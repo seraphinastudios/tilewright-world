@@ -194,9 +194,9 @@ Terrain grids:
   leaves every tile in the plane's default zone.
 - A grid has either `"fill"` (one value for every tile) or `"rows"`.
 - Character grids (ground layers and `zone`) map one palette key per tile.
-  Keys are printable ASCII characters, not all `.`; `.` (or `..`) means
-  empty. `"cell_width": 2` switches to two-character keys when a chunk needs
-  more than 93 distinct values. Ground palette values are `proto`
+  Keys are visible ASCII characters (`!` through `~`; not space), not all
+  `.`; `.` (or `..`) means empty. `"cell_width": 2` switches to
+  two-character keys when a chunk needs more than 93 distinct values. Ground palette values are `proto`
   definitions; zone palette values are zones of the plane, each listed once.
 - `height` rows are arrays of 32-bit signed integers (−2,147,483,648 to
   2,147,483,647). Height is the ground elevation of the tile's terrain floor;

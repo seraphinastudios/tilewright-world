@@ -19,6 +19,7 @@ use rusqlite::{
 };
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeSet,
     fmt::Write as _,
     io::Read as _,
     path::{Path, PathBuf},
@@ -73,6 +74,17 @@ fn uri(path: &Path) -> Result<String, Error> {
     }
     encoded.push_str("?immutable=1");
     Ok(encoded)
+}
+
+/// Whether `text` matches `^[a-z0-9][a-z0-9_.-]{0,127}$`, the source
+/// format's identifier pattern.
+fn is_identifier(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    (1..=128).contains(&bytes.len())
+        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_.-".contains(byte))
 }
 
 /// A size bound as an SQL parameter.
@@ -505,15 +517,26 @@ impl Pack {
         let mut planes = self.connection.prepare(&format!(
             "SELECT id, kind, chunk_size, {document} FROM planes ORDER BY id"
         ))?;
+        let mut has_zone = self
+            .connection
+            .prepare("SELECT EXISTS (SELECT 1 FROM zones WHERE plane = ?1 AND id = ?2)")?;
         let mut rows = planes.query([limit])?;
         while let Some(row) = rows.next()? {
             let (id, kind, chunk_size): (String, String, i64) =
                 (row.get(0)?, row.get(1)?, row.get(2)?);
             let stored = stored_document(row.get(3)?, "a plane document")?;
+            let default_zone_ok = match stored.root().get("default_zone") {
+                None => true,
+                Some(zone) => match zone.as_str() {
+                    Some(zone) => has_zone.query_row(params![id, zone], |row| row.get(0))?,
+                    None => false,
+                },
+            };
             if text(&stored, "format") != Some("tilewright.plane/1")
                 || text(&stored, "id") != Some(&id)
                 || text(&stored, "kind") != Some(&kind)
                 || stored.root().get("chunk_size").and_then(Value::as_i64) != Some(chunk_size)
+                || !default_zone_ok
             {
                 return Err(Error::Invalid(format!(
                     "the document of plane {id} disagrees with its row"
@@ -567,25 +590,40 @@ impl Pack {
                 "the stored profile disagrees with profile_id or profile_version".into(),
             ));
         }
-        let count = |key: &str, range: std::ops::RangeInclusive<usize>| {
-            profile
+        // Each list holds unique identifiers within its count, and every
+        // ground layer is a render layer other than `height` or `zone`.
+        let layers = |key: &str, range: std::ops::RangeInclusive<usize>| {
+            let names: Option<Vec<&str>> = profile
                 .root()
                 .get(key)
                 .and_then(Value::as_array)
-                .map(<[_]>::len)
-                .filter(|count| range.contains(count))
+                .filter(|items| range.contains(&items.len()))
+                .and_then(|items| items.iter().map(Value::as_str).collect());
+            names
+                .filter(|names| {
+                    let unique: BTreeSet<&str> = names.iter().copied().collect();
+                    unique.len() == names.len() && names.iter().all(|name| is_identifier(name))
+                })
                 .ok_or_else(|| {
                     Error::Invalid(format!(
-                        "stored profile does not list {}..={} {key}",
+                        "stored profile does not list {}..={} unique {key}",
                         range.start(),
                         range.end()
                     ))
                 })
         };
-        Ok((
-            count("render_layers", 1..=usize::from(u16::MAX - 1))?,
-            count("ground_layers", 0..=MAXIMUM_GROUND_LAYERS)?,
-        ))
+        let render = layers("render_layers", 1..=usize::from(u16::MAX - 1))?;
+        let ground = layers("ground_layers", 0..=MAXIMUM_GROUND_LAYERS)?;
+        let known: BTreeSet<&str> = render.iter().copied().collect();
+        if ground
+            .iter()
+            .any(|name| !known.contains(name) || ["height", "zone"].contains(name))
+        {
+            return Err(Error::Invalid(
+                "a stored ground layer is not a render layer other than height or zone".into(),
+            ));
+        }
+        Ok((render.len(), ground.len()))
     }
 }
 

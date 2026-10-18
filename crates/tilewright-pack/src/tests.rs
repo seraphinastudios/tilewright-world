@@ -910,3 +910,33 @@ fn the_profile_document_must_list_the_typed_layers() {
     ground.profile.ground_layers.reverse();
     assert!(compile(&ground).is_err());
 }
+
+#[test]
+fn stored_default_zones_and_profile_layers_must_resolve() {
+    for (name, sql, problem) in [
+        (
+            "default.twpack",
+            "UPDATE planes SET document = replace(document, '\"default_zone\":\"wilderness\"', '\"default_zone\":\"nowhere\"') WHERE id = 'overworld'",
+            "disagrees with its row",
+        ),
+        (
+            "duplicate.twpack",
+            "DELETE FROM chunks; UPDATE meta SET value = replace(value, '\"living\"', '\"mask\"') WHERE key = 'profile'",
+            "unique render_layers",
+        ),
+        (
+            "null.twpack",
+            "DELETE FROM chunks; UPDATE meta SET value = replace(value, '\"living\"', 'null') WHERE key = 'profile'",
+            "unique render_layers",
+        ),
+        (
+            "ground.twpack",
+            "DELETE FROM chunks; UPDATE meta SET value = replace(value, '\"ground_layers\":[\"floor\",\"mask\"]', '\"ground_layers\":[\"floor\",\"roof\"]') WHERE key = 'profile'",
+            "not a render layer",
+        ),
+    ] {
+        let (_directory, copy) = tampered(name, sql);
+        let error = Pack::open(&copy).unwrap().verify().unwrap_err();
+        assert!(error.to_string().contains(problem), "{name}: {error}");
+    }
+}

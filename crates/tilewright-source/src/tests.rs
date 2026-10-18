@@ -828,3 +828,19 @@ fn load_options_cannot_loosen_the_format_limits() {
         "{strict:?}"
     );
 }
+
+#[test]
+fn palette_keys_are_visible_ascii() {
+    let copy = workspace();
+    edit(
+        copy.path(),
+        "planes/vault/layers/0/0_0.jsonc",
+        "{\"palette\": {\"c\": \"cave_floor\"}, \"fill\": \"c\"}",
+        "{\"palette\": {\" \": \"cave_floor\"}, \"fill\": \" \"}",
+    );
+    assert!(has(
+        &problems(copy.path()),
+        "grid.invalid",
+        "planes/vault/layers/0/0_0.jsonc"
+    ));
+}

@@ -132,7 +132,9 @@ A full verification also:
   its row: `format`, `id`, `kind` and `chunk_size` for planes, `id` and
   `parent` for zones, `format`, `type` and `id` for definitions, and `format`,
   `id` and `version` against `profile_id` and `profile_version` for the
-  profile, which lists 1 to 65,534 render layers and at most 8 ground layers;
+  profile, which lists 1 to 65,534 unique render layer identifiers and at
+  most 8 unique ground layers, each a render layer other than `height` or
+  `zone`; a plane's `default_zone`, when present, must be a zone of the plane;
 - checks every string ID, render layer index, ground count and portal target
   (plane and anchor, and a location within ±9,007,199,254,740,991) that a
   chunk references, that every palette entry is used, that ground cells and
