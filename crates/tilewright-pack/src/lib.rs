@@ -91,6 +91,17 @@ pub(crate) fn is_identifier(text: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_.-".contains(byte))
 }
 
+/// Whether `text` is a domain-qualified namespace for `custom` data, such as
+/// `example.org` or `example.org/tool`, as the source format requires.
+pub(crate) fn is_namespace(text: &str) -> bool {
+    let (domain, rest) = text.split_once('/').unwrap_or((text, ""));
+    domain.contains('.')
+        && is_identifier(domain)
+        && !domain.starts_with('.')
+        && !domain.ends_with('.')
+        && (rest.is_empty() || is_identifier(rest))
+}
+
 /// Whether `text` is a field name: `^[a-z][a-z0-9_]{0,63}$`.
 pub(crate) fn is_field_name(text: &str) -> bool {
     let bytes = text.as_bytes();

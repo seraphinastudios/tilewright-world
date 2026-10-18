@@ -1061,3 +1061,72 @@ fn integer_fields_must_be_within_the_source_range() {
     let error = Pack::open(&copy).unwrap().verify().unwrap_err();
     assert!(error.to_string().contains("integer field"), "{error}");
 }
+
+/// Re-encodes the vault chunk of a fresh pack copy after `change`, and
+/// returns the verification error.
+fn tampered_vault(name: &str, change: impl FnOnce(&mut ChunkData, &dyn Fn(&str) -> u32)) -> String {
+    let (_directory, copy) = tampered(name, "SELECT 1");
+    let connection = Connection::open(&copy).unwrap();
+    let id = |value: &str| -> u32 {
+        connection
+            .query_row("SELECT id FROM strings WHERE value = ?1", [value], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    };
+    let pack = Pack::open(&copy).unwrap();
+    let mut chunk = pack.chunk("vault", 0, 0, 0).unwrap().unwrap();
+    drop(pack);
+    change(&mut chunk, &id);
+    connection
+        .execute(
+            "UPDATE chunks SET data = ?1 WHERE plane = 'vault'",
+            [encode_chunk(&chunk).unwrap()],
+        )
+        .unwrap();
+    Pack::open(&copy).unwrap().verify().unwrap_err().to_string()
+}
+
+#[test]
+fn field_names_are_names_and_listed_once() {
+    let error = tampered_vault("misnamed.twpack", |chunk, id| {
+        chunk.objects[0].fields[0].0 = id("cave.entrance");
+    });
+    assert!(error.contains("misnames a field"), "{error}");
+    let error = tampered_vault("repeated.twpack", |chunk, _| {
+        let field = chunk.objects[0].fields[0].clone();
+        chunk.objects[0].fields.push(field);
+    });
+    assert!(error.contains("repeats"), "{error}");
+}
+
+#[test]
+fn lookups_relative_to_a_plane_are_not_reused_for_another() {
+    // The overworld, checked first, has `cave.entrance`; the vault does not.
+    let error = tampered_vault("anchor.twpack", |chunk, id| {
+        chunk.objects[0].portal = Some(PortalRecord::Anchor {
+            plane: 0,
+            anchor: id("cave.entrance"),
+        });
+    });
+    assert!(error.contains("anchor"), "{error}");
+}
+
+#[test]
+fn custom_data_keys_are_namespaces() {
+    let mut custom = small_chunk();
+    custom.objects[0].custom = Some("{\"x\":1}".to_owned());
+    let error = encode_record(&custom).unwrap_err();
+    assert!(error.to_string().contains("namespaces"), "{error}");
+
+    let record = encode_record(&small_chunk()).unwrap();
+    let text = b"{\"example.org\":1}";
+    let at = record
+        .windows(text.len())
+        .position(|window| window == text)
+        .unwrap();
+    let mut patched = record.clone();
+    patched[at + 9] = b'X';
+    let error = decode_record(&patched).unwrap_err();
+    assert!(error.to_string().contains("namespaces"), "{error}");
+}

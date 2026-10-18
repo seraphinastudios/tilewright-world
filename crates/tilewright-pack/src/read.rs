@@ -13,14 +13,14 @@ use crate::{
         CHUNK_ENCODING, ChunkData, FieldRecord, MAXIMUM_CHUNK_BYTES, ObjectRecord, PortalRecord,
         decode_chunk,
     },
-    is_identifier,
+    is_field_name, is_identifier,
 };
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Statement, config::DbConfig, params, types,
 };
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fmt::Write as _,
     io::Read as _,
     path::{Path, PathBuf},
@@ -439,6 +439,14 @@ impl Pack {
                 "SELECT EXISTS (SELECT 1 FROM strings n JOIN anchors a ON a.id = n.value \
                  WHERE n.id = ?3 AND a.plane = CASE WHEN ?1 = 0 THEN ?2 ELSE (SELECT value FROM strings WHERE id = ?1) END)",
             )?,
+            value: self.connection.prepare("SELECT value FROM strings WHERE id = ?1")?,
+            planes: BTreeMap::new(),
+            protos: BTreeMap::new(),
+            field_names: BTreeMap::new(),
+            anchors: BTreeMap::new(),
+            current: String::new(),
+            zones: BTreeMap::new(),
+            own_anchors: BTreeMap::new(),
         };
         let mut statement = self.connection.prepare(&format!(
             "SELECT p.id, p.chunk_size, {} FROM chunks c JOIN planes p ON p.id = c.plane ORDER BY c.plane, c.layer, c.cx, c.cy",
@@ -465,11 +473,12 @@ impl Pack {
                     "a chunk disagrees with its plane or profile".into(),
                 ));
             }
-            targets.check_palette(&chunk, &plane)?;
+            targets.enter(&plane);
+            targets.check_palette(&chunk)?;
             let mut stack: Vec<&ObjectRecord> = chunk.objects.iter().collect();
             while let Some(object) = stack.pop() {
                 summary.objects += 1;
-                targets.check(object, &plane)?;
+                targets.check(object)?;
                 stack.extend(&object.inventory);
             }
             checked += 1;
@@ -791,8 +800,10 @@ fn read_meta(connection: &Connection) -> Result<Vec<(String, String)>, Error> {
 }
 
 /// What chunk records may reference. Strings are checked by ID, since
-/// verification has proven IDs are `1..=strings`; planes and anchors are
-/// looked up per portal.
+/// verification has proven IDs are `1..=strings`. Every other lookup is
+/// cached per distinct ID, so checking an object costs map lookups rather
+/// than queries, and verification work stays proportional to the decoded
+/// bytes its budget bounds.
 struct Targets<'c> {
     strings: u32,
     render_layers: usize,
@@ -805,6 +816,32 @@ struct Targets<'c> {
     /// Whether plane `?1` (a string ID, or 0 for plane `?2`) has the anchor
     /// named by string `?3`.
     has_anchor: Statement<'c>,
+    /// The value of string `?1`.
+    value: Statement<'c>,
+    planes: BTreeMap<u32, bool>,
+    protos: BTreeMap<u32, bool>,
+    field_names: BTreeMap<u32, bool>,
+    /// Anchors by `(plane, anchor)` for portals that name their plane.
+    anchors: BTreeMap<(u32, u32), bool>,
+    /// The plane of the chunks being checked, and the lookups relative to
+    /// it: its zones and its own anchors.
+    current: String,
+    zones: BTreeMap<u32, bool>,
+    own_anchors: BTreeMap<u32, bool>,
+}
+
+/// A cached boolean lookup.
+fn cached<K: Ord + Copy>(
+    cache: &mut BTreeMap<K, bool>,
+    key: K,
+    lookup: impl FnOnce() -> Result<bool, Error>,
+) -> Result<bool, Error> {
+    if let Some(known) = cache.get(&key) {
+        return Ok(*known);
+    }
+    let found = lookup()?;
+    cache.insert(key, found);
+    Ok(found)
 }
 
 impl Targets<'_> {
@@ -812,13 +849,41 @@ impl Targets<'_> {
         (1..=self.strings).contains(&id)
     }
 
+    /// Starts checking chunks of `plane`, dropping lookups relative to the
+    /// previous one.
+    fn enter(&mut self, plane: &str) {
+        if self.current != plane {
+            plane.clone_into(&mut self.current);
+            self.zones.clear();
+            self.own_anchors.clear();
+        }
+    }
+
     fn proto(&mut self, id: u32) -> Result<bool, Error> {
-        Ok(self.string(id) && self.is_proto.query_row([id], |row| row.get::<_, bool>(0))?)
+        if !self.string(id) {
+            return Ok(false);
+        }
+        let statement = &mut self.is_proto;
+        cached(&mut self.protos, id, || {
+            Ok(statement.query_row([id], |row| row.get(0))?)
+        })
+    }
+
+    fn field_name(&mut self, id: u32) -> Result<bool, Error> {
+        if !self.string(id) {
+            return Ok(false);
+        }
+        let statement = &mut self.value;
+        cached(&mut self.field_names, id, || {
+            let name: String = statement.query_row([id], |row| row.get(0))?;
+            Ok(is_field_name(&name))
+        })
     }
 
     /// Checks that every palette entry is used, that ground cells name
-    /// `proto` definitions, and that zone cells name zones of `plane`.
-    fn check_palette(&mut self, chunk: &ChunkData, plane: &str) -> Result<(), Error> {
+    /// `proto` definitions, and that zone cells name zones of the current
+    /// plane.
+    fn check_palette(&mut self, chunk: &ChunkData) -> Result<(), Error> {
         fn mark(cells: &[u16], used: &mut [bool]) {
             for cell in cells {
                 if let Some(flag) = usize::from(*cell)
@@ -836,13 +901,14 @@ impl Targets<'_> {
         }
         mark(&chunk.zones, &mut zone);
         for ((id, ground), zone) in chunk.palette.iter().zip(ground).zip(zone) {
-            let ok = (ground || zone)
-                && self.string(*id)
-                && (!ground || self.proto(*id)?)
-                && (!zone
-                    || self
-                        .is_zone
-                        .query_row(params![id, plane], |row| row.get::<_, bool>(0))?);
+            let id = *id;
+            let mut ok = (ground || zone) && self.string(id) && (!ground || self.proto(id)?);
+            if ok && zone {
+                let (statement, plane) = (&mut self.is_zone, &self.current);
+                ok = cached(&mut self.zones, id, || {
+                    Ok(statement.query_row(params![id, plane], |row| row.get(0))?)
+                })?;
+            }
             if !ok {
                 return Err(Error::Invalid(
                     "a palette entry is unused or not a proto definition or zone of its plane"
@@ -853,9 +919,8 @@ impl Targets<'_> {
         Ok(())
     }
 
-    fn check(&mut self, object: &ObjectRecord, current: &str) -> Result<(), Error> {
-        let mut ok = self.proto(object.proto)? && usize::from(object.layer) <= self.render_layers;
-        ok &= match &object.portal {
+    fn portal(&mut self, portal: Option<&PortalRecord>) -> Result<bool, Error> {
+        Ok(match portal {
             Some(PortalRecord::Location { x, y, .. })
                 if [x, y]
                     .iter()
@@ -864,19 +929,41 @@ impl Targets<'_> {
                 false
             }
             Some(PortalRecord::Location { plane: 0, .. }) | None => true,
-            Some(PortalRecord::Location { plane, .. }) => self
-                .is_plane
-                .query_row([plane], |row| row.get::<_, bool>(0))?,
-            Some(PortalRecord::Anchor { plane, anchor }) => {
-                (*plane == 0 || self.string(*plane))
-                    && self.string(*anchor)
-                    && self
-                        .has_anchor
-                        .query_row(params![plane, current, anchor], |row| row.get::<_, bool>(0))?
+            Some(PortalRecord::Location { plane, .. }) => {
+                let plane = *plane;
+                if !self.string(plane) {
+                    return Ok(false);
+                }
+                let statement = &mut self.is_plane;
+                cached(&mut self.planes, plane, || {
+                    Ok(statement.query_row([plane], |row| row.get(0))?)
+                })?
             }
-        };
+            Some(PortalRecord::Anchor { plane, anchor }) => {
+                let (plane, anchor) = (*plane, *anchor);
+                if !(plane == 0 || self.string(plane)) || !self.string(anchor) {
+                    return Ok(false);
+                }
+                let (statement, current) = (&mut self.has_anchor, &self.current);
+                let lookup =
+                    || Ok(statement.query_row(params![plane, current, anchor], |row| row.get(0))?);
+                if plane == 0 {
+                    cached(&mut self.own_anchors, anchor, lookup)?
+                } else {
+                    cached(&mut self.anchors, (plane, anchor), lookup)?
+                }
+            }
+        })
+    }
+
+    fn check(&mut self, object: &ObjectRecord) -> Result<(), Error> {
+        let mut ok = self.proto(object.proto)?
+            && usize::from(object.layer) <= self.render_layers
+            && self.portal(object.portal.as_ref())?;
+        // Field names are field-name strings, each at most once per object.
+        let mut names = BTreeSet::new();
         for (name, value) in &object.fields {
-            ok &= self.string(*name);
+            ok &= names.insert(*name) && self.field_name(*name)?;
             match value {
                 FieldRecord::String(id) => ok &= self.string(*id),
                 FieldRecord::Integer(number) => {
@@ -889,7 +976,7 @@ impl Targets<'_> {
             Ok(())
         } else {
             Err(Error::Invalid(
-                "an object references a missing string, layer, plane or anchor, or has a portal position or integer field out of range".into(),
+                "an object references a missing string, layer, plane or anchor, repeats or misnames a field, or has a portal position or integer field out of range".into(),
             ))
         }
     }

@@ -194,8 +194,14 @@ fn check_shape(chunk: &ChunkData) -> Result<usize, DecodeError> {
 fn check_json(text: &str, array_allowed: bool) -> Result<(), DecodeError> {
     let document = Document::parse(text, &crate::canonical_limits())
         .or_else(|error| invalid(format!("embedded JSON: {error}")))?;
+    // Custom data's keys are namespaces, as in the source format.
     let shape_ok = match document.root() {
-        Value::Object { .. } => true,
+        Value::Object { members, .. } => {
+            array_allowed
+                || members
+                    .iter()
+                    .all(|member| crate::is_namespace(&member.key))
+        }
         Value::Array { .. } => array_allowed,
         _ => false,
     };
@@ -203,7 +209,7 @@ fn check_json(text: &str, array_allowed: bool) -> Result<(), DecodeError> {
         return invalid(if array_allowed {
             "JSON field values must be arrays or objects"
         } else {
-            "custom data must be an object"
+            "custom data must be an object whose keys are namespaces"
         });
     }
     if document.canonical(document.root()) != text {

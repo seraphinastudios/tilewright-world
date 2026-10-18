@@ -112,8 +112,10 @@ loading it, and never load a whole table into memory. Readers:
   string limit, even when reading a single string;
 - reject chunk records with an unknown version, flags or tags, out-of-range
   tiles, palette indexes or sizes, a palette that is not nonzero and strictly
-  ascending, embedded JSON that is not canonical or not the required shape, a
-  decompressed size above 16 MiB, or trailing bytes.
+  ascending, embedded JSON that is not canonical or not the required shape
+  (custom data is an object whose keys are domain-qualified namespaces), data
+  that is not exactly one zstd frame, a decompressed size above 16 MiB, or
+  trailing bytes.
 
 Decoding is linear in a pack's decoded size, which compression can make
 thousands of times its file size. A full verification therefore has a
@@ -149,4 +151,7 @@ A full verification also:
   (plane and anchor, and a location within ±9,007,199,254,740,991) that a
   chunk references, that every palette entry is used, that ground cells and
   object prototypes name `proto` definitions and zone cells name zones of the
-  chunk's plane, looking targets up rather than loading the tables.
+  chunk's plane, that field names match the field-name pattern and appear
+  once per object, and that integer field values are within
+  ±9,007,199,254,740,991, looking each target up once rather than loading
+  the tables.
