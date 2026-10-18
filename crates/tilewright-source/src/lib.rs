@@ -42,7 +42,8 @@ pub const MAXIMUM_GROUND_LAYERS: usize = 8;
 /// Bounds on what a load may read.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LoadOptions {
-    /// Limits for every JSONC document.
+    /// Limits for every JSONC document. They can only tighten the format's
+    /// limits: a value above [`Limits::default`] is lowered to it.
     pub limits: Limits,
     /// Most files read in one load.
     pub maximum_files: usize,
@@ -263,6 +264,10 @@ pub fn load(root: &Path) -> Result<World, Vec<Diagnostic>> {
 /// # Errors
 /// Returns every diagnostic found, sorted by path and position.
 pub fn load_with(root: &Path, options: &LoadOptions) -> Result<World, Vec<Diagnostic>> {
+    let options = &LoadOptions {
+        limits: within_format(options.limits),
+        ..*options
+    };
     let mut tree = files::Tree::new(root, options);
     let mut diagnostics = Diagnostics::new(options.maximum_diagnostics);
     let world = load_tree(&mut tree, &mut diagnostics);
@@ -273,6 +278,24 @@ pub fn load_with(root: &Path, options: &LoadOptions) -> Result<World, Vec<Diagno
             ..world
         }),
         _ => Err(diagnostics.finish()),
+    }
+}
+
+/// `limits`, each lowered to the format's own limit where it is higher.
+fn within_format(limits: Limits) -> Limits {
+    let format = Limits::default();
+    Limits {
+        max_input_bytes: limits.max_input_bytes.min(format.max_input_bytes),
+        max_depth: limits.max_depth.min(format.max_depth),
+        max_values: limits.max_values.min(format.max_values),
+        max_array_items: limits.max_array_items.min(format.max_array_items),
+        max_object_keys: limits.max_object_keys.min(format.max_object_keys),
+        max_string_bytes: limits.max_string_bytes.min(format.max_string_bytes),
+        max_number_bytes: limits.max_number_bytes.min(format.max_number_bytes),
+        max_comments: limits.max_comments.min(format.max_comments),
+        max_comment_bytes: limits.max_comment_bytes.min(format.max_comment_bytes),
+        max_lines: limits.max_lines.min(format.max_lines),
+        max_line_bytes: limits.max_line_bytes.min(format.max_line_bytes),
     }
 }
 

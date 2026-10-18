@@ -227,6 +227,18 @@ fn push_u32(output: &mut Vec<u8>, value: usize) -> Result<(), DecodeError> {
     Ok(())
 }
 
+/// The bytes a field block takes, each field sized by its tag.
+fn field_block_bytes(fields: &[(u32, FieldRecord)]) -> usize {
+    fields.iter().fold(2_usize, |total, (_, value)| {
+        total.saturating_add(match value {
+            FieldRecord::Null | FieldRecord::Bool(_) => 5,
+            FieldRecord::Integer(_) | FieldRecord::Number(_) => 13,
+            FieldRecord::String(_) => 9,
+            FieldRecord::Json(text) => text.len().saturating_add(9),
+        })
+    })
+}
+
 fn encode_object(
     output: &mut Vec<u8>,
     object: &ObjectRecord,
@@ -284,7 +296,7 @@ fn encode_object(
     }
     if !object.fields.is_empty() {
         let count = u16::try_from(object.fields.len()).or_else(|_| invalid("too many fields"))?;
-        room(output, 2 + usize::from(count) * 13)?;
+        room(output, field_block_bytes(&object.fields))?;
         output.extend_from_slice(&count.to_le_bytes());
         for (name, value) in &object.fields {
             output.extend_from_slice(&name.to_le_bytes());
@@ -308,7 +320,6 @@ fn encode_object(
                     output.extend_from_slice(&id.to_le_bytes());
                 }
                 FieldRecord::Json(text) => {
-                    room(output, 5_usize.saturating_add(text.len()))?;
                     check_json(text, true)?;
                     output.push(6);
                     push_u32(output, text.len())?;

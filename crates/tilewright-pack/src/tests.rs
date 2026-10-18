@@ -870,7 +870,7 @@ fn compiled_packs_always_verify() {
 fn a_minimal_object_fits_the_last_bytes_of_a_record() {
     // `length` characters over a fixed 17 strings (each under the 1 MiB
     // string limit), so the JSON's overhead does not depend on `length`.
-    let custom = |length: usize| {
+    let custom = |length: usize, fields: usize| {
         let strings: Vec<String> = (0..17)
             .map(|index| {
                 let start = (index * 1_000_000).min(length);
@@ -882,14 +882,31 @@ fn a_minimal_object_fits_the_last_bytes_of_a_record() {
         let mut minimal = chunk.objects[0].inventory[0].clone();
         minimal.tile = Some(0);
         minimal.portal = None;
+        minimal.fields = (1..=fields)
+            .map(|name| (u32::try_from(name).unwrap(), FieldRecord::Null))
+            .collect();
         chunk.objects[0].custom = Some(format!("{{\"example.org\":[{}]}}", strings.join(",")));
         chunk.objects.push(minimal);
         chunk
     };
-    let base = encode_record(&custom(0)).unwrap().len();
-    let exact = custom(super::MAXIMUM_RECORD_BYTES - base);
-    let record = encode_record(&exact).unwrap();
-    assert_eq!(record.len(), super::MAXIMUM_RECORD_BYTES);
-    assert_eq!(decode_record(&record).unwrap(), exact);
-    assert!(encode_record(&custom(super::MAXIMUM_RECORD_BYTES - base + 1)).is_err());
+    // A bare object, and one whose 256 null fields take 5 bytes each.
+    for fields in [0, 256] {
+        let base = encode_record(&custom(0, fields)).unwrap().len();
+        let exact = custom(super::MAXIMUM_RECORD_BYTES - base, fields);
+        let record = encode_record(&exact).unwrap();
+        assert_eq!(record.len(), super::MAXIMUM_RECORD_BYTES);
+        assert_eq!(decode_record(&record).unwrap(), exact);
+        assert!(encode_record(&custom(super::MAXIMUM_RECORD_BYTES - base + 1, fields)).is_err());
+    }
+}
+
+#[test]
+fn the_profile_document_must_list_the_typed_layers() {
+    let mut reordered = world();
+    reordered.profile.render_layers.swap(0, 1);
+    let error = compile(&reordered).unwrap_err();
+    assert!(error.to_string().contains("layers differ"), "{error}");
+    let mut ground = world();
+    ground.profile.ground_layers.reverse();
+    assert!(compile(&ground).is_err());
 }

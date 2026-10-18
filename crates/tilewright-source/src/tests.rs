@@ -798,3 +798,33 @@ fn source_containers_of_the_wrong_kind_are_reported() {
         [("source.unexpected_file", "planes".to_owned(), 0)]
     );
 }
+
+#[test]
+fn load_options_cannot_loosen_the_format_limits() {
+    let copy = workspace();
+    let deep = format!("{}1{}", "[".repeat(70), "]".repeat(70));
+    edit(
+        copy.path(),
+        "defs/proto/coin.jsonc",
+        "\"weight\": 0.01}",
+        &format!("\"weight\": 0.01, \"footprint\": {deep}}}"),
+    );
+    let strict = problems(copy.path());
+    let options = LoadOptions {
+        limits: tilewright_jsonc::Limits {
+            max_depth: 100_000,
+            ..tilewright_jsonc::Limits::default()
+        },
+        ..LoadOptions::default()
+    };
+    let relaxed: Vec<_> = load_with(copy.path(), &options)
+        .expect_err("still deeper than the format allows")
+        .into_iter()
+        .map(|diagnostic| (diagnostic.code, diagnostic.path, diagnostic.line))
+        .collect();
+    assert_eq!(relaxed, strict);
+    assert!(
+        has(&strict, "jsonc.depth_limit", "defs/proto/coin.jsonc"),
+        "{strict:?}"
+    );
+}

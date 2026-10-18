@@ -113,6 +113,36 @@ fn render_layers(profile: &Profile) -> Result<Layers<'_>, Error> {
         .collect()
 }
 
+/// Checks that the stored profile document lists the same render and ground
+/// layers, in the same order, as the typed profile the records are built
+/// from: the model is public, and readers interpret indexes by the document.
+fn check_profile_layers(profile: &Profile) -> Result<(), Error> {
+    let document =
+        tilewright_jsonc::Document::parse(profile.canonical.as_str(), &crate::canonical_limits())
+            .map_err(|error| Error::Invalid(format!("the profile document: {error}")))?;
+    let names = |key: &str| -> Option<Vec<&str>> {
+        document
+            .root()
+            .get(key)?
+            .as_array()?
+            .iter()
+            .map(tilewright_jsonc::Value::as_str)
+            .collect()
+    };
+    let same = |key: &str, typed: &[String]| {
+        names(key).is_some_and(|names| names.iter().copied().eq(typed.iter().map(String::as_str)))
+    };
+    if same("render_layers", &profile.render_layers)
+        && same("ground_layers", &profile.ground_layers)
+    {
+        Ok(())
+    } else {
+        Err(Error::Invalid(
+            "the profile document's layers differ from the typed profile".into(),
+        ))
+    }
+}
+
 /// Checks a public model's chunk against format 1 before anything is
 /// copied from it.
 fn check_chunk_shape(chunk: &Chunk, ground_layers: usize) -> Result<(), Error> {
@@ -329,6 +359,7 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 /// Returns an error if SQLite fails or the world exceeds the pack's bounds.
 pub fn compile(world: &World) -> Result<Vec<u8>, Error> {
     let strings = Strings::collect(world)?;
+    check_profile_layers(&world.profile)?;
     let layers = render_layers(&world.profile)?;
     let connection = Connection::open_in_memory()?;
     let schema: &str = &SCHEMA;
