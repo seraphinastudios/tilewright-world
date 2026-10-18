@@ -1535,4 +1535,11 @@ fn compile_rejects_stairwell_steps_that_share_a_tile() {
     plane.stairwells.insert("cave.chute".to_owned(), long);
     let error = stairwell_tiles(&plane).unwrap_err();
     assert!(error.to_string().contains("more steps"), "{error}");
+    let mut plane = world.planes()["overworld"].clone();
+    let chute = plane.stairwells["cave.chute"].clone();
+    plane.stairwells = (0..250_001)
+        .map(|index| (format!("s{index}"), chute.clone()))
+        .collect();
+    let error = stairwell_tiles(&plane).unwrap_err();
+    assert!(error.to_string().contains("more stairwells"), "{error}");
 }

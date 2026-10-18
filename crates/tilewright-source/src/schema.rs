@@ -242,13 +242,15 @@ fn read_spec<'a>(
         Some(flag) => reader.boolean(flag),
         None => Some(false),
     };
-    if matches!(kind.as_str(), Some("list" | "object")) && depth >= MAXIMUM_FIELD_DEPTH {
+    // A list or object too deep is reported, and the rest of the spec is
+    // still read; the parser's nesting limit bounds the recursion.
+    let too_deep = matches!(kind.as_str(), Some("list" | "object")) && depth >= MAXIMUM_FIELD_DEPTH;
+    if too_deep {
         reader.report(
             kind.span(),
             Code::Range,
             format!("list and object types nest at most {MAXIMUM_FIELD_DEPTH} deep"),
         );
-        return None;
     }
     let field_type = match kind.as_str() {
         Some("boolean") => Some(FieldType::Boolean),
@@ -356,7 +358,7 @@ fn read_spec<'a>(
             None
         }
     };
-    field_type.zip(required)
+    field_type.zip(required).filter(|_| !too_deep)
 }
 
 /// `bounds` when its lower end is not above its upper end; otherwise reports

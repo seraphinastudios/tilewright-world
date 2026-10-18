@@ -1430,6 +1430,7 @@ fn list_and_object_types_nest_at_most_8_deep() {
             ("deep".to_owned(), FieldValue::Json(value.replace(' ', "")))
         );
     }
+    // Each list or object past level 8 is reported.
     for levels in [9, 12] {
         let copy = workspace();
         edit(
@@ -1440,10 +1441,30 @@ fn list_and_object_types_nest_at_most_8_deep() {
         );
         assert_eq!(
             codes(copy.path()),
-            [("shape.range", FIELDS.to_owned())],
+            vec![("shape.range", FIELDS.to_owned()); levels - 8],
             "{levels}"
         );
     }
+    // The rest of a spec that is too deep is still checked.
+    let copy = workspace();
+    let (spec, _) = nested(8);
+    edit(
+        copy.path(),
+        FIELDS,
+        "\"fields\": {",
+        &format!(
+            "\"fields\": {{\"deep\": {}, ",
+            spec.replace(
+                "{\"type\": \"boolean\"}",
+                "{\"type\": \"list\", \"min_items\": \"bad\", \"items\": 3}"
+            )
+        ),
+    );
+    let found: Vec<_> = problems(copy.path())
+        .into_iter()
+        .map(|(code, _, _)| code)
+        .collect();
+    assert_eq!(found, ["shape.range", "shape.type", "shape.type"]);
 }
 
 #[test]
