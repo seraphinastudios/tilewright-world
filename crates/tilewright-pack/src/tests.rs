@@ -1348,6 +1348,11 @@ fn stairwell_rows_steps_and_documents_are_verified() {
             step,
         ),
         (
+            "step-huge",
+            format!("UPDATE stairwell_steps SET step = 250000 {chute}"),
+            step,
+        ),
+        (
             "step-index",
             format!("UPDATE stairwell_steps SET step = 1 {chute}"),
             disagrees,
@@ -1458,6 +1463,12 @@ fn stored_stairwell_documents_have_the_source_shape_and_agree_with_their_rows() 
     let (_directory, copy) = tampered(
         "read-step.twpack",
         "UPDATE stairwell_steps SET proto = 'Not a proto' WHERE stairwell = 'cave.chute' AND step = 0",
+    );
+    let pack = Pack::open(&copy).unwrap();
+    assert!(pack.stairwell_step("overworld", 0, 28, 28).is_err());
+    let (_directory, copy) = tampered(
+        "read-step-index.twpack",
+        "UPDATE stairwell_steps SET step = 9223372036854775807 WHERE stairwell = 'cave.chute' AND step = 0",
     );
     let pack = Pack::open(&copy).unwrap();
     assert!(pack.stairwell_step("overworld", 0, 28, 28).is_err());

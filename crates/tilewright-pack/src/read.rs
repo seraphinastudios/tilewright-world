@@ -202,6 +202,15 @@ fn bounded_identifier(column: &str) -> String {
     )
 }
 
+/// SQL for `column` when it is an index a source array can have, from 0 to
+/// one less than the array limit, else NULL.
+fn step_index(column: &str) -> String {
+    format!(
+        "CASE WHEN typeof({column}) = 'integer' AND {column} BETWEEN 0 AND {} THEN {column} END",
+        Limits::default().max_array_items - 1
+    )
+}
+
 /// SQL for `column` when it is text of at most `?1` bytes, else NULL.
 fn bounded_text(column: &str) -> String {
     format!(
@@ -582,9 +591,10 @@ impl Pack {
             .connection
             .query_row(
                 &format!(
-                    "SELECT {}, CASE WHEN typeof(step) = 'integer' THEN step END, {} FROM stairwell_steps \
+                    "SELECT {}, {}, {} FROM stairwell_steps \
                      WHERE plane = ?1 AND layer = ?2 AND x = ?3 AND y = ?4",
                     bounded_identifier("stairwell"),
+                    step_index("step"),
                     bounded_identifier("proto"),
                 ),
                 params![plane, layer, x, y],
@@ -607,7 +617,7 @@ impl Pack {
                 }))
             }
             _ => Err(Error::Invalid(
-                "a stairwell step's stairwell or proto is not an identifier, or its index is not an integer".into(),
+                "a stairwell step's stairwell or proto is not an identifier, or its index is not one a source array can have".into(),
             )),
         }
     }
@@ -874,8 +884,9 @@ impl Pack {
                      OR typeof(t.layer) != 'integer' OR t.layer NOT BETWEEN -2147483648 AND 2147483647 \
                      OR typeof(t.x) != 'integer' OR t.x NOT BETWEEN -{MAX_SAFE_INTEGER} AND {MAX_SAFE_INTEGER} \
                      OR typeof(t.y) != 'integer' OR t.y NOT BETWEEN -{MAX_SAFE_INTEGER} AND {MAX_SAFE_INTEGER} \
-                     OR typeof(t.step) != 'integer' OR t.step < 0 \
+                     OR {} IS NULL \
                      OR {} OR NOT EXISTS (SELECT 1 FROM definitions d WHERE d.type = 'proto' AND d.id = t.proto)",
+                    step_index("t.step"),
                     not_identifier("t.proto")
                 ),
                 "a stairwell step names an unknown stairwell or proto, or has an invalid layer, position or index",

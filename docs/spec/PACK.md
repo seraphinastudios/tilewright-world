@@ -166,7 +166,7 @@ A full verification also:
   and positions; stairwell planes; that every
   `stairwell_steps` row names a stairwell of its plane and a `proto`
   definition, with a 32-bit layer, a position within ±9,007,199,254,740,991
-  and an index of at least 0; and chunk planes, layers and coordinates, which
+  and an index from 0 to 249,999, as in a source array; and chunk planes, layers and coordinates, which
   keep every tile within the source format's integer range;
 - checks that every `document` column, and the `profile` meta value, is
   canonical JSON of an object of at most 64 MiB, whose `custom` data, if any,
