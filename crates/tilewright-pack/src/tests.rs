@@ -136,7 +136,7 @@ fn packs_verify_and_decode_back_to_the_source() {
             summary.definitions,
             summary.objects
         ),
-        (2, 3, 2, 4, 11, 11)
+        (2, 3, 2, 5, 12, 11)
     );
     assert_eq!(
         pack.meta("source_digest").unwrap().unwrap(),
@@ -927,16 +927,24 @@ fn compile_bounds_strings_and_documents_by_role() {
 
 #[test]
 fn the_profile_document_must_list_the_typed_layers() {
-    use super::compile::check_profile_layers;
+    use super::compile::check_profile_document;
     let world = world();
-    check_profile_layers(world.profile()).unwrap();
+    check_profile_document(world.profile()).unwrap();
     let mut reordered = world.profile().clone();
     reordered.render_layers.swap(0, 1);
-    let error = check_profile_layers(&reordered).unwrap_err();
-    assert!(error.to_string().contains("layers differ"), "{error}");
+    let error = check_profile_document(&reordered).unwrap_err();
+    assert!(
+        error.to_string().contains("differ from the typed"),
+        "{error}"
+    );
     let mut ground = world.profile().clone();
     ground.ground_layers.reverse();
-    assert!(check_profile_layers(&ground).is_err());
+    assert!(check_profile_document(&ground).is_err());
+    for height in [None, Some(51)] {
+        let mut stacked = world.profile().clone();
+        stacked.layer_height = height;
+        assert!(check_profile_document(&stacked).is_err(), "{height:?}");
+    }
 }
 
 #[test]
@@ -997,6 +1005,7 @@ fn verification_stops_at_its_decoded_byte_budget() {
         ("overworld", -1, 0, 0),
         ("overworld", 0, -1, 0),
         ("overworld", 0, 0, 0),
+        ("overworld", 1, 0, 0),
         ("vault", 0, 0, 0),
     ]
     .iter()
@@ -1237,5 +1246,269 @@ fn paths_beginning_with_two_slashes_open() {
     let doubled = PathBuf::from(format!("/{}", written.path.display()));
     assert!(doubled.to_str().unwrap().starts_with("//"));
     let pack = Pack::open(&doubled).unwrap();
-    assert_eq!(pack.verify().unwrap().chunks, 4);
+    assert_eq!(pack.verify().unwrap().chunks, 5);
+}
+
+#[test]
+fn stairwells_layer_heights_and_list_fields_compile_and_read_back() {
+    let world = world();
+    let directory = tempfile::tempdir().unwrap();
+    let written = write_pack(&world, directory.path()).unwrap();
+    let pack = Pack::open(&written.path).unwrap();
+    assert_eq!(pack.verify().unwrap().stairwells, 3);
+    assert_eq!(pack.layer_height().unwrap(), Some(50));
+
+    let overworld = &world.planes()["overworld"];
+    for (id, stairwell) in &overworld.stairwells {
+        assert_eq!(
+            pack.stairwell("overworld", id).unwrap().as_ref(),
+            Some(stairwell)
+        );
+    }
+    assert!(pack.stairwell("overworld", "nowhere").unwrap().is_none());
+    assert!(pack.stairwell("vault", "cliff.path").unwrap().is_none());
+    let mut visited = Vec::new();
+    pack.visit_stairwells("overworld", &mut |stairwell| {
+        visited.push(stairwell.id);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(visited, ["cave.chute", "cliff.path", "tower.stairs"]);
+    pack.visit_stairwells("vault", &mut |_| panic!("the vault has none"))
+        .unwrap();
+
+    assert_eq!(
+        pack.stairwell_step("overworld", 0, 25, 8).unwrap(),
+        Some(super::StairwellTile {
+            stairwell: "cliff.path".to_owned(),
+            step: 1,
+            proto: "stairs_down".to_owned(),
+        })
+    );
+    assert!(
+        pack.stairwell_step("overworld", 1, 25, 8)
+            .unwrap()
+            .is_none()
+    );
+    assert!(pack.stairwell_step("vault", 0, 25, 8).unwrap().is_none());
+
+    // List and object field values are canonical JSON fields.
+    let chunk = pack.chunk("overworld", 0, 0, 0).unwrap().unwrap();
+    let wall = &chunk.objects[1];
+    assert_eq!(
+        pack.string(wall.fields[1].0).unwrap().as_deref(),
+        Some("tags")
+    );
+    assert_eq!(
+        wall.fields[1].1,
+        FieldRecord::Json("[\"ruin\",\"north\"]".to_owned())
+    );
+}
+
+#[test]
+fn stairwell_rows_steps_and_documents_are_verified() {
+    let chute = "WHERE stairwell = 'cave.chute' AND step = 0";
+    let row = "invalid ID, direction or flag";
+    let step = "a stairwell step names an unknown";
+    let disagrees = "disagrees with its rows";
+    for (name, sql, problem) in [
+        (
+            "direction",
+            "UPDATE stairwells SET direction = 'sideways' WHERE id = 'cave.chute'".to_owned(),
+            row,
+        ),
+        (
+            "hidden",
+            "UPDATE stairwells SET hidden_on_other_layers = 2 WHERE id = 'cave.chute'".to_owned(),
+            row,
+        ),
+        (
+            "hidden-text",
+            "UPDATE stairwells SET hidden_on_other_layers = 'yes' WHERE id = 'cave.chute'"
+                .to_owned(),
+            row,
+        ),
+        (
+            "plane",
+            "UPDATE stairwells SET plane = 'attic' WHERE id = 'cave.chute'".to_owned(),
+            row,
+        ),
+        (
+            "id",
+            "UPDATE stairwells SET id = 'Chute' WHERE id = 'cave.chute'".to_owned(),
+            row,
+        ),
+        (
+            "step-proto",
+            format!("UPDATE stairwell_steps SET proto = 'ladder' {chute}"),
+            step,
+        ),
+        (
+            "step-stairwell",
+            format!("UPDATE stairwell_steps SET stairwell = 'nowhere' {chute}"),
+            step,
+        ),
+        (
+            "step-layer",
+            format!("UPDATE stairwell_steps SET layer = 2147483648 {chute}"),
+            step,
+        ),
+        (
+            "step-x",
+            format!("UPDATE stairwell_steps SET x = 9007199254740992 {chute}"),
+            step,
+        ),
+        (
+            "step-negative",
+            format!("UPDATE stairwell_steps SET step = -1 {chute}"),
+            step,
+        ),
+        (
+            "step-index",
+            format!("UPDATE stairwell_steps SET step = 1 {chute}"),
+            disagrees,
+        ),
+        (
+            "step-other-proto",
+            format!("UPDATE stairwell_steps SET proto = 'wall' {chute}"),
+            disagrees,
+        ),
+        (
+            "step-moved",
+            format!("UPDATE stairwell_steps SET x = 29 {chute}"),
+            disagrees,
+        ),
+        (
+            "step-missing",
+            "DELETE FROM stairwell_steps WHERE stairwell = 'cave.chute' AND step = 1".to_owned(),
+            disagrees,
+        ),
+        (
+            "step-extra",
+            "INSERT INTO stairwell_steps VALUES ('overworld', 5, 0, 0, 'cave.chute', 2, 'stairs_up')"
+                .to_owned(),
+            "no stairwell lists",
+        ),
+    ] {
+        let (_directory, copy) = tampered(&format!("{name}.twpack"), &sql);
+        let error = Pack::open(&copy).unwrap().verify().unwrap_err();
+        assert!(error.to_string().contains(problem), "{name}: {error}");
+    }
+}
+
+#[test]
+fn stored_stairwell_documents_have_the_source_shape_and_agree_with_their_rows() {
+    let disagrees = "disagrees with its rows";
+    for (name, sql, problem) in [
+        (
+            "document-direction",
+            "UPDATE stairwells SET document = replace(document, '\"direction\":\"down\"', '\"direction\":\"up\"') WHERE id = 'cave.chute'".to_owned(),
+            disagrees,
+        ),
+        (
+            "document-id",
+            "UPDATE stairwells SET document = replace(document, '\"id\":\"cave.chute\"', '\"id\":\"cave.slide\"') WHERE id = 'cave.chute'".to_owned(),
+            disagrees,
+        ),
+        (
+            "document-key",
+            "UPDATE stairwells SET document = replace(document, '\"direction\":\"down\"', '\"direction\":\"down\",\"speed\":1') WHERE id = 'cave.chute'".to_owned(),
+            "source format's shape",
+        ),
+        (
+            "document-step-key",
+            "UPDATE stairwells SET document = replace(document, '\"proto\":\"cave_floor\"', '\"proto\":\"cave_floor\",\"z\":1') WHERE id = 'cave.chute'".to_owned(),
+            "source format's shape",
+        ),
+        (
+            "document-proto",
+            "UPDATE stairwells SET document = replace(document, '\"proto\":\"cave_floor\"', '\"proto\":\"Cave\"') WHERE id = 'cave.chute'".to_owned(),
+            "source format's shape",
+        ),
+        (
+            "document-spacing",
+            "UPDATE stairwells SET document = replace(document, '\"id\":', '\"id\": ') WHERE id = 'cave.chute'".to_owned(),
+            "canonical JSON",
+        ),
+        (
+            // The document and its rows agree, but the step is two tiles
+            // from the one before it.
+            "document-gap",
+            "UPDATE stairwells SET document = replace(document, '\"at\":[26,9]', '\"at\":[27,9]') WHERE id = 'cliff.path'; \
+             UPDATE stairwell_steps SET x = 27 WHERE stairwell = 'cliff.path' AND step = 2"
+                .to_owned(),
+            "not on adjacent layers",
+        ),
+    ] {
+        let (_directory, copy) = tampered(&format!("{name}.twpack"), &sql);
+        let error = Pack::open(&copy).unwrap().verify().unwrap_err();
+        assert!(error.to_string().contains(problem), "{name}: {error}");
+    }
+
+    // Single reads check what they load too.
+    let (_directory, copy) = tampered(
+        "read-direction.twpack",
+        "UPDATE stairwells SET direction = 'both' WHERE id = 'cave.chute'",
+    );
+    let pack = Pack::open(&copy).unwrap();
+    assert!(pack.stairwell("overworld", "cave.chute").is_err());
+    assert!(pack.visit_stairwells("overworld", &mut |_| Ok(())).is_err());
+    let (_directory, copy) = tampered(
+        "read-step.twpack",
+        "UPDATE stairwell_steps SET proto = 'Not a proto' WHERE stairwell = 'cave.chute' AND step = 0",
+    );
+    let pack = Pack::open(&copy).unwrap();
+    assert!(pack.stairwell_step("overworld", 0, 28, 28).is_err());
+    assert!(
+        pack.stairwell_step("overworld", 0, 20, 20)
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn stored_layer_heights_are_checked() {
+    for (name, height) in [
+        ("zero.twpack", "0"),
+        ("high.twpack", "65536"),
+        ("text.twpack", "\"50\""),
+    ] {
+        let (_directory, copy) = tampered(
+            name,
+            &format!(
+                "UPDATE meta SET value = replace(value, '\"layer_height\":50', '\"layer_height\":{height}') WHERE key = 'profile'"
+            ),
+        );
+        let pack = Pack::open(&copy).unwrap();
+        let error = pack.verify().unwrap_err();
+        assert!(
+            error.to_string().contains("layer_height"),
+            "{name}: {error}"
+        );
+        assert!(pack.layer_height().is_err(), "{name}");
+    }
+    let (_directory, copy) = tampered(
+        "flat.twpack",
+        "UPDATE meta SET value = replace(value, ',\"layer_height\":50', '') WHERE key = 'profile'",
+    );
+    let pack = Pack::open(&copy).unwrap();
+    pack.verify().unwrap();
+    assert_eq!(pack.layer_height().unwrap(), None);
+}
+
+#[test]
+fn compile_rejects_stairwell_steps_that_share_a_tile() {
+    use super::compile::stairwell_tiles;
+    let world = world();
+    assert_eq!(
+        stairwell_tiles(&world.planes()["overworld"]).unwrap().len(),
+        8
+    );
+    let mut plane = world.planes()["overworld"].clone();
+    plane.stairwells.get_mut("cave.chute").unwrap().steps[0].at = [20, 20];
+    let error = stairwell_tiles(&plane).unwrap_err();
+    assert!(
+        error.to_string().contains("share layer 0 tile [20, 20]"),
+        "{error}"
+    );
 }

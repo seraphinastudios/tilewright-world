@@ -166,9 +166,10 @@ pub(crate) fn render_layers(profile: &Profile) -> Result<Layers<'_>, Error> {
 }
 
 /// Checks that the stored profile document lists the same render and ground
-/// layers, in the same order, as the typed profile the records are built
-/// from: the model is public, and readers interpret indexes by the document.
-pub(crate) fn check_profile_layers(profile: &Profile) -> Result<(), Error> {
+/// layers, in the same order, and the same layer height as the typed
+/// profile the records are built from: the model is public, and readers
+/// interpret indexes and elevations by the document.
+pub(crate) fn check_profile_document(profile: &Profile) -> Result<(), Error> {
     let document =
         tilewright_jsonc::Document::parse(profile.canonical.as_str(), &crate::canonical_limits())
             .map_err(|error| Error::Invalid(format!("the profile document: {error}")))?;
@@ -184,13 +185,18 @@ pub(crate) fn check_profile_layers(profile: &Profile) -> Result<(), Error> {
     let same = |key: &str, typed: &[String]| {
         names(key).is_some_and(|names| names.iter().copied().eq(typed.iter().map(String::as_str)))
     };
+    let layer_height = document
+        .root()
+        .get("layer_height")
+        .map(tilewright_jsonc::Value::as_i64);
     if same("render_layers", &profile.render_layers)
         && same("ground_layers", &profile.ground_layers)
+        && layer_height == profile.layer_height.map(|height| Some(i64::from(height)))
     {
         Ok(())
     } else {
         Err(Error::Invalid(
-            "the profile document's layers differ from the typed profile".into(),
+            "the profile document's layers or layer height differ from the typed profile".into(),
         ))
     }
 }
@@ -401,6 +407,62 @@ fn chunk_record(
     })
 }
 
+/// A stairwell step's row: its stairwell, its index in the stairwell, and
+/// its prototype.
+pub(crate) type TileStep<'w> = (&'w str, i64, &'w str);
+
+/// The steps of a plane's stairwells by tile, the `stairwell_steps` key, so
+/// they are inserted in primary-key order.
+pub(crate) fn stairwell_tiles(
+    plane: &tilewright_source::Plane,
+) -> Result<BTreeMap<(i32, i64, i64), TileStep<'_>>, Error> {
+    let mut tiles = BTreeMap::new();
+    for (id, stairwell) in &plane.stairwells {
+        for (index, step) in stairwell.steps.iter().enumerate() {
+            let index = i64::try_from(index)
+                .map_err(|_| Error::Invalid("a stairwell has too many steps".into()))?;
+            let tile = (step.layer, step.at[0], step.at[1]);
+            if tiles
+                .insert(tile, (id.as_str(), index, step.proto.as_str()))
+                .is_some()
+            {
+                return Err(Error::Invalid(format!(
+                    "two stairwell steps of plane {} share layer {} tile [{}, {}]",
+                    plane.id, tile.0, tile.1, tile.2
+                )));
+            }
+        }
+    }
+    Ok(tiles)
+}
+
+/// Inserts a plane's stairwells and their steps, each in primary-key order.
+fn insert_stairwells(
+    connection: &Connection,
+    id: &str,
+    plane: &tilewright_source::Plane,
+) -> Result<(), Error> {
+    let mut stairwells = connection.prepare(
+        "INSERT INTO stairwells (plane, id, direction, hidden_on_other_layers, document) VALUES (?1, ?2, ?3, ?4, ?5)",
+    )?;
+    for (stairwell_id, stairwell) in &plane.stairwells {
+        stairwells.execute(params![
+            id,
+            stairwell_id,
+            stairwell.direction.as_str(),
+            stairwell.hidden_on_other_layers,
+            document(&stairwell.canonical)?
+        ])?;
+    }
+    let mut steps = connection.prepare(
+        "INSERT INTO stairwell_steps (plane, layer, x, y, stairwell, step, proto) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+    )?;
+    for ((layer, x, y), (stairwell, step, proto)) in stairwell_tiles(plane)? {
+        steps.execute(params![id, layer, x, y, stairwell, step, proto])?;
+    }
+    Ok(())
+}
+
 pub(crate) fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     bytes.iter().fold(String::new(), |mut output, byte| {
@@ -416,7 +478,7 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 /// Returns an error if SQLite fails or the world exceeds the pack's bounds.
 pub fn compile(world: &World) -> Result<Vec<u8>, Error> {
     let strings = Strings::collect(world)?;
-    check_profile_layers(world.profile())?;
+    check_profile_document(world.profile())?;
     let layers = render_layers(world.profile())?;
     let connection = Connection::open_in_memory()?;
     let schema: &str = &SCHEMA;
@@ -481,6 +543,7 @@ pub fn compile(world: &World) -> Result<Vec<u8>, Error> {
                     anchor.at[1]
                 ])?;
             }
+            insert_stairwells(&connection, id, plane)?;
             for ((layer, cx, cy), chunk) in &plane.chunks {
                 let record = chunk_record(chunk, &layers, &strings)?;
                 let data = encode_chunk(&record).map_err(|error| Error::Invalid(error.0))?;

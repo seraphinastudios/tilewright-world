@@ -15,7 +15,7 @@ result as section 3 describes, and writes the serialized database. The file uses
 
 ## 1. Tables
 
-The schema is exactly these seven tables, with no indexes, views or triggers
+The schema is exactly these nine tables, with no indexes, views or triggers
 beyond SQLite's automatic ones:
 
 ```sql
@@ -24,6 +24,8 @@ CREATE TABLE strings (id INTEGER PRIMARY KEY, value TEXT NOT NULL UNIQUE);
 CREATE TABLE planes (id TEXT PRIMARY KEY, kind TEXT NOT NULL, chunk_size INTEGER NOT NULL, document TEXT NOT NULL) WITHOUT ROWID;
 CREATE TABLE zones (plane TEXT NOT NULL, id TEXT NOT NULL, parent TEXT, document TEXT NOT NULL, PRIMARY KEY (plane, id)) WITHOUT ROWID;
 CREATE TABLE anchors (plane TEXT NOT NULL, id TEXT NOT NULL, layer INTEGER NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, PRIMARY KEY (plane, id)) WITHOUT ROWID;
+CREATE TABLE stairwells (plane TEXT NOT NULL, id TEXT NOT NULL, direction TEXT NOT NULL, hidden_on_other_layers INTEGER NOT NULL, document TEXT NOT NULL, PRIMARY KEY (plane, id)) WITHOUT ROWID;
+CREATE TABLE stairwell_steps (plane TEXT NOT NULL, layer INTEGER NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, stairwell TEXT NOT NULL, step INTEGER NOT NULL, proto TEXT NOT NULL, PRIMARY KEY (plane, layer, x, y)) WITHOUT ROWID;
 CREATE TABLE chunks (plane TEXT NOT NULL, layer INTEGER NOT NULL, cx INTEGER NOT NULL, cy INTEGER NOT NULL, encoding TEXT NOT NULL, data BLOB NOT NULL, PRIMARY KEY (plane, layer, cx, cy)) WITHOUT ROWID;
 CREATE TABLE definitions (type TEXT NOT NULL, id TEXT NOT NULL, document TEXT NOT NULL, PRIMARY KEY (type, id)) WITHOUT ROWID;
 ```
@@ -35,14 +37,23 @@ CREATE TABLE definitions (type TEXT NOT NULL, id TEXT NOT NULL, document TEXT NO
 | `chunk_encoding` | `twc1+zstd` |
 | `compiler` | The compiler's name and version, such as `tilewright-pack 0.1.0`. |
 | `format` | `tilewright.pack/1` |
-| `profile` | The profile document as canonical JSON. |
+| `profile` | The profile document as canonical JSON, including its `layer_height`. |
 | `profile_id`, `profile_version` | From the profile. |
 | `source_digest` | Lowercase hex SHA-256 over every source file read: for each path in byte order, the UTF-8 relative path, a zero byte, the file length as little-endian `u64`, and the SHA-256 of the file. |
 
-`document` columns hold the source document (or, for `zones`, the zone's entry)
-as canonical JSON: comments and whitespace removed, members in source order,
-numbers spelled exactly as in the source, strings escaped only where JSON
-requires.
+`document` columns hold the source document (or, for `zones` and
+`stairwells`, the entry) as canonical JSON: comments and whitespace removed,
+members in source order, numbers spelled exactly as in the source, strings
+escaped only where JSON requires.
+
+`stairwells` holds one row per stairwell: its plane and ID, its `direction`
+(`both`, `down` or `up`) and `hidden_on_other_layers` (1 or 0), with the
+source defaults applied, and its entry in `document`. `stairwell_steps` holds
+one row per step, keyed by the step's tile so that a reader finds the step on
+a tile, or the steps in an area of one layer, by primary key: the plane,
+layer and plane coordinates, the stairwell's ID, the step's index in the
+stairwell's `steps` from 0, and its prototype ID. The documents are
+authoritative; `stairwell_steps` indexes exactly their steps.
 
 `strings` interns every string that chunk records reference: prototype IDs,
 ground and zone palette values, field names, string field values, and portal
@@ -90,7 +101,8 @@ flags         u8       bit 0 portal, bit 1 fields, bit 2 custom, bit 3 inventory
 
 A field value is a tag byte and payload: `0` null, `1` false, `2` true,
 `3` i64, `4` finite f64, `5` string (u32 string ID), `6` JSON (u32 byte
-length + canonical JSON) for arrays and objects. `custom` is canonical JSON
+length + canonical JSON) for arrays and objects, which includes every value
+of a `list` or `object` field. `custom` is canonical JSON
 for an object. Objects appear in source order; inventories nest at most 16
 deep.
 
@@ -112,6 +124,10 @@ loading it, and never load a whole table into memory. Readers:
   not a blob within the bound of section 2, even when reading a single chunk;
 - reject a string that is not text of at most 1 MiB, the source format's
   string limit, even when reading a single string;
+- reject a stairwell whose document is not canonical, does not have the
+  source format's shape or disagrees with its row, even when reading a
+  single stairwell, and a step row whose stairwell or prototype is not an
+  identifier, even when reading a single step;
 - reject chunk records with an unknown version, flags or tags, out-of-range
   tiles, palette indexes or sizes, a palette that is not nonzero and strictly
   ascending, embedded JSON that is not canonical or not the required shape
@@ -139,11 +155,14 @@ A full verification also:
   directories the caller controls;
 - checks that string IDs are exactly `1..=count` in byte order of their
   values, and every string is UTF-8 text of at most 1 MiB without NUL;
-- checks that plane, zone, anchor and definition keys are identifiers; plane
-  kinds, and a chunk size of 32 as format 1 requires; zone planes, parents
-  and that parent chains end at a root; anchor planes, layers and positions;
-  and chunk planes, layers and coordinates, which keep every tile within the
-  source format's integer range;
+- checks that plane, zone, anchor, stairwell and definition keys are
+  identifiers; plane kinds, and a chunk size of 32 as format 1 requires; zone
+  planes, parents and that parent chains end at a root; anchor planes, layers
+  and positions; stairwell planes, directions and flags; that every
+  `stairwell_steps` row names a stairwell of its plane and a `proto`
+  definition, with a 32-bit layer, a position within ±9,007,199,254,740,991
+  and an index of at least 0; and chunk planes, layers and coordinates, which
+  keep every tile within the source format's integer range;
 - checks that every `document` column, and the `profile` meta value, is
   canonical JSON of an object of at most 64 MiB, whose `custom` data, if any,
   has domain-qualified namespace keys, and whose identity agrees with
@@ -154,7 +173,15 @@ A full verification also:
   most 8 unique ground layers, each a render layer other than `height` or
   `zone`, and has an `isometric` projection with `tile_width` and
   `tile_height` or a `top_down` one with `tile_size`, each from 1 to
-  4,294,967,295; a plane's `default_zone`, when present, must be a zone of the plane;
+  4,294,967,295, and a `layer_height`, if any, that is an integer from 1 to
+  65,535; a plane's `default_zone`, when present, must be a zone of the plane;
+- checks that each stairwell document has the source format's shape (section
+  10 of FORMAT.md): an ID that matches its row, at least two steps whose
+  layers change by one in one direction and whose positions move at most one
+  tile per axis, and a direction and flag that match its row; that each step
+  is the `stairwell_steps` row at its tile, naming its stairwell, index and
+  prototype; and that the table holds no other rows. One document is held at
+  a time, and each step is one primary-key lookup;
 - checks every string ID, render layer index, ground count and portal target
   (plane and anchor, and a location within ±9,007,199,254,740,991) that a
   chunk references, that every palette entry is used, that ground cells and

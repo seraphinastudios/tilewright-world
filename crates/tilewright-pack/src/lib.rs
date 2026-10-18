@@ -24,7 +24,7 @@ pub use chunk::{
     encode_chunk, encode_record,
 };
 pub use compile::{COMPILER, Written, compile, write_pack};
-pub use read::{DEFAULT_MAXIMUM_DECODED_BYTES, Pack, Summary, VerifyLimits};
+pub use read::{DEFAULT_MAXIMUM_DECODED_BYTES, Pack, StairwellTile, Summary, VerifyLimits};
 
 use std::fmt;
 
@@ -49,7 +49,7 @@ pub const META_KEYS: [&str; 7] = [
 ];
 
 /// The pack tables, by name, exactly as created.
-pub const SCHEMA_TABLES: [(&str, &str); 7] = [
+pub const SCHEMA_TABLES: [(&str, &str); 9] = [
     (
         "meta",
         "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID",
@@ -69,6 +69,14 @@ pub const SCHEMA_TABLES: [(&str, &str); 7] = [
     (
         "anchors",
         "CREATE TABLE anchors (plane TEXT NOT NULL, id TEXT NOT NULL, layer INTEGER NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, PRIMARY KEY (plane, id)) WITHOUT ROWID",
+    ),
+    (
+        "stairwells",
+        "CREATE TABLE stairwells (plane TEXT NOT NULL, id TEXT NOT NULL, direction TEXT NOT NULL, hidden_on_other_layers INTEGER NOT NULL, document TEXT NOT NULL, PRIMARY KEY (plane, id)) WITHOUT ROWID",
+    ),
+    (
+        "stairwell_steps",
+        "CREATE TABLE stairwell_steps (plane TEXT NOT NULL, layer INTEGER NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, stairwell TEXT NOT NULL, step INTEGER NOT NULL, proto TEXT NOT NULL, PRIMARY KEY (plane, layer, x, y)) WITHOUT ROWID",
     ),
     (
         "chunks",

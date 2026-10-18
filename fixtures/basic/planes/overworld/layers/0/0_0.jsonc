@@ -154,7 +154,7 @@
   },
   "objects": [
     {"at": [7, 0], "proto": "tree"},
-    {"at": [15, 0], "proto": "wall", "layer": "wall", "fields": {"name": "Old wall"}},
+    {"at": [15, 0], "proto": "wall", "layer": "wall", "fields": {"name": "Old wall", "tags": ["ruin", "north"]}},
     {"at": [12, 12], "proto": "tree", "sub_layer": 1, "z": 4},
     {"at": [9, 4], "proto": "stairs_down", "portal": {"anchor": "cave.entrance"}},
     {"at": [2, 2], "proto": "chest", "fields": {"locked": true, "loot": "chest_common"},

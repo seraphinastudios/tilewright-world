@@ -60,6 +60,12 @@ pub enum Code {
     Cycle,
     /// A malformed terrain grid.
     Grid,
+    /// A stairwell step that is not on the layer next to the step before
+    /// it, in the stairwell's direction, or that moves more than one tile
+    /// on an axis.
+    StairwellStep,
+    /// A tile that holds steps of two stairwells.
+    StairwellOverlap,
 }
 
 impl Code {
@@ -84,6 +90,8 @@ impl Code {
             Self::Reference => "ref.unresolved",
             Self::Cycle => "ref.cycle",
             Self::Grid => "grid.invalid",
+            Self::StairwellStep => "stairwell.step",
+            Self::StairwellOverlap => "stairwell.overlap",
         }
     }
 }

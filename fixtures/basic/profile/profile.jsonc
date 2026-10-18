@@ -7,9 +7,12 @@
   "ground_layers": ["floor", "mask"],
   "definition_types": {
     "proto": {"schema": "schema/proto.jsonc"},
-    "loot": {"schema": "schema/loot.jsonc"}
+    "loot": {"schema": "schema/loot.jsonc"},
+    "recipe": {"schema": "schema/recipe.jsonc"}
   },
   "object_fields": "schema/object-fields.jsonc",
   "zone_properties": "schema/zone-properties.jsonc",
+  // Layer L is drawn L * 50 height units above layer 0.
+  "layer_height": 50,
   "movement": {"max_step": 12, "fall_unit": 50}
 }

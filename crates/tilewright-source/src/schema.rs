@@ -10,19 +10,31 @@ use crate::{
     read::{Reader, is_identifier},
 };
 use std::collections::{BTreeMap, BTreeSet};
-use tilewright_jsonc::{MAX_SAFE_INTEGER, Value};
+use tilewright_jsonc::{MAX_SAFE_INTEGER, Member, Span, Value};
 
 /// Longest string a `string` field accepts unless its schema says less.
 pub const DEFAULT_MAXIMUM_STRING: usize = 65_536;
 
-/// A closed set of fields, in declaration order, indexed by name.
+/// Deepest nesting of `list` and `object` field types. A list or object
+/// field of a schema is at level 1, a list or object inside it at level 2,
+/// and so on.
+pub const MAXIMUM_FIELD_DEPTH: usize = 8;
+
+/// Largest `min_items` or `max_items` of a `list` field: the array limit of
+/// the strict JSONC dialect, so the default `max_items` accepts any array.
+pub const MAXIMUM_LIST_ITEMS: usize = 250_000;
+
+/// A closed set of fields, in declaration order, indexed by name. A schema
+/// document has one, and so does each `object` field type.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Schema {
-    /// Source path, relative to the root.
+    /// Source path of the schema document, relative to the root.
     pub path: String,
     fields: Vec<(String, FieldSpec)>,
     /// Positions in `fields` by name, kept with the list.
     index: BTreeMap<String, usize>,
+    /// Positions in `fields` of the required fields, in declaration order.
+    required: Vec<usize>,
 }
 
 impl Schema {
@@ -31,11 +43,15 @@ impl Schema {
             path,
             fields: Vec::new(),
             index: BTreeMap::new(),
+            required: Vec::new(),
         }
     }
 
     /// Adds a field; names come from one object's keys, so they are unique.
     fn push(&mut self, name: String, spec: FieldSpec) {
+        if spec.required {
+            self.required.push(self.fields.len());
+        }
         self.index.insert(name.clone(), self.fields.len());
         self.fields.push((name, spec));
     }
@@ -50,6 +66,14 @@ impl Schema {
     pub fn field(&self, name: &str) -> Option<&FieldSpec> {
         let position = *self.index.get(name)?;
         self.fields.get(position).map(|(_, spec)| spec)
+    }
+
+    /// The names of the required fields, in declaration order.
+    pub fn required(&self) -> impl Iterator<Item = &str> {
+        self.required
+            .iter()
+            .filter_map(|position| self.fields.get(*position))
+            .map(|(name, _)| name.as_str())
     }
 }
 
@@ -82,6 +106,35 @@ pub enum FieldType {
     },
     /// Any JSON value.
     Json,
+    /// An array of `minimum_items` to `maximum_items` values, each of type
+    /// `items`.
+    List {
+        items: Box<FieldType>,
+        minimum_items: usize,
+        maximum_items: usize,
+    },
+    /// An object closed by `fields`.
+    Object {
+        fields: Schema,
+    },
+}
+
+impl FieldType {
+    /// Calls `visit` with every reference target in this type, nested ones
+    /// included, and the dotted path of the field below this one that
+    /// holds it (`[]` stands for a list's items).
+    pub(crate) fn targets<'s>(&'s self, path: &str, visit: &mut impl FnMut(&str, &'s str)) {
+        match self {
+            Self::Reference { target } => visit(path, target),
+            Self::List { items, .. } => items.targets(&format!("{path}[]"), visit),
+            Self::Object { fields } => {
+                for (name, spec) in fields.fields() {
+                    spec.field_type.targets(&format!("{path}.{name}"), visit);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Whether `name` is a valid field name: `^[a-z][a-z0-9_]{0,63}$`.
@@ -105,10 +158,21 @@ pub(crate) fn read_schema(
     let reader = Reader::new(&source, diagnostics);
     let root = reader.object(reader.root(), &["format", "fields"])?;
     let format_ok = reader.format(root, "tilewright.schema/1");
-    let fields = reader.required(root, "fields")?;
-    let members = reader.members(fields)?;
+    let schema = read_field_specs(&reader, reader.required(root, "fields")?, path, 0);
+    schema.filter(|_| format_ok)
+}
+
+/// Reads a `fields` object of field specs. `depth` is the number of `list`
+/// and `object` types around it.
+fn read_field_specs<'a>(
+    reader: &Reader<'a>,
+    value: &'a Value,
+    path: &str,
+    depth: usize,
+) -> Option<Schema> {
+    let members = reader.members(value)?;
     let mut schema = Schema::new(path.to_owned());
-    let mut ok = format_ok;
+    let mut ok = true;
     for member in members {
         if !is_field_name(&member.key) {
             reader.report(
@@ -119,15 +183,31 @@ pub(crate) fn read_schema(
             ok = false;
             continue;
         }
-        match read_spec(&reader, &member.value) {
-            Some(spec) => schema.push(member.key.clone(), spec),
+        match read_spec(reader, &member.value, path, depth, true) {
+            Some((field_type, required)) => schema.push(
+                member.key.clone(),
+                FieldSpec {
+                    field_type,
+                    required,
+                },
+            ),
             None => ok = false,
         }
     }
     ok.then_some(schema)
 }
 
-fn read_spec<'a>(reader: &Reader<'a>, value: &'a Value) -> Option<FieldSpec> {
+/// Reads one field spec: its type and whether it is required. List items
+/// are never missing, so they take no `required`: `takes_required` is
+/// `false` for them.
+#[allow(clippy::too_many_lines)]
+fn read_spec<'a>(
+    reader: &Reader<'a>,
+    value: &'a Value,
+    path: &str,
+    depth: usize,
+    takes_required: bool,
+) -> Option<(FieldType, bool)> {
     if value.as_object().is_none() {
         reader.report(
             value.span(),
@@ -138,17 +218,32 @@ fn read_spec<'a>(reader: &Reader<'a>, value: &'a Value) -> Option<FieldSpec> {
     }
     let spec = value;
     let kind = reader.required(spec, "type")?;
-    let allowed: &[&str] = match kind.as_str() {
-        Some("integer" | "number") => &["type", "required", "min", "max"],
-        Some("string") => &["type", "required", "max_length", "values"],
-        Some("reference") => &["type", "required", "target"],
-        _ => &["type", "required"],
+    let options: &[&str] = match kind.as_str() {
+        Some("integer" | "number") => &["min", "max"],
+        Some("string") => &["max_length", "values"],
+        Some("reference") => &["target"],
+        Some("list") => &["items", "min_items", "max_items"],
+        Some("object") => &["fields"],
+        _ => &[],
     };
-    reader.object(spec, allowed)?;
-    let required = match spec.get("required") {
+    let mut allowed = vec!["type"];
+    if takes_required {
+        allowed.push("required");
+    }
+    allowed.extend(options);
+    reader.object(spec, &allowed)?;
+    let required = match spec.get("required").filter(|_| takes_required) {
         Some(flag) => reader.boolean(flag)?,
         None => false,
     };
+    if matches!(kind.as_str(), Some("list" | "object")) && depth >= MAXIMUM_FIELD_DEPTH {
+        reader.report(
+            kind.span(),
+            Code::Range,
+            format!("list and object types nest at most {MAXIMUM_FIELD_DEPTH} deep"),
+        );
+        return None;
+    }
     let field_type = match kind.as_str() {
         Some("boolean") => FieldType::Boolean,
         Some("json") => FieldType::Json,
@@ -210,19 +305,45 @@ fn read_spec<'a>(reader: &Reader<'a>, value: &'a Value) -> Option<FieldSpec> {
         Some("reference") => FieldType::Reference {
             target: reader.identifier(reader.required(spec, "target")?)?,
         },
+        Some("list") => {
+            let count = |key, default| match spec.get(key) {
+                Some(value) => {
+                    let limit = i64::try_from(MAXIMUM_LIST_ITEMS).unwrap_or(i64::MAX);
+                    usize::try_from(reader.integer(value, 0, limit)?).ok()
+                }
+                None => Some(default),
+            };
+            let minimum_items = count("min_items", 0)?;
+            let maximum_items = count("max_items", MAXIMUM_LIST_ITEMS)?;
+            if minimum_items > maximum_items {
+                reader.report(
+                    spec.span(),
+                    Code::Range,
+                    "min_items is greater than max_items",
+                );
+                return None;
+            }
+            let items = reader.required(spec, "items")?;
+            let (items, _) = read_spec(reader, items, path, depth + 1, false)?;
+            FieldType::List {
+                items: Box::new(items),
+                minimum_items,
+                maximum_items,
+            }
+        }
+        Some("object") => FieldType::Object {
+            fields: read_field_specs(reader, reader.required(spec, "fields")?, path, depth + 1)?,
+        },
         _ => {
             reader.report(
                 kind.span(),
                 Code::Range,
-                "type must be boolean, integer, number, string, reference or json",
+                "type must be boolean, integer, number, string, reference, json, list or object",
             );
             return None;
         }
     };
-    Some(FieldSpec {
-        field_type,
-        required,
-    })
+    Some((field_type, required))
 }
 
 /// What a reference names.
@@ -310,12 +431,43 @@ pub(crate) fn read_fields<'a>(
     schema: &Schema,
     references: &mut References,
 ) -> Option<Vec<(String, FieldValue)>> {
-    let mut output = Vec::new();
-    let mut ok = true;
     let members = match fields {
         Some(fields) => reader.members(fields)?,
         None => &[],
     };
+    let mut output = Vec::with_capacity(members.len());
+    let ok = check_members(
+        reader,
+        members,
+        fields.unwrap_or(owner).span(),
+        schema,
+        references,
+        &mut |member, spec| {
+            output.push((
+                member.key.clone(),
+                typed_value(reader, &member.value, &spec.field_type),
+            ));
+        },
+    );
+    ok.then_some(output)
+}
+
+/// Checks an object's members against `schema`: each key is one of its
+/// fields and each value has that field's type. Missing required fields are
+/// one diagnostic at `owner`. `accept` gets every member whose value is
+/// valid.
+fn check_members<'a>(
+    reader: &Reader<'a>,
+    members: &'a [Member],
+    owner: Span,
+    schema: &Schema,
+    references: &mut References,
+    accept: &mut dyn FnMut(&'a Member, &FieldSpec),
+) -> bool {
+    let mut ok = true;
+    // Keys are unique, so counting the required ones present is enough to
+    // know whether any is missing.
+    let mut required = 0;
     for member in members {
         let Some(spec) = schema.field(&member.key) else {
             reader.report(
@@ -326,57 +478,70 @@ pub(crate) fn read_fields<'a>(
             ok = false;
             continue;
         };
-        match check_field(reader, &member.value, spec, references) {
-            Some(value) => output.push((member.key.clone(), value)),
-            None => ok = false,
+        required += usize::from(spec.required);
+        if check_value(reader, &member.value, &spec.field_type, references) {
+            accept(member, spec);
+        } else {
+            ok = false;
         }
     }
-    // One diagnostic per owner, however many fields it lacks.
-    let present: BTreeSet<&str> = members.iter().map(|member| member.key.as_str()).collect();
-    let missing: Vec<&str> = schema
-        .fields()
-        .iter()
-        .filter(|(name, spec)| spec.required && !present.contains(name.as_str()))
-        .map(|(name, _)| name.as_str())
-        .collect();
-    if let Some(message) = missing_message(&missing) {
-        reader.report(fields.unwrap_or(owner).span(), Code::MissingKey, message);
+    let missing = schema.required.len().saturating_sub(required);
+    if missing > 0 {
+        reader.report(
+            owner,
+            Code::MissingKey,
+            missing_message(schema, members, missing),
+        );
         ok = false;
     }
-    ok.then_some(output)
+    ok
 }
 
-/// Names a few missing required fields and counts the rest.
-fn missing_message(missing: &[&str]) -> Option<String> {
+/// Names the first few missing required fields and counts the rest. The
+/// walk stops at the last field it names, so it passes at most the
+/// object's own members and the fields it names.
+fn missing_message(schema: &Schema, members: &[Member], missing: usize) -> String {
     const NAMED: usize = 3;
-    let named = missing
-        .iter()
+    let present: BTreeSet<&str> = members.iter().map(|member| member.key.as_str()).collect();
+    let named = schema
+        .required()
+        .filter(|name| !present.contains(name))
         .take(NAMED)
         .map(|name| format!("\"{name}\""))
         .collect::<Vec<_>>()
         .join(", ");
-    match missing.len() {
-        0 => None,
-        1 => Some(format!("required field {named} is missing")),
-        count if count <= NAMED => Some(format!("required fields {named} are missing")),
-        count => Some(format!(
+    match missing {
+        1 => format!("required field {named} is missing"),
+        count if count <= NAMED => format!("required fields {named} are missing"),
+        count => format!(
             "required fields {named} and {} more are missing",
             count - NAMED
-        )),
+        ),
     }
 }
 
-fn check_field<'a>(
+/// The model value of a field whose value has passed [`check_value`].
+fn typed_value(reader: &Reader<'_>, value: &Value, field_type: &FieldType) -> FieldValue {
+    match (field_type, value.as_f64()) {
+        (FieldType::Number { .. }, Some(number)) => FieldValue::Number(number),
+        _ => reader.field_value(value),
+    }
+}
+
+/// Checks that `value` has type `field_type`, reporting every problem in
+/// it, nested ones included. Recursion follows the type, whose nesting
+/// the schema bounds by [`MAXIMUM_FIELD_DEPTH`].
+fn check_value<'a>(
     reader: &Reader<'a>,
     value: &'a Value,
-    spec: &FieldSpec,
+    field_type: &FieldType,
     references: &mut References,
-) -> Option<FieldValue> {
-    match &spec.field_type {
-        FieldType::Boolean => reader.boolean(value).map(FieldValue::Bool),
-        FieldType::Integer { minimum, maximum } => reader
-            .integer(value, *minimum, *maximum)
-            .map(FieldValue::Integer),
+) -> bool {
+    match field_type {
+        FieldType::Boolean => reader.boolean(value).is_some(),
+        FieldType::Integer { minimum, maximum } => {
+            reader.integer(value, *minimum, *maximum).is_some()
+        }
         FieldType::Number { minimum, maximum } => {
             let Some(number) = value.as_f64() else {
                 reader.report(
@@ -384,7 +549,7 @@ fn check_field<'a>(
                     Code::Type,
                     format!("expected a number, found {}", value.kind()),
                 );
-                return None;
+                return false;
             };
             if number < *minimum || number > *maximum {
                 reader.report(
@@ -392,34 +557,38 @@ fn check_field<'a>(
                     Code::Range,
                     format!("{number} is outside {minimum}..={maximum}"),
                 );
-                return None;
+                return false;
             }
-            Some(FieldValue::Number(number))
+            true
         }
         FieldType::String {
             maximum_length,
             values,
         } => {
-            let text = reader.text(value, *maximum_length)?;
+            let Some(text) = reader.text(value, *maximum_length) else {
+                return false;
+            };
             if !values.is_empty() && !values.contains(&text) {
                 reader.report(
                     value.span(),
                     Code::Range,
                     format!("\"{text}\" is not one of the allowed values"),
                 );
-                return None;
+                return false;
             }
-            Some(FieldValue::String(text))
+            true
         }
         FieldType::Reference { target } => {
-            let id = reader.string(value)?;
+            let Some(id) = reader.string(value) else {
+                return false;
+            };
             if !is_identifier(id) {
                 reader.report(
                     value.span(),
                     Code::Identifier,
                     format!("\"{id}\" is not a valid identifier"),
                 );
-                return None;
+                return false;
             }
             reader.reference(
                 references,
@@ -429,10 +598,66 @@ fn check_field<'a>(
                 },
                 value.span(),
             );
-            Some(FieldValue::String(id.to_owned()))
+            true
         }
-        FieldType::Json => Some(reader.field_value(value)),
+        FieldType::Json => true,
+        FieldType::List {
+            items,
+            minimum_items,
+            maximum_items,
+        } => check_list(
+            reader,
+            value,
+            items,
+            *minimum_items..=*maximum_items,
+            references,
+        ),
+        FieldType::Object { fields } => {
+            let Some(members) = reader.members(value) else {
+                return false;
+            };
+            check_members(
+                reader,
+                members,
+                value.span(),
+                fields,
+                references,
+                &mut |_, _| {},
+            )
+        }
     }
+}
+
+/// Checks a `list` value: an array of `count` items, each of type `items`.
+/// Every item is checked, so each bad one is reported.
+fn check_list<'a>(
+    reader: &Reader<'a>,
+    value: &'a Value,
+    items: &FieldType,
+    count: std::ops::RangeInclusive<usize>,
+    references: &mut References,
+) -> bool {
+    let Some(elements) = reader.array(value) else {
+        return false;
+    };
+    if !count.contains(&elements.len()) {
+        reader.report(
+            value.span(),
+            Code::Range,
+            format!(
+                "{} items, outside {}..={}",
+                elements.len(),
+                count.start(),
+                count.end()
+            ),
+        );
+        return false;
+    }
+    let mut ok = true;
+    for element in elements {
+        ok &= check_value(reader, element, items, references);
+    }
+    ok
 }
 
 #[cfg(test)]

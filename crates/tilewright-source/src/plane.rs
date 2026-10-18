@@ -10,6 +10,7 @@ use crate::{
     files::{EntryKind, Tree, join},
     read::Reader,
     schema::{References, read_fields},
+    stairwell::read_stairwells,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use tilewright_jsonc::{MAX_SAFE_INTEGER, Span};
@@ -90,7 +91,8 @@ pub(crate) fn read_planes(
         .collect()
 }
 
-/// Reads a plane's own documents: the plane, its zones and its anchors.
+/// Reads a plane's own documents: the plane, its zones, its anchors and its
+/// stairwells.
 /// Returns the plane and whether it has a `layers` directory.
 fn read_plane(
     tree: &mut Tree<'_>,
@@ -103,7 +105,10 @@ fn read_plane(
     let mut has_layers = false;
     for entry in tree.list(directory) {
         match (entry.name.as_str(), entry.kind) {
-            ("plane.jsonc" | "zones.jsonc" | "anchors.jsonc", EntryKind::File) => {}
+            (
+                "plane.jsonc" | "zones.jsonc" | "anchors.jsonc" | "stairwells.jsonc",
+                EntryKind::File,
+            ) => {}
             ("layers", EntryKind::Directory) => has_layers = true,
             _ => diagnostics.push(Diagnostic::file(
                 &join(directory, &entry.name),
@@ -120,6 +125,10 @@ fn read_plane(
     let anchors_path = join(directory, "anchors.jsonc");
     if tree.kind(&anchors_path).is_some() {
         plane.anchors = read_anchors(tree, &anchors_path, diagnostics);
+    }
+    let stairwells_path = join(directory, "stairwells.jsonc");
+    if tree.kind(&stairwells_path).is_some() {
+        plane.stairwells = read_stairwells(tree, &stairwells_path, references, diagnostics);
     }
     if let Some(zone) = &plane.default_zone
         && !plane.zones.contains_key(zone)
@@ -207,6 +216,7 @@ fn read_plane_document(
         canonical,
         zones: BTreeMap::new(),
         anchors: BTreeMap::new(),
+        stairwells: BTreeMap::new(),
         chunks: BTreeMap::new(),
     })
 }

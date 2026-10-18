@@ -1,0 +1,18 @@
+{
+  "format": "tilewright.schema/1",
+  "fields": {
+    "output": {"type": "reference", "target": "proto", "required": true},
+    "ingredients": {
+      "type": "list",
+      "required": true,
+      "min_items": 1,
+      "items": {
+        "type": "object",
+        "fields": {
+          "item": {"type": "reference", "target": "proto", "required": true},
+          "count": {"type": "integer", "min": 1, "required": true}
+        }
+      }
+    }
+  }
+}
