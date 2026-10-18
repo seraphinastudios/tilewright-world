@@ -7,7 +7,7 @@
 //! allocation, every index is range-checked, and trailing bytes are errors.
 
 use std::fmt;
-use tilewright_jsonc::{Document, Limits, Value};
+use tilewright_jsonc::{Document, Value};
 
 /// The `chunks.encoding` value of this encoding.
 pub const CHUNK_ENCODING: &str = "twc1+zstd";
@@ -182,7 +182,7 @@ fn check_shape(chunk: &ChunkData) -> Result<usize, DecodeError> {
 /// Checks that `text` is canonical JSON (as `Document::canonical` writes it)
 /// for an object, or for an array when `array_allowed`.
 fn check_json(text: &str, array_allowed: bool) -> Result<(), DecodeError> {
-    let document = Document::parse(text, &Limits::default())
+    let document = Document::parse(text, &crate::canonical_limits())
         .or_else(|error| invalid(format!("embedded JSON: {error}")))?;
     let shape_ok = match document.root() {
         Value::Object { .. } => true,

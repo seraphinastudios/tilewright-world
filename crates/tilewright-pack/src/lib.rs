@@ -80,6 +80,17 @@ pub const SCHEMA_TABLES: [(&str, &str); 7] = [
     ),
 ];
 
+/// Limits for parsing canonical JSON stored in a pack. Canonical JSON is
+/// one line, so the physical line limit is the input limit; every other
+/// limit is the source format's, which the source document already met.
+pub(crate) fn canonical_limits() -> tilewright_jsonc::Limits {
+    let limits = tilewright_jsonc::Limits::default();
+    tilewright_jsonc::Limits {
+        max_line_bytes: limits.max_input_bytes,
+        ..limits
+    }
+}
+
 /// The schema as one SQL batch.
 pub(crate) static SCHEMA: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     SCHEMA_TABLES

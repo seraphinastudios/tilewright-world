@@ -130,8 +130,8 @@ fn bounded_text(column: &str) -> String {
 /// Parses a stored document, which must be canonical JSON of an object.
 fn stored_document(text: Option<String>, what: &str) -> Result<Document, Error> {
     let invalid = || Error::Invalid(format!("{what} is not canonical JSON of an object"));
-    let document =
-        Document::parse(text.ok_or_else(invalid)?, &Limits::default()).map_err(|_| invalid())?;
+    let document = Document::parse(text.ok_or_else(invalid)?, &crate::canonical_limits())
+        .map_err(|_| invalid())?;
     if document.root().as_object().is_none()
         || document.canonical(document.root()) != document.source()
     {

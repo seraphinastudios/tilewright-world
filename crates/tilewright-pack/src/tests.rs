@@ -493,3 +493,35 @@ fn stored_documents_must_be_canonical_and_agree_with_their_rows() {
         assert!(pack.verify().is_err(), "{name} verified");
     }
 }
+
+#[test]
+fn canonical_json_longer_than_a_source_line_compiles_and_verifies() {
+    // Two lines of 100,000 eight-digit numbers: each source line is under
+    // the 1 MiB line limit, but the canonical JSON is one line of ~1.8 MB.
+    let row = vec!["12345678"; 100_000].join(",");
+    let big = format!("[\n[{row}],\n[{row}]\n]");
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("source");
+    copy_tree(&fixture(), &root);
+    std::fs::write(
+        root.join("defs/proto/rock.jsonc"),
+        format!("{{\"format\": \"tilewright.def/1\", \"type\": \"proto\", \"id\": \"rock\", \"fields\": {{\"face\": \"rock.png\", \"layer\": \"item\", \"footprint\": {big}}}}}\n"),
+    )
+    .unwrap();
+    let vault = root.join("planes/vault/layers/0/0_0.jsonc");
+    let text = std::fs::read_to_string(&vault).unwrap();
+    std::fs::write(
+        &vault,
+        text.replace(
+            "\"objects\": [",
+            &format!("\"objects\": [{{\"at\": [2, 2], \"proto\": \"rock\", \"custom\": {{\"example.org\": {big}}}}}, "),
+        ),
+    )
+    .unwrap();
+    let world = tilewright_source::load(&root).unwrap();
+    let written = write_pack(&world, &directory.path().join("output")).unwrap();
+    let pack = Pack::open(&written.path).unwrap();
+    pack.verify().unwrap();
+    let chunk = pack.chunk("vault", 0, 0, 0).unwrap().unwrap();
+    assert!(chunk.objects[0].custom.as_ref().unwrap().len() > 1024 * 1024);
+}
