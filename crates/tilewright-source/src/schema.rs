@@ -23,6 +23,9 @@ pub struct Schema {
     fields: Vec<(String, FieldSpec)>,
     /// Positions in `fields` by name, kept with the list.
     index: BTreeMap<String, usize>,
+    /// Positions in `fields` of the required fields, in declaration order,
+    /// listed once so that checking an owner never walks the others.
+    required: Vec<usize>,
 }
 
 impl Schema {
@@ -31,13 +34,24 @@ impl Schema {
             path,
             fields: Vec::new(),
             index: BTreeMap::new(),
+            required: Vec::new(),
         }
     }
 
     /// Adds a field; names come from one object's keys, so they are unique.
     fn push(&mut self, name: String, spec: FieldSpec) {
-        self.index.insert(name.clone(), self.fields.len());
+        let position = self.fields.len();
+        if spec.required {
+            self.required.push(position);
+        }
+        self.index.insert(name.clone(), position);
         self.fields.push((name, spec));
+    }
+
+    /// The position and spec of field `name`.
+    fn lookup(&self, name: &str) -> Option<(usize, &FieldSpec)> {
+        let position = *self.index.get(name)?;
+        self.fields.get(position).map(|(_, spec)| (position, spec))
     }
 
     /// The fields in declaration order.
@@ -48,8 +62,7 @@ impl Schema {
 
     #[must_use]
     pub fn field(&self, name: &str) -> Option<&FieldSpec> {
-        let position = *self.index.get(name)?;
-        self.fields.get(position).map(|(_, spec)| spec)
+        self.lookup(name).map(|(_, spec)| spec)
     }
 }
 
@@ -303,6 +316,11 @@ impl References {
 
 /// Validates a `fields` object against `schema`. Missing required fields are
 /// reported at `owner`, the object holding `fields`.
+///
+/// The work is proportional to the fields the owner has, however many the
+/// schema requires. An owner with every required field is not checked for
+/// missing ones; naming the first few that another owner lacks visits at
+/// most [`NAMED`] more required fields than it has.
 pub(crate) fn read_fields<'a>(
     reader: &Reader<'a>,
     owner: &'a Value,
@@ -316,8 +334,11 @@ pub(crate) fn read_fields<'a>(
         Some(fields) => reader.members(fields)?,
         None => &[],
     };
+    // Positions of the required fields present. Keys are unique, so the
+    // owner lacks exactly the other required fields.
+    let mut present = BTreeSet::new();
     for member in members {
-        let Some(spec) = schema.field(&member.key) else {
+        let Some((position, spec)) = schema.lookup(&member.key) else {
             reader.report(
                 member.key_span,
                 Code::UnknownKey,
@@ -326,43 +347,70 @@ pub(crate) fn read_fields<'a>(
             ok = false;
             continue;
         };
+        if spec.required {
+            present.insert(position);
+        }
         match check_field(reader, &member.value, spec, references) {
             Some(value) => output.push((member.key.clone(), value)),
             None => ok = false,
         }
     }
     // One diagnostic per owner, however many fields it lacks.
-    let present: BTreeSet<&str> = members.iter().map(|member| member.key.as_str()).collect();
-    let missing: Vec<&str> = schema
-        .fields()
-        .iter()
-        .filter(|(name, spec)| spec.required && !present.contains(name.as_str()))
-        .map(|(name, _)| name.as_str())
-        .collect();
-    if let Some(message) = missing_message(&missing) {
-        reader.report(fields.unwrap_or(owner).span(), Code::MissingKey, message);
+    let missing = schema.required.len() - present.len();
+    if missing > 0 {
+        let named: Vec<&str> = schema
+            .required
+            .iter()
+            .inspect(|_| visited())
+            .filter(|position| !present.contains(position))
+            .take(NAMED)
+            .filter_map(|position| schema.fields.get(*position))
+            .map(|(name, _)| name.as_str())
+            .collect();
+        reader.report(
+            fields.unwrap_or(owner).span(),
+            Code::MissingKey,
+            missing_message(&named, missing),
+        );
         ok = false;
     }
     ok.then_some(output)
 }
 
-/// Names a few missing required fields and counts the rest.
-fn missing_message(missing: &[&str]) -> Option<String> {
-    const NAMED: usize = 3;
-    let named = missing
+/// Missing required fields named in one diagnostic; the rest are counted.
+const NAMED: usize = 3;
+
+#[cfg(test)]
+thread_local! {
+    /// Required fields visited on this thread while naming missing ones, so
+    /// tests can bound the work of a load.
+    pub(crate) static REQUIRED_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Counts a required field visited while naming missing ones.
+#[cfg(test)]
+fn visited() {
+    REQUIRED_VISITS.with(|visits| visits.set(visits.get() + 1));
+}
+
+#[cfg(not(test))]
+const fn visited() {}
+
+/// The diagnostic for an owner that lacks `count` required fields, the
+/// first of which are `named`.
+fn missing_message(named: &[&str], count: usize) -> String {
+    let list = named
         .iter()
-        .take(NAMED)
         .map(|name| format!("\"{name}\""))
         .collect::<Vec<_>>()
         .join(", ");
-    match missing.len() {
-        0 => None,
-        1 => Some(format!("required field {named} is missing")),
-        count if count <= NAMED => Some(format!("required fields {named} are missing")),
-        count => Some(format!(
-            "required fields {named} and {} more are missing",
-            count - NAMED
-        )),
+    match count {
+        1 => format!("required field {list} is missing"),
+        count if count <= named.len() => format!("required fields {list} are missing"),
+        count => format!(
+            "required fields {list} and {} more are missing",
+            count - named.len()
+        ),
     }
 }
 

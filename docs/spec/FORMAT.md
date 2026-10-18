@@ -299,8 +299,11 @@ Field names match `^[a-z][a-z0-9_]{0,63}$`. Types:
 | `json` | any value | |
 
 `required` (default `false`) makes a field mandatory; an object that lacks
-required fields gets one diagnostic naming them. A key that is not in the
-schema is an error.
+required fields gets one diagnostic that names the first three and counts the
+rest. A key that is not in the schema is an error. Checking an object costs
+time in proportion to the fields it has, however many the schema requires, so
+a schema with many required fields cannot multiply the work of many small
+objects.
 
 ## 12. Validation summary
 

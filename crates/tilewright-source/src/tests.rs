@@ -622,6 +622,54 @@ fn missing_required_fields_are_one_diagnostic_per_owner() {
 }
 
 #[test]
+fn required_fields_cost_what_their_owner_has() {
+    // A schema with 251 required fields, as many as fit beside the fixture's
+    // five, and many objects with no fields at all.
+    let copy = workspace();
+    let required: Vec<String> = (0..251)
+        .map(|index| format!("\"r{index}\": {{\"type\": \"boolean\", \"required\": true}}"))
+        .collect();
+    edit(
+        copy.path(),
+        "profile/schema/object-fields.jsonc",
+        "\"fields\": {",
+        &format!("\"fields\": {{{}, ", required.join(", ")),
+    );
+    let count = 20_000;
+    let objects = vec!["{\"at\": [1, 1], \"proto\": \"coin\"}"; count];
+    fs::write(
+        copy.path().join("planes/vault/layers/0/0_0.jsonc"),
+        format!(
+            "{{\"format\": \"tilewright.chunk/1\", \"plane\": \"vault\", \"layer\": 0, \"chunk\": [0, 0], \"objects\": [\n{}\n]}}\n",
+            objects.join(",\n")
+        ),
+    )
+    .unwrap();
+    let options = LoadOptions {
+        maximum_diagnostics: 1_000_000,
+        ..LoadOptions::default()
+    };
+    super::schema::REQUIRED_VISITS.set(0);
+    let found = load_with(copy.path(), &options).expect_err("required fields are missing");
+    let visits = super::schema::REQUIRED_VISITS.get();
+    let missing: Vec<_> = found
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "shape.missing_key")
+        .collect();
+    assert!(missing.len() > count, "{}", missing.len());
+    for diagnostic in &missing {
+        assert_eq!(
+            diagnostic.message,
+            "required fields \"r0\", \"r1\", \"r2\" and 248 more are missing"
+        );
+    }
+    // Every owner has none of the required fields, so naming three of them
+    // visits three, not all 251. Owners with every required field, the
+    // definitions here, visit none.
+    assert_eq!(visits, 3 * missing.len());
+}
+
+#[test]
 fn roles_naming_one_schema_share_it() {
     let copy = workspace();
     edit(
