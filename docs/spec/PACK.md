@@ -24,7 +24,7 @@ CREATE TABLE strings (id INTEGER PRIMARY KEY, value TEXT NOT NULL UNIQUE);
 CREATE TABLE planes (id TEXT PRIMARY KEY, kind TEXT NOT NULL, chunk_size INTEGER NOT NULL, document TEXT NOT NULL) WITHOUT ROWID;
 CREATE TABLE zones (plane TEXT NOT NULL, id TEXT NOT NULL, parent TEXT, document TEXT NOT NULL, PRIMARY KEY (plane, id)) WITHOUT ROWID;
 CREATE TABLE anchors (plane TEXT NOT NULL, id TEXT NOT NULL, layer INTEGER NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, PRIMARY KEY (plane, id)) WITHOUT ROWID;
-CREATE TABLE stairwells (plane TEXT NOT NULL, id TEXT NOT NULL, direction TEXT NOT NULL, hidden_on_other_layers INTEGER NOT NULL, document TEXT NOT NULL, PRIMARY KEY (plane, id)) WITHOUT ROWID;
+CREATE TABLE stairwells (plane TEXT NOT NULL, id TEXT NOT NULL, document TEXT NOT NULL, PRIMARY KEY (plane, id)) WITHOUT ROWID;
 CREATE TABLE stairwell_steps (plane TEXT NOT NULL, layer INTEGER NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, stairwell TEXT NOT NULL, step INTEGER NOT NULL, proto TEXT NOT NULL, PRIMARY KEY (plane, layer, x, y)) WITHOUT ROWID;
 CREATE TABLE chunks (plane TEXT NOT NULL, layer INTEGER NOT NULL, cx INTEGER NOT NULL, cy INTEGER NOT NULL, encoding TEXT NOT NULL, data BLOB NOT NULL, PRIMARY KEY (plane, layer, cx, cy)) WITHOUT ROWID;
 CREATE TABLE definitions (type TEXT NOT NULL, id TEXT NOT NULL, document TEXT NOT NULL, PRIMARY KEY (type, id)) WITHOUT ROWID;
@@ -46,9 +46,8 @@ CREATE TABLE definitions (type TEXT NOT NULL, id TEXT NOT NULL, document TEXT NO
 members in source order, numbers spelled exactly as in the source, strings
 escaped only where JSON requires.
 
-`stairwells` holds one row per stairwell: its plane and ID, its `direction`
-(`both`, `down` or `up`) and `hidden_on_other_layers` (1 or 0), with the
-source defaults applied, and its entry in `document`. `stairwell_steps` holds
+`stairwells` holds one row per stairwell: its plane and ID, and its entry in
+`document`. `stairwell_steps` holds
 one row per step, keyed by the step's tile so that a reader finds the step on
 a tile, or the steps in an area of one layer, by primary key: the plane,
 layer and plane coordinates, the stairwell's ID, the step's index in the
@@ -158,7 +157,7 @@ A full verification also:
 - checks that plane, zone, anchor, stairwell and definition keys are
   identifiers; plane kinds, and a chunk size of 32 as format 1 requires; zone
   planes, parents and that parent chains end at a root; anchor planes, layers
-  and positions; stairwell planes, directions and flags; that every
+  and positions; stairwell planes; that every
   `stairwell_steps` row names a stairwell of its plane and a `proto`
   definition, with a 32-bit layer, a position within ±9,007,199,254,740,991
   and an index of at least 0; and chunk planes, layers and coordinates, which
@@ -178,7 +177,7 @@ A full verification also:
 - checks that each stairwell document has the source format's shape (section
   10 of FORMAT.md): an ID that matches its row, at least two steps whose
   layers change by one in one direction and whose positions move at most one
-  tile per axis, and a direction and flag that match its row; that each step
+  tile per axis, and a valid direction and flag; that each step
   is the `stairwell_steps` row at its tile, naming its stairwell, index and
   prototype; and that the table holds no other rows. One document is held at
   a time, and each step is one primary-key lookup;

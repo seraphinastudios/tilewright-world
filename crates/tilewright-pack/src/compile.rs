@@ -442,17 +442,10 @@ fn insert_stairwells(
     id: &str,
     plane: &tilewright_source::Plane,
 ) -> Result<(), Error> {
-    let mut stairwells = connection.prepare(
-        "INSERT INTO stairwells (plane, id, direction, hidden_on_other_layers, document) VALUES (?1, ?2, ?3, ?4, ?5)",
-    )?;
+    let mut stairwells =
+        connection.prepare("INSERT INTO stairwells (plane, id, document) VALUES (?1, ?2, ?3)")?;
     for (stairwell_id, stairwell) in &plane.stairwells {
-        stairwells.execute(params![
-            id,
-            stairwell_id,
-            stairwell.direction.as_str(),
-            stairwell.hidden_on_other_layers,
-            document(&stairwell.canonical)?
-        ])?;
+        stairwells.execute(params![id, stairwell_id, document(&stairwell.canonical)?])?;
     }
     let mut steps = connection.prepare(
         "INSERT INTO stairwell_steps (plane, layer, x, y, stairwell, step, proto) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",

@@ -72,7 +72,7 @@ pub const SCHEMA_TABLES: [(&str, &str); 9] = [
     ),
     (
         "stairwells",
-        "CREATE TABLE stairwells (plane TEXT NOT NULL, id TEXT NOT NULL, direction TEXT NOT NULL, hidden_on_other_layers INTEGER NOT NULL, document TEXT NOT NULL, PRIMARY KEY (plane, id)) WITHOUT ROWID",
+        "CREATE TABLE stairwells (plane TEXT NOT NULL, id TEXT NOT NULL, document TEXT NOT NULL, PRIMARY KEY (plane, id)) WITHOUT ROWID",
     ),
     (
         "stairwell_steps",

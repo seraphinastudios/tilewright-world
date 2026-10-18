@@ -1308,26 +1308,10 @@ fn stairwells_layer_heights_and_list_fields_compile_and_read_back() {
 #[test]
 fn stairwell_rows_steps_and_documents_are_verified() {
     let chute = "WHERE stairwell = 'cave.chute' AND step = 0";
-    let row = "invalid ID, direction or flag";
+    let row = "a stairwell has an invalid ID";
     let step = "a stairwell step names an unknown";
     let disagrees = "disagrees with its rows";
     for (name, sql, problem) in [
-        (
-            "direction",
-            "UPDATE stairwells SET direction = 'sideways' WHERE id = 'cave.chute'".to_owned(),
-            row,
-        ),
-        (
-            "hidden",
-            "UPDATE stairwells SET hidden_on_other_layers = 2 WHERE id = 'cave.chute'".to_owned(),
-            row,
-        ),
-        (
-            "hidden-text",
-            "UPDATE stairwells SET hidden_on_other_layers = 'yes' WHERE id = 'cave.chute'"
-                .to_owned(),
-            row,
-        ),
         (
             "plane",
             "UPDATE stairwells SET plane = 'attic' WHERE id = 'cave.chute'".to_owned(),
@@ -1402,8 +1386,13 @@ fn stored_stairwell_documents_have_the_source_shape_and_agree_with_their_rows() 
     for (name, sql, problem) in [
         (
             "document-direction",
-            "UPDATE stairwells SET document = replace(document, '\"direction\":\"down\"', '\"direction\":\"up\"') WHERE id = 'cave.chute'".to_owned(),
-            disagrees,
+            "UPDATE stairwells SET document = replace(document, '\"direction\":\"down\"', '\"direction\":\"sideways\"') WHERE id = 'cave.chute'".to_owned(),
+            "source format's shape",
+        ),
+        (
+            "document-hidden",
+            "UPDATE stairwells SET document = replace(document, '\"hidden_on_other_layers\":false', '\"hidden_on_other_layers\":0') WHERE id = 'cliff.path'".to_owned(),
+            "source format's shape",
         ),
         (
             "document-id",
@@ -1447,8 +1436,8 @@ fn stored_stairwell_documents_have_the_source_shape_and_agree_with_their_rows() 
 
     // Single reads check what they load too.
     let (_directory, copy) = tampered(
-        "read-direction.twpack",
-        "UPDATE stairwells SET direction = 'both' WHERE id = 'cave.chute'",
+        "read-id.twpack",
+        "UPDATE stairwells SET document = replace(document, '\"id\":\"cave.chute\"', '\"id\":\"cave.slide\"') WHERE id = 'cave.chute'",
     );
     let pack = Pack::open(&copy).unwrap();
     assert!(pack.stairwell("overworld", "cave.chute").is_err());

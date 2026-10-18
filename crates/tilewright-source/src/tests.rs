@@ -1061,6 +1061,10 @@ fn stairwell_tiles_hold_one_step() {
         [("stairwell.overlap", STAIRWELLS.to_owned(), 3)],
         "{found:?}"
     );
+    assert_eq!(
+        load(copy.path()).unwrap_err()[0].message,
+        "layer 1 tile [1, 1] already holds a step of stairwell \"a\""
+    );
 }
 
 #[test]

@@ -36,9 +36,10 @@ pub(crate) fn read_stairwells(
     else {
         return stairwells;
     };
-    // The stairwell holding each tile, across the plane.
-    let mut tiles: BTreeMap<(i32, i64, i64), String> = BTreeMap::new();
-    for item in items {
+    // The entry, by position in `items`, whose step holds each tile, across
+    // the plane.
+    let mut tiles: BTreeMap<(i32, i64, i64), usize> = BTreeMap::new();
+    for (position, item) in items.iter().enumerate() {
         let Some(stairwell) = read_stairwell(&reader, item, references) else {
             continue;
         };
@@ -56,6 +57,11 @@ pub(crate) fn read_stairwells(
         for (step, value) in stairwell.steps.iter().zip(steps) {
             let tile = (step.layer, step.at[0], step.at[1]);
             if let Some(other) = tiles.get(&tile) {
+                let other = items
+                    .get(*other)
+                    .and_then(|entry| entry.get("id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
                 reader.report(
                     value.span(),
                     Code::StairwellOverlap,
@@ -66,7 +72,7 @@ pub(crate) fn read_stairwells(
                 );
                 ok = false;
             } else {
-                tiles.insert(tile, stairwell.id.clone());
+                tiles.insert(tile, position);
             }
         }
         if ok {

@@ -371,17 +371,12 @@ fn text<'d>(document: &'d Document, key: &str) -> Option<&'d str> {
     document.root().get(key).and_then(Value::as_str)
 }
 
-/// A stairwell from a row of `id, direction, hidden_on_other_layers,
-/// document`, each bounded in SQL (NULL when out of bounds), after checking
-/// that the document agrees with the row.
+/// A stairwell from a row of `id, document`, each bounded in SQL (NULL when
+/// out of bounds), after checking that the document has the row's ID.
 fn stairwell_row(row: &rusqlite::Row<'_>) -> Result<Stairwell, Error> {
-    let (id, direction, hidden): (Option<String>, Option<String>, Option<i64>) =
-        (row.get(0)?, row.get(1)?, row.get(2)?);
-    let stairwell = stored_stairwell(&stored_document(row.get(3)?, "a stairwell document")?)?;
-    if id.as_deref() != Some(stairwell.id.as_str())
-        || direction.as_deref() != Some(stairwell.direction.as_str())
-        || hidden != Some(i64::from(stairwell.hidden_on_other_layers))
-    {
+    let id: Option<String> = row.get(0)?;
+    let stairwell = stored_stairwell(&stored_document(row.get(1)?, "a stairwell document")?)?;
+    if id.as_deref() != Some(stairwell.id.as_str()) {
         return Err(Error::Invalid(format!(
             "the document of stairwell {} disagrees with its row",
             stairwell.id
@@ -529,10 +524,8 @@ impl Pack {
     /// have the source format's shape or disagrees with its row.
     pub fn stairwell(&self, plane: &str, id: &str) -> Result<Option<Stairwell>, Error> {
         let mut statement = self.connection.prepare(&format!(
-            "SELECT {}, {}, {}, {} FROM stairwells WHERE plane = ?2 AND id = ?3",
+            "SELECT {}, {} FROM stairwells WHERE plane = ?2 AND id = ?3",
             bounded_text("id"),
-            bounded_text("direction"),
-            "CASE WHEN typeof(hidden_on_other_layers) = 'integer' THEN hidden_on_other_layers END",
             bounded_text("document"),
         ))?;
         let mut rows = statement.query(params![maximum_document_bytes(), plane, id])?;
@@ -551,10 +544,8 @@ impl Pack {
         visit: &mut dyn FnMut(Stairwell) -> Result<(), Error>,
     ) -> Result<(), Error> {
         let mut statement = self.connection.prepare(&format!(
-            "SELECT {}, {}, {}, {} FROM stairwells WHERE plane = ?2 ORDER BY id",
+            "SELECT {}, {} FROM stairwells WHERE plane = ?2 ORDER BY id",
             bounded_text("id"),
-            bounded_text("direction"),
-            "CASE WHEN typeof(hidden_on_other_layers) = 'integer' THEN hidden_on_other_layers END",
             bounded_text("document"),
         ))?;
         let mut rows = statement.query(params![maximum_document_bytes(), plane])?;
@@ -858,12 +849,10 @@ impl Pack {
             ),
             (
                 format!(
-                    "SELECT count(*) FROM stairwells s WHERE {} OR NOT EXISTS (SELECT 1 FROM planes p WHERE p.id = s.plane) \
-                     OR typeof(s.direction) != 'text' OR s.direction NOT IN ('both', 'down', 'up') \
-                     OR typeof(s.hidden_on_other_layers) != 'integer' OR s.hidden_on_other_layers NOT IN (0, 1)",
+                    "SELECT count(*) FROM stairwells s WHERE {} OR NOT EXISTS (SELECT 1 FROM planes p WHERE p.id = s.plane)",
                     not_identifier("s.id")
                 ),
-                "a stairwell has an invalid ID, direction or flag, or names an unknown plane",
+                "a stairwell has an invalid ID or names an unknown plane",
             ),
             (
                 // A step's stairwell is a stairwell of its plane, so the plane
@@ -1000,7 +989,7 @@ impl Pack {
     /// [`Pack::check_rows`] has already checked the rows' columns.
     fn check_stairwells(&self) -> Result<(), Error> {
         let mut stairwells = self.connection.prepare(&format!(
-            "SELECT plane, id, direction, hidden_on_other_layers, {} FROM stairwells ORDER BY plane, id",
+            "SELECT plane, id, {} FROM stairwells ORDER BY plane, id",
             bounded_text("document")
         ))?;
         let mut step_at = self.connection.prepare(
@@ -1009,18 +998,14 @@ impl Pack {
         let mut listed: u64 = 0;
         let mut rows = stairwells.query([maximum_document_bytes()])?;
         while let Some(row) = rows.next()? {
-            let (plane, id, direction, hidden): (String, String, String, bool) =
-                (row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?);
-            let stored = stored_stairwell(&stored_document(row.get(4)?, "a stairwell document")?)?;
+            let (plane, id): (String, String) = (row.get(0)?, row.get(1)?);
+            let stored = stored_stairwell(&stored_document(row.get(2)?, "a stairwell document")?)?;
             let disagrees = || {
                 Error::Invalid(format!(
                     "the document of stairwell {plane}/{id} disagrees with its rows"
                 ))
             };
-            if stored.id != id
-                || stored.direction.as_str() != direction
-                || stored.hidden_on_other_layers != hidden
-            {
+            if stored.id != id {
                 return Err(disagrees());
             }
             for (index, step) in stored.steps.iter().enumerate() {
