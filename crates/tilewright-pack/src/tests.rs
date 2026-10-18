@@ -1489,6 +1489,12 @@ fn stored_layer_heights_are_checked() {
         );
         assert!(pack.layer_height().is_err(), "{name}");
     }
+    // The whole stored profile is checked, not just its layer height.
+    let (_directory, copy) = tampered(
+        "bare.twpack",
+        "UPDATE meta SET value = '{\"layer_height\":50}' WHERE key = 'profile'",
+    );
+    assert!(Pack::open(&copy).unwrap().layer_height().is_err());
     let (_directory, copy) = tampered(
         "flat.twpack",
         "UPDATE meta SET value = replace(value, ',\"layer_height\":50', '') WHERE key = 'profile'",
@@ -1525,7 +1531,7 @@ fn compile_rejects_stairwell_steps_that_share_a_tile() {
     assert!(stairwell_tiles(&plane).is_err());
     let mut plane = world.planes()["overworld"].clone();
     let mut long = chute;
-    long.steps = (0..250_001)
+    long.steps = (0..1_000_001)
         .map(|layer| tilewright_source::StairwellStep {
             layer,
             at: [0, 0],
@@ -1534,12 +1540,19 @@ fn compile_rejects_stairwell_steps_that_share_a_tile() {
         .collect();
     plane.stairwells.insert("cave.chute".to_owned(), long);
     let error = stairwell_tiles(&plane).unwrap_err();
-    assert!(error.to_string().contains("more steps"), "{error}");
+    assert!(
+        error.to_string().contains("more stairwell steps"),
+        "{error}"
+    );
+    // Many stairwells, each within an array's limit, are capped in total.
     let mut plane = world.planes()["overworld"].clone();
     let chute = plane.stairwells["cave.chute"].clone();
-    plane.stairwells = (0..250_001)
+    plane.stairwells = (0..500_001)
         .map(|index| (format!("s{index}"), chute.clone()))
         .collect();
     let error = stairwell_tiles(&plane).unwrap_err();
-    assert!(error.to_string().contains("more stairwells"), "{error}");
+    assert!(
+        error.to_string().contains("more stairwell steps"),
+        "{error}"
+    );
 }

@@ -1564,6 +1564,22 @@ fn every_key_of_a_spec_is_checked() {
             "{\"type\": \"string\", \"max_length\": 0, \"values\": [1, \"a\", \"a\"]}",
             &["shape.range", "shape.type", "ref.duplicate"],
         ),
+        (
+            "{\"type\": \"list\", \"items\": {\"required\": true, \"extra\": 0}}",
+            &[
+                "shape.missing_key",
+                "shape.unknown_key",
+                "shape.unknown_key",
+            ],
+        ),
+        (
+            "{\"required\": 1, \"extra\": 0}",
+            &["shape.missing_key", "shape.type", "shape.unknown_key"],
+        ),
+        (
+            "{\"type\": \"object\", \"fields\": {\"Bad\": {\"type\": \"set\"}}}",
+            &["shape.identifier", "shape.range"],
+        ),
     ] {
         let copy = workspace();
         edit(

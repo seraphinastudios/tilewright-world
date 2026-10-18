@@ -515,18 +515,19 @@ impl Pack {
     }
 
     /// The profile's `layer_height`: height units per layer, or `None` when
-    /// the profile does not stack layers.
+    /// the profile does not stack layers. The stored profile is checked as a
+    /// full verification checks it.
     ///
     /// # Errors
     /// Returns an error if SQLite fails or the stored profile is invalid.
     pub fn layer_height(&self) -> Result<Option<u32>, Error> {
-        stored_layer_height(&stored_document(
-            self.meta("profile")?,
-            "the stored profile",
-        )?)
+        Ok(self.profile_layers()?.2)
     }
 
-    /// One stairwell of a plane, read from its stored document.
+    /// One stairwell of a plane, read from its stored document. Like
+    /// [`Pack::chunk`], it checks the shape and bounds of what it loads;
+    /// whether the plane and the steps' prototypes exist is checked by
+    /// [`Pack::verify`].
     ///
     /// # Errors
     /// Returns an error if SQLite fails, or the stored stairwell does not
@@ -564,7 +565,9 @@ impl Pack {
         Ok(())
     }
 
-    /// The stairwell step on a tile of a plane, if any.
+    /// The stairwell step on a tile of a plane, if any. It checks the shape
+    /// and bounds of what it loads; whether the stairwell and prototype
+    /// exist is checked by [`Pack::verify`].
     ///
     /// # Errors
     /// Returns an error if SQLite fails or the stored step is invalid.
@@ -732,7 +735,7 @@ impl Pack {
         self.check_string_encoding()?;
         self.check_documents()?;
         self.check_stairwells()?;
-        let (render_layers, ground_layers) = self.profile_layers()?;
+        let (render_layers, ground_layers, _) = self.profile_layers()?;
         let mut targets = Targets {
             strings: u32::try_from(summary.strings)
                 .map_err(|_| Error::Invalid("too many strings".into()))?,
@@ -1045,7 +1048,7 @@ impl Pack {
 
     /// Render and ground layer counts from the stored profile, which must be
     /// canonical and agree with `profile_id` and `profile_version`.
-    fn profile_layers(&self) -> Result<(usize, usize), Error> {
+    fn profile_layers(&self) -> Result<(usize, usize, Option<u32>), Error> {
         let profile = stored_document(self.meta("profile")?, "the stored profile")?;
         // The identity must be one a source profile can have: an identifier
         // and a version of at most 64 characters.
@@ -1065,7 +1068,7 @@ impl Pack {
                 "the stored profile's projection is not one a source profile can have".into(),
             ));
         }
-        stored_layer_height(&profile)?;
+        let layer_height = stored_layer_height(&profile)?;
         // Each list holds unique identifiers within its count, and every
         // ground layer is a render layer other than `height` or `zone`.
         let layers = |key: &str, range: std::ops::RangeInclusive<usize>| {
@@ -1099,7 +1102,7 @@ impl Pack {
                 "a stored ground layer is not a render layer other than height or zone".into(),
             ));
         }
-        Ok((render.len(), ground.len()))
+        Ok((render.len(), ground.len(), layer_height))
     }
 }
 

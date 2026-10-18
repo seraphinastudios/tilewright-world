@@ -127,6 +127,12 @@ loading it, and never load a whole table into memory. Readers:
   source format's shape or disagrees with its row, even when reading a
   single stairwell, and a step row whose stairwell or prototype is not an
   identifier, even when reading a single step;
+- check the whole stored profile, as a full verification does, before
+  reporting its `layer_height`.
+
+A single read checks the shape and bounds of what it loads. Whether the
+targets it names exist (a step's stairwell or prototype, a chunk's
+strings) is checked by a full verification.
 - reject chunk records with an unknown version, flags or tags, out-of-range
   tiles, palette indexes or sizes, a palette that is not nonzero and strictly
   ascending, embedded JSON that is not canonical or not the required shape

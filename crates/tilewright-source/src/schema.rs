@@ -178,16 +178,17 @@ fn read_field_specs<'a>(
     let mut schema = Schema::new(Arc::clone(path));
     let mut ok = true;
     for member in members {
-        if !is_field_name(&member.key) {
+        // A bad name is reported and its spec is still checked.
+        let named = is_field_name(&member.key);
+        if !named {
             reader.report(
                 member.key_span,
                 Code::Identifier,
                 format!("\"{}\" is not a valid field name", member.key),
             );
             ok = false;
-            continue;
         }
-        match read_spec(reader, &member.value, path, depth, true) {
+        match read_spec(reader, &member.value, path, depth, true).filter(|_| named) {
             Some((field_type, required)) => schema.push(
                 member.key.clone(),
                 FieldSpec {
@@ -221,14 +222,28 @@ fn read_spec<'a>(
         return None;
     }
     let spec = value;
-    let kind = reader.required(spec, "type")?;
-    let options: &[&str] = match kind.as_str() {
+    let kind = reader.required(spec, "type");
+    // Keys are checked against their type's options, or, when the type is
+    // missing or unknown, against every type's, so a key no type allows is
+    // reported either way.
+    let options: &[&str] = match kind.and_then(Value::as_str) {
         Some("integer" | "number") => &["min", "max"],
         Some("string") => &["max_length", "values"],
         Some("reference") => &["target"],
         Some("list") => &["items", "min_items", "max_items"],
         Some("object") => &["fields"],
-        _ => &[],
+        Some("boolean" | "json") => &[],
+        _ => &[
+            "min",
+            "max",
+            "max_length",
+            "values",
+            "target",
+            "items",
+            "min_items",
+            "max_items",
+            "fields",
+        ],
     };
     let mut allowed = vec!["type"];
     if takes_required {
@@ -242,6 +257,7 @@ fn read_spec<'a>(
         Some(flag) => reader.boolean(flag),
         None => Some(false),
     };
+    let kind = kind?;
     // A list or object too deep is reported, and the rest of the spec is
     // still read; the parser's nesting limit bounds the recursion.
     let too_deep = matches!(kind.as_str(), Some("list" | "object")) && depth >= MAXIMUM_FIELD_DEPTH;

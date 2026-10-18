@@ -413,27 +413,28 @@ pub(crate) type TileStep<'w> = (&'w str, i64, &'w str);
 
 /// The steps of a plane's stairwells by tile, the `stairwell_steps` key, so
 /// they are inserted in primary-key order. The model is public, so the
-/// plane's stairwell count and each stairwell's ID, step count and step
-/// prototypes are checked against the source format's limits before
-/// anything is kept.
+/// plane's total step count, and each stairwell's ID and step prototypes,
+/// are checked against the source format's limits before anything is kept.
 pub(crate) fn stairwell_tiles(
     plane: &tilewright_source::Plane,
 ) -> Result<BTreeMap<(i32, i64, i64), TileStep<'_>>, Error> {
-    let array = Limits::default().max_array_items;
-    if plane.stairwells.len() > array {
+    // One stairwells document holds at most the source format's value
+    // limit, so no plane has more steps than that.
+    let steps = plane
+        .stairwells
+        .values()
+        .try_fold(0_usize, |total, stairwell| {
+            total.checked_add(stairwell.steps.len())
+        });
+    if steps.is_none_or(|steps| steps > Limits::default().max_values) {
         return Err(Error::Invalid(format!(
-            "plane {} has more stairwells than a source array holds",
+            "plane {} has more stairwell steps than a source document holds",
             plane.id
         )));
     }
     let mut tiles = BTreeMap::new();
     for (id, stairwell) in &plane.stairwells {
         let id = identifier(id)?;
-        if stairwell.steps.len() > array {
-            return Err(Error::Invalid(format!(
-                "stairwell {id} has more steps than a source array holds"
-            )));
-        }
         for (index, step) in stairwell.steps.iter().enumerate() {
             let index = i64::try_from(index)
                 .map_err(|_| Error::Invalid("a stairwell has too many steps".into()))?;
