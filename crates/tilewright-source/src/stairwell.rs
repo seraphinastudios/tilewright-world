@@ -135,16 +135,16 @@ fn read_steps<'a>(
     references: &References,
 ) -> Option<Vec<StairwellStep>> {
     let items = reader.array(value)?;
-    if items.len() < 2 {
+    // Too few steps is reported, and each step is still checked.
+    let mut ok = items.len() >= 2;
+    if !ok {
         reader.report(
             value.span(),
             Code::Range,
             "a stairwell has at least two steps",
         );
-        return None;
     }
     let mut steps: Vec<StairwellStep> = Vec::with_capacity(items.len());
-    let mut ok = true;
     // Whether the steps go up; the first two adjacent steps set it.
     let mut up = None;
     // Whether the last step pushed is the one just before this item.

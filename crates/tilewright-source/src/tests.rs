@@ -1135,6 +1135,18 @@ fn stairwell_entries_have_their_documented_shape() {
         );
     }
 
+    // A lone step is still checked.
+    let copy = with_stairwells(
+        "{\"id\": \"s\", \"steps\": [{\"layer\": 0, \"at\": [1, 1], \"proto\": \"ladder\"}]}",
+    );
+    assert_eq!(
+        codes(copy.path()),
+        [
+            ("shape.range", STAIRWELLS.to_owned()),
+            ("ref.unresolved", STAIRWELLS.to_owned())
+        ]
+    );
+
     let copy = with_stairwells("");
     edit(
         copy.path(),

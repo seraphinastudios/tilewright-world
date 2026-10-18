@@ -9,7 +9,10 @@ use crate::{
     files::Tree,
     read::{Reader, is_identifier},
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 use tilewright_jsonc::{MAX_SAFE_INTEGER, Member, Span, Value};
 
 /// Longest string a `string` field accepts unless its schema says less.
@@ -28,8 +31,9 @@ pub const MAXIMUM_LIST_ITEMS: usize = 250_000;
 /// document has one, and so does each `object` field type.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Schema {
-    /// Source path of the schema document, relative to the root.
-    pub path: String,
+    /// Source path of the schema document, relative to the root. Nested
+    /// `object` types share their document's path.
+    pub path: Arc<str>,
     fields: Vec<(String, FieldSpec)>,
     /// Positions in `fields` by name, kept with the list.
     index: BTreeMap<String, usize>,
@@ -38,7 +42,7 @@ pub struct Schema {
 }
 
 impl Schema {
-    pub(crate) const fn new(path: String) -> Self {
+    pub(crate) const fn new(path: Arc<str>) -> Self {
         Self {
             path,
             fields: Vec::new(),
@@ -158,7 +162,7 @@ pub(crate) fn read_schema(
     let reader = Reader::new(&source, diagnostics);
     let root = reader.object(reader.root(), &["format", "fields"])?;
     let format_ok = reader.format(root, "tilewright.schema/1");
-    let schema = read_field_specs(&reader, reader.required(root, "fields")?, path, 0);
+    let schema = read_field_specs(&reader, reader.required(root, "fields")?, &path.into(), 0);
     schema.filter(|_| format_ok)
 }
 
@@ -167,11 +171,11 @@ pub(crate) fn read_schema(
 fn read_field_specs<'a>(
     reader: &Reader<'a>,
     value: &'a Value,
-    path: &str,
+    path: &Arc<str>,
     depth: usize,
 ) -> Option<Schema> {
     let members = reader.members(value)?;
-    let mut schema = Schema::new(path.to_owned());
+    let mut schema = Schema::new(Arc::clone(path));
     let mut ok = true;
     for member in members {
         if !is_field_name(&member.key) {
@@ -204,7 +208,7 @@ fn read_field_specs<'a>(
 fn read_spec<'a>(
     reader: &Reader<'a>,
     value: &'a Value,
-    path: &str,
+    path: &Arc<str>,
     depth: usize,
     takes_required: bool,
 ) -> Option<(FieldType, bool)> {

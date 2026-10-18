@@ -1442,6 +1442,19 @@ fn stored_stairwell_documents_have_the_source_shape_and_agree_with_their_rows() 
     let pack = Pack::open(&copy).unwrap();
     assert!(pack.stairwell("overworld", "cave.chute").is_err());
     assert!(pack.visit_stairwells("overworld", &mut |_| Ok(())).is_err());
+    // An ID longer than an identifier is not loaded.
+    let (_directory, copy) = tampered(
+        "read-long-id.twpack",
+        "UPDATE stairwells SET id = id || replace(hex(zeroblob(150)), '00', 'a') WHERE id = 'cave.chute'",
+    );
+    let pack = Pack::open(&copy).unwrap();
+    let long = format!("cave.chute{}", "a".repeat(150));
+    let error = pack.stairwell("overworld", &long).unwrap_err();
+    assert!(
+        error.to_string().contains("disagrees with its row"),
+        "{error}"
+    );
+    assert!(pack.visit_stairwells("overworld", &mut |_| Ok(())).is_err());
     let (_directory, copy) = tampered(
         "read-step.twpack",
         "UPDATE stairwell_steps SET proto = 'Not a proto' WHERE stairwell = 'cave.chute' AND step = 0",

@@ -194,6 +194,14 @@ fn chunk_data_with(value: types::Value, visit: Option<Visit<'_>>) -> Result<Chun
     }
 }
 
+/// SQL for `column` when it is text the length of an identifier, at most
+/// 128 bytes, else NULL; callers then check the pattern.
+fn bounded_identifier(column: &str) -> String {
+    format!(
+        "CASE WHEN typeof({column}) = 'text' AND octet_length({column}) BETWEEN 1 AND 128 THEN {column} END"
+    )
+}
+
 /// SQL for `column` when it is text of at most `?1` bytes, else NULL.
 fn bounded_text(column: &str) -> String {
     format!(
@@ -371,8 +379,9 @@ fn text<'d>(document: &'d Document, key: &str) -> Option<&'d str> {
     document.root().get(key).and_then(Value::as_str)
 }
 
-/// A stairwell from a row of `id, document`, each bounded in SQL (NULL when
-/// out of bounds), after checking that the document has the row's ID.
+/// A stairwell from a row of `id, document`, bounded in SQL by
+/// [`bounded_identifier`] and [`bounded_text`] (NULL when out of bounds),
+/// after checking that the document has the row's ID.
 fn stairwell_row(row: &rusqlite::Row<'_>) -> Result<Stairwell, Error> {
     let id: Option<String> = row.get(0)?;
     let stairwell = stored_stairwell(&stored_document(row.get(1)?, "a stairwell document")?)?;
@@ -525,7 +534,7 @@ impl Pack {
     pub fn stairwell(&self, plane: &str, id: &str) -> Result<Option<Stairwell>, Error> {
         let mut statement = self.connection.prepare(&format!(
             "SELECT {}, {} FROM stairwells WHERE plane = ?2 AND id = ?3",
-            bounded_text("id"),
+            bounded_identifier("id"),
             bounded_text("document"),
         ))?;
         let mut rows = statement.query(params![maximum_document_bytes(), plane, id])?;
@@ -545,7 +554,7 @@ impl Pack {
     ) -> Result<(), Error> {
         let mut statement = self.connection.prepare(&format!(
             "SELECT {}, {} FROM stairwells WHERE plane = ?2 ORDER BY id",
-            bounded_text("id"),
+            bounded_identifier("id"),
             bounded_text("document"),
         ))?;
         let mut rows = statement.query(params![maximum_document_bytes(), plane])?;
@@ -571,11 +580,11 @@ impl Pack {
             .query_row(
                 &format!(
                     "SELECT {}, CASE WHEN typeof(step) = 'integer' THEN step END, {} FROM stairwell_steps \
-                     WHERE plane = ?2 AND layer = ?3 AND x = ?4 AND y = ?5",
-                    bounded_text("stairwell"),
-                    bounded_text("proto"),
+                     WHERE plane = ?1 AND layer = ?2 AND x = ?3 AND y = ?4",
+                    bounded_identifier("stairwell"),
+                    bounded_identifier("proto"),
                 ),
-                params![bound(128), plane, layer, x, y],
+                params![plane, layer, x, y],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
