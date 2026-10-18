@@ -94,6 +94,11 @@ fn uri(absolute: &Path) -> Result<String, Error> {
         .to_str()
         .ok_or_else(|| Error::Invalid("pack path is not UTF-8".into()))?
         .as_bytes();
+    // `file://` and then the absolute path, so a path that itself begins with
+    // `//` stays part of the file name instead of becoming a URI authority.
+    #[cfg(unix)]
+    let mut encoded = String::from("file://");
+    #[cfg(not(unix))]
     let mut encoded = String::from("file:");
     for byte in bytes {
         if byte.is_ascii_alphanumeric() || b"/-_.~".contains(byte) {
@@ -206,6 +211,33 @@ fn stored_document(text: Option<String>, what: &str) -> Result<Document, Error> 
         return Err(invalid());
     }
     Ok(document)
+}
+
+/// Whether a stored profile's `projection` is one a source profile can
+/// have: `isometric` with `tile_width` and `tile_height`, or `top_down` with
+/// `tile_size`, each an integer from 1 to `u32::MAX`, and no other keys.
+fn projection_ok(profile: &Document) -> bool {
+    let Some(members) = profile.root().get("projection").and_then(Value::as_object) else {
+        return false;
+    };
+    let keys: BTreeSet<&str> = members.iter().map(|member| member.key.as_str()).collect();
+    let sizes: &[&str] = match members
+        .iter()
+        .find(|member| member.key == "kind")
+        .and_then(|member| member.value.as_str())
+    {
+        Some("isometric") => &["tile_width", "tile_height"],
+        Some("top_down") => &["tile_size"],
+        _ => return false,
+    };
+    keys.len() == sizes.len() + 1
+        && sizes.iter().all(|size| {
+            members
+                .iter()
+                .find(|member| member.key == *size)
+                .and_then(|member| member.value.as_i64())
+                .is_some_and(|value| (1..=i64::from(u32::MAX)).contains(&value))
+        })
 }
 
 /// A string member of a document's root object.
@@ -707,6 +739,11 @@ impl Pack {
         {
             return Err(Error::Invalid(
                 "the stored profile disagrees with profile_id or profile_version".into(),
+            ));
+        }
+        if !projection_ok(&profile) {
+            return Err(Error::Invalid(
+                "the stored profile's projection is not one a source profile can have".into(),
             ));
         }
         // Each list holds unique identifiers within its count, and every

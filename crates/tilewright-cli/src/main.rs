@@ -9,7 +9,6 @@ use std::{
     path::Path,
     process::ExitCode,
 };
-use tilewright_jsonc::write_json_string;
 use tilewright_source::Diagnostic;
 
 const USAGE: &str = "usage:
@@ -90,12 +89,35 @@ fn terminal_safe(text: &str) -> String {
     )
 }
 
-/// Runs a command; everything it prints is made [`terminal_safe`].
+/// Writes `text` as a JSON string with every control character escaped in
+/// JSON's `\u00XX` form, DEL and C1 controls included, so JSON output needs
+/// no further escaping to be safe for a terminal.
+fn json_string(text: &str, output: &mut String) {
+    output.push('"');
+    for character in text.chars() {
+        match character {
+            '"' => output.push_str("\\\""),
+            '\\' => output.push_str("\\\\"),
+            character if character.is_control() => {
+                let _ = write!(output, "\\u{:04x}", u32::from(character));
+            }
+            character => output.push(character),
+        }
+    }
+    output.push('"');
+}
+
+/// Runs a command. Its human-readable output is also made
+/// [`terminal_safe`]; JSON output escapes control characters itself and is
+/// left as written, so it stays valid JSON.
 fn run(arguments: &[&OsStr]) -> Result<String, Failure> {
+    let json =
+        matches!(arguments, [command, flag, _] if *command == "validate" && *flag == "--json");
+    let output = |text: String| if json { text } else { terminal_safe(&text) };
     run_command(arguments)
-        .map(|output| terminal_safe(&output))
+        .map(output)
         .map_err(|failure| Failure {
-            output: terminal_safe(&failure.output),
+            output: output(failure.output),
             message: terminal_safe(&failure.message),
         })
 }
@@ -147,15 +169,15 @@ fn diagnostics_text(diagnostics: &[Diagnostic], json: bool) -> String {
                 output.push(',');
             }
             output.push_str("{\"path\":");
-            write_json_string(&diagnostic.path, &mut output);
+            json_string(&diagnostic.path, &mut output);
             let _ = write!(
                 output,
                 ",\"start\":{},\"end\":{},\"line\":{},\"column\":{},\"code\":",
                 diagnostic.start, diagnostic.end, diagnostic.line, diagnostic.column
             );
-            write_json_string(diagnostic.code, &mut output);
+            json_string(diagnostic.code, &mut output);
             output.push_str(",\"message\":");
-            write_json_string(&diagnostic.message, &mut output);
+            json_string(&diagnostic.message, &mut output);
             output.push('}');
         }
         output.push_str("]\n");
@@ -470,6 +492,26 @@ mod tests {
                 failure.output
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn json_output_escapes_every_control_character() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("source");
+        for entry in walk(Path::new(&fixture())) {
+            let target = root.join(entry.strip_prefix(fixture()).unwrap());
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::copy(&entry, &target).unwrap();
+        }
+        // DEL and a C1 control, which JSON allows unescaped.
+        std::fs::write(root.join("planes/overworld/x\u{7f}y\u{85}z"), "").unwrap();
+        let failure = run(&["validate", "--json", &root.display().to_string()]).unwrap_err();
+        let json = failure.output;
+        assert!(json.contains("x\\u007fy\\u0085z"), "{json}");
+        assert!(!json.contains('\u{7f}') && !json.contains('\u{85}') && !json.contains("\\u{"));
+        tilewright_jsonc::Document::parse(json.trim_end(), &tilewright_jsonc::Limits::default())
+            .expect("the output is JSON");
     }
 
     /// Every file under `root`.

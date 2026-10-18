@@ -1188,3 +1188,54 @@ fn a_pack_file_is_exactly_its_pages() {
         );
     }
 }
+
+#[test]
+fn the_stored_projection_is_checked() {
+    let isometric = "\"projection\":{\"kind\":\"isometric\",\"tile_width\":48,\"tile_height\":24}";
+    for (name, projection) in [
+        ("null.twpack", "\"projection\":null"),
+        (
+            "missing.twpack",
+            "\"projection\":{\"kind\":\"isometric\",\"tile_width\":48}",
+        ),
+        (
+            "zero.twpack",
+            "\"projection\":{\"kind\":\"isometric\",\"tile_width\":0,\"tile_height\":24}",
+        ),
+        (
+            "extra.twpack",
+            "\"projection\":{\"kind\":\"top_down\",\"tile_size\":32,\"tile_width\":48}",
+        ),
+        (
+            "kind.twpack",
+            "\"projection\":{\"kind\":\"oblique\",\"tile_size\":32}",
+        ),
+    ] {
+        let (_directory, copy) = tampered(
+            name,
+            &format!(
+                "UPDATE meta SET value = replace(value, '{isometric}', '{projection}') WHERE key = 'profile'"
+            ),
+        );
+        let error = Pack::open(&copy).unwrap().verify().unwrap_err();
+        assert!(error.to_string().contains("projection"), "{name}: {error}");
+    }
+    let (_directory, copy) = tampered(
+        "top-down.twpack",
+        &format!(
+            "UPDATE meta SET value = replace(value, '{isometric}', '\"projection\":{{\"kind\":\"top_down\",\"tile_size\":32}}') WHERE key = 'profile'"
+        ),
+    );
+    Pack::open(&copy).unwrap().verify().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn paths_beginning_with_two_slashes_open() {
+    let directory = tempfile::tempdir().unwrap();
+    let written = write_pack(&world(), directory.path()).unwrap();
+    let doubled = PathBuf::from(format!("/{}", written.path.display()));
+    assert!(doubled.to_str().unwrap().starts_with("//"));
+    let pack = Pack::open(&doubled).unwrap();
+    assert_eq!(pack.verify().unwrap().chunks, 4);
+}
