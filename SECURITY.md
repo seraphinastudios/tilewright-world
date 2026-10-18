@@ -24,4 +24,8 @@ A pack's file name digest is checked against the file at its path, so the
 check binds to the path. Packs are content-addressed files opened from
 directories the caller controls; verifying packs in a directory others can
 write to is not supported. Verification decodes every chunk and stops once a
-caller-set decoded-byte budget (8 GiB by default) is passed.
+caller-set decoded-byte budget (8 GiB by default) is passed. A pack file
+longer than a caller-set size limit (8 GiB by default) is rejected before it
+is opened, and hashing stops at that limit. A pack has no free pages, and a
+full verification's integrity check reads every page before the file is
+hashed, so a sparse file cannot hide holes that only the hash reads.

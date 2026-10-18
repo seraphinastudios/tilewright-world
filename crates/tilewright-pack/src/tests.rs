@@ -1007,6 +1007,7 @@ fn verification_stops_at_its_decoded_byte_budget() {
     .sum();
     let limits = |maximum_decoded_bytes| VerifyLimits {
         maximum_decoded_bytes,
+        ..VerifyLimits::default()
     };
     pack.verify_with(&limits(total)).unwrap();
     let error = pack.verify_with(&limits(total - 1)).unwrap_err();
@@ -1176,7 +1177,7 @@ fn stored_document_custom_data_is_namespaced() {
 fn a_pack_file_is_exactly_its_pages() {
     let directory = tempfile::tempdir().unwrap();
     let written = write_pack(&world(), directory.path()).unwrap();
-    for (name, extend) in [("trailing.twpack", 1_u64), ("sparse.twpack", 1 << 40)] {
+    for (name, extend) in [("trailing.twpack", 1_u64), ("sparse.twpack", 1 << 32)] {
         let copy = directory.path().join(name);
         std::fs::copy(&written.path, &copy).unwrap();
         let file = std::fs::OpenOptions::new().write(true).open(&copy).unwrap();
@@ -1187,6 +1188,84 @@ fn a_pack_file_is_exactly_its_pages() {
             "{name}: {error}"
         );
     }
+}
+
+#[test]
+fn packs_have_no_free_pages() {
+    // Dropping a table leaves its pages free without changing the schema,
+    // and SQLite's integrity check accepts them.
+    let (directory, copy) = tampered(
+        "free.twpack",
+        "CREATE TABLE scratch (x); INSERT INTO scratch VALUES (zeroblob(1000000)); DROP TABLE scratch;",
+    );
+    let connection = Connection::open(&copy).unwrap();
+    let free: i64 = connection
+        .query_row("PRAGMA freelist_count", [], |row| row.get(0))
+        .unwrap();
+    assert!(free > 200, "{free}");
+    let integrity: String = connection
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(integrity, "ok");
+    drop(connection);
+    let error = Pack::open(&copy).err().unwrap();
+    assert!(error.to_string().contains("free pages"), "{error}");
+
+    // A header that hides the free pages leaves them unused, which the
+    // integrity check reports before the file is hashed: the name is not
+    // the file's digest, and that is not what fails.
+    let mut bytes = std::fs::read(&copy).unwrap();
+    bytes[32..40].fill(0);
+    let hidden = directory.path().join(format!("{}.twpack", "0".repeat(64)));
+    std::fs::write(&hidden, bytes).unwrap();
+    let error = Pack::open(&hidden).unwrap().verify().unwrap_err();
+    assert!(error.to_string().contains("never used"), "{error}");
+}
+
+#[test]
+fn packs_past_the_size_limit_are_not_opened_or_hashed() {
+    assert_eq!(super::DEFAULT_MAXIMUM_PACK_BYTES, 8 * 1024 * 1024 * 1024);
+    let directory = tempfile::tempdir().unwrap();
+    let written = write_pack(&world(), directory.path()).unwrap();
+    let limits = |maximum_pack_bytes| VerifyLimits {
+        maximum_pack_bytes,
+        ..VerifyLimits::default()
+    };
+    let exact = limits(written.bytes);
+    let short = limits(written.bytes - 1);
+
+    // The name is the digest, so verifying hashes the whole file.
+    let pack = Pack::open_with(&written.path, &exact).unwrap();
+    pack.verify_with(&exact).unwrap();
+    assert_eq!(pack.file_digest().unwrap(), written.digest);
+    let error = pack.verify_with(&short).unwrap_err();
+    assert!(error.to_string().contains("pack size limit"), "{error}");
+    let error = Pack::open_with(&written.path, &short).err().unwrap();
+    assert!(error.to_string().contains("pack size limit"), "{error}");
+
+    // The length is checked before SQLite opens the file: a sparse file
+    // past the default limit is rejected without being read.
+    let sparse = directory.path().join("sparse.twpack");
+    std::fs::File::create(&sparse)
+        .unwrap()
+        .set_len(super::DEFAULT_MAXIMUM_PACK_BYTES + 1)
+        .unwrap();
+    let error = Pack::open(&sparse).err().unwrap();
+    assert!(error.to_string().contains("pack size limit"), "{error}");
+
+    // Hashing stops at the limit the pack was opened with, even if the
+    // file at its path has grown since.
+    let grown = directory.path().join("grown.twpack");
+    std::fs::copy(&written.path, &grown).unwrap();
+    let pack = Pack::open_with(&grown, &exact).unwrap();
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&grown)
+        .unwrap()
+        .set_len(written.bytes + 1)
+        .unwrap();
+    let error = pack.file_digest().unwrap_err();
+    assert!(error.to_string().contains("pack size limit"), "{error}");
 }
 
 #[test]
