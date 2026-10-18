@@ -3,6 +3,7 @@
 
 //! `world.jsonc` and the game profile.
 
+use crate::diagnostic::Diagnostics;
 use crate::{
     Code, Diagnostic, MAXIMUM_GROUND_LAYERS, Movement, Profile, Projection,
     files::{Tree, is_jsonc_path},
@@ -17,11 +18,11 @@ use std::{
 /// Reads `world.jsonc`: the profile path and the plane list.
 pub(crate) fn read_manifest(
     tree: &mut Tree<'_>,
-    diagnostics: &mut Vec<Diagnostic>,
+    diagnostics: &mut Diagnostics,
 ) -> Option<(String, Vec<String>)> {
     let source = tree.document("world.jsonc")?;
     let reader = Reader::new(&source, diagnostics);
-    let root = reader.object(reader.root(), &["format", "profile", "planes", "custom"])?;
+    let root = reader.object(reader.root(), &["format", "profile", "planes"])?;
     let format_ok = reader.format(root, "tilewright.world/1");
     let profile_value = reader.required(root, "profile")?;
     let profile = reader.string(profile_value)?;
@@ -34,7 +35,6 @@ pub(crate) fn read_manifest(
         return None;
     }
     let planes = reader.identifiers(reader.required(root, "planes")?)?;
-    reader.custom(root);
     format_ok.then(|| (profile.to_owned(), planes))
 }
 
@@ -43,7 +43,7 @@ pub(crate) fn read_manifest(
 fn references_resolve(
     schema: &Schema,
     type_names: &BTreeSet<String>,
-    diagnostics: &mut Vec<Diagnostic>,
+    diagnostics: &mut Diagnostics,
 ) -> bool {
     let mut ok = true;
     for (name, spec) in &schema.fields {
@@ -83,7 +83,7 @@ fn beside(profile: &str, relative: &str) -> String {
 pub(crate) fn read_profile(
     tree: &mut Tree<'_>,
     path: &str,
-    diagnostics: &mut Vec<Diagnostic>,
+    diagnostics: &mut Diagnostics,
 ) -> Option<Profile> {
     let source = tree.document(path)?;
     let reader = Reader::new(&source, diagnostics);

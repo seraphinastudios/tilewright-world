@@ -3,6 +3,7 @@
 
 //! Planes, their zones and anchors, and the chunk tree.
 
+use crate::diagnostic::Diagnostics;
 use crate::{
     Anchor, CHUNK_SIZE, Code, Diagnostic, Plane, PlaneKind, Profile, Zone,
     chunk::{ChunkAddress, read_chunk},
@@ -29,7 +30,7 @@ pub(crate) fn read_planes(
     profile: &Profile,
     plane_ids: &[String],
     references: &mut References,
-    diagnostics: &mut Vec<Diagnostic>,
+    diagnostics: &mut Diagnostics,
 ) -> Vec<Plane> {
     let listed: BTreeSet<&str> = plane_ids.iter().map(String::as_str).collect();
     let present: BTreeSet<String> = match tree.kind("planes") {
@@ -75,7 +76,7 @@ fn read_plane(
     id: &str,
     directory: &str,
     references: &mut References,
-    diagnostics: &mut Vec<Diagnostic>,
+    diagnostics: &mut Diagnostics,
 ) -> Option<Plane> {
     let mut has_layers = false;
     for entry in tree.list(directory) {
@@ -124,7 +125,7 @@ fn read_plane_document(
     tree: &mut Tree<'_>,
     id: &str,
     directory: &str,
-    diagnostics: &mut Vec<Diagnostic>,
+    diagnostics: &mut Diagnostics,
 ) -> Option<Plane> {
     let source = tree.document(&join(directory, "plane.jsonc"))?;
     let reader = Reader::new(&source, diagnostics);
@@ -203,7 +204,7 @@ fn read_zones(
     profile: &Profile,
     path: &str,
     references: &mut References,
-    diagnostics: &mut Vec<Diagnostic>,
+    diagnostics: &mut Diagnostics,
 ) -> BTreeMap<String, Zone> {
     let mut zones = BTreeMap::new();
     let Some(source) = tree.document(path) else {
@@ -331,7 +332,7 @@ fn report_cycles(
 fn read_anchors(
     tree: &mut Tree<'_>,
     path: &str,
-    diagnostics: &mut Vec<Diagnostic>,
+    diagnostics: &mut Diagnostics,
 ) -> BTreeMap<String, Anchor> {
     let mut anchors = BTreeMap::new();
     let Some(source) = tree.document(path) else {
@@ -349,7 +350,7 @@ fn read_anchors(
         return anchors;
     };
     for item in items {
-        let Some(entry) = reader.object(item, &["id", "layer", "at", "custom"]) else {
+        let Some(entry) = reader.object(item, &["id", "layer", "at"]) else {
             continue;
         };
         let (Some(id_value), Some(layer), Some(at)) = (
@@ -366,7 +367,6 @@ fn read_anchors(
         ) else {
             continue;
         };
-        reader.custom(entry);
         if anchors.contains_key(&id) {
             reader.report(
                 id_value.span(),
@@ -386,7 +386,7 @@ fn read_layers(
     plane: &mut Plane,
     directory: &str,
     references: &mut References,
-    diagnostics: &mut Vec<Diagnostic>,
+    diagnostics: &mut Diagnostics,
 ) {
     let layers = join(directory, "layers");
     // Chunk `c` covers tiles `c * size ..= c * size + size - 1`; both ends

@@ -4,6 +4,7 @@
 //! Shape checks shared by every document reader. Each helper reports its
 //! own diagnostic and returns `None` when the value is unusable.
 
+use crate::diagnostic::Diagnostics;
 use crate::{Code, Diagnostic, FieldValue, diagnostic::Positions, files::Source};
 use std::{
     cell::{OnceCell, RefCell},
@@ -37,13 +38,13 @@ pub(crate) fn is_namespace(text: &str) -> bool {
 /// `RefCell`, so helpers can nest (`reader.i32(reader.required(..)?)`).
 pub(crate) struct Reader<'a> {
     pub source: &'a Source,
-    diagnostics: RefCell<&'a mut Vec<Diagnostic>>,
+    diagnostics: RefCell<&'a mut Diagnostics>,
     /// Built at the first diagnostic.
     positions: OnceCell<Positions<'a>>,
 }
 
 impl<'a> Reader<'a> {
-    pub fn new(source: &'a Source, diagnostics: &'a mut Vec<Diagnostic>) -> Self {
+    pub fn new(source: &'a Source, diagnostics: &'a mut Diagnostics) -> Self {
         Self {
             source,
             diagnostics: RefCell::new(diagnostics),

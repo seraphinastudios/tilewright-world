@@ -5,7 +5,10 @@
 
 use crate::{
     APPLICATION_ID, Error, FORMAT, SCHEMA, USER_VERSION,
-    chunk::{CHUNK_ENCODING, ChunkData, FieldRecord, ObjectRecord, PortalRecord, encode_chunk},
+    chunk::{
+        CHUNK_ENCODING, ChunkData, FieldRecord, MAXIMUM_DEPTH, ObjectRecord, PortalRecord,
+        encode_chunk,
+    },
 };
 use rusqlite::{Connection, MAIN_DB, params};
 use sha2::{Digest, Sha256};
@@ -14,7 +17,8 @@ use std::{
     io::{Read as _, Write as _},
     path::{Path, PathBuf},
 };
-use tilewright_source::{Chunk, FieldValue, Object, Portal, Profile, World};
+use tilewright_jsonc::MAX_SAFE_INTEGER;
+use tilewright_source::{CHUNK_SIZE, Chunk, FieldValue, Object, Portal, Profile, World};
 
 /// The `compiler` meta value.
 pub const COMPILER: &str = concat!("tilewright-pack ", env!("CARGO_PKG_VERSION"));
@@ -102,16 +106,33 @@ fn render_layers(profile: &Profile) -> Result<Layers<'_>, Error> {
         .collect()
 }
 
+/// Builds an object record. `depth` is the object's inventory depth; the
+/// model is public, so its bounds are checked here rather than assumed.
 fn object_record(
     object: &Object,
     layers: &Layers<'_>,
     strings: &Strings,
     chunk_size: u16,
+    depth: usize,
 ) -> Result<ObjectRecord, Error> {
-    let tile = match object.at {
-        Some([x, y]) if x < chunk_size && y < chunk_size => Some(y * chunk_size + x),
-        Some(_) => return Err(Error::Invalid("an object lies outside its chunk".into())),
-        None => None,
+    if depth > MAXIMUM_DEPTH {
+        return Err(Error::Invalid(format!(
+            "inventories nest more than {MAXIMUM_DEPTH} deep"
+        )));
+    }
+    let outside = || {
+        Error::Invalid(
+            "top-level objects need a tile in their chunk; inventory entries none".into(),
+        )
+    };
+    let tile = match (object.at, depth) {
+        (Some([x, y]), 0) if x < chunk_size && y < chunk_size => Some(
+            y.checked_mul(chunk_size)
+                .and_then(|row| row.checked_add(x))
+                .ok_or_else(outside)?,
+        ),
+        (None, 1..) => None,
+        _ => return Err(outside()),
     };
     let layer = match &object.layer {
         Some(name) => layers
@@ -121,6 +142,15 @@ fn object_record(
         None => 0,
     };
     let portal = match &object.portal {
+        Some(Portal::Location { at, .. })
+            if at
+                .iter()
+                .any(|value| !(-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER).contains(value)) =>
+        {
+            return Err(Error::Invalid(
+                "a portal leads outside the format's integer range".into(),
+            ));
+        }
         Some(Portal::Location { plane, layer, at }) => Some(PortalRecord::Location {
             plane: strings.optional(plane.as_ref())?,
             layer: *layer,
@@ -148,7 +178,7 @@ fn object_record(
     let inventory = object
         .inventory
         .iter()
-        .map(|item| object_record(item, layers, strings, chunk_size))
+        .map(|item| object_record(item, layers, strings, chunk_size, depth + 1))
         .collect::<Result<_, _>>()?;
     Ok(ObjectRecord {
         tile,
@@ -216,7 +246,7 @@ fn chunk_record(
         objects: chunk
             .objects
             .iter()
-            .map(|object| object_record(object, layers, strings, chunk_size))
+            .map(|object| object_record(object, layers, strings, chunk_size, 0))
             .collect::<Result<_, _>>()?,
         palette,
     })
@@ -295,6 +325,12 @@ pub fn compile(world: &World) -> Result<Vec<u8>, Error> {
                     anchor.at[0],
                     anchor.at[1]
                 ])?;
+            }
+            if plane.chunk_size != CHUNK_SIZE {
+                return Err(Error::Invalid(format!(
+                    "plane {id} has chunk size {}, not {CHUNK_SIZE}",
+                    plane.chunk_size
+                )));
             }
             for ((layer, cx, cy), chunk) in &plane.chunks {
                 let record = chunk_record(chunk, &layers, &strings, plane.chunk_size)?;
@@ -377,13 +413,31 @@ pub fn write_pack(world: &World, directory: &Path) -> Result<Written, Error> {
     let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
     temporary.write_all(&data)?;
     temporary.as_file().sync_all()?;
-    temporary
-        .persist_noclobber(&path)
-        .map_err(|error| Error::Io(error.error))?;
+    let created = persist(temporary, &path, &data)?;
     Ok(Written {
         path,
         digest,
         bytes,
-        created: true,
+        created,
     })
+}
+
+/// Moves `temporary` to `path` without replacing anything. When another
+/// writer got there first with the same bytes, that is not an error: returns
+/// whether this call created the file.
+pub(crate) fn persist(
+    temporary: tempfile::NamedTempFile,
+    path: &Path,
+    data: &[u8],
+) -> Result<bool, Error> {
+    match temporary.persist_noclobber(path) {
+        Ok(_) => Ok(true),
+        Err(error)
+            if error.error.kind() == std::io::ErrorKind::AlreadyExists
+                && same_file_contents(path, data)? =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(Error::Io(error.error)),
+    }
 }

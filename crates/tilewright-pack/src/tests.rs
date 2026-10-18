@@ -635,3 +635,144 @@ fn existing_packs_are_compared_without_replacing_them() {
     std::fs::create_dir(&written.path).unwrap();
     assert!(write_pack(&world, directory.path()).is_err());
 }
+
+#[test]
+fn malformed_sizes_and_depths_fail_to_compile_without_panicking() {
+    let mut size = world();
+    let vault = size.planes.get_mut("vault").unwrap();
+    vault.chunk_size = 300;
+    vault.chunks.values_mut().next().unwrap().objects[0].at = Some([299, 299]);
+    assert!(compile(&size).is_err());
+
+    // Far deeper than any stack could recurse through.
+    let mut deep = world();
+    let chunk = deep
+        .planes
+        .get_mut("vault")
+        .unwrap()
+        .chunks
+        .values_mut()
+        .next()
+        .unwrap();
+    let coin = |inventory| tilewright_source::Object {
+        at: None,
+        proto: "coin".to_owned(),
+        layer: None,
+        sub_layer: 0,
+        z: 0,
+        fields: Vec::new(),
+        portal: None,
+        inventory,
+        custom: None,
+    };
+    let mut item = coin(Vec::new());
+    for _ in 0..200_000 {
+        item = coin(vec![item]);
+    }
+    chunk.objects[0].inventory = vec![item];
+    let error = compile(&deep).unwrap_err();
+    assert!(error.to_string().contains("deep"), "{error}");
+    // Dismantle the chain without recursing through it.
+    let chunk = deep
+        .planes
+        .get_mut("vault")
+        .unwrap()
+        .chunks
+        .values_mut()
+        .next()
+        .unwrap();
+    let mut stack = std::mem::take(&mut chunk.objects);
+    while let Some(mut object) = stack.pop() {
+        stack.append(&mut object.inventory);
+    }
+}
+
+#[test]
+fn encoding_stops_at_the_record_limit() {
+    let mut large = small_chunk();
+    large.palette = (1..=5_000_000).collect();
+    assert!(encode_record(&large).is_err());
+    let mut custom = small_chunk();
+    custom.objects[0].custom = Some(format!(
+        "{{\"example.org\":\"{}\"}}",
+        "x".repeat(super::MAXIMUM_RECORD_BYTES)
+    ));
+    let error = encode_record(&custom).unwrap_err();
+    assert!(error.to_string().contains("16 MiB"), "{error}");
+}
+
+#[test]
+fn a_concurrent_identical_pack_is_not_an_error() {
+    let data = compile(&world()).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("pack.twpack");
+    let temporary = || {
+        let mut file = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
+        std::io::Write::write_all(&mut file, &data).unwrap();
+        file
+    };
+    std::fs::write(&path, &data).unwrap();
+    assert!(!super::compile::persist(temporary(), &path, &data).unwrap());
+    std::fs::write(&path, b"other").unwrap();
+    assert!(super::compile::persist(temporary(), &path, &data).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), b"other");
+}
+
+#[test]
+fn verification_checks_names_profiles_portals_and_encodings() {
+    let directory = tempfile::tempdir().unwrap();
+    let written = write_pack(&world(), directory.path()).unwrap();
+    let name = written.path.file_name().unwrap().to_str().unwrap();
+    let upper = directory
+        .path()
+        .join(name.replace(".twpack", "").to_ascii_uppercase() + ".twpack");
+    std::fs::copy(&written.path, &upper).unwrap();
+    let error = Pack::open(&upper).unwrap().verify().unwrap_err();
+    assert!(
+        error.to_string().contains("does not match its name"),
+        "{error}"
+    );
+
+    for (name, sql, problem) in [
+        (
+            "ground.twpack",
+            "DELETE FROM chunks; UPDATE meta SET value = replace(value, '\"ground_layers\":[\"floor\",\"mask\"]', '\"ground_layers\":[\"floor\",\"mask\",\"a\",\"b\",\"c\",\"d\",\"e\",\"f\",\"g\"]') WHERE key = 'profile'",
+            "ground_layers",
+        ),
+        (
+            "utf8.twpack",
+            "UPDATE strings SET value = CAST(x'ff' AS TEXT) WHERE id = (SELECT max(id) FROM strings)",
+            "UTF-8",
+        ),
+    ] {
+        let (_directory, copy) = tampered(name, sql);
+        let error = Pack::open(&copy).unwrap().verify().unwrap_err();
+        assert!(error.to_string().contains(problem), "{name}: {error}");
+    }
+
+    let (_directory, copy) = tampered("portal.twpack", "SELECT 1");
+    let pack = Pack::open(&copy).unwrap();
+    let mut chunk = pack.chunk("overworld", 0, 0, 0).unwrap().unwrap();
+    drop(pack);
+    let portal = chunk
+        .objects
+        .iter_mut()
+        .find_map(|object| match &mut object.portal {
+            Some(PortalRecord::Location { x, .. }) => Some(x),
+            _ => None,
+        })
+        .unwrap();
+    *portal = tilewright_jsonc::MAX_SAFE_INTEGER + 1;
+    Connection::open(&copy)
+        .unwrap()
+        .execute(
+            "UPDATE chunks SET data = ?1 WHERE plane = 'overworld' AND layer = 0 AND cx = 0 AND cy = 0",
+            [encode_chunk(&chunk).unwrap()],
+        )
+        .unwrap();
+    let error = Pack::open(&copy).unwrap().verify().unwrap_err();
+    assert!(
+        error.to_string().contains("references a missing"),
+        "{error}"
+    );
+}

@@ -3,6 +3,7 @@
 
 //! Definitions: `defs/<type>/<id>.jsonc`.
 
+use crate::diagnostic::Diagnostics;
 use crate::{
     Code, Definition, Diagnostic, Profile,
     files::{EntryKind, Tree, join},
@@ -15,7 +16,7 @@ pub(crate) fn read_definitions(
     tree: &mut Tree<'_>,
     profile: &Profile,
     references: &mut References,
-    diagnostics: &mut Vec<Diagnostic>,
+    diagnostics: &mut Diagnostics,
 ) -> BTreeMap<(String, String), Definition> {
     let mut definitions = BTreeMap::new();
     if tree.kind("defs") != Some(EntryKind::Directory) {

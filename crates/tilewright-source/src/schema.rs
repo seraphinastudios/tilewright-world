@@ -3,6 +3,7 @@
 
 //! Closed field schemas (`tilewright.schema/1`) and deferred references.
 
+use crate::diagnostic::Diagnostics;
 use crate::{
     Code, Definition, Diagnostic, FieldValue, Plane, Profile,
     files::Tree,
@@ -78,7 +79,7 @@ fn is_field_name(name: &str) -> bool {
 pub(crate) fn read_schema(
     tree: &mut Tree<'_>,
     path: &str,
-    diagnostics: &mut Vec<Diagnostic>,
+    diagnostics: &mut Diagnostics,
 ) -> Option<Schema> {
     let source = tree.document(path)?;
     let reader = Reader::new(&source, diagnostics);
@@ -231,7 +232,7 @@ impl References {
         profile: &Profile,
         definitions: &BTreeMap<(String, String), Definition>,
         planes: &BTreeMap<String, Plane>,
-        diagnostics: &mut Vec<Diagnostic>,
+        diagnostics: &mut Diagnostics,
     ) {
         let render_layers: BTreeSet<&str> =
             profile.render_layers.iter().map(String::as_str).collect();

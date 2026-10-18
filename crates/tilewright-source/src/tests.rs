@@ -532,7 +532,7 @@ fn files_that_outgrow_their_metadata_count_against_the_budget() {
     };
     let mut tree = super::files::Tree::new(Path::new("/proc/self"), &options);
     assert!(tree.document("status").is_none());
-    let found = tree.take_diagnostics();
+    let found = tree.take_diagnostics().finish();
     assert!(
         found
             .iter()
@@ -656,5 +656,121 @@ fn document_paths_have_at_most_32_components() {
                 [("source.path", "world.jsonc".to_owned(), 4)]
             );
         }
+    }
+}
+
+#[test]
+fn diagnostics_stop_at_their_cap() {
+    let copy = workspace();
+    let scalars = vec!["1"; 500].join(", ");
+    fs::write(
+        copy.path().join("planes/vault/layers/0/0_0.jsonc"),
+        format!(
+            "{{\"format\": \"tilewright.chunk/1\", \"plane\": \"vault\", \"layer\": 0, \"chunk\": [0, 0], \"objects\": [{scalars}]}}\n"
+        ),
+    )
+    .unwrap();
+    let options = LoadOptions {
+        maximum_diagnostics: 10,
+        ..LoadOptions::default()
+    };
+    let found = load_with(copy.path(), &options).expect_err("scalars are not objects");
+    assert_eq!(found.len(), 11, "{found:?}");
+    let budget: Vec<_> = found
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "source.budget")
+        .collect();
+    assert_eq!(budget.len(), 1);
+    assert_eq!(
+        budget[0].message,
+        "more than 10 problems; the rest are not reported"
+    );
+    assert_eq!(load(copy.path()).expect_err("still invalid").len(), 500);
+}
+
+#[test]
+fn custom_data_is_only_allowed_where_it_is_kept() {
+    let copy = workspace();
+    let root = copy.path();
+    edit(
+        root,
+        "world.jsonc",
+        "\"format\": \"tilewright.world/1\",",
+        "\"format\": \"tilewright.world/1\", \"custom\": {\"example.org\": 1},",
+    );
+    let found = problems(root);
+    assert!(has(&found, "shape.unknown_key", "world.jsonc"), "{found:?}");
+
+    let copy = workspace();
+    let root = copy.path();
+    edit(
+        root,
+        "planes/vault/layers/0/0_0.jsonc",
+        "\"layer\": 0,",
+        "\"layer\": 0, \"custom\": {\"example.org\": 1},",
+    );
+    edit(
+        root,
+        "planes/overworld/anchors.jsonc",
+        "\"at\": [10, 12]}",
+        "\"at\": [10, 12], \"custom\": {\"example.org\": 1}}",
+    );
+    let found = problems(root);
+    assert!(
+        has(
+            &found,
+            "shape.unknown_key",
+            "planes/vault/layers/0/0_0.jsonc"
+        ),
+        "{found:?}"
+    );
+    assert!(
+        has(
+            &found,
+            "shape.unknown_key",
+            "planes/overworld/anchors.jsonc"
+        ),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn heights_z_and_sub_layers_have_their_documented_ranges() {
+    const VAULT: &str = "planes/vault/layers/0/0_0.jsonc";
+    let set = |root: &Path, terrain: &str, object: &str| {
+        edit(
+            root,
+            VAULT,
+            "\"terrain\": {\"floor\": {\"palette\": {\"c\": \"cave_floor\"}, \"fill\": \"c\"}}",
+            &format!(
+                "\"terrain\": {{\"floor\": {{\"palette\": {{\"c\": \"cave_floor\"}}, \"fill\": \"c\"}}, \"height\": {terrain}}}"
+            ),
+        );
+        edit(
+            root,
+            VAULT,
+            "\"proto\": \"chest\",",
+            &format!("\"proto\": \"chest\", {object},"),
+        );
+    };
+    let copy = workspace();
+    set(
+        copy.path(),
+        "{\"fill\": 2147483647}",
+        "\"sub_layer\": -32768, \"z\": -2147483648",
+    );
+    load(copy.path()).expect("the extremes are valid");
+    for (terrain, object) in [
+        ("{\"fill\": 2147483648}", "\"z\": 0"),
+        ("{\"fill\": 0}", "\"sub_layer\": 32768"),
+        ("{\"fill\": 0}", "\"z\": 2147483648"),
+    ] {
+        let copy = workspace();
+        set(copy.path(), terrain, object);
+        let found = problems(copy.path());
+        assert!(
+            found.len() == 1 && has(&found, "shape.range", VAULT),
+            "{terrain} {object}: {found:?}"
+        );
     }
 }

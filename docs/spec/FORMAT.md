@@ -75,7 +75,9 @@ comments. Everything else follows RFC 8259, plus these rules:
 - decoded strings and keys may not contain NUL;
 - documents are closed: a key not defined by this spec or by the profile's
   schema is an error, except below an explicit `"custom"` object whose keys
-  are reviewed, domain-qualified namespaces.
+  are reviewed, domain-qualified namespaces. `custom` is allowed only where
+  this spec says so (the profile, planes, objects, zones and definitions),
+  so that compiling never drops it.
 
 Parsers enforce these limits while reading, not after building a tree:
 
@@ -125,7 +127,9 @@ replaces the exact byte span of the values it changes.
 }
 ```
 
-- `projection` sets the default camera; consumers may switch per camera.
+- `version` is a string of at most 64 characters.
+- `projection` sets the default camera; consumers may switch per camera. Tile
+  sizes are integers from 1 to 4,294,967,295.
 - `render_layers` orders draw layers (1 to 65,534 unique identifiers); an
   object's `layer` names one of them.
 - `ground_layers` are the layers stored in terrain grids: at most 8, each a
@@ -134,8 +138,9 @@ replaces the exact byte span of the values it changes.
   11). It must declare `proto`, the type objects and terrain cells refer to.
 - `object_fields` and `zone_properties` name the schemas for object `fields`
   and zone `properties`.
-- `movement` (optional) holds the editor's analysis rules, `max_step` and
-  `fall_unit`; the format itself does not interpret them.
+- `movement` (optional) holds the editor's analysis rules, `max_step` (0 to
+  4,294,967,295) and `fall_unit` (1 to 4,294,967,295); the format itself does
+  not interpret them.
 - `custom` (optional) holds namespaced extension data, as in section 7.
 
 ## 6. Plane: `planes/<plane>/plane.jsonc`
@@ -193,8 +198,9 @@ Terrain grids:
   empty. `"cell_width": 2` switches to two-character keys when a chunk needs
   more than 93 distinct values. Ground palette values are `proto`
   definitions; zone palette values are zones of the plane, each listed once.
-- `height` rows are arrays of integers. Height is the ground elevation of the
-  tile's terrain floor; objects may add their own `z`.
+- `height` rows are arrays of 32-bit signed integers (−2,147,483,648 to
+  2,147,483,647). Height is the ground elevation of the tile's terrain floor;
+  objects may add their own `z`.
 - A tile's terrain floor is the plain prototype in its cell. A floor with
   field overrides, or an additional floor on another sub-layer, is an object
   entry instead.
@@ -206,8 +212,8 @@ Objects:
 | `at` | Chunk-local `[x, y]`; required on top-level objects, absent in inventories. |
 | `proto` | Prototype ID; required. |
 | `layer` | Render layer name; defaults to the prototype's layer. |
-| `sub_layer` | Integer sub-layer, default 0. |
-| `z` | Elevation offset, default 0. |
+| `sub_layer` | 16-bit signed integer sub-layer (−32,768 to 32,767), default 0. |
+| `z` | 32-bit signed elevation offset, default 0. |
 | `fields` | Field overrides, closed by the profile's `object_fields` and the prototype. |
 | `portal` | `{"plane"?, "layer", "at": [x, y]}` in plane coordinates, or `{"plane"?, "anchor": id}`. Without `plane`, the target is this plane. |
 | `inventory` | Ordered list of contained objects, nested at most 16 deep. |
@@ -288,7 +294,7 @@ Field names match `^[a-z][a-z0-9_]{0,63}$`. Types:
 | `boolean` | `true` or `false` | |
 | `integer` | an integer | `min`, `max` |
 | `number` | any number | `min`, `max` |
-| `string` | a string | `max_length` (default 65,536 characters), `values` |
+| `string` | a string | `max_length` (1 to 1,048,576 characters; default 65,536), `values` |
 | `reference` | the ID of a definition | `target`: a definition type the profile declares |
 | `json` | any value | |
 
@@ -303,12 +309,14 @@ document matches its section's shape and the profile's schemas, every
 reference resolves (profile, schemas, planes, zones, anchors, prototypes,
 references, portal targets), file names match content, and no two zones,
 anchors, planes or definitions share an ID. Validators report every error
-with file, byte span, line, column and a stable code:
+with file, byte span, line, column and a stable code, up to a limit they
+state (10,000 by default in the reference loader); past it they report one
+`source.budget` diagnostic instead of the rest:
 
 | Code | Meaning |
 | --- | --- |
 | `jsonc.*` | Syntax and limit errors of section 3. |
-| `source.io`, `source.encoding`, `source.budget` | Unreadable, non-UTF-8, or more files or bytes than the validator allows. |
+| `source.io`, `source.encoding`, `source.budget` | Unreadable, non-UTF-8, or more files, bytes or problems than the validator allows. |
 | `source.symlink`, `source.unexpected_file`, `source.missing_file` | The file layout of section 2. |
 | `source.path`, `source.name_mismatch` | A path in a document, or a file name that disagrees with its content. |
 | `shape.format`, `shape.unknown_key`, `shape.missing_key`, `shape.type`, `shape.range`, `shape.identifier` | Document shape. |

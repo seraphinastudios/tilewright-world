@@ -3,8 +3,9 @@
 
 //! Chunk documents: terrain grids and objects.
 
+use crate::diagnostic::Diagnostics;
 use crate::{
-    Chunk, Code, Diagnostic, Grid, Object, Portal, Profile, Zone,
+    Chunk, Code, Grid, Object, Portal, Profile, Zone,
     files::Tree,
     read::Reader,
     schema::{References, Target, read_fields},
@@ -38,15 +39,13 @@ pub(crate) fn read_chunk(
     address: &ChunkAddress<'_>,
     path: &str,
     references: &mut References,
-    diagnostics: &mut Vec<Diagnostic>,
+    diagnostics: &mut Diagnostics,
 ) -> Option<Chunk> {
     let source = tree.document(path)?;
     let reader = Reader::new(&source, diagnostics);
     let root = reader.object(
         reader.root(),
-        &[
-            "format", "plane", "layer", "chunk", "terrain", "objects", "custom",
-        ],
+        &["format", "plane", "layer", "chunk", "terrain", "objects"],
     )?;
     let mut ok = reader.format(root, "tilewright.chunk/1");
     let plane_value = reader.required(root, "plane")?;
@@ -165,7 +164,6 @@ pub(crate) fn read_chunk(
             }
         }
     }
-    reader.custom(root);
     ok.then_some(chunk)
 }
 
@@ -183,13 +181,17 @@ fn read_grid<'a>(
         None => 1,
     };
     let (keys, palette) = read_palette(reader, reader.required(grid, "palette")?, width, kind)?;
+    // Keys are indexed once, so decoding a cell is a lookup, not a scan.
+    let indexes: BTreeMap<&str, u16> = keys
+        .iter()
+        .zip(1..)
+        .map(|(key, index)| (*key, index))
+        .collect();
     let lookup = |key: &str| -> Option<u16> {
         if key.bytes().all(|byte| byte == b'.') {
             Some(0)
         } else {
-            keys.iter()
-                .position(|candidate| *candidate == key)
-                .and_then(|index| u16::try_from(index + 1).ok())
+            indexes.get(key).copied()
         }
     };
     let side = usize::from(chunk_size);

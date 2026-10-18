@@ -29,6 +29,7 @@ mod schema;
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 use tilewright_jsonc::Limits;
 
+use diagnostic::Diagnostics;
 pub use diagnostic::{Code, Diagnostic};
 pub use schema::{FieldSpec, FieldType, Schema};
 
@@ -50,6 +51,9 @@ pub struct LoadOptions {
     pub maximum_entries: usize,
     /// Most bytes read in one load.
     pub maximum_total_bytes: u64,
+    /// Most diagnostics kept; past this, one `source.budget` diagnostic
+    /// notes that the rest were dropped.
+    pub maximum_diagnostics: usize,
 }
 
 impl Default for LoadOptions {
@@ -59,6 +63,7 @@ impl Default for LoadOptions {
             maximum_files: 500_000,
             maximum_entries: 1_000_000,
             maximum_total_bytes: 8 * 1024 * 1024 * 1024,
+            maximum_diagnostics: 10_000,
         }
     }
 }
@@ -259,23 +264,19 @@ pub fn load(root: &Path) -> Result<World, Vec<Diagnostic>> {
 /// Returns every diagnostic found, sorted by path and position.
 pub fn load_with(root: &Path, options: &LoadOptions) -> Result<World, Vec<Diagnostic>> {
     let mut tree = files::Tree::new(root, options);
-    let mut diagnostics = Vec::new();
+    let mut diagnostics = Diagnostics::new(options.maximum_diagnostics);
     let world = load_tree(&mut tree, &mut diagnostics);
-    diagnostics.extend(tree.take_diagnostics());
+    diagnostics.append(tree.take_diagnostics());
     match world {
         Some(world) if diagnostics.is_empty() => Ok(World {
             source_digest: tree.digest(),
             ..world
         }),
-        _ => {
-            diagnostics.sort();
-            diagnostics.dedup();
-            Err(diagnostics)
-        }
+        _ => Err(diagnostics.finish()),
     }
 }
 
-fn load_tree(tree: &mut files::Tree, diagnostics: &mut Vec<Diagnostic>) -> Option<World> {
+fn load_tree(tree: &mut files::Tree, diagnostics: &mut Diagnostics) -> Option<World> {
     let (manifest_path, plane_ids) = profile::read_manifest(tree, diagnostics)?;
     let profile = profile::read_profile(tree, &manifest_path, diagnostics)?;
     let mut references = schema::References::default();

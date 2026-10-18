@@ -24,7 +24,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use tilewright_jsonc::{Document, Limits, MAX_SAFE_INTEGER, Value};
-use tilewright_source::CHUNK_SIZE;
+use tilewright_source::{CHUNK_SIZE, MAXIMUM_GROUND_LAYERS};
 
 /// Largest `meta` value other than `profile`.
 const MAXIMUM_META_BYTES: usize = 1024;
@@ -362,8 +362,9 @@ impl Pack {
             .and_then(|name| name.strip_suffix(".twpack"))
             .filter(|stem| stem.len() == 64 && stem.bytes().all(|byte| byte.is_ascii_hexdigit()))
         {
+            // The name must be the lowercase digest; other cases do not match.
             let digest = crate::compile::hex(&self.file_digest()?);
-            if digest != stem.to_ascii_lowercase() {
+            if digest != stem {
                 return Err(Error::Invalid(format!(
                     "file digest {digest} does not match its name"
                 )));
@@ -384,6 +385,7 @@ impl Pack {
             return Err(Error::Invalid("string IDs are not 1..=count".into()));
         }
         self.check_rows()?;
+        self.check_string_encoding()?;
         self.check_documents()?;
         let (render_layers, ground_layers) = self.profile_layers()?;
         let mut targets = Targets {
@@ -511,6 +513,22 @@ impl Pack {
         Ok(())
     }
 
+    /// Checks that every string is UTF-8, one bounded row at a time; SQLite
+    /// accepts any bytes as text.
+    fn check_string_encoding(&self) -> Result<(), Error> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT value FROM strings ORDER BY id")?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            match row.get_ref(0)? {
+                types::ValueRef::Text(bytes) if std::str::from_utf8(bytes).is_ok() => {}
+                _ => return Err(Error::Invalid("a string is not UTF-8 text".into())),
+            }
+        }
+        Ok(())
+    }
+
     /// Checks that every `document` column holds canonical JSON of an
     /// object whose identity keys agree with its row.
     fn check_documents(&self) -> Result<(), Error> {
@@ -581,15 +599,25 @@ impl Pack {
                 "the stored profile disagrees with profile_id or profile_version".into(),
             ));
         }
-        let count = |key: &str| {
+        let count = |key: &str, range: std::ops::RangeInclusive<usize>| {
             profile
                 .root()
                 .get(key)
                 .and_then(Value::as_array)
                 .map(<[_]>::len)
-                .ok_or_else(|| Error::Invalid(format!("stored profile has no {key}")))
+                .filter(|count| range.contains(count))
+                .ok_or_else(|| {
+                    Error::Invalid(format!(
+                        "stored profile does not list {}..={} {key}",
+                        range.start(),
+                        range.end()
+                    ))
+                })
         };
-        Ok((count("render_layers")?, count("ground_layers")?))
+        Ok((
+            count("render_layers", 1..=usize::from(u16::MAX - 1))?,
+            count("ground_layers", 0..=MAXIMUM_GROUND_LAYERS)?,
+        ))
     }
 }
 
@@ -644,6 +672,13 @@ impl Targets<'_> {
     fn check(&mut self, object: &ObjectRecord, current: &str) -> Result<(), Error> {
         let mut ok = self.string(object.proto) && usize::from(object.layer) <= self.render_layers;
         ok &= match &object.portal {
+            Some(PortalRecord::Location { x, y, .. })
+                if [x, y]
+                    .iter()
+                    .any(|value| !(-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER).contains(*value)) =>
+            {
+                false
+            }
             Some(PortalRecord::Location { plane: 0, .. }) | None => true,
             Some(PortalRecord::Location { plane, .. }) => self
                 .is_plane
@@ -666,7 +701,7 @@ impl Targets<'_> {
             Ok(())
         } else {
             Err(Error::Invalid(
-                "an object references a missing string, layer, plane or anchor".into(),
+                "an object references a missing string, layer, plane or anchor, or a portal position out of range".into(),
             ))
         }
     }

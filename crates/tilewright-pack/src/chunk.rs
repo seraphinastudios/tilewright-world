@@ -119,7 +119,16 @@ pub fn encode_chunk(chunk: &ChunkData) -> Result<Vec<u8>, DecodeError> {
 /// Returns an error if the chunk violates the encoding's bounds.
 pub fn encode_record(chunk: &ChunkData) -> Result<Vec<u8>, DecodeError> {
     let cells = check_shape(chunk)?;
-    let mut output = Vec::with_capacity(16 + cells * (2 * chunk.ground.len() + 6));
+    // Sizes are checked before each part is appended, so encoding stops as
+    // soon as the record would pass its limit.
+    let grids = cells * (2 * chunk.ground.len() + 6);
+    room(
+        &[],
+        22_usize
+            .saturating_add(chunk.palette.len().saturating_mul(4))
+            .saturating_add(grids),
+    )?;
+    let mut output = Vec::with_capacity(16 + grids);
     output.extend_from_slice(MAGIC);
     output.extend_from_slice(&VERSION.to_le_bytes());
     output.extend_from_slice(&chunk.chunk_size.to_le_bytes());
@@ -202,6 +211,16 @@ fn check_json(text: &str, array_allowed: bool) -> Result<(), DecodeError> {
     Ok(())
 }
 
+/// Fails unless `additional` more bytes fit in a record of at most
+/// [`MAXIMUM_RECORD_BYTES`].
+fn room(output: &[u8], additional: usize) -> Result<(), DecodeError> {
+    if output.len().saturating_add(additional) > MAXIMUM_RECORD_BYTES {
+        invalid("record exceeds 16 MiB")
+    } else {
+        Ok(())
+    }
+}
+
 fn push_u32(output: &mut Vec<u8>, value: usize) -> Result<(), DecodeError> {
     let value = u32::try_from(value).or_else(|_| invalid("count exceeds u32"))?;
     output.extend_from_slice(&value.to_le_bytes());
@@ -217,6 +236,8 @@ fn encode_object(
     if depth > MAXIMUM_DEPTH {
         return invalid("inventory nesting too deep");
     }
+    // The fixed part and a portal take at most 38 bytes.
+    room(output, 38)?;
     let tile = match (object.tile, depth) {
         (Some(tile), 0) if usize::from(tile) < cells => tile,
         (None, depth) if depth > 0 => NO_TILE,
@@ -258,6 +279,7 @@ fn encode_object(
     }
     if !object.fields.is_empty() {
         let count = u16::try_from(object.fields.len()).or_else(|_| invalid("too many fields"))?;
+        room(output, 2 + usize::from(count) * 13)?;
         output.extend_from_slice(&count.to_le_bytes());
         for (name, value) in &object.fields {
             output.extend_from_slice(&name.to_le_bytes());
@@ -281,6 +303,7 @@ fn encode_object(
                     output.extend_from_slice(&id.to_le_bytes());
                 }
                 FieldRecord::Json(text) => {
+                    room(output, 5_usize.saturating_add(text.len()))?;
                     check_json(text, true)?;
                     output.push(6);
                     push_u32(output, text.len())?;
@@ -290,11 +313,13 @@ fn encode_object(
         }
     }
     if let Some(custom) = &object.custom {
+        room(output, 4_usize.saturating_add(custom.len()))?;
         check_json(custom, false)?;
         push_u32(output, custom.len())?;
         output.extend_from_slice(custom.as_bytes());
     }
     if !object.inventory.is_empty() {
+        room(output, 4)?;
         push_u32(output, object.inventory.len())?;
         for item in &object.inventory {
             encode_object(output, item, cells, depth + 1)?;

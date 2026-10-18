@@ -118,9 +118,10 @@ loading it, and never load a whole table into memory. Readers:
 A full verification also:
 
 - runs SQLite's integrity check, and compares the file's SHA-256 (hashed in
-  bounded blocks) with its name when the name is a digest;
+  bounded blocks) with its name when the name is 64 hex digits, which must be
+  the lowercase digest;
 - checks that string IDs are exactly `1..=count` in byte order of their
-  values, and every string is text of at most 1 MiB without NUL;
+  values, and every string is UTF-8 text of at most 1 MiB without NUL;
 - checks that plane, zone, anchor and definition keys are identifiers; plane
   kinds, and a chunk size of 32 as format 1 requires; zone planes, parents
   and that parent chains end at a root; anchor planes, layers and positions;
@@ -131,7 +132,7 @@ A full verification also:
   its row: `format`, `id`, `kind` and `chunk_size` for planes, `id` and
   `parent` for zones, `format`, `type` and `id` for definitions, and `format`,
   `id` and `version` against `profile_id` and `profile_version` for the
-  profile;
+  profile, which lists 1 to 65,534 render layers and at most 8 ground layers;
 - checks every string ID, render layer index, ground count and portal target
-  (plane and anchor) that a chunk references, looking targets up rather than
-  loading the tables.
+  (plane and anchor, and a location within ±9,007,199,254,740,991) that a
+  chunk references, looking targets up rather than loading the tables.

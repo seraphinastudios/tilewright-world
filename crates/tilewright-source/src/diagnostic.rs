@@ -212,6 +212,62 @@ impl<'s> Positions<'s> {
     }
 }
 
+/// The diagnostics of one load. At most `maximum` are kept, so hostile input
+/// cannot grow the list without bound; past that, one `source.budget`
+/// diagnostic notes that the rest were dropped.
+pub(crate) struct Diagnostics {
+    items: Vec<Diagnostic>,
+    maximum: usize,
+    dropped: bool,
+}
+
+impl Diagnostics {
+    pub(crate) const fn new(maximum: usize) -> Self {
+        Self {
+            items: Vec::new(),
+            maximum,
+            dropped: false,
+        }
+    }
+
+    pub(crate) fn push(&mut self, diagnostic: Diagnostic) {
+        if self.items.len() < self.maximum {
+            self.items.push(diagnostic);
+        } else {
+            self.dropped = true;
+        }
+    }
+
+    pub(crate) const fn is_empty(&self) -> bool {
+        self.items.is_empty() && !self.dropped
+    }
+
+    pub(crate) fn append(&mut self, other: Self) {
+        for diagnostic in other.items {
+            self.push(diagnostic);
+        }
+        self.dropped |= other.dropped;
+    }
+
+    /// The diagnostics sorted by path and position, without duplicates.
+    pub(crate) fn finish(self) -> Vec<Diagnostic> {
+        let mut items = self.items;
+        if self.dropped {
+            items.push(Diagnostic::file(
+                ".",
+                Code::Budget,
+                format!(
+                    "more than {} problems; the rest are not reported",
+                    self.maximum
+                ),
+            ));
+        }
+        items.sort();
+        items.dedup();
+        items
+    }
+}
+
 impl fmt::Display for Diagnostic {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.line == 0 {

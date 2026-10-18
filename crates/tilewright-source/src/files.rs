@@ -17,7 +17,10 @@ use beneath as platform;
 #[cfg(not(unix))]
 use portable as platform;
 
-use crate::{Code, Diagnostic, LoadOptions, diagnostic::Positions};
+use crate::{
+    Code, Diagnostic, LoadOptions,
+    diagnostic::{Diagnostics, Positions},
+};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, io::Read as _, path::Path};
 use tilewright_jsonc::{Document, ErrorCode};
@@ -88,7 +91,7 @@ pub(crate) struct Tree<'o> {
     entries: usize,
     bytes: u64,
     digests: BTreeMap<String, (u64, [u8; 32])>,
-    diagnostics: Vec<Diagnostic>,
+    diagnostics: Diagnostics,
     exhausted: bool,
 }
 
@@ -123,7 +126,7 @@ impl<'o> Tree<'o> {
             entries: 0,
             bytes: 0,
             digests: BTreeMap::new(),
-            diagnostics: Vec::new(),
+            diagnostics: Diagnostics::new(options.maximum_diagnostics),
             exhausted: false,
         }
     }
@@ -152,8 +155,11 @@ impl<'o> Tree<'o> {
             && self.bytes.saturating_add(length) <= self.options.maximum_total_bytes
     }
 
-    pub fn take_diagnostics(&mut self) -> Vec<Diagnostic> {
-        std::mem::take(&mut self.diagnostics)
+    pub fn take_diagnostics(&mut self) -> Diagnostics {
+        std::mem::replace(
+            &mut self.diagnostics,
+            Diagnostics::new(self.options.maximum_diagnostics),
+        )
     }
 
     /// Reports a symbolic link at `path`.
