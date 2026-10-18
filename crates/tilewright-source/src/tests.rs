@@ -313,3 +313,55 @@ fn loads_stop_at_their_budget() {
             .any(|diagnostic| diagnostic.code == "source.budget")
     );
 }
+
+#[test]
+fn extreme_chunk_names_are_rejected_without_overflow() {
+    let copy = workspace();
+    let root = copy.path();
+    for name in [
+        "-9223372036854775808_0.jsonc",
+        "0_-9223372036854775808.jsonc",
+    ] {
+        fs::copy(
+            root.join(CHUNK),
+            root.join("planes/overworld/layers/0").join(name),
+        )
+        .unwrap();
+    }
+    let found = problems(root);
+    for name in [
+        "-9223372036854775808_0.jsonc",
+        "0_-9223372036854775808.jsonc",
+    ] {
+        let path = format!("planes/overworld/layers/0/{name}");
+        assert!(
+            has(&found, "source.unexpected_file", &path),
+            "{path}: {found:?}"
+        );
+    }
+}
+
+#[test]
+fn directory_listings_count_against_the_budget() {
+    let copy = workspace();
+    let root = copy.path();
+    for index in 0..50 {
+        fs::write(root.join(format!("planes/overworld/junk{index}")), "x").unwrap();
+    }
+    let options = LoadOptions {
+        maximum_entries: 20,
+        ..LoadOptions::default()
+    };
+    let found = load_with(root, &options).expect_err("entry budget exceeded");
+    assert!(
+        found
+            .iter()
+            .any(|diagnostic| diagnostic.code == "source.budget")
+    );
+    // Enumeration stopped early: not every junk file was reported.
+    let reported = found
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "source.unexpected_file")
+        .count();
+    assert!(reported < 50, "{reported} unexpected files reported");
+}

@@ -152,28 +152,33 @@ fn chunk_record(
         }
     }
     let palette: Vec<u32> = used.into_iter().collect();
+    // Declared palette entries that no cell uses are not interned; they map
+    // to 0 and are never looked up.
     let remap = |grid: &tilewright_source::Grid| -> Result<Vec<u16>, Error> {
         let local: Vec<u16> = grid
             .palette
             .iter()
             .map(|value| {
-                let id = strings.id(value)?;
-                Ok(palette
-                    .binary_search(&id)
-                    .ok()
+                strings
+                    .0
+                    .get(value)
+                    .and_then(|id| palette.binary_search(id).ok())
                     .and_then(|index| u16::try_from(index + 1).ok())
-                    .unwrap_or(0))
+                    .unwrap_or(0)
             })
-            .collect::<Result<_, Error>>()?;
-        Ok(grid
-            .cells
+            .collect();
+        grid.cells
             .iter()
-            .map(|cell| {
-                usize::from(*cell)
-                    .checked_sub(1)
-                    .map_or(0, |index| local[index])
+            .map(|cell| match usize::from(*cell).checked_sub(1) {
+                None => Ok(0),
+                Some(index) => match local.get(index) {
+                    Some(0) | None => {
+                        Err(Error::Invalid("a grid cell has no palette entry".into()))
+                    }
+                    Some(mapped) => Ok(*mapped),
+                },
             })
-            .collect())
+            .collect()
     };
     Ok(ChunkData {
         chunk_size,
@@ -290,14 +295,16 @@ pub struct Written {
     pub created: bool,
 }
 
-/// Compiles a world and writes it to `directory/<sha256>.twpack`. The write
-/// is atomic and never replaces a different file.
+/// Compiles a world and writes it to `directory/<sha256>.twpack`, creating
+/// the directory if needed. The write is atomic and never replaces a
+/// different file.
 ///
 /// # Errors
 /// Returns an error if compilation or the write fails, or if a different
 /// file already has the pack's name.
 pub fn write_pack(world: &World, directory: &Path) -> Result<Written, Error> {
     let data = compile(world)?;
+    std::fs::create_dir_all(directory)?;
     let digest: [u8; 32] = Sha256::digest(&data).into();
     let path = directory.join(format!("{}.twpack", hex(&digest)));
     let bytes = u64::try_from(data.len()).unwrap_or(u64::MAX);

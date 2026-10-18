@@ -34,6 +34,17 @@ pub const FORMAT: &str = "tilewright.pack/1";
 /// SQLite `application_id` of a pack: `"TWP1"`.
 pub const APPLICATION_ID: i32 = 0x5457_5031;
 
+/// Every `meta` key, in byte order. A pack has exactly these.
+pub const META_KEYS: [&str; 7] = [
+    "chunk_encoding",
+    "compiler",
+    "format",
+    "profile",
+    "profile_id",
+    "profile_version",
+    "source_digest",
+];
+
 /// The pack tables, by name, exactly as created.
 pub const SCHEMA_TABLES: [(&str, &str); 7] = [
     (

@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs,
+    io::Read as _,
     path::{Path, PathBuf},
 };
 use tilewright_jsonc::{Document, ErrorCode};
@@ -34,6 +35,7 @@ pub(crate) struct Tree<'o> {
     root: PathBuf,
     options: &'o LoadOptions,
     files: usize,
+    entries: usize,
     bytes: u64,
     digests: BTreeMap<String, (u64, [u8; 32])>,
     diagnostics: Vec<Diagnostic>,
@@ -68,10 +70,28 @@ impl<'o> Tree<'o> {
             root: root.to_path_buf(),
             options,
             files: 0,
+            entries: 0,
             bytes: 0,
             digests: BTreeMap::new(),
             diagnostics: Vec::new(),
             exhausted: false,
+        }
+    }
+
+    /// Reports the exhausted budget once.
+    fn exhaust(&mut self, path: &str) {
+        if !self.exhausted {
+            self.exhausted = true;
+            self.diagnostics.push(Diagnostic::file(
+                path,
+                Code::Budget,
+                format!(
+                    "the load exceeds {} files, {} directory entries or {} bytes",
+                    self.options.maximum_files,
+                    self.options.maximum_entries,
+                    self.options.maximum_total_bytes
+                ),
+            ));
         }
     }
 
@@ -143,6 +163,14 @@ impl<'o> Tree<'o> {
         };
         let mut entries = Vec::new();
         for entry in directory {
+            if self.exhausted {
+                break;
+            }
+            self.entries += 1;
+            if self.entries > self.options.maximum_entries {
+                self.exhaust(path);
+                break;
+            }
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(error) => {
@@ -233,23 +261,20 @@ impl<'o> Tree<'o> {
             ));
             return None;
         }
-        if self.files >= self.options.maximum_files
+        if self.exhausted
+            || self.files >= self.options.maximum_files
             || self.bytes.saturating_add(metadata.len()) > self.options.maximum_total_bytes
         {
-            if !self.exhausted {
-                self.exhausted = true;
-                self.diagnostics.push(Diagnostic::file(
-                    path,
-                    Code::Budget,
-                    format!(
-                        "the load exceeds {} files or {} bytes",
-                        self.options.maximum_files, self.options.maximum_total_bytes
-                    ),
-                ));
-            }
+            self.exhaust(path);
             return None;
         }
-        let bytes = match fs::read(&absolute) {
+        // Read at most one byte past the limit, so a file that grows after
+        // the size check still cannot force an unbounded read.
+        let bytes = match fs::File::open(&absolute).and_then(|file| {
+            let mut bytes = Vec::new();
+            file.take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
+            Ok(bytes)
+        }) {
             Ok(bytes) => bytes,
             Err(error) => {
                 self.diagnostics.push(Diagnostic::file(

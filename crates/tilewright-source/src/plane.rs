@@ -389,7 +389,10 @@ fn read_layers(
                 .strip_suffix(".jsonc")
                 .and_then(|stem| stem.split_once('_'))
                 .and_then(|(x, y)| Some((canonical_integer(x)?, canonical_integer(y)?)))
-                .filter(|(cx, cy)| cx.abs() <= chunk_limit && cy.abs() <= chunk_limit)
+                .filter(|(cx, cy)| {
+                    (-chunk_limit..=chunk_limit).contains(cx)
+                        && (-chunk_limit..=chunk_limit).contains(cy)
+                })
                 .filter(|_| chunk_entry.kind == EntryKind::File);
             let Some((cx, cy)) = coordinates else {
                 diagnostics.push(Diagnostic::file(

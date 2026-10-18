@@ -269,8 +269,9 @@ impl Document {
         match value {
             Value::Null { .. } => output.push_str("null"),
             Value::Bool { value, .. } => output.push_str(if *value { "true" } else { "false" }),
-            Value::Integer { value, .. } => output.push_str(&value.to_string()),
-            Value::Float { span, .. } => output.push_str(self.text(*span)),
+            Value::Integer { span, .. } | Value::Float { span, .. } => {
+                output.push_str(self.text(*span));
+            }
             Value::String { value, .. } => write_json_string(value, output),
             Value::Array { items, .. } => {
                 output.push('[');

@@ -7,12 +7,38 @@ use super::{
 };
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tilewright_source::World;
 
+fn fixture() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/basic")
+}
+
 fn world() -> World {
-    tilewright_source::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/basic"))
-        .expect("the fixture is valid")
+    tilewright_source::load(&fixture()).expect("the fixture is valid")
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+/// A pack written from the fixture, and a writable copy of it to tamper with.
+fn tampered(name: &str, sql: &str) -> (tempfile::TempDir, PathBuf) {
+    let directory = tempfile::tempdir().unwrap();
+    let written = write_pack(&world(), directory.path()).unwrap();
+    let copy = directory.path().join(name);
+    std::fs::copy(&written.path, &copy).unwrap();
+    Connection::open(&copy).unwrap().execute_batch(sql).unwrap();
+    (directory, copy)
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -232,4 +258,114 @@ fn malformed_chunk_records_are_rejected() {
     assert!(decode_chunk(&record).is_err());
     let oversized = zstd::bulk::compress(&vec![0; super::MAXIMUM_RECORD_BYTES + 1], 1).unwrap();
     assert!(decode_chunk(&oversized).is_err());
+}
+
+#[test]
+fn unused_palette_entries_compile_and_are_not_interned() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("source");
+    copy_tree(&fixture(), &root);
+    std::fs::write(
+        root.join("defs/proto/moss.jsonc"),
+        "{\"format\": \"tilewright.def/1\", \"type\": \"proto\", \"id\": \"moss\", \"fields\": {\"face\": \"moss.png\", \"layer\": \"floor\"}}\n",
+    )
+    .unwrap();
+    let vault = root.join("planes/vault/layers/0/0_0.jsonc");
+    let text = std::fs::read_to_string(&vault).unwrap();
+    std::fs::write(
+        &vault,
+        text.replace(
+            "{\"c\": \"cave_floor\"}",
+            "{\"c\": \"cave_floor\", \"m\": \"moss\"}",
+        ),
+    )
+    .unwrap();
+    let world = tilewright_source::load(&root).unwrap();
+    let written = write_pack(&world, &directory.path().join("nested/output")).unwrap();
+    let pack = Pack::open(&written.path).unwrap();
+    pack.verify().unwrap();
+    let strings = pack.summary().unwrap().strings;
+    let all: Vec<String> = (1..=u32::try_from(strings).unwrap())
+        .map(|id| pack.string(id).unwrap().unwrap())
+        .collect();
+    assert!(all.contains(&"cave_floor".to_owned()));
+    assert!(!all.contains(&"moss".to_owned()));
+}
+
+#[test]
+fn direct_chunk_reads_reject_unknown_encodings() {
+    let (_directory, copy) = tampered(
+        "encoding.twpack",
+        "UPDATE chunks SET encoding = 'twc2+zstd' WHERE plane = 'vault'",
+    );
+    let pack = Pack::open(&copy).unwrap();
+    assert!(pack.chunk("vault", 0, 0, 0).is_err());
+    assert!(pack.chunk("overworld", 0, 0, 0).unwrap().is_some());
+}
+
+#[test]
+fn metadata_must_be_exactly_the_format_keys() {
+    for (name, sql) in [
+        ("missing.twpack", "DELETE FROM meta WHERE key = 'compiler'"),
+        ("extra.twpack", "INSERT INTO meta VALUES ('zzz', 'x')"),
+        (
+            "digest.twpack",
+            "UPDATE meta SET value = 'XYZ' WHERE key = 'source_digest'",
+        ),
+    ] {
+        let (_directory, copy) = tampered(name, sql);
+        assert!(Pack::open(&copy).is_err(), "{name} opened");
+    }
+}
+
+#[test]
+fn verification_checks_rows_and_portal_targets() {
+    for (name, sql) in [
+        (
+            "parent.twpack",
+            "UPDATE zones SET parent = 'nowhere' WHERE id = 'village'",
+        ),
+        (
+            "plane.twpack",
+            "UPDATE anchors SET plane = 'attic' WHERE id = 'village.well'",
+        ),
+        (
+            "kind.twpack",
+            "UPDATE planes SET kind = 'shared-ish' WHERE id = 'vault'",
+        ),
+        (
+            "anchor.twpack",
+            "DELETE FROM anchors WHERE id = 'cave.entrance'",
+        ),
+    ] {
+        let (_directory, copy) = tampered(name, sql);
+        assert!(
+            Pack::open(&copy).unwrap().verify().is_err(),
+            "{name} verified"
+        );
+    }
+}
+
+#[test]
+fn palettes_and_embedded_json_must_be_canonical() {
+    let mut descending = small_chunk();
+    descending.palette = vec![9, 7];
+    assert!(encode_record(&descending).is_err());
+    let mut zero = small_chunk();
+    zero.palette = vec![0, 7];
+    assert!(encode_record(&zero).is_err());
+    for text in ["not-json", "[1, 2]", "3", "{\"a\":1,}"] {
+        let mut json = small_chunk();
+        json.objects[0].fields[5].1 = FieldRecord::Json(text.to_owned());
+        assert!(encode_record(&json).is_err(), "{text} encoded");
+    }
+    let mut custom = small_chunk();
+    custom.objects[0].custom = Some("[1]".to_owned());
+    assert!(encode_record(&custom).is_err());
+
+    // A record built by hand with a descending palette fails to decode too.
+    let mut record = encode_record(&small_chunk()).unwrap();
+    record[14..18].copy_from_slice(&9_u32.to_le_bytes());
+    record[18..22].copy_from_slice(&7_u32.to_le_bytes());
+    assert!(decode_record(&record).is_err());
 }

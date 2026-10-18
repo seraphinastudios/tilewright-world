@@ -61,7 +61,7 @@ chunk_size    u16      N, 1..=255
 ground_count  u8       G, the profile's ground layer count (at most 8)
 reserved      u8       0
 palette_len   u32      P
-palette       P × u32  string IDs, ascending: every value the grids use
+palette       P × u32  string IDs, nonzero and strictly ascending: every value the grids use
 ground        G × N² × u16  per ground layer in profile order: palette index + 1, 0 = empty
 height        N² × i32
 zone          N² × u16 palette index + 1, 0 = the plane's default zone
@@ -88,8 +88,9 @@ flags         u8       bit 0 portal, bit 1 fields, bit 2 custom, bit 3 inventory
 
 A field value is a tag byte and payload: `0` null, `1` false, `2` true,
 `3` i64, `4` finite f64, `5` string (u32 string ID), `6` JSON (u32 byte
-length + canonical JSON) for arrays and objects. Objects appear in source
-order; inventories nest at most 16 deep.
+length + canonical JSON) for arrays and objects. `custom` is canonical JSON
+for an object. Objects appear in source order; inventories nest at most 16
+deep.
 
 ## 3. Reading
 
@@ -98,12 +99,18 @@ Packs are untrusted input. Readers:
 - open the file read-only and immutable, with SQLite's defensive mode on and
   untrusted schemas disabled;
 - reject the file unless its schema is exactly section 1, its
-  `application_id` is `"TWP1"`, and `meta` names this format and encoding;
+  `application_id` is `"TWP1"`, and `meta` holds exactly the keys of section
+  1, names this format and encoding, and has a lowercase hex `source_digest`;
+- reject any chunk row whose `encoding` is not `twc1+zstd`, even when reading
+  a single chunk;
 - reject chunk records with an unknown version, flags or tags, out-of-range
-  tiles, palette indexes or sizes, a decompressed size above 16 MiB, or
-  trailing bytes.
+  tiles, palette indexes or sizes, a palette that is not nonzero and strictly
+  ascending, embedded JSON that is not canonical or not the required shape, a
+  decompressed size above 16 MiB, or trailing bytes.
 
 A full verification also runs SQLite's integrity check, compares the file's
-SHA-256 with its name when the name is a digest, checks that string IDs are
-exactly `1..=count`, and checks every string ID, render layer index and ground
-count that a chunk references.
+SHA-256 (hashed in bounded blocks) with its name when the name is a digest,
+checks that string IDs are exactly `1..=count`, checks plane kinds and chunk
+sizes, zone planes and parents and anchor planes and layers, and checks every
+string ID, render layer index, ground count and portal target (plane and
+anchor) that a chunk references.

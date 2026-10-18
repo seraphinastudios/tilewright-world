@@ -7,6 +7,7 @@
 //! allocation, every index is range-checked, and trailing bytes are errors.
 
 use std::fmt;
+use tilewright_jsonc::{Document, Limits, Value};
 
 /// The `chunks.encoding` value of this encoding.
 pub const CHUNK_ENCODING: &str = "twc1+zstd";
@@ -158,6 +159,10 @@ fn check_shape(chunk: &ChunkData) -> Result<usize, DecodeError> {
     {
         return invalid("grid sizes do not match the chunk size");
     }
+    if chunk.palette.first() == Some(&0) || chunk.palette.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return invalid("palette string IDs must be nonzero and strictly increasing");
+    }
     let limit = chunk.palette.len();
     if chunk
         .ground
@@ -169,6 +174,29 @@ fn check_shape(chunk: &ChunkData) -> Result<usize, DecodeError> {
         return invalid("a grid cell is outside the palette");
     }
     Ok(cells)
+}
+
+/// Checks that `text` is canonical JSON (as `Document::canonical` writes it)
+/// for an object, or for an array when `array_allowed`.
+fn check_json(text: &str, array_allowed: bool) -> Result<(), DecodeError> {
+    let document = Document::parse(text, &Limits::default())
+        .or_else(|error| invalid(format!("embedded JSON: {error}")))?;
+    let shape_ok = match document.root() {
+        Value::Object { .. } => true,
+        Value::Array { .. } => array_allowed,
+        _ => false,
+    };
+    if !shape_ok {
+        return invalid(if array_allowed {
+            "JSON field values must be arrays or objects"
+        } else {
+            "custom data must be an object"
+        });
+    }
+    if document.canonical(document.root()) != text {
+        return invalid("embedded JSON is not canonical");
+    }
+    Ok(())
 }
 
 fn push_u32(output: &mut Vec<u8>, value: usize) -> Result<(), DecodeError> {
@@ -250,6 +278,7 @@ fn encode_object(
                     output.extend_from_slice(&id.to_le_bytes());
                 }
                 FieldRecord::Json(text) => {
+                    check_json(text, true)?;
                     output.push(6);
                     push_u32(output, text.len())?;
                     output.extend_from_slice(text.as_bytes());
@@ -258,6 +287,7 @@ fn encode_object(
         }
     }
     if let Some(custom) = &object.custom {
+        check_json(custom, false)?;
         push_u32(output, custom.len())?;
         output.extend_from_slice(custom.as_bytes());
     }
@@ -487,7 +517,11 @@ fn decode_object(
                     FieldRecord::Number(number)
                 }
                 5 => FieldRecord::String(cursor.u32()?),
-                6 => FieldRecord::Json(cursor.text()?),
+                6 => {
+                    let text = cursor.text()?;
+                    check_json(&text, true)?;
+                    FieldRecord::Json(text)
+                }
                 _ => return invalid("unknown field tag"),
             };
             fields.push((name, value));
@@ -496,7 +530,9 @@ fn decode_object(
     let custom = if flags & FLAG_CUSTOM == 0 {
         None
     } else {
-        Some(cursor.text()?)
+        let text = cursor.text()?;
+        check_json(&text, false)?;
+        Some(text)
     };
     let mut inventory = Vec::new();
     if flags & FLAG_INVENTORY != 0 {

@@ -45,6 +45,9 @@ pub struct LoadOptions {
     pub limits: Limits,
     /// Most files read in one load.
     pub maximum_files: usize,
+    /// Most directory entries listed in one load, counted before they are
+    /// examined.
+    pub maximum_entries: usize,
     /// Most bytes read in one load.
     pub maximum_total_bytes: u64,
 }
@@ -54,6 +57,7 @@ impl Default for LoadOptions {
         Self {
             limits: Limits::default(),
             maximum_files: 500_000,
+            maximum_entries: 1_000_000,
             maximum_total_bytes: 8 * 1024 * 1024 * 1024,
         }
     }
