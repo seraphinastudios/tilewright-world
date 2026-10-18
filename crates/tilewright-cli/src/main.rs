@@ -56,9 +56,26 @@ impl Failure {
     }
 }
 
+/// An untrusted value for one field of line-oriented output: every control
+/// character, newlines included, is escaped, so a value cannot add or forge
+/// lines, such as a fake `verified:` line.
+fn field(text: &str) -> String {
+    text.chars().fold(
+        String::with_capacity(text.len()),
+        |mut output, character| {
+            if character.is_control() {
+                output.extend(character.escape_unicode());
+            } else {
+                output.push(character);
+            }
+            output
+        },
+    )
+}
+
 /// Text for a terminal: control characters other than newlines are
-/// escaped, so pack metadata and source content shown to the user cannot
-/// carry terminal escape sequences.
+/// escaped. A backstop behind [`field`], which every untrusted value passes
+/// through first.
 fn terminal_safe(text: &str) -> String {
     text.chars().fold(
         String::with_capacity(text.len()),
@@ -144,7 +161,17 @@ fn diagnostics_text(diagnostics: &[Diagnostic], json: bool) -> String {
         output.push_str("]\n");
     } else {
         for diagnostic in diagnostics {
-            let _ = writeln!(output, "{diagnostic}");
+            let path = field(&diagnostic.path);
+            let message = field(&diagnostic.message);
+            let _ = if diagnostic.line == 0 {
+                writeln!(output, "{path}: {}: {message}", diagnostic.code)
+            } else {
+                writeln!(
+                    output,
+                    "{path}:{}:{}: {}: {message}",
+                    diagnostic.line, diagnostic.column, diagnostic.code
+                )
+            };
         }
     }
     output
@@ -153,7 +180,11 @@ fn diagnostics_text(diagnostics: &[Diagnostic], json: bool) -> String {
 fn load(root: &Path, json: bool) -> Result<tilewright_source::World, Failure> {
     tilewright_source::load(root).map_err(|diagnostics| Failure {
         output: diagnostics_text(&diagnostics, json),
-        message: format!("{} problem(s) in {}", diagnostics.len(), root.display()),
+        message: format!(
+            "{} problem(s) in {}",
+            diagnostics.len(),
+            field(&root.display().to_string())
+        ),
     })
 }
 
@@ -177,11 +208,12 @@ fn validate(root: &Path, json: bool) -> Result<String, Failure> {
 
 fn compile(root: &Path, output: &Path) -> Result<String, Failure> {
     let world = load(root, false)?;
-    let written = tilewright_pack::write_pack(&world, output)
-        .map_err(|error| Failure::message(format!("cannot write pack: {error}")))?;
+    let written = tilewright_pack::write_pack(&world, output).map_err(|error| {
+        Failure::message(format!("cannot write pack: {}", field(&error.to_string())))
+    })?;
     Ok(format!(
         "{} {} bytes{}\n",
-        written.path.display(),
+        field(&written.path.display().to_string()),
         written.bytes,
         if written.created {
             ""
@@ -192,8 +224,13 @@ fn compile(root: &Path, output: &Path) -> Result<String, Failure> {
 }
 
 fn inspect(path: &Path, limits: tilewright_pack::VerifyLimits) -> Result<String, Failure> {
-    let fail =
-        |error: tilewright_pack::Error| Failure::message(format!("{}: {error}", path.display()));
+    let fail = |error: tilewright_pack::Error| {
+        Failure::message(format!(
+            "{}: {}",
+            field(&path.display().to_string()),
+            field(&error.to_string())
+        ))
+    };
     let pack = tilewright_pack::Pack::open(path).map_err(fail)?;
     let summary = pack.verify_with(&limits).map_err(fail)?;
     let mut output = String::new();
@@ -205,7 +242,7 @@ fn inspect(path: &Path, limits: tilewright_pack::VerifyLimits) -> Result<String,
         "source_digest",
     ] {
         let value = pack.meta(key).map_err(fail)?.unwrap_or_default();
-        let _ = writeln!(output, "{key}: {value}");
+        let _ = writeln!(output, "{key}: {}", field(&value));
     }
     let _ = writeln!(
         output,
@@ -366,6 +403,73 @@ mod tests {
             "{}",
             failure.output
         );
+    }
+
+    #[test]
+    fn untrusted_values_cannot_forge_lines() {
+        assert_eq!(super::field("a\nb\u{1b}"), "a\\u{a}b\\u{1b}");
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("source");
+        let output = directory.path().join("packs");
+        for entry in walk(Path::new(&fixture())) {
+            let target = root.join(entry.strip_prefix(fixture()).unwrap());
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::copy(&entry, &target).unwrap();
+        }
+        // A profile version that would add a forged status line.
+        let profile = root.join("profile/profile.jsonc");
+        let text = std::fs::read_to_string(&profile).unwrap();
+        std::fs::write(
+            &profile,
+            text.replace(
+                "\"version\": \"1.0.0\"",
+                "\"version\": \"x\\nverified: no\"",
+            ),
+        )
+        .unwrap();
+        let root_text = root.display().to_string();
+        run(&["compile", &root_text, &output.display().to_string()]).unwrap();
+        let pack = std::fs::read_dir(&output)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let inspected = run(&["inspect", &pack.display().to_string()]).unwrap();
+        let lines: Vec<&str> = inspected.lines().collect();
+        assert!(
+            lines.contains(&"profile_version: x\\u{a}verified: no"),
+            "{inspected}"
+        );
+        assert!(!lines.contains(&"verified: no"), "{inspected}");
+        assert_eq!(lines.last(), Some(&"verified: yes"));
+
+        // A file name with a newline cannot forge a diagnostic line.
+        #[cfg(unix)]
+        {
+            std::fs::write(
+                root.join("planes/overworld/x\nplanes:1:1: ref.unresolved: forged"),
+                "",
+            )
+            .unwrap();
+            let failure = run(&["validate", &root_text]).unwrap_err();
+            assert!(
+                failure
+                    .output
+                    .lines()
+                    .all(|line| !line.starts_with("planes:1:1")),
+                "{}",
+                failure.output
+            );
+            assert!(
+                failure
+                    .output
+                    .contains("x\\u{a}planes:1:1: ref.unresolved: forged"),
+                "{}",
+                failure.output
+            );
+        }
     }
 
     /// Every file under `root`.
