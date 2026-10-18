@@ -16,21 +16,41 @@ use tilewright_jsonc::{MAX_SAFE_INTEGER, Value};
 /// Longest string a `string` field accepts unless its schema says less.
 pub const DEFAULT_MAXIMUM_STRING: usize = 65_536;
 
-/// A closed set of fields, in declaration order.
+/// A closed set of fields, in declaration order, indexed by name.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Schema {
     /// Source path, relative to the root.
     pub path: String,
-    pub fields: Vec<(String, FieldSpec)>,
+    fields: Vec<(String, FieldSpec)>,
+    /// Positions in `fields` by name, kept with the list.
+    index: BTreeMap<String, usize>,
 }
 
 impl Schema {
+    pub(crate) const fn new(path: String) -> Self {
+        Self {
+            path,
+            fields: Vec::new(),
+            index: BTreeMap::new(),
+        }
+    }
+
+    /// Adds a field; names come from one object's keys, so they are unique.
+    fn push(&mut self, name: String, spec: FieldSpec) {
+        self.index.insert(name.clone(), self.fields.len());
+        self.fields.push((name, spec));
+    }
+
+    /// The fields in declaration order.
+    #[must_use]
+    pub fn fields(&self) -> &[(String, FieldSpec)] {
+        &self.fields
+    }
+
     #[must_use]
     pub fn field(&self, name: &str) -> Option<&FieldSpec> {
-        self.fields
-            .iter()
-            .find(|(field, _)| field == name)
-            .map(|(_, spec)| spec)
+        let position = *self.index.get(name)?;
+        self.fields.get(position).map(|(_, spec)| spec)
     }
 }
 
@@ -88,10 +108,7 @@ pub(crate) fn read_schema(
     let format_ok = reader.format(root, "tilewright.schema/1");
     let fields = reader.required(root, "fields")?;
     let members = reader.members(fields)?;
-    let mut schema = Schema {
-        path: path.to_owned(),
-        fields: Vec::with_capacity(members.len()),
-    };
+    let mut schema = Schema::new(path.to_owned());
     let mut ok = format_ok;
     for member in members {
         if !is_field_name(&member.key) {
@@ -104,7 +121,7 @@ pub(crate) fn read_schema(
             continue;
         }
         match read_spec(&reader, &member.value) {
-            Some(spec) => schema.fields.push((member.key.clone(), spec)),
+            Some(spec) => schema.push(member.key.clone(), spec),
             None => ok = false,
         }
     }
@@ -353,7 +370,7 @@ pub(crate) fn read_fields<'a>(
     // One diagnostic per owner, however many fields it lacks.
     let present: BTreeSet<&str> = members.iter().map(|member| member.key.as_str()).collect();
     let missing: Vec<&str> = schema
-        .fields
+        .fields()
         .iter()
         .filter(|(name, spec)| spec.required && !present.contains(name.as_str()))
         .map(|(name, _)| name.as_str())

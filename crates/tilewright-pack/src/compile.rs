@@ -298,10 +298,11 @@ fn chunk_record(chunk: &Chunk, layers: &Layers<'_>, strings: &Strings) -> Result
         }
     }
     let palette: Vec<u32> = used.into_iter().collect();
-    // Objects may use what the header, palette and grids leave of the record.
+    // Objects may use what the header (14 bytes through the palette length),
+    // palette, grids and object count (4 bytes) leave of the record.
     let cells = usize::from(chunk_size) * usize::from(chunk_size);
     let mut budget = MAXIMUM_RECORD_BYTES
-        .saturating_sub(22 + 4 * palette.len() + cells * (2 * chunk.ground.len() + 6));
+        .saturating_sub(18 + 4 * palette.len() + cells * (2 * chunk.ground.len() + 6));
     // Declared palette entries that no cell uses are not interned; they map
     // to 0 and are never looked up.
     let remap = |grid: &tilewright_source::Grid| -> Result<Vec<u16>, Error> {

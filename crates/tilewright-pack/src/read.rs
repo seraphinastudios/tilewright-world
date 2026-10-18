@@ -27,6 +27,9 @@ use std::{
 use tilewright_jsonc::{Document, Limits, MAX_SAFE_INTEGER, Value};
 use tilewright_source::{CHUNK_SIZE, MAXIMUM_GROUND_LAYERS};
 
+/// The page size of every pack.
+const PAGE_SIZE: i64 = 4096;
+
 /// Largest `meta` value other than `profile`.
 const MAXIMUM_META_BYTES: usize = 1024;
 
@@ -582,7 +585,12 @@ impl Pack {
     /// canonical and agree with `profile_id` and `profile_version`.
     fn profile_layers(&self) -> Result<(usize, usize), Error> {
         let profile = stored_document(self.meta("profile")?, "the stored profile")?;
+        // The identity must be one a source profile can have: an identifier
+        // and a version of at most 64 characters.
+        let identity_ok = text(&profile, "id").is_some_and(is_identifier)
+            && text(&profile, "version").is_some_and(|version| version.chars().count() <= 64);
         if text(&profile, "format") != Some("tilewright.profile/1")
+            || !identity_ok
             || text(&profile, "id") != self.meta("profile_id")?.as_deref()
             || text(&profile, "version") != self.meta("profile_version")?.as_deref()
         {
@@ -662,9 +670,10 @@ fn check_identity(connection: &Connection) -> Result<(), Error> {
     }
     let application: i32 = connection.query_row("PRAGMA application_id", [], |row| row.get(0))?;
     let version: i32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if application != APPLICATION_ID || version != USER_VERSION {
+    let page_size: i64 = connection.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+    if application != APPLICATION_ID || version != USER_VERSION || page_size != PAGE_SIZE {
         return Err(Error::Invalid(format!(
-            "not a Tilewright pack of user_version {USER_VERSION}"
+            "not a Tilewright pack of user_version {USER_VERSION} with {PAGE_SIZE}-byte pages"
         )));
     }
     let meta = read_meta(connection)?;

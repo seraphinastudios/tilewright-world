@@ -10,7 +10,7 @@ use crate::{
     read::Reader,
     schema::{References, Target, read_fields},
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use tilewright_jsonc::Value;
 
 /// Deepest inventory nesting accepted.
@@ -264,6 +264,7 @@ fn read_palette<'a>(
     }
     let mut keys: Vec<&str> = Vec::with_capacity(members.len());
     let mut palette = Vec::with_capacity(members.len());
+    let mut seen = BTreeSet::new();
     for member in members {
         let key_ok = member.key.len() == width
             && member.key.bytes().all(|byte| byte.is_ascii_graphic())
@@ -277,7 +278,7 @@ fn read_palette<'a>(
             return None;
         }
         let entry = reader.identifier(&member.value)?;
-        if kind == GridKind::Zone && palette.contains(&entry) {
+        if kind == GridKind::Zone && !seen.insert(entry.clone()) {
             reader.report(
                 member.value.span(),
                 Code::Duplicate,

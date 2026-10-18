@@ -122,9 +122,10 @@ pub fn encode_record(chunk: &ChunkData) -> Result<Vec<u8>, DecodeError> {
     // Sizes are checked before each part is appended, so encoding stops as
     // soon as the record would pass its limit.
     let grids = cells * (2 * chunk.ground.len() + 6);
+    // 14 header bytes through `palette_len`, and the 4-byte object count.
     room(
         &[],
-        22_usize
+        18_usize
             .saturating_add(chunk.palette.len().saturating_mul(4))
             .saturating_add(grids),
     )?;

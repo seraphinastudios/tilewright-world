@@ -844,3 +844,15 @@ fn palette_keys_are_visible_ascii() {
         "planes/vault/layers/0/0_0.jsonc"
     ));
 }
+
+#[test]
+fn zones_are_listed_once_per_palette() {
+    let copy = workspace();
+    edit(
+        copy.path(),
+        CHUNK,
+        "\"palette\": {\"i\": \"island\", \"v\": \"village\"}",
+        "\"palette\": {\"i\": \"island\", \"v\": \"village\", \"w\": \"island\"}",
+    );
+    assert!(has(&problems(copy.path()), "ref.duplicate", CHUNK));
+}

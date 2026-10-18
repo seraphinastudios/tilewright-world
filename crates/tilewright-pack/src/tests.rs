@@ -940,3 +940,66 @@ fn stored_default_zones_and_profile_layers_must_resolve() {
         assert!(error.to_string().contains(problem), "{name}: {error}");
     }
 }
+
+#[test]
+fn a_chunk_of_exactly_16_mib_compiles() {
+    // `length` characters over a fixed 17 strings, as in the codec test.
+    let sized = |length: usize| {
+        let strings: Vec<String> = (0..17)
+            .map(|index| {
+                let start = (index * 1_000_000).min(length);
+                let end = ((index + 1) * 1_000_000).min(length);
+                format!("\"{}\"", "x".repeat(end - start))
+            })
+            .collect();
+        let mut world = world();
+        world
+            .planes
+            .get_mut("vault")
+            .unwrap()
+            .chunks
+            .values_mut()
+            .next()
+            .unwrap()
+            .objects[0]
+            .custom = Some(format!("{{\"example.org\":[{}]}}", strings.join(",")));
+        world
+    };
+    let record_length = |world: &World| {
+        let directory = tempfile::tempdir().unwrap();
+        let written = write_pack(world, directory.path()).unwrap();
+        let chunk = Pack::open(&written.path)
+            .unwrap()
+            .chunk("vault", 0, 0, 0)
+            .unwrap()
+            .unwrap();
+        encode_record(&chunk).unwrap().len()
+    };
+    let base = record_length(&sized(0));
+    let exact = sized(super::MAXIMUM_RECORD_BYTES - base);
+    assert_eq!(record_length(&exact), super::MAXIMUM_RECORD_BYTES);
+    assert!(compile(&sized(super::MAXIMUM_RECORD_BYTES - base + 1)).is_err());
+}
+
+#[test]
+fn identity_page_size_and_profile_limits_are_checked() {
+    let (_directory, copy) = tampered("pages.twpack", "PRAGMA page_size = 8192; VACUUM;");
+    let error = Pack::open(&copy).err().unwrap();
+    assert!(error.to_string().contains("4096-byte pages"), "{error}");
+
+    let long = "1".repeat(65);
+    for (name, sql) in [
+        (
+            "upper.twpack",
+            "UPDATE meta SET value = replace(value, '\"id\":\"example\"', '\"id\":\"Example\"') WHERE key = 'profile'; UPDATE meta SET value = 'Example' WHERE key = 'profile_id'".to_owned(),
+        ),
+        (
+            "version.twpack",
+            format!("UPDATE meta SET value = replace(value, '\"version\":\"1.0.0\"', '\"version\":\"{long}\"') WHERE key = 'profile'; UPDATE meta SET value = '{long}' WHERE key = 'profile_version'"),
+        ),
+    ] {
+        let (_directory, copy) = tampered(name, &sql);
+        let error = Pack::open(&copy).unwrap().verify().unwrap_err();
+        assert!(error.to_string().contains("profile"), "{name}: {error}");
+    }
+}

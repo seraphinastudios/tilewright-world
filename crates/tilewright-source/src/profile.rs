@@ -46,7 +46,7 @@ fn references_resolve(
     diagnostics: &mut Diagnostics,
 ) -> bool {
     let mut ok = true;
-    for (name, spec) in &schema.fields {
+    for (name, spec) in schema.fields() {
         if let FieldType::Reference { target } = &spec.field_type
             && !type_names.contains(target)
         {
