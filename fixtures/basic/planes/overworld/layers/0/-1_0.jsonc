@@ -1,0 +1,11 @@
+{
+  "format": "tilewright.chunk/1",
+  "plane": "overworld",
+  "layer": 0,
+  "chunk": [-1, 0],
+  "terrain": {
+    "floor": {"palette": {"g": "grass"}, "fill": "g"},
+    "height": {"fill": 0}
+  },
+  "objects": []
+}

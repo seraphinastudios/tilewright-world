@@ -1,0 +1,6 @@
+{
+  "format": "tilewright.def/1",
+  "type": "loot",
+  "id": "chest_common",
+  "fields": {"item": "coin", "chance": 0.5}
+}

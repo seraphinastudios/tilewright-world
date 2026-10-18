@@ -1,0 +1,7 @@
+{
+  "format": "tilewright.schema/1",
+  "fields": {
+    "music": {"type": "string"},
+    "safe": {"type": "boolean"}
+  }
+}

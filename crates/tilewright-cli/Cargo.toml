@@ -1,0 +1,24 @@
+[package]
+name = "tilewright-cli"
+description = "Command-line tools for Tilewright worlds: validate sources, compile and inspect content packs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "tilewright"
+path = "src/main.rs"
+
+[dependencies]
+tilewright-jsonc.workspace = true
+tilewright-pack.workspace = true
+tilewright-source.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

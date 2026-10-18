@@ -1,0 +1,8 @@
+{
+  "format": "tilewright.zones/1",
+  "zones": [
+    {"id": "wilderness", "name": "Wilderness"},
+    {"id": "island", "parent": "wilderness", "name": "Green Island", "properties": {"music": "calm"}},
+    {"id": "village", "parent": "island", "name": "Little Village", "properties": {"safe": true}}
+  ]
+}

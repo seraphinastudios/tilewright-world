@@ -1,0 +1,6 @@
+{
+  "format": "tilewright.plane/1",
+  "id": "vault",
+  "kind": "instanced",
+  "chunk_size": 32
+}

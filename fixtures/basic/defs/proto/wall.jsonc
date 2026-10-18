@@ -1,0 +1,1 @@
+{"format": "tilewright.def/1", "type": "proto", "id": "wall", "fields": {"face": "wall.png", "layer": "wall", "blocks_view": true, "footprint": [1, 1]}}

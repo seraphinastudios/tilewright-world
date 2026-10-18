@@ -250,6 +250,53 @@ impl Document {
         &self.source[span.start..span.end]
     }
 
+    /// Canonical minified JSON for a value of this document: no comments or
+    /// whitespace, members in source order, numbers spelled exactly as in the
+    /// source, and strings escaped minimally (`"`, `\\` and control
+    /// characters only). Equal values from equal source text always give
+    /// equal output.
+    ///
+    /// # Panics
+    /// Panics if the value is not part of this document.
+    #[must_use]
+    pub fn canonical(&self, value: &Value) -> String {
+        let mut output = String::new();
+        self.write_canonical(value, &mut output);
+        output
+    }
+
+    fn write_canonical(&self, value: &Value, output: &mut String) {
+        match value {
+            Value::Null { .. } => output.push_str("null"),
+            Value::Bool { value, .. } => output.push_str(if *value { "true" } else { "false" }),
+            Value::Integer { value, .. } => output.push_str(&value.to_string()),
+            Value::Float { span, .. } => output.push_str(self.text(*span)),
+            Value::String { value, .. } => write_json_string(value, output),
+            Value::Array { items, .. } => {
+                output.push('[');
+                for (index, item) in items.iter().enumerate() {
+                    if index > 0 {
+                        output.push(',');
+                    }
+                    self.write_canonical(item, output);
+                }
+                output.push(']');
+            }
+            Value::Object { members, .. } => {
+                output.push('{');
+                for (index, member) in members.iter().enumerate() {
+                    if index > 0 {
+                        output.push(',');
+                    }
+                    write_json_string(&member.key, output);
+                    output.push(':');
+                    self.write_canonical(&member.value, output);
+                }
+                output.push('}');
+            }
+        }
+    }
+
     /// Replaces one span with new text and parses the result. Every byte
     /// outside the span is preserved.
     ///
@@ -378,6 +425,28 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+/// Appends `value` as a JSON string with minimal escaping.
+pub fn write_json_string(value: &str, output: &mut String) {
+    use std::fmt::Write as _;
+    output.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => output.push_str("\\\""),
+            '\\' => output.push_str("\\\\"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            '\u{8}' => output.push_str("\\b"),
+            '\u{c}' => output.push_str("\\f"),
+            control if u32::from(control) < 0x20 => {
+                let _ = write!(output, "\\u{:04x}", u32::from(control));
+            }
+            other => output.push(other),
+        }
+    }
+    output.push('"');
+}
 
 fn parse_value_tree(source: &str, limits: &Limits) -> Result<Value, Error> {
     let error_at = |code, offset| Err(locate(source, code, offset));

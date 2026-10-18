@@ -25,9 +25,27 @@ Both are drafts until format 1.0 is frozen.
 
 | Crate | Purpose |
 | --- | --- |
-| `tilewright-jsonc` | Strict, lossless, bounded JSONC parser with byte spans and span edits |
+| `tilewright-jsonc` | Strict, lossless, bounded JSONC parser with byte spans, span edits and canonical JSON output |
+| `tilewright-source` | Loads and validates a source tree into a typed world model, reporting every problem with file, span and a stable code |
+| `tilewright-pack` | Deterministic pack compiler, the `twc1+zstd` chunk codec, and a verifying pack reader |
+| `tilewright-cli` | The `tilewright` command |
 
-The world model, validator, transactions, compiler and CLI follow.
+Transactions for structural edits follow.
+
+## Command line
+
+```sh
+cargo run --locked --package tilewright-cli -- validate fixtures/basic
+cargo run --locked --package tilewright-cli -- validate --json fixtures/basic
+cargo run --locked --package tilewright-cli -- compile fixtures/basic dist
+cargo run --locked --package tilewright-cli -- inspect dist/<sha256>.twpack
+```
+
+`validate` prints one line per problem (`path:line:column: code: message`), or
+a JSON array with `--json`. `compile` writes `<sha256>.twpack` atomically and
+never replaces a different file. `inspect` verifies a pack and prints its
+metadata and counts. `fixtures/basic` is a small synthetic world that uses
+every feature of the format.
 
 ## Development
 
