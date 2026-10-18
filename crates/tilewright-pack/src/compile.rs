@@ -413,20 +413,28 @@ pub(crate) type TileStep<'w> = (&'w str, i64, &'w str);
 
 /// The steps of a plane's stairwells by tile, the `stairwell_steps` key, so
 /// they are inserted in primary-key order. The model is public, so the
-/// plane's total step count, and each stairwell's ID and step prototypes,
-/// are checked against the source format's limits before anything is kept.
+/// plane's stairwell and step counts, and each stairwell's ID and step
+/// prototypes, are checked against the source format's limits before
+/// anything is kept.
 pub(crate) fn stairwell_tiles(
     plane: &tilewright_source::Plane,
 ) -> Result<BTreeMap<(i32, i64, i64), TileStep<'_>>, Error> {
-    // One stairwells document holds at most the source format's value
-    // limit, so no plane has more steps than that.
+    // One stairwells document holds at most the source format's array limit
+    // of stairwells and value limit of steps, as verification checks.
+    let limits = Limits::default();
+    if plane.stairwells.len() > limits.max_array_items {
+        return Err(Error::Invalid(format!(
+            "plane {} has more stairwells than a source document holds",
+            plane.id
+        )));
+    }
     let steps = plane
         .stairwells
         .values()
         .try_fold(0_usize, |total, stairwell| {
             total.checked_add(stairwell.steps.len())
         });
-    if steps.is_none_or(|steps| steps > Limits::default().max_values) {
+    if steps.is_none_or(|steps| steps > limits.max_values) {
         return Err(Error::Invalid(format!(
             "plane {} has more stairwell steps than a source document holds",
             plane.id

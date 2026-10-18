@@ -1019,10 +1019,31 @@ impl Pack {
             "SELECT stairwell, step, proto FROM stairwell_steps WHERE plane = ?1 AND layer = ?2 AND x = ?3 AND y = ?4",
         )?;
         let mut listed: u64 = 0;
+        // Stairwells and steps of the plane being checked: one source
+        // document holds at most the array limit of stairwells and the value
+        // limit of steps.
+        let limits = Limits::default();
+        let (mut current, mut count, mut steps) = (String::new(), 0_usize, 0_usize);
         let mut rows = stairwells.query([maximum_document_bytes()])?;
         while let Some(row) = rows.next()? {
             let (plane, id): (String, String) = (row.get(0)?, row.get(1)?);
+            if plane != current {
+                current.clone_from(&plane);
+                (count, steps) = (0, 0);
+            }
+            count += 1;
+            if count > limits.max_array_items {
+                return Err(Error::Invalid(format!(
+                    "plane {plane} has more stairwells than a source document holds"
+                )));
+            }
             let stored = stored_stairwell(&stored_document(row.get(2)?, "a stairwell document")?)?;
+            steps = steps.saturating_add(stored.steps.len());
+            if steps > limits.max_values {
+                return Err(Error::Invalid(format!(
+                    "plane {plane} has more stairwell steps than a source document holds"
+                )));
+            }
             let disagrees = || {
                 Error::Invalid(format!(
                     "the document of stairwell {plane}/{id} disagrees with its rows"

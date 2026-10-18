@@ -279,14 +279,20 @@ impl StairwellStep {
     /// away on each axis.
     #[must_use]
     pub fn leads_to(&self, next: &Self, up: bool) -> bool {
-        let change = if up { 1 } else { -1 };
-        i64::from(next.layer) - i64::from(self.layer) == change
-            && self
-                .at
-                .iter()
-                .zip(next.at)
-                .all(|(before, after)| (i128::from(*before) - i128::from(after)).abs() <= 1)
+        adjacent((self.layer, self.at), (next.layer, next.at), up)
     }
+}
+
+/// Whether a step at position `next` (layer and plane coordinates) may
+/// follow one at `before` in a stairwell that goes `up` (or down).
+pub(crate) fn adjacent(before: (i32, [i64; 2]), next: (i32, [i64; 2]), up: bool) -> bool {
+    let change = if up { 1 } else { -1 };
+    i64::from(next.0) - i64::from(before.0) == change
+        && before
+            .1
+            .iter()
+            .zip(next.1)
+            .all(|(before, after)| (i128::from(*before) - i128::from(after)).abs() <= 1)
 }
 
 /// Which way a stairwell may be used.

@@ -183,7 +183,9 @@ A full verification also:
 - checks that each stairwell document has the source format's shape (section
   10 of FORMAT.md): an ID that matches its row, at least two steps whose
   layers change by one in one direction and whose positions move at most one
-  tile per axis, and a valid direction and flag; that each step
+  tile per axis, and a valid direction and flag; that a plane has at most
+  250,000 stairwells and 1,000,000 steps, the array and value limits of the
+  one source document that holds them; that each step
   is the `stairwell_steps` row at its tile, naming its stairwell, index and
   prototype; and that the table holds no other rows. One document is held at
   a time, and each step is one primary-key lookup;

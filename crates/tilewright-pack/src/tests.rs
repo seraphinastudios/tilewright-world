@@ -1555,15 +1555,30 @@ fn compile_rejects_stairwell_steps_that_share_a_tile() {
         error.to_string().contains("more stairwell steps"),
         "{error}"
     );
-    // Many stairwells, each within an array's limit, are capped in total.
+    // A plane holds at most an array's worth of stairwells.
     let mut plane = world.planes()["overworld"].clone();
     let chute = plane.stairwells["cave.chute"].clone();
-    plane.stairwells = (0..500_001)
+    plane.stairwells = (0..250_001)
         .map(|index| (format!("s{index}"), chute.clone()))
         .collect();
     let error = stairwell_tiles(&plane).unwrap_err();
-    assert!(
-        error.to_string().contains("more stairwell steps"),
-        "{error}"
+    assert!(error.to_string().contains("more stairwells"), "{error}");
+}
+
+#[test]
+fn verification_caps_stairwells_per_plane() {
+    // 250,001 two-step stairwells on distinct tiles.
+    let rows = "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 250001) ";
+    let (_directory, copy) = tampered(
+        "many.twpack",
+        &format!(
+            "DELETE FROM stairwell_steps; DELETE FROM stairwells; \
+             {rows}INSERT INTO stairwells SELECT 'overworld', 's' || i, \
+             '{{\"id\":\"s' || i || '\",\"steps\":[{{\"layer\":0,\"at\":[' || i || ',0],\"proto\":\"stairs_up\"}},{{\"layer\":1,\"at\":[' || i || ',0],\"proto\":\"stairs_up\"}}]}}' FROM n; \
+             {rows}INSERT INTO stairwell_steps SELECT 'overworld', 0, i, 0, 's' || i, 0, 'stairs_up' FROM n; \
+             {rows}INSERT INTO stairwell_steps SELECT 'overworld', 1, i, 0, 's' || i, 1, 'stairs_up' FROM n;"
+        ),
     );
+    let error = Pack::open(&copy).unwrap().verify().unwrap_err();
+    assert!(error.to_string().contains("more stairwells"), "{error}");
 }

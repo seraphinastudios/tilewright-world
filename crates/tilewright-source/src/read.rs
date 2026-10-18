@@ -256,10 +256,10 @@ impl<'a> Reader<'a> {
     /// A pair of integers within the format's integer range.
     pub fn coordinates(&self, value: &'a Value) -> Option<[i64; 2]> {
         if let [x, y] = self.array(value)? {
-            Some([
-                self.integer(x, -MAX_SAFE_INTEGER, MAX_SAFE_INTEGER)?,
-                self.integer(y, -MAX_SAFE_INTEGER, MAX_SAFE_INTEGER)?,
-            ])
+            // Both are checked before either is used.
+            let x = self.integer(x, -MAX_SAFE_INTEGER, MAX_SAFE_INTEGER);
+            let y = self.integer(y, -MAX_SAFE_INTEGER, MAX_SAFE_INTEGER);
+            Some([x?, y?])
         } else {
             self.report(value.span(), Code::Type, "expected [x, y]");
             None

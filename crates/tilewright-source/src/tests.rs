@@ -1146,6 +1146,24 @@ fn every_stairwell_problem_is_reported() {
     .map(|(code, line, _)| (code, line))
     .collect();
     assert_eq!(codes, [("stairwell.overlap", 3), ("stairwell.step", 3)]);
+    // A step with a bad prototype still has its tile checked for overlaps.
+    let codes: Vec<_> = found(&format!(
+        "{},\n{}",
+        stairwell("a", &[(0, 1, 1), (1, 1, 1)]),
+        "{\"id\": \"b\", \"steps\": [{\"layer\": 1, \"at\": [1, 1], \"proto\": \"Bad\"}, {\"layer\": 2, \"at\": [1, 1], \"proto\": \"stairs_up\"}]}"
+    ))
+    .into_iter()
+    .map(|(code, line, _)| (code, line))
+    .collect();
+    assert_eq!(codes, [("stairwell.overlap", 3), ("shape.identifier", 3)]);
+    // Both coordinates are checked.
+    let codes: Vec<_> = found(
+        "{\"id\": \"s\", \"steps\": [{\"layer\": 0, \"at\": [\"x\", \"y\"], \"proto\": \"stairs_up\"}, {\"layer\": 1, \"at\": [1, 1], \"proto\": \"stairs_up\"}]}",
+    )
+    .into_iter()
+    .map(|(code, _, _)| code)
+    .collect();
+    assert_eq!(codes, ["shape.type", "shape.type"]);
     // Each member of a step is checked.
     let messages: Vec<_> = found(
         "{\"id\": \"s\", \"steps\": [{}, {\"layer\": 1, \"at\": [1, 1], \"proto\": \"stairs_up\"}]}",

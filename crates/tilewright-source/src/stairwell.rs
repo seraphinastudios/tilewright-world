@@ -5,7 +5,7 @@
 
 use crate::diagnostic::Diagnostics;
 use crate::{
-    Code, Stairwell, StairwellDirection, StairwellStep,
+    Code, Stairwell, StairwellDirection, StairwellStep, adjacent,
     files::Tree,
     read::Reader,
     schema::{References, Target},
@@ -50,7 +50,7 @@ pub(crate) fn read_stairwells(
         };
         let position = names.len();
         names.push(entry.id.clone());
-        let mut ok = entry.steps.complete && entry.rest.is_some();
+        let mut ok = entry.rest.is_some();
         if let Some(id) = &entry.id
             && !ids.insert(id.clone())
         {
@@ -62,8 +62,8 @@ pub(crate) fn read_stairwells(
             );
             ok = false;
         }
-        for (value, step) in &entry.steps.parsed {
-            let tile = (step.layer, step.at[0], step.at[1]);
+        for (value, (layer, at)) in &entry.steps.positions {
+            let tile = (*layer, at[0], at[1]);
             if let Some(other) = tiles.get(&tile) {
                 let other = names.get(*other).and_then(Option::as_ref).map_or_else(
                     || "an earlier stairwell".to_owned(),
@@ -82,19 +82,14 @@ pub(crate) fn read_stairwells(
                 tiles.insert(tile, position);
             }
         }
-        if let (true, Some(id), Some((direction, hidden_on_other_layers, custom))) =
-            (ok, entry.id, entry.rest)
+        if let (true, Some(id), Some(steps), Some((direction, hidden_on_other_layers, custom))) =
+            (ok, entry.id, entry.steps.steps, entry.rest)
         {
             stairwells.insert(
                 id.clone(),
                 Stairwell {
                     id,
-                    steps: entry
-                        .steps
-                        .parsed
-                        .into_iter()
-                        .map(|(_, step)| step)
-                        .collect(),
+                    steps,
                     direction,
                     hidden_on_other_layers,
                     custom,
@@ -114,12 +109,16 @@ struct Entry<'a> {
     rest: Option<(StairwellDirection, bool, Option<String>)>,
 }
 
-/// The steps of an entry that parse, with their values, and whether the
-/// list was complete and connected.
+/// A step's layer and plane coordinates.
+type Position = (i32, [i64; 2]);
+
+/// The steps of an entry: the position of every step whose position
+/// parses, with its value, for overlap checks; and the steps themselves
+/// when they are complete and connected.
 #[derive(Default)]
 struct Steps<'a> {
-    parsed: Vec<(&'a Value, StairwellStep)>,
-    complete: bool,
+    positions: Vec<(&'a Value, Position)>,
+    steps: Option<Vec<StairwellStep>>,
 }
 
 /// Reads one entry, reporting every problem in it. `None` when it is not an
@@ -172,9 +171,10 @@ fn read_entry<'a>(
     Some(Entry { id, steps, rest })
 }
 
-/// Reads every step. The list is complete when it has at least two steps,
-/// every one parses, and each follows the step before it; each pair of
-/// adjacent steps that parse is checked.
+/// Reads every step. Each step's position (`layer` and `at`) is checked
+/// against the position before it whenever both parse, and its prototype on
+/// its own. The steps are complete when there are at least two, every one
+/// parses, and each follows the one before it.
 fn read_steps<'a>(reader: &Reader<'a>, value: &'a Value, references: &References) -> Steps<'a> {
     let Some(items) = reader.array(value) else {
         return Steps::default();
@@ -187,20 +187,22 @@ fn read_steps<'a>(reader: &Reader<'a>, value: &'a Value, references: &References
             "a stairwell has at least two steps",
         );
     }
-    let mut parsed: Vec<(&Value, StairwellStep)> = Vec::with_capacity(items.len());
-    // Whether the steps go up; the first two adjacent steps set it.
+    let mut positions: Vec<(&Value, Position)> = Vec::with_capacity(items.len());
+    let mut steps = Vec::with_capacity(items.len());
+    // Whether the steps go up; the first two adjacent positions set it.
     let mut up = None;
-    // Whether the last parsed step is the one just before this item.
-    let mut previous_read = false;
+    // The position of the item just before this one, if it parsed.
+    let mut previous: Option<Position> = None;
     for item in items {
-        let Some(step) = read_step(reader, item, references) else {
+        let (position, proto) = read_step(reader, item, references);
+        let Some(position) = position else {
             complete = false;
-            previous_read = false;
+            previous = None;
             continue;
         };
-        if let Some((_, previous)) = parsed.last().filter(|_| previous_read) {
-            let going_up = up.unwrap_or(step.layer > previous.layer);
-            if previous.leads_to(&step, going_up) {
+        if let Some(before) = previous {
+            let going_up = up.unwrap_or(position.0 > before.0);
+            if adjacent(before, position, going_up) {
                 up = Some(going_up);
             } else {
                 reader.report(
@@ -211,19 +213,33 @@ fn read_steps<'a>(reader: &Reader<'a>, value: &'a Value, references: &References
                 complete = false;
             }
         }
-        parsed.push((item, step));
-        previous_read = true;
+        previous = Some(position);
+        positions.push((item, position));
+        match proto {
+            Some(proto) => steps.push(StairwellStep {
+                layer: position.0,
+                at: position.1,
+                proto,
+            }),
+            None => complete = false,
+        }
     }
-    Steps { parsed, complete }
+    Steps {
+        positions,
+        steps: complete.then_some(steps),
+    }
 }
 
-/// Reads one step, checking each of its members.
+/// Reads one step, checking each of its members: its position (`layer` and
+/// `at`) and its prototype, each `None` when invalid.
 fn read_step<'a>(
     reader: &Reader<'a>,
     item: &'a Value,
     references: &References,
-) -> Option<StairwellStep> {
-    let step = reader.object(item, &["layer", "at", "proto"])?;
+) -> (Option<Position>, Option<String>) {
+    let Some(step) = reader.object(item, &["layer", "at", "proto"]) else {
+        return (None, None);
+    };
     let layer = reader
         .required(step, "layer")
         .and_then(|value| reader.i32(value));
@@ -242,9 +258,5 @@ fn read_step<'a>(
         );
         Some(proto)
     });
-    Some(StairwellStep {
-        layer: layer?,
-        at: at?,
-        proto: proto?,
-    })
+    (layer.zip(at), proto)
 }
