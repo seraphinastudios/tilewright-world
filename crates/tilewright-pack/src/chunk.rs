@@ -354,6 +354,10 @@ pub fn decode_chunk(data: &[u8]) -> Result<ChunkData, DecodeError> {
     if data.len() > MAXIMUM_CHUNK_BYTES {
         return invalid(format!("stored chunk exceeds {MAXIMUM_CHUNK_BYTES} bytes"));
     }
+    // Exactly one frame, so the size it records is the whole decoded size.
+    if zstd::zstd_safe::find_frame_compressed_size(data).ok() != Some(data.len()) {
+        return invalid("not exactly one zstd frame");
+    }
     match zstd::zstd_safe::get_frame_content_size(data) {
         Ok(Some(size)) if size <= MAXIMUM_RECORD_BYTES as u64 => {}
         Ok(Some(_)) => return invalid("record exceeds 16 MiB"),

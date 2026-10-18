@@ -10,9 +10,11 @@
 //! reported as a [`Diagnostic`] with its file, byte span and a stable code.
 //! A world is returned only when there are no diagnostics at all.
 //!
-//! On Unix every path component is opened through its parent directory's
-//! handle without following symbolic links, so a link swapped into the tree
-//! during a load is never followed. Other platforms check each component by
+//! The root path is resolved as the caller gives it and may be a link;
+//! nothing beneath it is followed. On Unix every path component beneath the
+//! root is opened through its parent directory's handle without following
+//! symbolic links, so a link swapped into the tree during a load is never
+//! followed. Other platforms check each component by
 //! path before using it; that is a best effort which a local process changing
 //! the tree during the load can race. Race-free loading is Unix-only.
 //!

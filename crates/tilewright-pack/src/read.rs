@@ -79,8 +79,14 @@ pub struct Pack {
 
 /// Percent-encodes a path for an SQLite URI. On Unix the path's bytes are
 /// encoded as they are, so paths that are not UTF-8 open too.
-fn uri(path: &Path) -> Result<String, Error> {
-    let absolute = std::path::absolute(path)?;
+#[cfg_attr(
+    unix,
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "only platforms whose paths must be UTF-8 can fail"
+    )
+)]
+fn uri(absolute: &Path) -> Result<String, Error> {
     #[cfg(unix)]
     let bytes = std::os::unix::ffi::OsStrExt::as_bytes(absolute.as_os_str());
     #[cfg(not(unix))]
@@ -195,11 +201,14 @@ impl Pack {
     /// # Errors
     /// Returns an error if the file is not a pack of this format.
     pub fn open(path: &Path) -> Result<Self, Error> {
-        if !std::fs::metadata(path)?.is_file() {
+        // The same absolute path opens the database and is hashed later, so
+        // a change of working directory cannot point them at different files.
+        let path = std::path::absolute(path)?;
+        if !std::fs::metadata(&path)?.is_file() {
             return Err(Error::Invalid(format!("{} is not a file", path.display())));
         }
         let connection = Connection::open_with_flags(
-            uri(path)?,
+            uri(&path)?,
             OpenFlags::SQLITE_OPEN_READ_ONLY
                 | OpenFlags::SQLITE_OPEN_URI
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -210,7 +219,7 @@ impl Pack {
         check_identity(&connection)?;
         Ok(Self {
             connection,
-            path: Some(path.to_path_buf()),
+            path: Some(path),
         })
     }
 
@@ -868,16 +877,46 @@ impl Targets<'_> {
         };
         for (name, value) in &object.fields {
             ok &= self.string(*name);
-            if let FieldRecord::String(id) = value {
-                ok &= self.string(*id);
+            match value {
+                FieldRecord::String(id) => ok &= self.string(*id),
+                FieldRecord::Integer(number) => {
+                    ok &= (-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER).contains(number);
+                }
+                _ => {}
             }
         }
         if ok {
             Ok(())
         } else {
             Err(Error::Invalid(
-                "an object references a missing string, layer, plane or anchor, or a portal position out of range".into(),
+                "an object references a missing string, layer, plane or anchor, or has a portal position or integer field out of range".into(),
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Pack;
+    use std::path::Path;
+
+    #[test]
+    fn packs_keep_the_absolute_path_they_opened() {
+        // Unit tests run in the package directory, so this path is relative.
+        let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+        std::fs::create_dir_all(&target).unwrap();
+        let directory = tempfile::tempdir_in(&target).unwrap();
+        let world = tilewright_source::load(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/basic"),
+        )
+        .unwrap();
+        let written = crate::write_pack(&world, directory.path()).unwrap();
+        let relative = Path::new("../../target")
+            .join(directory.path().file_name().unwrap())
+            .join(written.path.file_name().unwrap());
+        let pack = Pack::open(&relative).unwrap();
+        let path = pack.path.as_ref().unwrap();
+        assert!(path.is_absolute(), "{}", path.display());
+        pack.verify().unwrap();
     }
 }

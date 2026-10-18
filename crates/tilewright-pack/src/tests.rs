@@ -1013,3 +1013,51 @@ fn verification_stops_at_its_decoded_byte_budget() {
     assert!(error.to_string().contains("verification limit"), "{error}");
     assert!(pack.verify_with(&limits(0)).is_err());
 }
+
+#[test]
+fn chunks_are_exactly_one_frame() {
+    let single = encode_chunk(&small_chunk()).unwrap();
+    let empty = zstd::bulk::compress(&[], 1).unwrap();
+    let mut prefixed = empty.clone();
+    prefixed.extend_from_slice(&single);
+    let mut suffixed = single.clone();
+    suffixed.extend_from_slice(&empty);
+    for data in [&prefixed, &suffixed] {
+        let error = decode_chunk(data).unwrap_err();
+        assert!(error.to_string().contains("one zstd frame"), "{error}");
+    }
+
+    let (_directory, copy) = tampered("frames.twpack", "SELECT 1");
+    let stored: Vec<u8> = Connection::open(&copy)
+        .unwrap()
+        .query_row("SELECT data FROM chunks WHERE plane = 'vault'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let mut data = empty;
+    data.extend_from_slice(&stored);
+    Connection::open(&copy)
+        .unwrap()
+        .execute("UPDATE chunks SET data = ?1 WHERE plane = 'vault'", [data])
+        .unwrap();
+    let error = Pack::open(&copy).unwrap().verify().unwrap_err();
+    assert!(error.to_string().contains("one zstd frame"), "{error}");
+}
+
+#[test]
+fn integer_fields_must_be_within_the_source_range() {
+    let (_directory, copy) = tampered("integer.twpack", "SELECT 1");
+    let pack = Pack::open(&copy).unwrap();
+    let mut chunk = pack.chunk("vault", 0, 0, 0).unwrap().unwrap();
+    drop(pack);
+    chunk.objects[0].fields[0].1 = FieldRecord::Integer(i64::MAX);
+    Connection::open(&copy)
+        .unwrap()
+        .execute(
+            "UPDATE chunks SET data = ?1 WHERE plane = 'vault'",
+            [encode_chunk(&chunk).unwrap()],
+        )
+        .unwrap();
+    let error = Pack::open(&copy).unwrap().verify().unwrap_err();
+    assert!(error.to_string().contains("integer field"), "{error}");
+}

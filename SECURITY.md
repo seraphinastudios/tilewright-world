@@ -7,9 +7,11 @@ depth and count limits while reading, reject malformed data with stable error
 codes, and never execute content. Tools write only to explicit output paths and
 never overwrite source files except through validated span edits.
 
-Loading a source tree never follows a symbolic link. On Unix this holds even
-if the tree changes during the load, because every component is opened
-through its parent directory's handle. On other platforms components are
+Loading a source tree never follows a symbolic link beneath its root. The
+root path itself is resolved as the caller gives it, so it may be, or pass
+through, a link. On Unix this holds even if the tree changes during the load,
+because every component beneath the root is opened through its parent
+directory's handle. On other platforms components are
 checked by path first, which a local process changing the tree at the same
 time can race. Sources are local checkouts, so a race needs a local attacker.
 
