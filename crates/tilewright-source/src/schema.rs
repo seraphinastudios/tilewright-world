@@ -5,8 +5,7 @@
 
 use crate::diagnostic::Diagnostics;
 use crate::{
-    Code, Definition, Diagnostic, FieldValue, Plane, Profile,
-    diagnostic::Location,
+    Code, FieldValue, Plane, Profile,
     files::Tree,
     read::{Reader, is_identifier},
 };
@@ -249,91 +248,56 @@ impl Target {
     }
 }
 
-/// References of one load. Each is resolved as soon as its target set is
-/// known: render layers at once, definitions once every definition is read.
-/// Only the rest wait, each target stored once with compact locations.
+/// What references of one load may resolve to. Every target set is known
+/// before any reference to it is read, so each reference is checked as it
+/// is read and none is kept: render layers from the profile, definition keys
+/// from the `defs/` layout before any definition is parsed, and planes and
+/// their anchors before any chunk is read.
 pub(crate) struct References {
     render_layers: BTreeSet<String>,
-    /// Definition IDs by type, once every definition is read.
-    definitions: Option<BTreeMap<String, BTreeSet<String>>>,
-    pending: BTreeMap<Target, Vec<Location>>,
+    /// Definition IDs by type, from the file names under `defs/`.
+    definitions: BTreeMap<String, BTreeSet<String>>,
+    /// Anchor IDs by plane, for every plane that loaded.
+    planes: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl References {
     pub fn new(profile: &Profile) -> Self {
         Self {
             render_layers: profile.render_layers.iter().cloned().collect(),
-            definitions: None,
-            pending: BTreeMap::new(),
+            definitions: BTreeMap::new(),
+            planes: BTreeMap::new(),
         }
     }
 
-    /// Whether `target` resolves, when that is already known.
-    pub fn resolves(&self, target: &Target) -> Option<bool> {
+    /// Records the definitions the `defs/` layout holds, before any is read.
+    pub fn definitions_listed(&mut self, keys: impl IntoIterator<Item = (String, String)>) {
+        for (kind, id) in keys {
+            self.definitions.entry(kind).or_default().insert(id);
+        }
+    }
+
+    /// Records a plane that loaded, with its anchors, before any chunk is
+    /// read.
+    pub fn plane_read(&mut self, plane: &Plane) {
+        self.planes
+            .insert(plane.id.clone(), plane.anchors.keys().cloned().collect());
+    }
+
+    /// Whether `target` resolves.
+    pub fn resolves(&self, target: &Target) -> bool {
         match target {
-            Target::RenderLayer(layer) => Some(self.render_layers.contains(layer)),
+            Target::RenderLayer(layer) => self.render_layers.contains(layer),
             Target::Definition { kind, id } => self
                 .definitions
-                .as_ref()
-                .map(|definitions| definitions.get(kind).is_some_and(|ids| ids.contains(id))),
-            Target::Plane(_) | Target::Anchor { .. } => None,
+                .get(kind)
+                .is_some_and(|ids| ids.contains(id)),
+            Target::Plane(plane) => self.planes.contains_key(plane),
+            Target::Anchor { plane, id } => self
+                .planes
+                .get(plane)
+                .is_some_and(|anchors| anchors.contains(id)),
         }
-    }
-
-    /// Records a reference whose target set is not known yet.
-    pub fn defer(&mut self, target: Target, location: Location) {
-        self.pending.entry(target).or_default().push(location);
-    }
-
-    /// Resolves waiting definition references once every definition is read;
-    /// later ones resolve at once.
-    pub fn definitions_read(
-        &mut self,
-        definitions: &BTreeMap<(String, String), Definition>,
-        diagnostics: &mut Diagnostics,
-    ) {
-        let mut ids: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for (kind, id) in definitions.keys() {
-            ids.entry(kind.clone()).or_default().insert(id.clone());
-        }
-        self.pending.retain(|target, locations| {
-            let Target::Definition { kind, id } = target else {
-                return true;
-            };
-            if !ids.get(kind).is_some_and(|known| known.contains(id)) {
-                report(target, locations, diagnostics);
-            }
-            false
-        });
-        self.definitions = Some(ids);
-    }
-
-    /// Resolves what is left once every plane is read.
-    pub fn check(self, planes: &BTreeMap<String, Plane>, diagnostics: &mut Diagnostics) {
-        for (target, locations) in &self.pending {
-            let resolved = match target {
-                Target::Plane(plane) => planes.contains_key(plane),
-                Target::Anchor { plane, id } => planes
-                    .get(plane)
-                    .is_some_and(|plane| plane.anchors.contains_key(id)),
-                Target::Definition { .. } | Target::RenderLayer(_) => {
-                    self.resolves(target) == Some(true)
-                }
-            };
-            if !resolved {
-                report(target, locations, diagnostics);
-            }
-        }
-    }
-}
-
-fn report(target: &Target, locations: &[Location], diagnostics: &mut Diagnostics) {
-    for location in locations {
-        diagnostics.push(Diagnostic::located(
-            location,
-            Code::Reference,
-            target.message(),
-        ));
     }
 }
 
@@ -459,7 +423,7 @@ fn check_field<'a>(
             }
             reader.reference(
                 references,
-                Target::Definition {
+                &Target::Definition {
                     kind: target.clone(),
                     id: id.to_owned(),
                 },
@@ -474,53 +438,32 @@ fn check_field<'a>(
 #[cfg(test)]
 mod tests {
     use super::{References, Target};
-    use crate::{diagnostic::Diagnostics, files::Source, read::Reader};
     use std::path::Path;
-    use tilewright_jsonc::{Document, Limits, Span};
 
     #[test]
-    fn references_resolve_as_soon_as_their_targets_are_known() {
+    fn references_resolve_against_what_is_known_before_they_are_read() {
         let world =
             crate::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/basic"))
                 .expect("the fixture is valid");
-        let mut references = References::new(&world.profile);
-        let mut diagnostics = Diagnostics::new(100);
+        let mut references = References::new(world.profile());
         let proto = |id: &str| Target::Definition {
             kind: "proto".to_owned(),
             id: id.to_owned(),
         };
-        let source = Source {
-            path: "a.jsonc".to_owned(),
-            document: Document::parse("{}", &Limits::default()).unwrap(),
+        let anchor = Target::Anchor {
+            plane: "overworld".to_owned(),
+            id: "village.well".to_owned(),
         };
-        let span = Span { start: 0, end: 2 };
-        {
-            let reader = Reader::new(&source, &mut diagnostics);
-            reader.reference(
-                &mut references,
-                Target::RenderLayer("wall".to_owned()),
-                span,
-            );
-            reader.reference(&mut references, proto("tree"), span);
-        }
-        assert_eq!(references.pending.len(), 1, "definitions wait until read");
-        references.definitions_read(&world.definitions, &mut diagnostics);
-        assert!(references.pending.is_empty());
-        {
-            let reader = Reader::new(&source, &mut diagnostics);
-            reader.reference(&mut references, proto("tree"), span);
-            reader.reference(&mut references, proto("missing"), span);
-            let anchor = Target::Anchor {
-                plane: "overworld".to_owned(),
-                id: "village.well".to_owned(),
-            };
-            reader.reference(&mut references, anchor.clone(), span);
-            reader.reference(&mut references, anchor, span);
-        }
-        assert_eq!(references.pending.len(), 1, "one entry per target");
-        assert_eq!(references.pending.values().next().unwrap().len(), 2);
-        let found = diagnostics.finish();
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].message, "no proto definition \"missing\"");
+        assert!(references.resolves(&Target::RenderLayer("wall".to_owned())));
+        assert!(!references.resolves(&Target::RenderLayer("roof".to_owned())));
+        assert!(!references.resolves(&proto("tree")));
+        assert!(!references.resolves(&anchor));
+        references.definitions_listed(world.definitions().keys().cloned());
+        references.plane_read(&world.planes()["overworld"]);
+        assert!(references.resolves(&proto("tree")));
+        assert!(!references.resolves(&proto("missing")));
+        assert!(references.resolves(&anchor));
+        assert!(references.resolves(&Target::Plane("overworld".to_owned())));
+        assert!(!references.resolves(&Target::Plane("vault".to_owned())));
     }
 }

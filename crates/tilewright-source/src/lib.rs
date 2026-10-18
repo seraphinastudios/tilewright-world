@@ -345,12 +345,10 @@ fn load_tree(tree: &mut files::Tree, diagnostics: &mut Diagnostics) -> Option<Wo
     let profile = profile::read_profile(tree, &manifest_path, diagnostics)?;
     let mut references = schema::References::new(&profile);
     let definitions = defs::read_definitions(tree, &profile, &mut references, diagnostics);
-    references.definitions_read(&definitions, diagnostics);
     let mut planes = BTreeMap::new();
     for plane in plane::read_planes(tree, &profile, &plane_ids, &mut references, diagnostics) {
         planes.insert(plane.id.clone(), plane);
     }
-    references.check(&planes, diagnostics);
     Some(World {
         profile,
         planes,

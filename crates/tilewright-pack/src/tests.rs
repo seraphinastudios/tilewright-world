@@ -1158,3 +1158,33 @@ fn streaming_decodes_visit_every_object_and_keep_none() {
         11
     );
 }
+
+#[test]
+fn stored_document_custom_data_is_namespaced() {
+    let (_directory, copy) = tampered(
+        "custom.twpack",
+        "UPDATE planes SET document = replace(document, '}', ',\"custom\":{\"x\":1}}') WHERE id = 'vault'",
+    );
+    let error = Pack::open(&copy).unwrap().verify().unwrap_err();
+    assert!(
+        error.to_string().contains("namespaced custom data"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_pack_file_is_exactly_its_pages() {
+    let directory = tempfile::tempdir().unwrap();
+    let written = write_pack(&world(), directory.path()).unwrap();
+    for (name, extend) in [("trailing.twpack", 1_u64), ("sparse.twpack", 1 << 40)] {
+        let copy = directory.path().join(name);
+        std::fs::copy(&written.path, &copy).unwrap();
+        let file = std::fs::OpenOptions::new().write(true).open(&copy).unwrap();
+        file.set_len(written.bytes + extend).unwrap();
+        let error = Pack::open(&copy).err().unwrap();
+        assert!(
+            error.to_string().contains("pages of 4096 bytes"),
+            "{name}: {error}"
+        );
+    }
+}

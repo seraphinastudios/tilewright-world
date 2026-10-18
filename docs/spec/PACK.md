@@ -105,7 +105,9 @@ loading it, and never load a whole table into memory. Readers:
   `application_id` is `"TWP1"`, its `user_version` is 1, and `meta` holds
   exactly the keys of section 1, as text of at most 64 MiB for `profile` and
   1 KiB for the others, names this format and encoding, and has a lowercase
-  hex `source_digest`;
+  hex `source_digest`, its pages are 4096 bytes, and the file is exactly its
+  pages: its length is `page_count × 4096`, with nothing, not even a sparse
+  hole, after the last page;
 - reject any chunk row whose `encoding` is not `twc1+zstd`, or whose `data` is
   not a blob within the bound of section 2, even when reading a single chunk;
 - reject a string that is not text of at most 1 MiB, the source format's
@@ -124,7 +126,8 @@ sum of the decoded sizes the chunks' zstd frames record. It fails as soon as
 the next chunk would pass the budget, before decompressing that chunk. The
 `tilewright inspect` command sets the budget with `--max-decoded-bytes`.
 Verification checks each chunk's objects as they decode instead of building
-the chunk's object model, so its memory stays bounded by one record.
+the chunk's object model, and keeps its target lookups in caches of bounded
+size, so its memory stays bounded by one record.
 
 A full verification also:
 
@@ -142,7 +145,8 @@ A full verification also:
   and chunk planes, layers and coordinates, which keep every tile within the
   source format's integer range;
 - checks that every `document` column, and the `profile` meta value, is
-  canonical JSON of an object of at most 64 MiB whose identity agrees with
+  canonical JSON of an object of at most 64 MiB, whose `custom` data, if any,
+  has domain-qualified namespace keys, and whose identity agrees with
   its row: `format`, `id`, `kind` and `chunk_size` for planes, `id` and
   `parent` for zones, `format`, `type` and `id` for definitions, and `format`,
   `id` and `version` against `profile_id` and `profile_version` for the

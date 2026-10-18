@@ -108,7 +108,7 @@ pub(crate) fn read_chunk(
                         for value_name in &grid.palette {
                             reader.reference(
                                 references,
-                                Target::Definition {
+                                &Target::Definition {
                                     kind: "proto".to_owned(),
                                     id: value_name.clone(),
                                 },
@@ -388,7 +388,7 @@ fn read_object<'a>(
     let proto = reader.identifier(proto_value)?;
     reader.reference(
         context.references,
-        Target::Definition {
+        &Target::Definition {
             kind: "proto".to_owned(),
             id: proto.clone(),
         },
@@ -399,7 +399,7 @@ fn read_object<'a>(
             let layer = reader.identifier(layer_value)?;
             reader.reference(
                 context.references,
-                Target::RenderLayer(layer.clone()),
+                &Target::RenderLayer(layer.clone()),
                 layer_value.span(),
             );
             Some(layer)
@@ -472,7 +472,7 @@ fn read_portal<'a>(
             let plane = reader.identifier(plane_value)?;
             reader.reference(
                 context.references,
-                Target::Plane(plane.clone()),
+                &Target::Plane(plane.clone()),
                 plane_value.span(),
             );
             Some(plane)
@@ -485,7 +485,7 @@ fn read_portal<'a>(
         let anchor = reader.identifier(anchor_value)?;
         reader.reference(
             context.references,
-            Target::Anchor {
+            &Target::Anchor {
                 plane: target_plane.clone(),
                 id: anchor.clone(),
             },

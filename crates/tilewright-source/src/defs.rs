@@ -22,6 +22,10 @@ pub(crate) fn read_definitions(
     if !tree.container("defs") {
         return definitions;
     }
+    // A definition's key comes from its path, so the whole layout is listed
+    // before any document is read: references between definitions then
+    // resolve as they are read.
+    let mut files = Vec::new();
     for type_entry in tree.list("defs") {
         let directory = join("defs", &type_entry.name);
         let Some(schema) = profile
@@ -50,41 +54,49 @@ pub(crate) fn read_definitions(
                 ));
                 continue;
             };
-            let Some(source) = tree.document(&path) else {
-                continue;
-            };
-            let reader = Reader::new(&source, diagnostics);
-            let Some(root) =
-                reader.object(reader.root(), &["format", "type", "id", "fields", "custom"])
-            else {
-                continue;
-            };
-            let mut ok = reader.format(root, "tilewright.def/1");
-            for (key, expected) in [("type", type_entry.name.as_str()), ("id", id)] {
-                match reader.required(root, key) {
-                    Some(value) if value.as_str() == Some(expected) => {}
-                    Some(value) => {
-                        reader.report(
-                            value.span(),
-                            Code::NameMismatch,
-                            format!("{key} must be \"{expected}\" to match the path"),
-                        );
-                        ok = false;
-                    }
-                    None => ok = false,
+            files.push((type_entry.name.clone(), id.to_owned(), path, schema));
+        }
+    }
+    references.definitions_listed(
+        files
+            .iter()
+            .map(|(kind, id, _, _)| (kind.clone(), id.clone())),
+    );
+    for (kind, id, path, schema) in files {
+        let Some(source) = tree.document(&path) else {
+            continue;
+        };
+        let reader = Reader::new(&source, diagnostics);
+        let Some(root) =
+            reader.object(reader.root(), &["format", "type", "id", "fields", "custom"])
+        else {
+            continue;
+        };
+        let mut ok = reader.format(root, "tilewright.def/1");
+        for (key, expected) in [("type", kind.as_str()), ("id", id.as_str())] {
+            match reader.required(root, key) {
+                Some(value) if value.as_str() == Some(expected) => {}
+                Some(value) => {
+                    reader.report(
+                        value.span(),
+                        Code::NameMismatch,
+                        format!("{key} must be \"{expected}\" to match the path"),
+                    );
+                    ok = false;
                 }
+                None => ok = false,
             }
-            let fields = read_fields(&reader, root, root.get("fields"), schema, references);
-            reader.custom(root);
-            if let (true, Some(fields)) = (ok, fields) {
-                definitions.insert(
-                    (type_entry.name.clone(), id.to_owned()),
-                    Definition {
-                        fields,
-                        canonical: reader.canonical(root),
-                    },
-                );
-            }
+        }
+        let fields = read_fields(&reader, root, root.get("fields"), schema, references);
+        reader.custom(root);
+        if let (true, Some(fields)) = (ok, fields) {
+            definitions.insert(
+                (kind, id),
+                Definition {
+                    fields,
+                    canonical: reader.canonical(root),
+                },
+            );
         }
     }
     definitions

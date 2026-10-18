@@ -7,14 +7,13 @@
 use crate::diagnostic::Diagnostics;
 use crate::{
     Code, Diagnostic, FieldValue,
-    diagnostic::{Location, Positions},
+    diagnostic::Positions,
     files::Source,
     schema::{References, Target},
 };
 use std::{
     cell::{OnceCell, RefCell},
     collections::BTreeSet,
-    sync::Arc,
 };
 use tilewright_jsonc::{MAX_SAFE_INTEGER, Member, Span, Value};
 
@@ -47,8 +46,6 @@ pub(crate) struct Reader<'a> {
     diagnostics: RefCell<&'a mut Diagnostics>,
     /// Built at the first diagnostic.
     positions: OnceCell<Positions<'a>>,
-    /// The document's path, shared by its deferred references.
-    path: OnceCell<Arc<str>>,
 }
 
 impl<'a> Reader<'a> {
@@ -57,7 +54,6 @@ impl<'a> Reader<'a> {
             source,
             diagnostics: RefCell::new(diagnostics),
             positions: OnceCell::new(),
-            path: OnceCell::new(),
         }
     }
 
@@ -66,25 +62,10 @@ impl<'a> Reader<'a> {
             .get_or_init(|| Positions::new(self.source.document.source()))
     }
 
-    /// Checks a reference now when its target set is known, else defers it.
-    pub fn reference(&self, references: &mut References, target: Target, span: Span) {
-        match references.resolves(&target) {
-            Some(true) => {}
-            Some(false) => self.report(span, Code::Reference, target.message()),
-            None => {
-                let (line, column) = self.positions().locate(span.start);
-                let location = Location {
-                    path: self
-                        .path
-                        .get_or_init(|| Arc::from(self.source.path.as_str()))
-                        .clone(),
-                    start: span.start,
-                    end: span.end,
-                    line,
-                    column,
-                };
-                references.defer(target, location);
-            }
+    /// Reports a reference that does not resolve.
+    pub fn reference(&self, references: &References, target: &Target, span: Span) {
+        if !references.resolves(target) {
+            self.report(span, Code::Reference, target.message());
         }
     }
 

@@ -13,7 +13,7 @@ use crate::{
         CHUNK_ENCODING, ChunkData, DecodeError, FieldRecord, MAXIMUM_CHUNK_BYTES, ObjectRecord,
         PortalRecord, Visit, decode_chunk_with,
     },
-    is_field_name, is_identifier,
+    is_field_name, is_identifier, is_namespace,
 };
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Statement, config::DbConfig, params, types,
@@ -184,11 +184,24 @@ fn bounded_text(column: &str) -> String {
 
 /// Parses a stored document, which must be canonical JSON of an object.
 fn stored_document(text: Option<String>, what: &str) -> Result<Document, Error> {
-    let invalid = || Error::Invalid(format!("{what} is not canonical JSON of an object"));
+    let invalid = || {
+        Error::Invalid(format!(
+            "{what} is not canonical JSON of an object with namespaced custom data"
+        ))
+    };
     let document = Document::parse(text.ok_or_else(invalid)?, &crate::canonical_limits())
         .map_err(|_| invalid())?;
+    // `custom` data, where a document has it, is keyed by namespaces as in
+    // the source format.
+    let custom_ok = match document.root().get("custom") {
+        None => true,
+        Some(custom) => custom
+            .as_object()
+            .is_some_and(|members| members.iter().all(|member| is_namespace(&member.key))),
+    };
     if document.root().as_object().is_none()
         || document.canonical(document.root()) != document.source()
+        || !custom_ok
     {
         return Err(invalid());
     }
@@ -222,6 +235,19 @@ impl Pack {
         connection.set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)?;
         connection.execute_batch("PRAGMA query_only = ON")?;
         check_identity(&connection)?;
+        // A pack is exactly its database: nothing, not even a sparse hole,
+        // follows the last page, so hashing it never reads past the pages.
+        let pages: i64 = connection.query_row("PRAGMA page_count", [], |row| row.get(0))?;
+        let length = std::fs::metadata(&path)?.len();
+        if u64::try_from(pages)
+            .ok()
+            .and_then(|pages| pages.checked_mul(PAGE_SIZE.unsigned_abs()))
+            != Some(length)
+        {
+            return Err(Error::Invalid(format!(
+                "the file is {length} bytes, not its {pages} pages of {PAGE_SIZE} bytes"
+            )));
+        }
         Ok(Self {
             connection,
             path: Some(path),
@@ -816,9 +842,9 @@ fn read_meta(connection: &Connection) -> Result<Vec<(String, String)>, Error> {
 
 /// What chunk records may reference. Strings are checked by ID, since
 /// verification has proven IDs are `1..=strings`. Every other lookup is
-/// cached per distinct ID, so checking an object costs map lookups rather
-/// than queries, and verification work stays proportional to the decoded
-/// bytes its budget bounds.
+/// cached per distinct ID in a cache of bounded size, so checking an object
+/// costs map lookups and at worst a query per object: memory stays bounded
+/// and work stays proportional to the decoded bytes its budget bounds.
 struct Targets<'c> {
     strings: u32,
     render_layers: usize,
@@ -845,6 +871,11 @@ struct Targets<'c> {
     own_anchors: BTreeMap<u32, bool>,
 }
 
+/// Entries kept per lookup cache. A full cache is cleared, so memory stays
+/// bounded however many distinct targets a pack names, and a lookup is at
+/// worst one query per object.
+const CACHE_ENTRIES: usize = 1 << 16;
+
 /// A cached boolean lookup.
 fn cached<K: Ord + Copy>(
     cache: &mut BTreeMap<K, bool>,
@@ -855,6 +886,9 @@ fn cached<K: Ord + Copy>(
         return Ok(*known);
     }
     let found = lookup()?;
+    if cache.len() >= CACHE_ENTRIES {
+        cache.clear();
+    }
     cache.insert(key, found);
     Ok(found)
 }
@@ -999,8 +1033,31 @@ impl Targets<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::Pack;
-    use std::path::Path;
+    use super::{CACHE_ENTRIES, Pack, cached};
+    use std::{collections::BTreeMap, path::Path};
+
+    #[test]
+    fn lookup_caches_stay_bounded() {
+        let mut cache = BTreeMap::new();
+        for key in 0..u32::try_from(CACHE_ENTRIES * 3).unwrap() {
+            assert!(cached(&mut cache, key, || Ok(true)).unwrap());
+            assert!(cache.len() <= CACHE_ENTRIES);
+        }
+        // The latest keys are kept and not looked up again; evicted ones are.
+        let last = u32::try_from(CACHE_ENTRIES * 3 - 1).unwrap();
+        let mut again = false;
+        let kept = cached(&mut cache, last, || {
+            again = true;
+            Ok(false)
+        });
+        assert!(kept.unwrap() && !again);
+        let mut queried = false;
+        let evicted = cached(&mut cache, 0, || {
+            queried = true;
+            Ok(false)
+        });
+        assert!(!evicted.unwrap() && queried);
+    }
 
     #[test]
     fn packs_keep_the_absolute_path_they_opened() {

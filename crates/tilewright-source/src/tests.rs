@@ -856,3 +856,32 @@ fn zones_are_listed_once_per_palette() {
     );
     assert!(has(&problems(copy.path()), "ref.duplicate", CHUNK));
 }
+
+#[test]
+fn portals_resolve_anchors_of_planes_read_later() {
+    // The overworld's chunks are read before the vault's, so this anchor
+    // resolves only because every plane's anchors are read before any chunk.
+    let copy = workspace();
+    let root = copy.path();
+    fs::write(
+        root.join("planes/vault/anchors.jsonc"),
+        "{\"format\": \"tilewright.anchors/1\", \"anchors\": [{\"id\": \"vault.door\", \"layer\": 0, \"at\": [1, 1]}]}\n",
+    )
+    .unwrap();
+    edit(
+        root,
+        CHUNK,
+        "\"portal\": {\"plane\": \"vault\", \"layer\": 0, \"at\": [1, 1]}",
+        "\"portal\": {\"plane\": \"vault\", \"anchor\": \"vault.door\"}",
+    );
+    let world = load(root).expect("the anchor resolves");
+    assert!(world.planes()["vault"].anchors.contains_key("vault.door"));
+    edit(root, CHUNK, "\"vault.door\"", "\"vault.window\"");
+    assert_eq!(
+        problems(root)
+            .iter()
+            .filter(|(code, path, _)| *code == "ref.unresolved" && path == CHUNK)
+            .count(),
+        1
+    );
+}

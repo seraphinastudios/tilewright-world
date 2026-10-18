@@ -52,6 +52,8 @@ pub(crate) fn read_planes(
     } else {
         BTreeSet::new()
     };
+    // Every plane's documents and anchors are read before any chunk, so
+    // portal planes and anchors resolve as chunks are read.
     let mut planes = Vec::new();
     for id in plane_ids {
         let directory = join("planes", id);
@@ -63,13 +65,33 @@ pub(crate) fn read_planes(
             ));
             continue;
         }
-        if let Some(plane) = read_plane(tree, profile, id, &directory, references, diagnostics) {
-            planes.push(plane);
+        if let Some((plane, has_layers)) =
+            read_plane(tree, profile, id, &directory, references, diagnostics)
+        {
+            references.plane_read(&plane);
+            planes.push((plane, has_layers, directory));
         }
     }
     planes
+        .into_iter()
+        .map(|(mut plane, has_layers, directory)| {
+            if has_layers {
+                read_layers(
+                    tree,
+                    profile,
+                    &mut plane,
+                    &directory,
+                    references,
+                    diagnostics,
+                );
+            }
+            plane
+        })
+        .collect()
 }
 
+/// Reads a plane's own documents: the plane, its zones and its anchors.
+/// Returns the plane and whether it has a `layers` directory.
 fn read_plane(
     tree: &mut Tree<'_>,
     profile: &Profile,
@@ -77,7 +99,7 @@ fn read_plane(
     directory: &str,
     references: &mut References,
     diagnostics: &mut Diagnostics,
-) -> Option<Plane> {
+) -> Option<(Plane, bool)> {
     let mut has_layers = false;
     for entry in tree.list(directory) {
         match (entry.name.as_str(), entry.kind) {
@@ -108,17 +130,7 @@ fn read_plane(
             format!("default zone \"{zone}\" is not in zones.jsonc"),
         ));
     }
-    if has_layers {
-        read_layers(
-            tree,
-            profile,
-            &mut plane,
-            directory,
-            references,
-            diagnostics,
-        );
-    }
-    Some(plane)
+    Some((plane, has_layers))
 }
 
 fn read_plane_document(
