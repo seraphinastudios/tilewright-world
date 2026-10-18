@@ -412,18 +412,26 @@ fn chunk_record(
 pub(crate) type TileStep<'w> = (&'w str, i64, &'w str);
 
 /// The steps of a plane's stairwells by tile, the `stairwell_steps` key, so
-/// they are inserted in primary-key order.
+/// they are inserted in primary-key order. The model is public, so each
+/// stairwell's ID, step count and step prototypes are checked against the
+/// source format's limits before anything is kept.
 pub(crate) fn stairwell_tiles(
     plane: &tilewright_source::Plane,
 ) -> Result<BTreeMap<(i32, i64, i64), TileStep<'_>>, Error> {
     let mut tiles = BTreeMap::new();
     for (id, stairwell) in &plane.stairwells {
+        let id = identifier(id)?;
+        if stairwell.steps.len() > Limits::default().max_array_items {
+            return Err(Error::Invalid(format!(
+                "stairwell {id} has more steps than a source array holds"
+            )));
+        }
         for (index, step) in stairwell.steps.iter().enumerate() {
             let index = i64::try_from(index)
                 .map_err(|_| Error::Invalid("a stairwell has too many steps".into()))?;
             let tile = (step.layer, step.at[0], step.at[1]);
             if tiles
-                .insert(tile, (id.as_str(), index, step.proto.as_str()))
+                .insert(tile, (id, index, identifier(&step.proto)?))
                 .is_some()
             {
                 return Err(Error::Invalid(format!(
@@ -442,6 +450,8 @@ fn insert_stairwells(
     id: &str,
     plane: &tilewright_source::Plane,
 ) -> Result<(), Error> {
+    // Checks every stairwell before any is inserted.
+    let tiles = stairwell_tiles(plane)?;
     let mut stairwells =
         connection.prepare("INSERT INTO stairwells (plane, id, document) VALUES (?1, ?2, ?3)")?;
     for (stairwell_id, stairwell) in &plane.stairwells {
@@ -450,7 +460,7 @@ fn insert_stairwells(
     let mut steps = connection.prepare(
         "INSERT INTO stairwell_steps (plane, layer, x, y, stairwell, step, proto) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
     )?;
-    for ((layer, x, y), (stairwell, step, proto)) in stairwell_tiles(plane)? {
+    for ((layer, x, y), (stairwell, step, proto)) in tiles {
         steps.execute(params![id, layer, x, y, stairwell, step, proto])?;
     }
     Ok(())

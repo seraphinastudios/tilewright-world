@@ -10,7 +10,7 @@ use crate::{
     read::Reader,
     schema::{References, Target},
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use tilewright_jsonc::Value;
 
 /// Reads a plane's stairwells. Steps resolve their prototypes as they are
@@ -36,25 +36,30 @@ pub(crate) fn read_stairwells(
     else {
         return stairwells;
     };
-    // The entry, by position in `items`, whose step holds each tile, across
-    // the plane.
+    // Every valid ID so far, and the entry, by position in `items`, whose
+    // step holds each tile across the plane. IDs are checked for every
+    // entry whose ID is valid, and tiles for every entry whose steps are,
+    // so one problem never hides another.
+    let mut ids = BTreeSet::new();
     let mut tiles: BTreeMap<(i32, i64, i64), usize> = BTreeMap::new();
     for (position, item) in items.iter().enumerate() {
-        let Some(stairwell) = read_stairwell(&reader, item, references) else {
+        let Some(entry) = read_entry(&reader, item, references) else {
             continue;
         };
-        if stairwells.contains_key(&stairwell.id) {
+        let mut ok = entry.rest.is_some();
+        if let Some(id) = &entry.id
+            && !ids.insert(id.clone())
+        {
             let span = item.get("id").map_or(item.span(), Value::span);
             reader.report(
                 span,
                 Code::Duplicate,
-                format!("stairwell \"{}\" is defined twice", stairwell.id),
+                format!("stairwell \"{id}\" is defined twice"),
             );
-            continue;
+            ok = false;
         }
-        let mut ok = true;
-        let steps = item.get("steps").and_then(Value::as_array).unwrap_or(&[]);
-        for (step, value) in stairwell.steps.iter().zip(steps) {
+        let values = item.get("steps").and_then(Value::as_array).unwrap_or(&[]);
+        for (step, value) in entry.steps.iter().flatten().zip(values) {
             let tile = (step.layer, step.at[0], step.at[1]);
             if let Some(other) = tiles.get(&tile) {
                 let other = items
@@ -75,18 +80,36 @@ pub(crate) fn read_stairwells(
                 tiles.insert(tile, position);
             }
         }
-        if ok {
-            stairwells.insert(stairwell.id.clone(), stairwell);
+        if let (true, Some(id), Some(steps), Some((direction, hidden_on_other_layers, custom))) =
+            (ok, entry.id, entry.steps, entry.rest)
+        {
+            stairwells.insert(
+                id.clone(),
+                Stairwell {
+                    id,
+                    steps,
+                    direction,
+                    hidden_on_other_layers,
+                    custom,
+                    canonical: reader.canonical(item),
+                },
+            );
         }
     }
     stairwells
 }
 
-fn read_stairwell<'a>(
-    reader: &Reader<'a>,
-    item: &'a Value,
-    references: &References,
-) -> Option<Stairwell> {
+/// The parts of a stairwell entry, each `None` when it is invalid: its ID,
+/// its steps, and the rest (direction, flag and custom data).
+struct Entry {
+    id: Option<String>,
+    steps: Option<Vec<StairwellStep>>,
+    rest: Option<(StairwellDirection, bool, Option<String>)>,
+}
+
+/// Reads one entry, reporting every problem in it. `None` when it is not an
+/// object.
+fn read_entry<'a>(reader: &Reader<'a>, item: &'a Value, references: &References) -> Option<Entry> {
     let entry = reader.object(
         item,
         &[
@@ -97,7 +120,9 @@ fn read_stairwell<'a>(
             "custom",
         ],
     )?;
-    let id = reader.identifier(reader.required(entry, "id")?);
+    let id = reader
+        .required(entry, "id")
+        .and_then(|value| reader.identifier(value));
     let direction = match entry.get("direction") {
         None => Some(StairwellDirection::Both),
         Some(value) => {
@@ -116,16 +141,15 @@ fn read_stairwell<'a>(
         None => Some(true),
         Some(value) => reader.boolean(value),
     };
-    let steps = read_steps(reader, reader.required(entry, "steps")?, references);
+    let steps = reader
+        .required(entry, "steps")
+        .and_then(|value| read_steps(reader, value, references));
+    // `custom` reports its own problems, which reject the tree.
     let custom = reader.custom(entry);
-    Some(Stairwell {
-        id: id?,
-        steps: steps?,
-        direction: direction?,
-        hidden_on_other_layers: hidden_on_other_layers?,
-        custom,
-        canonical: reader.canonical(entry),
-    })
+    let rest = direction
+        .zip(hidden_on_other_layers)
+        .map(|(direction, hidden)| (direction, hidden, custom));
+    Some(Entry { id, steps, rest })
 }
 
 /// Reads at least two steps, each following the one before it.

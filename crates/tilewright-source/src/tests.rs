@@ -1065,6 +1065,33 @@ fn stairwell_tiles_hold_one_step() {
         load(copy.path()).unwrap_err()[0].message,
         "layer 1 tile [1, 1] already holds a step of stairwell \"a\""
     );
+
+    // A rejected entry still counts for duplicates and overlaps, so one
+    // problem never hides another: "a" overlaps nothing but has a bad
+    // direction, the second "a" is a duplicate whose steps overlap the
+    // first, and "c", with no steps, is a duplicate of nothing.
+    let copy = with_stairwells(&format!(
+        "{},\n{},\n{},\n{}",
+        stairwell("a", &[(0, 1, 1), (1, 1, 1)]).replace("]}", "], \"direction\": \"sideways\"}"),
+        stairwell("a", &[(1, 1, 1), (2, 1, 1)]),
+        "{\"id\": \"c\"}",
+        "{\"id\": \"c\", \"steps\": {}}"
+    ));
+    let found: Vec<_> = problems(copy.path())
+        .into_iter()
+        .map(|(code, _, line)| (code, line))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            ("shape.range", 2),
+            ("ref.duplicate", 3),
+            ("stairwell.overlap", 3),
+            ("shape.missing_key", 4),
+            ("ref.duplicate", 5),
+            ("shape.type", 5),
+        ]
+    );
 }
 
 #[test]

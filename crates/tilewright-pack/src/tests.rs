@@ -1513,4 +1513,26 @@ fn compile_rejects_stairwell_steps_that_share_a_tile() {
         error.to_string().contains("share layer 0 tile [20, 20]"),
         "{error}"
     );
+
+    // The public model's IDs, prototypes and step counts are checked
+    // before anything is kept.
+    let mut plane = world.planes()["overworld"].clone();
+    let chute = plane.stairwells.remove("cave.chute").unwrap();
+    plane.stairwells.insert("X".repeat(1 << 20), chute.clone());
+    assert!(stairwell_tiles(&plane).is_err());
+    let mut plane = world.planes()["overworld"].clone();
+    plane.stairwells.get_mut("cave.chute").unwrap().steps[1].proto = "Not a proto".to_owned();
+    assert!(stairwell_tiles(&plane).is_err());
+    let mut plane = world.planes()["overworld"].clone();
+    let mut long = chute;
+    long.steps = (0..250_001)
+        .map(|layer| tilewright_source::StairwellStep {
+            layer,
+            at: [0, 0],
+            proto: "stairs_up".to_owned(),
+        })
+        .collect();
+    plane.stairwells.insert("cave.chute".to_owned(), long);
+    let error = stairwell_tiles(&plane).unwrap_err();
+    assert!(error.to_string().contains("more steps"), "{error}");
 }
