@@ -56,7 +56,34 @@ impl Failure {
     }
 }
 
+/// Text for a terminal: control characters other than newlines are
+/// escaped, so pack metadata and source content shown to the user cannot
+/// carry terminal escape sequences.
+fn terminal_safe(text: &str) -> String {
+    text.chars().fold(
+        String::with_capacity(text.len()),
+        |mut output, character| {
+            if character.is_control() && character != '\n' {
+                output.extend(character.escape_unicode());
+            } else {
+                output.push(character);
+            }
+            output
+        },
+    )
+}
+
+/// Runs a command; everything it prints is made [`terminal_safe`].
 fn run(arguments: &[&OsStr]) -> Result<String, Failure> {
+    run_command(arguments)
+        .map(|output| terminal_safe(&output))
+        .map_err(|failure| Failure {
+            output: terminal_safe(&failure.output),
+            message: terminal_safe(&failure.message),
+        })
+}
+
+fn run_command(arguments: &[&OsStr]) -> Result<String, Failure> {
     match arguments {
         [command] if *command == "--version" => {
             Ok(format!("tilewright {}\n", env!("CARGO_PKG_VERSION")))
@@ -285,6 +312,77 @@ mod tests {
             .path();
         assert!(run(&[OsStr::new("inspect"), pack.as_os_str()]).contains("verified: yes"));
         assert!(super::run(&[OsStr::from_bytes(b"\xff")]).is_err());
+    }
+
+    #[test]
+    fn printed_text_escapes_control_characters() {
+        assert_eq!(
+            super::terminal_safe("a\u{1b}[2Jb\u{7}\n"),
+            "a\\u{1b}[2Jb\\u{7}\n"
+        );
+
+        // A valid source can put control characters in its profile version,
+        // which `inspect` prints, and in keys, which diagnostics quote.
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("source");
+        let output = directory.path().join("packs");
+        std::fs::create_dir_all(&root).unwrap();
+        for entry in walk(Path::new(&fixture())) {
+            let relative = entry.strip_prefix(fixture()).unwrap();
+            let target = root.join(relative);
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::copy(&entry, &target).unwrap();
+        }
+        let profile = root.join("profile/profile.jsonc");
+        let text = std::fs::read_to_string(&profile).unwrap();
+        std::fs::write(
+            &profile,
+            text.replace(
+                "\"version\": \"1.0.0\"",
+                "\"version\": \"1\\u001b]52;c;eA==\\u0007\"",
+            ),
+        )
+        .unwrap();
+        let root_text = root.display().to_string();
+        let output_text = output.display().to_string();
+        run(&["compile", &root_text, &output_text]).unwrap();
+        let pack = std::fs::read_dir(&output)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let inspected = run(&["inspect", &pack.display().to_string()]).unwrap();
+        assert!(!inspected.contains('\u{1b}') && !inspected.contains('\u{7}'));
+        assert!(inspected.contains("profile_version: 1\\u{1b}]52;c;eA==\\u{7}"));
+
+        let world = root.join("world.jsonc");
+        let text = std::fs::read_to_string(&world).unwrap();
+        std::fs::write(&world, text.replacen('{', "{\"\\u001b[31mx\": 1, ", 1)).unwrap();
+        let failure = run(&["validate", &root_text]).unwrap_err();
+        assert!(!failure.output.contains('\u{1b}'), "{}", failure.output);
+        assert!(
+            failure.output.contains("\\u{1b}[31mx"),
+            "{}",
+            failure.output
+        );
+    }
+
+    /// Every file under `root`.
+    fn walk(root: &Path) -> Vec<std::path::PathBuf> {
+        let mut files = Vec::new();
+        let mut directories = vec![root.to_path_buf()];
+        while let Some(directory) = directories.pop() {
+            for entry in std::fs::read_dir(directory).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    directories.push(path);
+                } else {
+                    files.push(path);
+                }
+            }
+        }
+        files
     }
 
     #[test]
