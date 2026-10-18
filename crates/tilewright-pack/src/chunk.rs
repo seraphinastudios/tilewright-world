@@ -351,12 +351,29 @@ fn encode_object(
     Ok(())
 }
 
-/// Decompresses and decodes a chunk.
+/// Decompresses and decodes a chunk into its full model. Objects take more
+/// memory decoded than encoded, so the model of a 16 MiB record can be
+/// several times its size; verification checks objects as they decode
+/// instead of building it.
 ///
 /// # Errors
 /// Returns an error for anything other than a well-formed record within the
 /// encoding's bounds.
 pub fn decode_chunk(data: &[u8]) -> Result<ChunkData, DecodeError> {
+    decode_chunk_with(data, None)
+}
+
+/// Visits each object of a record as it is decoded, at any depth and with
+/// an empty inventory; its inventory entries are visited after it.
+pub(crate) type Visit<'v> = &'v mut dyn FnMut(&ObjectRecord) -> Result<(), DecodeError>;
+
+/// Decompresses and decodes a chunk. With `visit`, objects are streamed to it
+/// instead of kept, so the returned chunk has no objects and memory stays
+/// bounded by the record rather than its decoded objects.
+pub(crate) fn decode_chunk_with(
+    data: &[u8],
+    visit: Option<Visit<'_>>,
+) -> Result<ChunkData, DecodeError> {
     if data.len() > MAXIMUM_CHUNK_BYTES {
         return invalid(format!("stored chunk exceeds {MAXIMUM_CHUNK_BYTES} bytes"));
     }
@@ -371,7 +388,7 @@ pub fn decode_chunk(data: &[u8]) -> Result<ChunkData, DecodeError> {
     }
     let record = zstd::bulk::decompress(data, MAXIMUM_RECORD_BYTES)
         .or_else(|error| invalid(format!("zstd decompression failed: {error}")))?;
-    decode_record(&record)
+    decode_record_with(&record, visit)
 }
 
 struct Cursor<'a> {
@@ -449,6 +466,14 @@ impl<'a> Cursor<'a> {
 /// # Errors
 /// Returns an error for anything other than a well-formed record.
 pub fn decode_record(record: &[u8]) -> Result<ChunkData, DecodeError> {
+    decode_record_with(record, None)
+}
+
+/// [`decode_record`], streaming objects to `visit` when it is given.
+fn decode_record_with(
+    record: &[u8],
+    mut visit: Option<Visit<'_>>,
+) -> Result<ChunkData, DecodeError> {
     if record.len() > MAXIMUM_RECORD_BYTES {
         return invalid("record exceeds 16 MiB");
     }
@@ -496,23 +521,26 @@ pub fn decode_record(record: &[u8]) -> Result<ChunkData, DecodeError> {
     let zones = (0..cells)
         .map(|_| cursor.u16())
         .collect::<Result<Vec<_>, _>>()?;
-    let object_count = cursor.count(15)?;
-    let mut objects = Vec::with_capacity(object_count);
-    for _ in 0..object_count {
-        objects.push(decode_object(&mut cursor, cells, 0)?);
-    }
-    if cursor.remaining() != 0 {
-        return invalid("trailing bytes");
-    }
-    let chunk = ChunkData {
+    let mut chunk = ChunkData {
         chunk_size,
         palette,
         ground,
         heights,
         zones,
-        objects,
+        objects: Vec::new(),
     };
     check_shape(&chunk)?;
+    // Objects are kept only as they decode, never reserved from the count.
+    let object_count = cursor.count(15)?;
+    for _ in 0..object_count {
+        let object = decode_object(&mut cursor, cells, 0, &mut visit)?;
+        if visit.is_none() {
+            chunk.objects.push(object);
+        }
+    }
+    if cursor.remaining() != 0 {
+        return invalid("trailing bytes");
+    }
     Ok(chunk)
 }
 
@@ -520,6 +548,7 @@ fn decode_object(
     cursor: &mut Cursor<'_>,
     cells: usize,
     depth: usize,
+    visit: &mut Option<Visit<'_>>,
 ) -> Result<ObjectRecord, DecodeError> {
     if depth > MAXIMUM_DEPTH {
         return invalid("inventory nesting too deep");
@@ -592,17 +621,7 @@ fn decode_object(
         check_json(&text, false)?;
         Some(text)
     };
-    let mut inventory = Vec::new();
-    if flags & FLAG_INVENTORY != 0 {
-        let count = cursor.count(15)?;
-        if count == 0 {
-            return invalid("empty inventory flagged");
-        }
-        for _ in 0..count {
-            inventory.push(decode_object(cursor, cells, depth + 1)?);
-        }
-    }
-    Ok(ObjectRecord {
+    let mut object = ObjectRecord {
         tile,
         proto,
         layer,
@@ -611,6 +630,22 @@ fn decode_object(
         portal,
         fields,
         custom,
-        inventory,
-    })
+        inventory: Vec::new(),
+    };
+    if let Some(visit) = visit.as_mut() {
+        visit(&object)?;
+    }
+    if flags & FLAG_INVENTORY != 0 {
+        let count = cursor.count(15)?;
+        if count == 0 {
+            return invalid("empty inventory flagged");
+        }
+        for _ in 0..count {
+            let item = decode_object(cursor, cells, depth + 1, visit)?;
+            if visit.is_none() {
+                object.inventory.push(item);
+            }
+        }
+    }
+    Ok(object)
 }

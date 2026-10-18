@@ -1130,3 +1130,31 @@ fn custom_data_keys_are_namespaces() {
     let error = decode_record(&patched).unwrap_err();
     assert!(error.to_string().contains("namespaces"), "{error}");
 }
+
+#[test]
+fn streaming_decodes_visit_every_object_and_keep_none() {
+    let data = encode_chunk(&small_chunk()).unwrap();
+    let mut seen = Vec::new();
+    let mut visit = |object: &ObjectRecord| {
+        assert!(object.inventory.is_empty());
+        seen.push(object.proto);
+        Ok(())
+    };
+    let chunk = super::chunk::decode_chunk_with(&data, Some(&mut visit)).unwrap();
+    assert!(chunk.objects.is_empty());
+    assert_eq!(seen, [7, 9], "the chest, then its inventory entry");
+    assert_eq!(chunk.palette, small_chunk().palette);
+
+    // A visitor's error stops decoding, and verification reports its own.
+    let mut stop = |_: &ObjectRecord| Err(super::DecodeError("stop".into()));
+    assert_eq!(
+        super::chunk::decode_chunk_with(&data, Some(&mut stop)).unwrap_err(),
+        super::DecodeError("stop".into())
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let written = write_pack(&world(), directory.path()).unwrap();
+    assert_eq!(
+        Pack::open(&written.path).unwrap().verify().unwrap().objects,
+        11
+    );
+}

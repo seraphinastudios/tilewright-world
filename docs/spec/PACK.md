@@ -123,6 +123,8 @@ decoded-byte budget, which the caller sets and which is 8 GiB by default: the
 sum of the decoded sizes the chunks' zstd frames record. It fails as soon as
 the next chunk would pass the budget, before decompressing that chunk. The
 `tilewright inspect` command sets the budget with `--max-decoded-bytes`.
+Verification checks each chunk's objects as they decode instead of building
+the chunk's object model, so its memory stays bounded by one record.
 
 A full verification also:
 

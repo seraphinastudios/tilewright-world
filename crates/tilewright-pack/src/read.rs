@@ -10,8 +10,8 @@
 use crate::{
     APPLICATION_ID, Error, FORMAT, META_KEYS, SCHEMA_TABLES, USER_VERSION,
     chunk::{
-        CHUNK_ENCODING, ChunkData, FieldRecord, MAXIMUM_CHUNK_BYTES, ObjectRecord, PortalRecord,
-        decode_chunk,
+        CHUNK_ENCODING, ChunkData, DecodeError, FieldRecord, MAXIMUM_CHUNK_BYTES, ObjectRecord,
+        PortalRecord, Visit, decode_chunk_with,
     },
     is_field_name, is_identifier,
 };
@@ -159,8 +159,13 @@ fn recorded_size(value: &types::Value) -> u64 {
 
 /// Decodes the value of [`chunk_data_sql`].
 fn chunk_data(value: types::Value) -> Result<ChunkData, Error> {
+    chunk_data_with(value, None)
+}
+
+/// [`chunk_data`], streaming objects to `visit` when it is given.
+fn chunk_data_with(value: types::Value, visit: Option<Visit<'_>>) -> Result<ChunkData, Error> {
     match value {
-        types::Value::Blob(data) => decode_chunk(&data).map_err(Error::Chunk),
+        types::Value::Blob(data) => decode_chunk_with(&data, visit).map_err(Error::Chunk),
         types::Value::Integer(0) => Err(Error::Invalid(format!(
             "a chunk's encoding is not {CHUNK_ENCODING}"
         ))),
@@ -275,7 +280,9 @@ impl Pack {
         }
     }
 
-    /// Decodes one chunk.
+    /// Decodes one chunk into its full model; see [`decode_chunk`].
+    ///
+    /// [`decode_chunk`]: crate::decode_chunk
     ///
     /// # Errors
     /// Returns an error if SQLite fails or the stored record is invalid.
@@ -467,20 +474,28 @@ impl Pack {
                     "the chunks decode to more than {maximum_decoded_bytes} bytes, the verification limit"
                 )));
             }
-            let chunk = chunk_data(data)?;
+            // Objects are checked as they decode rather than kept, so memory
+            // stays bounded by the record, not by the objects it holds.
+            targets.enter(&plane);
+            let mut failure = None;
+            let mut visit = |object: &ObjectRecord| {
+                summary.objects += 1;
+                targets.check(object).map_err(|error| {
+                    failure = Some(error);
+                    DecodeError("an object failed verification".into())
+                })
+            };
+            let decoded_chunk = chunk_data_with(data, Some(&mut visit));
+            if let Some(error) = failure {
+                return Err(error);
+            }
+            let chunk = decoded_chunk?;
             if chunk.chunk_size != chunk_size || chunk.ground.len() != ground_layers {
                 return Err(Error::Invalid(
                     "a chunk disagrees with its plane or profile".into(),
                 ));
             }
-            targets.enter(&plane);
             targets.check_palette(&chunk)?;
-            let mut stack: Vec<&ObjectRecord> = chunk.objects.iter().collect();
-            while let Some(object) = stack.pop() {
-                summary.objects += 1;
-                targets.check(object)?;
-                stack.extend(&object.inventory);
-            }
             checked += 1;
         }
         if checked != summary.chunks {
