@@ -279,13 +279,14 @@ pub fn load_with(root: &Path, options: &LoadOptions) -> Result<World, Vec<Diagno
 fn load_tree(tree: &mut files::Tree, diagnostics: &mut Diagnostics) -> Option<World> {
     let (manifest_path, plane_ids) = profile::read_manifest(tree, diagnostics)?;
     let profile = profile::read_profile(tree, &manifest_path, diagnostics)?;
-    let mut references = schema::References::default();
+    let mut references = schema::References::new(&profile);
     let definitions = defs::read_definitions(tree, &profile, &mut references, diagnostics);
+    references.definitions_read(&definitions, diagnostics);
     let mut planes = BTreeMap::new();
     for plane in plane::read_planes(tree, &profile, &plane_ids, &mut references, diagnostics) {
         planes.insert(plane.id.clone(), plane);
     }
-    references.check(&profile, &definitions, &planes, diagnostics);
+    references.check(&planes, diagnostics);
     Some(World {
         profile,
         planes,

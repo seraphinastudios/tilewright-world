@@ -48,9 +48,9 @@ integers: no `+`, no leading zeros, no `-0`. Layers are 32-bit; chunk
 coordinates are limited so that every tile coordinate stays within the
 integer range of section 3.
 
-Only the files above are read. Under `planes/` and `defs/`, any other file or
-directory is an error, and so is a symbolic link anywhere in a path that is
-read. Other files at the root, such as assets, scripts or a README, are
+Only the files above are read. `planes/` and `defs/` are optional, but if
+present they must be directories. Under them, any other file or directory is
+an error, and so is a symbolic link anywhere in a path that is read. Other files at the root, such as assets, scripts or a README, are
 ignored. Assets such as images and sounds stay ordinary files referenced by
 path or by an ID the profile defines.
 

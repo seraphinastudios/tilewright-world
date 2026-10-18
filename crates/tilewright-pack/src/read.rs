@@ -48,7 +48,8 @@ pub struct Summary {
 
 pub struct Pack {
     connection: Connection,
-    path: PathBuf,
+    /// `None` for a pack the compiler is checking in memory.
+    path: Option<PathBuf>,
 }
 
 /// Percent-encodes a path for an SQLite URI. On Unix the path's bytes are
@@ -169,68 +170,24 @@ impl Pack {
         connection.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
         connection.set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)?;
         connection.execute_batch("PRAGMA query_only = ON")?;
-        // At most one row more than expected, each value bounded, is loaded.
-        let mut schema = connection.prepare(&format!(
-            "SELECT {}, {}, {} FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY name LIMIT {}",
-            bounded_text("type"),
-            bounded_text("name"),
-            bounded_text("sql"),
-            SCHEMA_TABLES.len() + 1
-        ))?;
-        let found: Vec<(Option<String>, Option<String>, Option<String>)> = schema
-            .query_map([bound(MAXIMUM_SCHEMA_BYTES)], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })?
-            .collect::<Result<_, _>>()?;
-        drop(schema);
-        let mut expected: Vec<(Option<String>, Option<String>, Option<String>)> = SCHEMA_TABLES
-            .iter()
-            .map(|(name, sql)| {
-                (
-                    Some("table".to_owned()),
-                    Some((*name).to_owned()),
-                    Some((*sql).to_owned()),
-                )
-            })
-            .collect();
-        expected.sort_by(|left, right| left.1.cmp(&right.1));
-        if found != expected {
-            return Err(Error::Invalid(
-                "the pack schema does not match this format".into(),
-            ));
-        }
-        let application: i32 =
-            connection.query_row("PRAGMA application_id", [], |row| row.get(0))?;
-        let version: i32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if application != APPLICATION_ID || version != USER_VERSION {
-            return Err(Error::Invalid(format!(
-                "not a Tilewright pack of user_version {USER_VERSION}"
-            )));
-        }
-        let meta = read_meta(&connection)?;
-        let value = |key: &str| {
-            meta.iter()
-                .find(|(name, _)| name == key)
-                .map(|(_, value)| value.as_str())
-        };
-        let digest_ok = value("source_digest").is_some_and(|digest| {
-            digest.len() == 64
-                && digest
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        });
-        if value("format") != Some(FORMAT)
-            || value("chunk_encoding") != Some(CHUNK_ENCODING)
-            || !digest_ok
-        {
-            return Err(Error::Invalid(format!(
-                "the pack's metadata is not that of {FORMAT}"
-            )));
-        }
+        check_identity(&connection)?;
         Ok(Self {
             connection,
-            path: path.to_path_buf(),
+            path: Some(path.to_path_buf()),
         })
+    }
+
+    /// A pack the compiler has just built, checked like an opened one.
+    pub(crate) fn compiled(connection: Connection) -> Result<Self, Error> {
+        check_identity(&connection)?;
+        Ok(Self {
+            connection,
+            path: None,
+        })
+    }
+
+    pub(crate) fn into_connection(self) -> Connection {
+        self.connection
     }
 
     /// A `meta` value.
@@ -326,7 +283,11 @@ impl Pack {
     /// # Errors
     /// Returns an error if the file cannot be read.
     pub fn file_digest(&self) -> Result<[u8; 32], Error> {
-        let mut file = std::fs::File::open(&self.path)?;
+        let path = self
+            .path
+            .as_ref()
+            .ok_or_else(|| Error::Invalid("the pack is not a file".into()))?;
+        let mut file = std::fs::File::open(path)?;
         let mut hasher = Sha256::new();
         let mut buffer = vec![0; 64 * 1024];
         loop {
@@ -357,7 +318,8 @@ impl Pack {
         }
         if let Some(stem) = self
             .path
-            .file_name()
+            .as_ref()
+            .and_then(|path| path.file_name())
             .and_then(|name| name.to_str())
             .and_then(|name| name.strip_suffix(".twpack"))
             .filter(|stem| stem.len() == 64 && stem.bytes().all(|byte| byte.is_ascii_hexdigit()))
@@ -370,6 +332,12 @@ impl Pack {
                 )));
             }
         }
+        self.verify_contents()
+    }
+
+    /// Everything [`Pack::verify`] checks except SQLite integrity and the
+    /// file name: what the compiler checks of every pack it builds.
+    pub(crate) fn verify_contents(&self) -> Result<Summary, Error> {
         let mut summary = self.summary()?;
         let (minimum, maximum): (Option<i64>, Option<i64>) =
             self.connection
@@ -395,6 +363,12 @@ impl Pack {
             is_plane: self.connection.prepare(
                 "SELECT EXISTS (SELECT 1 FROM strings s JOIN planes p ON p.id = s.value WHERE s.id = ?1)",
             )?,
+            is_proto: self.connection.prepare(
+                "SELECT EXISTS (SELECT 1 FROM strings s JOIN definitions d ON d.type = 'proto' AND d.id = s.value WHERE s.id = ?1)",
+            )?,
+            is_zone: self.connection.prepare(
+                "SELECT EXISTS (SELECT 1 FROM strings s JOIN zones z ON z.plane = ?2 AND z.id = s.value WHERE s.id = ?1)",
+            )?,
             has_anchor: self.connection.prepare(
                 "SELECT EXISTS (SELECT 1 FROM strings n JOIN anchors a ON a.id = n.value \
                  WHERE n.id = ?3 AND a.plane = CASE WHEN ?1 = 0 THEN ?2 ELSE (SELECT value FROM strings WHERE id = ?1) END)",
@@ -415,13 +389,7 @@ impl Pack {
                     "a chunk disagrees with its plane or profile".into(),
                 ));
             }
-            if chunk
-                .palette
-                .iter()
-                .any(|id| *id == 0 || *id > targets.strings)
-            {
-                return Err(Error::Invalid("a palette entry is not a string".into()));
-            }
+            targets.check_palette(&chunk, &plane)?;
             let mut stack: Vec<&ObjectRecord> = chunk.objects.iter().collect();
             while let Some(object) = stack.pop() {
                 summary.objects += 1;
@@ -621,6 +589,69 @@ impl Pack {
     }
 }
 
+/// Checks the schema, application ID, user version and `meta` of a pack
+/// before any other query runs.
+fn check_identity(connection: &Connection) -> Result<(), Error> {
+    // At most one row more than expected, each value bounded, is loaded.
+    let mut schema = connection.prepare(&format!(
+        "SELECT {}, {}, {} FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY name LIMIT {}",
+        bounded_text("type"),
+        bounded_text("name"),
+        bounded_text("sql"),
+        SCHEMA_TABLES.len() + 1
+    ))?;
+    let found: Vec<(Option<String>, Option<String>, Option<String>)> = schema
+        .query_map([bound(MAXIMUM_SCHEMA_BYTES)], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?
+        .collect::<Result<_, _>>()?;
+    drop(schema);
+    let mut expected: Vec<(Option<String>, Option<String>, Option<String>)> = SCHEMA_TABLES
+        .iter()
+        .map(|(name, sql)| {
+            (
+                Some("table".to_owned()),
+                Some((*name).to_owned()),
+                Some((*sql).to_owned()),
+            )
+        })
+        .collect();
+    expected.sort_by(|left, right| left.1.cmp(&right.1));
+    if found != expected {
+        return Err(Error::Invalid(
+            "the pack schema does not match this format".into(),
+        ));
+    }
+    let application: i32 = connection.query_row("PRAGMA application_id", [], |row| row.get(0))?;
+    let version: i32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if application != APPLICATION_ID || version != USER_VERSION {
+        return Err(Error::Invalid(format!(
+            "not a Tilewright pack of user_version {USER_VERSION}"
+        )));
+    }
+    let meta = read_meta(connection)?;
+    let value = |key: &str| {
+        meta.iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.as_str())
+    };
+    let digest_ok = value("source_digest").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    });
+    if value("format") != Some(FORMAT)
+        || value("chunk_encoding") != Some(CHUNK_ENCODING)
+        || !digest_ok
+    {
+        return Err(Error::Invalid(format!(
+            "the pack's metadata is not that of {FORMAT}"
+        )));
+    }
+    Ok(())
+}
+
 /// Reads `meta` after checking, without loading any value, that it holds
 /// exactly the format's keys with text values of bounded size.
 fn read_meta(connection: &Connection) -> Result<Vec<(String, String)>, Error> {
@@ -659,6 +690,10 @@ struct Targets<'c> {
     render_layers: usize,
     /// Whether string `?1` names a plane.
     is_plane: Statement<'c>,
+    /// Whether string `?1` names a `proto` definition.
+    is_proto: Statement<'c>,
+    /// Whether string `?1` names a zone of plane `?2`.
+    is_zone: Statement<'c>,
     /// Whether plane `?1` (a string ID, or 0 for plane `?2`) has the anchor
     /// named by string `?3`.
     has_anchor: Statement<'c>,
@@ -669,8 +704,49 @@ impl Targets<'_> {
         (1..=self.strings).contains(&id)
     }
 
+    fn proto(&mut self, id: u32) -> Result<bool, Error> {
+        Ok(self.string(id) && self.is_proto.query_row([id], |row| row.get::<_, bool>(0))?)
+    }
+
+    /// Checks that every palette entry is used, that ground cells name
+    /// `proto` definitions, and that zone cells name zones of `plane`.
+    fn check_palette(&mut self, chunk: &ChunkData, plane: &str) -> Result<(), Error> {
+        fn mark(cells: &[u16], used: &mut [bool]) {
+            for cell in cells {
+                if let Some(flag) = usize::from(*cell)
+                    .checked_sub(1)
+                    .and_then(|index| used.get_mut(index))
+                {
+                    *flag = true;
+                }
+            }
+        }
+        let mut ground = vec![false; chunk.palette.len()];
+        let mut zone = vec![false; chunk.palette.len()];
+        for grid in &chunk.ground {
+            mark(grid, &mut ground);
+        }
+        mark(&chunk.zones, &mut zone);
+        for ((id, ground), zone) in chunk.palette.iter().zip(ground).zip(zone) {
+            let ok = (ground || zone)
+                && self.string(*id)
+                && (!ground || self.proto(*id)?)
+                && (!zone
+                    || self
+                        .is_zone
+                        .query_row(params![id, plane], |row| row.get::<_, bool>(0))?);
+            if !ok {
+                return Err(Error::Invalid(
+                    "a palette entry is unused or not a proto definition or zone of its plane"
+                        .into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn check(&mut self, object: &ObjectRecord, current: &str) -> Result<(), Error> {
-        let mut ok = self.string(object.proto) && usize::from(object.layer) <= self.render_layers;
+        let mut ok = self.proto(object.proto)? && usize::from(object.layer) <= self.render_layers;
         ok &= match &object.portal {
             Some(PortalRecord::Location { x, y, .. })
                 if [x, y]

@@ -1,7 +1,7 @@
 // Copyright 2026 Seraphina Studios
 // SPDX-License-Identifier: MIT
 
-use std::fmt;
+use std::{fmt, sync::Arc};
 use tilewright_jsonc::ErrorCode;
 
 /// Anything with a stable diagnostic code string.
@@ -136,6 +136,31 @@ impl Diagnostic {
             column,
             code: code.name(),
             message: message.into(),
+        }
+    }
+}
+
+/// Where a deferred reference is, kept compactly until it is resolved: the
+/// document's path is shared by every location in it.
+#[derive(Clone, Debug)]
+pub(crate) struct Location {
+    pub path: Arc<str>,
+    pub start: usize,
+    pub end: usize,
+    pub line: usize,
+    pub column: usize,
+}
+
+impl Diagnostic {
+    pub(crate) fn located(location: &Location, code: impl CodeName, message: String) -> Self {
+        Self {
+            path: location.path.to_string(),
+            start: location.start,
+            end: location.end,
+            line: location.line,
+            column: location.column,
+            code: code.name(),
+            message,
         }
     }
 }

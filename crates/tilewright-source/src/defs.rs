@@ -19,7 +19,7 @@ pub(crate) fn read_definitions(
     diagnostics: &mut Diagnostics,
 ) -> BTreeMap<(String, String), Definition> {
     let mut definitions = BTreeMap::new();
-    if tree.kind("defs") != Some(EntryKind::Directory) {
+    if !tree.container("defs") {
         return definitions;
     }
     for type_entry in tree.list("defs") {

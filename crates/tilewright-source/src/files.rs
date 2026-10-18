@@ -77,6 +77,8 @@ pub(crate) struct Source {
 pub(crate) enum EntryKind {
     File,
     Directory,
+    /// Neither a regular file nor a directory, such as a FIFO.
+    Other,
 }
 
 pub(crate) struct Entry {
@@ -177,7 +179,8 @@ impl<'o> Tree<'o> {
         match self.root.kind(&components(path)) {
             Ok(Found::File) => Some(EntryKind::File),
             Ok(Found::Directory) => Some(EntryKind::Directory),
-            Ok(Found::Other | Found::Missing) | Err(Refused::Missing | Refused::Unexpected) => None,
+            Ok(Found::Other) => Some(EntryKind::Other),
+            Ok(Found::Missing) | Err(Refused::Missing | Refused::Unexpected) => None,
             Err(Refused::Link(link)) => {
                 self.link(&link);
                 None
@@ -190,6 +193,23 @@ impl<'o> Tree<'o> {
                 ));
                 None
             }
+        }
+    }
+
+    /// Whether the optional directory `path` is present. An entry of
+    /// another kind there is reported, not treated as absent.
+    pub fn container(&mut self, path: &str) -> bool {
+        match self.kind(path) {
+            Some(EntryKind::Directory) => true,
+            Some(EntryKind::File | EntryKind::Other) => {
+                self.diagnostics.push(Diagnostic::file(
+                    path,
+                    Code::UnexpectedFile,
+                    "must be a directory",
+                ));
+                false
+            }
+            None => false,
         }
     }
 

@@ -776,3 +776,120 @@ fn verification_checks_names_profiles_portals_and_encodings() {
         "{error}"
     );
 }
+
+#[test]
+fn grid_and_object_values_must_name_their_targets() {
+    for (name, sql) in [
+        (
+            "ground.twpack",
+            "DELETE FROM definitions WHERE type = 'proto' AND id = 'sand'",
+        ),
+        ("zone.twpack", "DELETE FROM zones WHERE id = 'village'"),
+        (
+            "object.twpack",
+            "DELETE FROM definitions WHERE type = 'proto' AND id = 'tree'",
+        ),
+    ] {
+        let (_directory, copy) = tampered(name, sql);
+        assert!(
+            Pack::open(&copy).unwrap().verify().is_err(),
+            "{name} verified"
+        );
+    }
+
+    let (_directory, copy) = tampered("unused.twpack", "SELECT 1");
+    let pack = Pack::open(&copy).unwrap();
+    let mut chunk = pack.chunk("vault", 0, 0, 0).unwrap().unwrap();
+    drop(pack);
+    let last = *chunk.palette.last().unwrap();
+    chunk.palette.push(last + 1);
+    Connection::open(&copy)
+        .unwrap()
+        .execute(
+            "UPDATE chunks SET data = ?1 WHERE plane = 'vault'",
+            [encode_chunk(&chunk).unwrap()],
+        )
+        .unwrap();
+    let error = Pack::open(&copy).unwrap().verify().unwrap_err();
+    assert!(error.to_string().contains("unused"), "{error}");
+}
+
+#[test]
+fn compiled_packs_always_verify() {
+    let mut far = world();
+    let vault = far.planes.get_mut("vault").unwrap();
+    let chunk = vault.chunks.values().next().unwrap().clone();
+    vault.chunks.insert((0, 281_474_976_710_656, 0), chunk);
+    let error = compile(&far).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("does not compile to a valid pack"),
+        "{error}"
+    );
+
+    let mut zone = world();
+    let overworld = zone.planes.get_mut("overworld").unwrap();
+    let village = overworld.zones.remove("village").unwrap();
+    overworld.zones.insert("Village".to_owned(), village);
+    assert!(compile(&zone).is_err());
+
+    let mut heights = world();
+    heights
+        .planes
+        .get_mut("vault")
+        .unwrap()
+        .chunks
+        .values_mut()
+        .next()
+        .unwrap()
+        .heights
+        .truncate(2);
+    let error = compile(&heights).unwrap_err();
+    assert!(error.to_string().contains("grids"), "{error}");
+
+    let mut large = world();
+    large
+        .planes
+        .get_mut("vault")
+        .unwrap()
+        .chunks
+        .values_mut()
+        .next()
+        .unwrap()
+        .objects[0]
+        .custom = Some(format!(
+        "{{\"example.org\":\"{}\"}}",
+        "x".repeat(super::MAXIMUM_RECORD_BYTES)
+    ));
+    let error = compile(&large).unwrap_err();
+    assert!(error.to_string().contains("16 MiB"), "{error}");
+}
+
+#[test]
+fn a_minimal_object_fits_the_last_bytes_of_a_record() {
+    // `length` characters over a fixed 17 strings (each under the 1 MiB
+    // string limit), so the JSON's overhead does not depend on `length`.
+    let custom = |length: usize| {
+        let strings: Vec<String> = (0..17)
+            .map(|index| {
+                let start = (index * 1_000_000).min(length);
+                let end = ((index + 1) * 1_000_000).min(length);
+                format!("\"{}\"", "x".repeat(end - start))
+            })
+            .collect();
+        let mut chunk = small_chunk();
+        let mut minimal = chunk.objects[0].inventory[0].clone();
+        minimal.tile = Some(0);
+        minimal.portal = None;
+        chunk.objects[0].custom = Some(format!("{{\"example.org\":[{}]}}", strings.join(",")));
+        chunk.objects.push(minimal);
+        chunk
+    };
+    let base = encode_record(&custom(0)).unwrap().len();
+    let exact = custom(super::MAXIMUM_RECORD_BYTES - base);
+    let record = encode_record(&exact).unwrap();
+    assert_eq!(record.len(), super::MAXIMUM_RECORD_BYTES);
+    assert_eq!(decode_record(&record).unwrap(), exact);
+    assert!(encode_record(&custom(super::MAXIMUM_RECORD_BYTES - base + 1)).is_err());
+}

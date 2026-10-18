@@ -774,3 +774,27 @@ fn heights_z_and_sub_layers_have_their_documented_ranges() {
         );
     }
 }
+
+#[test]
+fn source_containers_of_the_wrong_kind_are_reported() {
+    let copy = workspace();
+    let root = copy.path();
+    fs::remove_dir_all(root.join("defs")).unwrap();
+    fs::write(root.join("defs"), "not a directory").unwrap();
+    assert!(has(&problems(root), "source.unexpected_file", "defs"));
+
+    let copy = workspace();
+    let root = copy.path();
+    edit(
+        root,
+        "world.jsonc",
+        "\"planes\": [\"overworld\", \"vault\"]",
+        "\"planes\": []",
+    );
+    fs::remove_dir_all(root.join("planes")).unwrap();
+    fs::write(root.join("planes"), "not a directory").unwrap();
+    assert_eq!(
+        problems(root),
+        [("source.unexpected_file", "planes".to_owned(), 0)]
+    );
+}

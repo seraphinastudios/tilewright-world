@@ -4,10 +4,10 @@
 //! Deterministic compilation of a validated world into a pack.
 
 use crate::{
-    APPLICATION_ID, Error, FORMAT, SCHEMA, USER_VERSION,
+    APPLICATION_ID, Error, FORMAT, Pack, SCHEMA, USER_VERSION,
     chunk::{
-        CHUNK_ENCODING, ChunkData, FieldRecord, MAXIMUM_DEPTH, ObjectRecord, PortalRecord,
-        encode_chunk,
+        CHUNK_ENCODING, ChunkData, FieldRecord, MAXIMUM_DEPTH, MAXIMUM_RECORD_BYTES, ObjectRecord,
+        PortalRecord, encode_chunk,
     },
 };
 use rusqlite::{Connection, MAIN_DB, params};
@@ -30,8 +30,15 @@ struct Strings(BTreeMap<String, u32>);
 impl Strings {
     fn collect(world: &World) -> Result<Self, Error> {
         let mut values = BTreeSet::new();
-        for plane in world.planes.values() {
+        for (id, plane) in &world.planes {
+            if plane.chunk_size != CHUNK_SIZE {
+                return Err(Error::Invalid(format!(
+                    "plane {id} has chunk size {}, not {CHUNK_SIZE}",
+                    plane.chunk_size
+                )));
+            }
             for chunk in plane.chunks.values() {
+                check_chunk_shape(chunk, world.profile.ground_layers.len())?;
                 for grid in chunk.ground.iter().chain([&chunk.zones]) {
                     let used: BTreeSet<u16> = grid.cells.iter().copied().collect();
                     for cell in used {
@@ -106,20 +113,75 @@ fn render_layers(profile: &Profile) -> Result<Layers<'_>, Error> {
         .collect()
 }
 
-/// Builds an object record. `depth` is the object's inventory depth; the
-/// model is public, so its bounds are checked here rather than assumed.
+/// Checks a public model's chunk against format 1 before anything is
+/// copied from it.
+fn check_chunk_shape(chunk: &Chunk, ground_layers: usize) -> Result<(), Error> {
+    let cells = usize::from(CHUNK_SIZE) * usize::from(CHUNK_SIZE);
+    let grid_ok = |grid: &tilewright_source::Grid| {
+        grid.cells.len() == cells && grid.palette.len() < usize::from(u16::MAX)
+    };
+    if chunk.ground.len() == ground_layers
+        && chunk.ground.iter().all(grid_ok)
+        && grid_ok(&chunk.zones)
+        && chunk.heights.len() == cells
+    {
+        Ok(())
+    } else {
+        Err(Error::Invalid(format!(
+            "chunk {} does not have the grids of a format-1 chunk",
+            chunk.path
+        )))
+    }
+}
+
+/// The bytes an object's own part of a record takes, inventory excluded.
+fn encoded_size(object: &Object) -> usize {
+    let portal: usize = match object.portal {
+        Some(Portal::Location { .. }) => 25,
+        Some(Portal::Anchor { .. }) => 9,
+        None => 0,
+    };
+    let fields = if object.fields.is_empty() {
+        0
+    } else {
+        object.fields.iter().fold(2_usize, |total, (_, value)| {
+            total.saturating_add(match value {
+                FieldValue::Null | FieldValue::Bool(_) => 5,
+                FieldValue::Integer(_) | FieldValue::Number(_) => 13,
+                FieldValue::String(_) => 9,
+                FieldValue::Json(text) => text.len().saturating_add(9),
+            })
+        })
+    };
+    let custom = object
+        .custom
+        .as_ref()
+        .map_or(0, |text| text.len().saturating_add(4));
+    let inventory = if object.inventory.is_empty() { 0 } else { 4 };
+    (15 + portal + inventory)
+        .saturating_add(fields)
+        .saturating_add(custom)
+}
+
+/// Builds an object record. `depth` is the object's inventory depth and
+/// `budget` the bytes left in the chunk's record; the model is public, so
+/// its bounds are checked here rather than assumed.
 fn object_record(
     object: &Object,
     layers: &Layers<'_>,
     strings: &Strings,
-    chunk_size: u16,
     depth: usize,
+    budget: &mut usize,
 ) -> Result<ObjectRecord, Error> {
     if depth > MAXIMUM_DEPTH {
         return Err(Error::Invalid(format!(
             "inventories nest more than {MAXIMUM_DEPTH} deep"
         )));
     }
+    *budget = budget
+        .checked_sub(encoded_size(object))
+        .ok_or_else(|| Error::Invalid("a chunk's record exceeds 16 MiB".into()))?;
+    let chunk_size = CHUNK_SIZE;
     let outside = || {
         Error::Invalid(
             "top-level objects need a tile in their chunk; inventory entries none".into(),
@@ -178,7 +240,7 @@ fn object_record(
     let inventory = object
         .inventory
         .iter()
-        .map(|item| object_record(item, layers, strings, chunk_size, depth + 1))
+        .map(|item| object_record(item, layers, strings, depth + 1, budget))
         .collect::<Result<_, _>>()?;
     Ok(ObjectRecord {
         tile,
@@ -195,12 +257,8 @@ fn object_record(
 
 /// Builds a chunk record. The chunk palette holds the string IDs its grids
 /// use, in ascending order.
-fn chunk_record(
-    chunk: &Chunk,
-    layers: &Layers<'_>,
-    strings: &Strings,
-    chunk_size: u16,
-) -> Result<ChunkData, Error> {
+fn chunk_record(chunk: &Chunk, layers: &Layers<'_>, strings: &Strings) -> Result<ChunkData, Error> {
+    let chunk_size = CHUNK_SIZE;
     let mut used = BTreeSet::new();
     for grid in chunk.ground.iter().chain([&chunk.zones]) {
         for cell in &grid.cells {
@@ -210,6 +268,10 @@ fn chunk_record(
         }
     }
     let palette: Vec<u32> = used.into_iter().collect();
+    // Objects may use what the header, palette and grids leave of the record.
+    let cells = usize::from(chunk_size) * usize::from(chunk_size);
+    let mut budget = MAXIMUM_RECORD_BYTES
+        .saturating_sub(22 + 4 * palette.len() + cells * (2 * chunk.ground.len() + 6));
     // Declared palette entries that no cell uses are not interned; they map
     // to 0 and are never looked up.
     let remap = |grid: &tilewright_source::Grid| -> Result<Vec<u16>, Error> {
@@ -246,7 +308,7 @@ fn chunk_record(
         objects: chunk
             .objects
             .iter()
-            .map(|object| object_record(object, layers, strings, chunk_size, 0))
+            .map(|object| object_record(object, layers, strings, 0, &mut budget))
             .collect::<Result<_, _>>()?,
         palette,
     })
@@ -326,14 +388,8 @@ pub fn compile(world: &World) -> Result<Vec<u8>, Error> {
                     anchor.at[1]
                 ])?;
             }
-            if plane.chunk_size != CHUNK_SIZE {
-                return Err(Error::Invalid(format!(
-                    "plane {id} has chunk size {}, not {CHUNK_SIZE}",
-                    plane.chunk_size
-                )));
-            }
             for ((layer, cx, cy), chunk) in &plane.chunks {
-                let record = chunk_record(chunk, &layers, &strings, plane.chunk_size)?;
+                let record = chunk_record(chunk, &layers, &strings)?;
                 let data = encode_chunk(&record).map_err(|error| Error::Invalid(error.0))?;
                 chunks.execute(params![id, layer, cx, cy, CHUNK_ENCODING, data])?;
             }
@@ -345,6 +401,15 @@ pub fn compile(world: &World) -> Result<Vec<u8>, Error> {
         }
     }
     connection.execute_batch("COMMIT; VACUUM;")?;
+    // The model is public, so the compiled pack is verified like any other
+    // before it is returned: a malformed model never yields an invalid pack.
+    let pack = Pack::compiled(connection)?;
+    pack.verify_contents().map_err(|error| {
+        Error::Invalid(format!(
+            "the world does not compile to a valid pack: {error}"
+        ))
+    })?;
+    let connection = pack.into_connection();
     let data = connection.serialize(MAIN_DB)?;
     Ok(data.to_vec())
 }

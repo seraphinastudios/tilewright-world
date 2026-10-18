@@ -9,8 +9,8 @@ open it directly.
 
 The compiler is deterministic: the same source tree and compiler version
 always produce byte-identical packs. It builds the database in memory in one
-transaction, inserting rows in primary-key order, runs `VACUUM`, and writes
-the serialized database. The file uses `page_size = 4096`,
+transaction, inserting rows in primary-key order, runs `VACUUM`, verifies the
+result as section 3 describes, and writes the serialized database. The file uses `page_size = 4096`,
 `application_id = 0x54575031` (`"TWP1"`) and `user_version = 1`.
 
 ## 1. Tables
@@ -135,4 +135,6 @@ A full verification also:
   profile, which lists 1 to 65,534 render layers and at most 8 ground layers;
 - checks every string ID, render layer index, ground count and portal target
   (plane and anchor, and a location within ±9,007,199,254,740,991) that a
-  chunk references, looking targets up rather than loading the tables.
+  chunk references, that every palette entry is used, that ground cells and
+  object prototypes name `proto` definitions and zone cells name zones of the
+  chunk's plane, looking targets up rather than loading the tables.

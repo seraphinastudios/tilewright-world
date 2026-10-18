@@ -106,16 +106,13 @@ pub(crate) fn read_chunk(
                 match read_grid(&reader, value, address.size, GridKind::Ground) {
                     Some(grid) => {
                         for value_name in &grid.palette {
-                            references.add(
+                            reader.reference(
+                                references,
                                 Target::Definition {
                                     kind: "proto".to_owned(),
                                     id: value_name.clone(),
                                 },
-                                reader.diagnostic(
-                                    value.span(),
-                                    Code::Reference,
-                                    format!("no proto definition \"{value_name}\""),
-                                ),
+                                value.span(),
                             );
                         }
                         chunk.ground[index] = grid;
@@ -388,27 +385,21 @@ fn read_object<'a>(
     };
     let proto_value = reader.required(entry, "proto")?;
     let proto = reader.identifier(proto_value)?;
-    context.references.add(
+    reader.reference(
+        context.references,
         Target::Definition {
             kind: "proto".to_owned(),
             id: proto.clone(),
         },
-        reader.diagnostic(
-            proto_value.span(),
-            Code::Reference,
-            format!("no proto definition \"{proto}\""),
-        ),
+        proto_value.span(),
     );
     let layer = match entry.get("layer") {
         Some(layer_value) => {
             let layer = reader.identifier(layer_value)?;
-            context.references.add(
+            reader.reference(
+                context.references,
                 Target::RenderLayer(layer.clone()),
-                reader.diagnostic(
-                    layer_value.span(),
-                    Code::Reference,
-                    format!("\"{layer}\" is not a render layer of the profile"),
-                ),
+                layer_value.span(),
             );
             Some(layer)
         }
@@ -478,13 +469,10 @@ fn read_portal<'a>(
     let plane = match portal.get("plane") {
         Some(plane_value) => {
             let plane = reader.identifier(plane_value)?;
-            context.references.add(
+            reader.reference(
+                context.references,
                 Target::Plane(plane.clone()),
-                reader.diagnostic(
-                    plane_value.span(),
-                    Code::Reference,
-                    format!("no plane \"{plane}\""),
-                ),
+                plane_value.span(),
             );
             Some(plane)
         }
@@ -494,16 +482,13 @@ fn read_portal<'a>(
     if anchor {
         let anchor_value = reader.required(portal, "anchor")?;
         let anchor = reader.identifier(anchor_value)?;
-        context.references.add(
+        reader.reference(
+            context.references,
             Target::Anchor {
                 plane: target_plane.clone(),
                 id: anchor.clone(),
             },
-            reader.diagnostic(
-                anchor_value.span(),
-                Code::Reference,
-                format!("no anchor \"{anchor}\" in plane \"{target_plane}\""),
-            ),
+            anchor_value.span(),
         );
         Some(Portal::Anchor { plane, anchor })
     } else {

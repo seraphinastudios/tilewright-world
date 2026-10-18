@@ -236,8 +236,13 @@ fn encode_object(
     if depth > MAXIMUM_DEPTH {
         return invalid("inventory nesting too deep");
     }
-    // The fixed part and a portal take at most 38 bytes.
-    room(output, 38)?;
+    // The fixed part is 15 bytes; a portal adds its kind and fields.
+    let portal = match object.portal {
+        Some(PortalRecord::Location { .. }) => 25,
+        Some(PortalRecord::Anchor { .. }) => 9,
+        None => 0,
+    };
+    room(output, 15 + portal)?;
     let tile = match (object.tile, depth) {
         (Some(tile), 0) if usize::from(tile) < cells => tile,
         (None, depth) if depth > 0 => NO_TILE,

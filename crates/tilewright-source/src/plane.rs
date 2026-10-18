@@ -33,9 +33,8 @@ pub(crate) fn read_planes(
     diagnostics: &mut Diagnostics,
 ) -> Vec<Plane> {
     let listed: BTreeSet<&str> = plane_ids.iter().map(String::as_str).collect();
-    let present: BTreeSet<String> = match tree.kind("planes") {
-        Some(EntryKind::Directory) => tree
-            .list("planes")
+    let present: BTreeSet<String> = if tree.container("planes") {
+        tree.list("planes")
             .into_iter()
             .filter_map(|entry| {
                 if entry.kind == EntryKind::Directory && listed.contains(entry.name.as_str()) {
@@ -49,8 +48,9 @@ pub(crate) fn read_planes(
                     None
                 }
             })
-            .collect(),
-        _ => BTreeSet::new(),
+            .collect()
+    } else {
+        BTreeSet::new()
     };
     let mut planes = Vec::new();
     for id in plane_ids {

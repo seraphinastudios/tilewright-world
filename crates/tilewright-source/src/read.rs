@@ -5,10 +5,16 @@
 //! own diagnostic and returns `None` when the value is unusable.
 
 use crate::diagnostic::Diagnostics;
-use crate::{Code, Diagnostic, FieldValue, diagnostic::Positions, files::Source};
+use crate::{
+    Code, Diagnostic, FieldValue,
+    diagnostic::{Location, Positions},
+    files::Source,
+    schema::{References, Target},
+};
 use std::{
     cell::{OnceCell, RefCell},
     collections::BTreeSet,
+    sync::Arc,
 };
 use tilewright_jsonc::{MAX_SAFE_INTEGER, Member, Span, Value};
 
@@ -41,6 +47,8 @@ pub(crate) struct Reader<'a> {
     diagnostics: RefCell<&'a mut Diagnostics>,
     /// Built at the first diagnostic.
     positions: OnceCell<Positions<'a>>,
+    /// The document's path, shared by its deferred references.
+    path: OnceCell<Arc<str>>,
 }
 
 impl<'a> Reader<'a> {
@@ -49,6 +57,34 @@ impl<'a> Reader<'a> {
             source,
             diagnostics: RefCell::new(diagnostics),
             positions: OnceCell::new(),
+            path: OnceCell::new(),
+        }
+    }
+
+    fn positions(&self) -> &Positions<'a> {
+        self.positions
+            .get_or_init(|| Positions::new(self.source.document.source()))
+    }
+
+    /// Checks a reference now when its target set is known, else defers it.
+    pub fn reference(&self, references: &mut References, target: Target, span: Span) {
+        match references.resolves(&target) {
+            Some(true) => {}
+            Some(false) => self.report(span, Code::Reference, target.message()),
+            None => {
+                let (line, column) = self.positions().locate(span.start);
+                let location = Location {
+                    path: self
+                        .path
+                        .get_or_init(|| Arc::from(self.source.path.as_str()))
+                        .clone(),
+                    start: span.start,
+                    end: span.end,
+                    line,
+                    column,
+                };
+                references.defer(target, location);
+            }
         }
     }
 
@@ -62,12 +98,9 @@ impl<'a> Reader<'a> {
 
     /// Builds a diagnostic at `span` without recording it.
     pub fn diagnostic(&self, span: Span, code: Code, message: impl Into<String>) -> Diagnostic {
-        let positions = self
-            .positions
-            .get_or_init(|| Positions::new(self.source.document.source()));
         Diagnostic::at(
             &self.source.path,
-            positions,
+            self.positions(),
             span.start,
             span.end,
             code,
