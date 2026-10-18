@@ -40,11 +40,26 @@ and `y` in `[cy * chunk_size, (cy + 1) * chunk_size)`. Coordinates are signed
   defs/<type>/<id>.jsonc            definitions (prototypes, loot tables, ...)
 ```
 
-Identifiers (`plane`, zone, anchor, definition and prototype IDs) match
-`^[a-z0-9][a-z0-9_.-]{0,127}$`. File names derive from identifiers and
-coordinates; a file whose name disagrees with its content is an error.
-Assets such as images and sounds stay ordinary files referenced by path or by
-an ID the profile defines.
+Identifiers (`plane`, zone, anchor, definition and prototype IDs, render
+layer names) match `^[a-z0-9][a-z0-9_.-]{0,127}$`. File names derive from
+identifiers and coordinates; a file whose name disagrees with its content is
+an error. Layer directories and chunk coordinates use canonical decimal
+integers: no `+`, no leading zeros, no `-0`. Layers are 32-bit; chunk
+coordinates are limited so that every tile coordinate stays within the
+integer range of section 3.
+
+Only the files above are read. `planes/` and `defs/` are optional, but if
+present they must be directories. Under them, any other file or directory is
+an error, and so is a symbolic link anywhere in a path that is read. Other files at the root, such as assets, scripts or a README, are
+ignored. Assets such as images and sounds stay ordinary files referenced by
+path or by an ID the profile defines.
+
+Paths written inside documents (the profile path, schema paths) are relative,
+`/`-separated, made of ASCII letters, digits, `_`, `.` and `-`, with no
+component starting with `.` or `-`, and end in `.jsonc`. A path is at most
+1,024 bytes and 32 components, each at most 128 bytes. Schema paths are
+relative to the profile's directory and cannot leave it. Several roles may
+name the same schema; it is read once.
 
 ## 3. Syntax: strict JSONC
 
@@ -60,7 +75,9 @@ comments. Everything else follows RFC 8259, plus these rules:
 - decoded strings and keys may not contain NUL;
 - documents are closed: a key not defined by this spec or by the profile's
   schema is an error, except below an explicit `"custom"` object whose keys
-  are reviewed, domain-qualified namespaces.
+  are reviewed, domain-qualified namespaces. `custom` is allowed only where
+  this spec says so (the profile, planes, objects, zones and definitions),
+  so that compiling never drops it.
 
 Parsers enforce these limits while reading, not after building a tree:
 
@@ -110,14 +127,21 @@ replaces the exact byte span of the values it changes.
 }
 ```
 
-- `projection` sets the default camera; consumers may switch per camera.
-- `render_layers` orders draw layers; an object's `layer` names one of them.
-- `ground_layers` are the layers stored in terrain grids.
-- `definition_types` maps each definition type to its closed schema.
-- `object_fields` and `zone_properties` declare the fields objects and zones
-  may set, with types and bounds.
-- `movement` holds the editor's analysis rules; the format itself does not
-  interpret them.
+- `version` is a string of at most 64 characters.
+- `projection` sets the default camera; consumers may switch per camera. Tile
+  sizes are integers from 1 to 4,294,967,295.
+- `render_layers` orders draw layers (1 to 65,534 unique identifiers); an
+  object's `layer` names one of them.
+- `ground_layers` are the layers stored in terrain grids: at most 8, each a
+  render layer, and never named `height` or `zone`.
+- `definition_types` maps each definition type to its closed schema (section
+  11). It must declare `proto`, the type objects and terrain cells refer to.
+- `object_fields` and `zone_properties` name the schemas for object `fields`
+  and zone `properties`.
+- `movement` (optional) holds the editor's analysis rules, `max_step` (0 to
+  4,294,967,295) and `fall_unit` (1 to 4,294,967,295); the format itself does
+  not interpret them.
+- `custom` (optional) holds namespaced extension data, as in section 7.
 
 ## 6. Plane: `planes/<plane>/plane.jsonc`
 
@@ -131,6 +155,10 @@ replaces the exact byte span of the values it changes.
   "default_zone": "wilderness"
 }
 ```
+
+`title` (at most 256 characters) and `default_zone` are optional;
+`default_zone` must be a zone of the plane. `chunk_size` must be 32 in format
+1. `custom` is allowed.
 
 ## 7. Chunk: `planes/<plane>/layers/<layer>/<cx>_<cy>.jsonc`
 
@@ -160,13 +188,19 @@ replaces the exact byte span of the values it changes.
 
 Terrain grids:
 
+- `terrain` holds one optional grid per profile ground layer, keyed by the
+  layer's name (`floor` and `mask` above), plus optional `height` and `zone`.
+  A missing ground grid is empty; missing heights are 0; a missing zone grid
+  leaves every tile in the plane's default zone.
 - A grid has either `"fill"` (one value for every tile) or `"rows"`.
-- Character grids (`floor`, `mask`, `zone`) map one palette key per tile.
-  Keys are single printable ASCII characters other than `.`; `.` means empty.
-  `"cell_width": 2` switches to two-character keys when a chunk needs more
-  than 90 distinct values.
-- `height` rows are arrays of integers. Height is the ground elevation of the
-  tile's terrain floor; objects may add their own `z`.
+- Character grids (ground layers and `zone`) map one palette key per tile.
+  Keys are visible ASCII characters (`!` through `~`; not space), not all
+  `.`; `.` (or `..`) means empty. `"cell_width": 2` switches to
+  two-character keys when a chunk needs more than 93 distinct values. Ground palette values are `proto`
+  definitions; zone palette values are zones of the plane, each listed once.
+- `height` rows are arrays of 32-bit signed integers (−2,147,483,648 to
+  2,147,483,647). Height is the ground elevation of the tile's terrain floor;
+  objects may add their own `z`.
 - A tile's terrain floor is the plain prototype in its cell. A floor with
   field overrides, or an additional floor on another sub-layer, is an object
   entry instead.
@@ -178,12 +212,12 @@ Objects:
 | `at` | Chunk-local `[x, y]`; required on top-level objects, absent in inventories. |
 | `proto` | Prototype ID; required. |
 | `layer` | Render layer name; defaults to the prototype's layer. |
-| `sub_layer` | Integer sub-layer, default 0. |
-| `z` | Elevation offset, default 0. |
+| `sub_layer` | 16-bit signed integer sub-layer (−32,768 to 32,767), default 0. |
+| `z` | 32-bit signed elevation offset, default 0. |
 | `fields` | Field overrides, closed by the profile's `object_fields` and the prototype. |
-| `portal` | `{"plane"?, "layer", "at": [x, y]}` in plane coordinates, or `{"anchor": id}`. |
-| `inventory` | Ordered list of contained objects. |
-| `custom` | Namespaced extension data. |
+| `portal` | `{"plane"?, "layer", "at": [x, y]}` in plane coordinates, or `{"plane"?, "anchor": id}`. Without `plane`, the target is this plane. |
+| `inventory` | Ordered list of contained objects, nested at most 16 deep. |
+| `custom` | Namespaced extension data: an object whose keys are domain-qualified namespaces such as `example.org` or `example.org/tool`. |
 
 Object order is significant: objects on the same tile keep their listed order,
 which is their stacking order within a layer and sub-layer. A multi-tile
@@ -195,14 +229,17 @@ object appears once, at its head tile; the prototype defines its footprint.
 {
   "format": "tilewright.zones/1",
   "zones": [
-    {"id": "island", "name": "Strakewood Island", "properties": {"music": "th_16"}},
-    {"id": "mountains", "parent": "island", "name": "Giant Mountains"}
+    {"id": "island", "name": "Green Island", "properties": {"music": "calm"}},
+    {"id": "mountains", "parent": "island", "name": "High Peaks"}
   ]
 }
 ```
 
 A tile's effective properties are its zone's properties over its ancestors'.
-Its display name is the innermost zone that has a `name`.
+Its display name is the innermost zone that has a `name` (at most 256
+characters). `properties` are checked against the profile's
+`zone_properties` schema. Parents must be zones of the same plane, and parent
+chains may not form cycles. `custom` is allowed on each zone.
 
 ## 9. Anchors: `planes/<plane>/anchors.jsonc`
 
@@ -226,13 +263,62 @@ Its display name is the innermost zone that has a `name`.
 }
 ```
 
-`fields` are validated by the definition type's schema in the profile.
+`fields` are validated by the definition type's schema in the profile. The
+file's directory must be the definition's `type` and its name the `id`.
+`custom` is allowed.
 
-## 11. Validation summary
+## 11. Field schemas
+
+Definition fields, object fields and zone properties are closed by schema
+documents the profile names:
+
+```jsonc
+{
+  "format": "tilewright.schema/1",
+  "fields": {
+    "face": {"type": "string", "required": true, "max_length": 128},
+    "layer": {"type": "string", "values": ["floor", "item", "wall"]},
+    "count": {"type": "integer", "min": 1, "max": 65535},
+    "weight": {"type": "number", "min": 0},
+    "blocks_view": {"type": "boolean"},
+    "loot": {"type": "reference", "target": "loot"},
+    "script": {"type": "json"}
+  }
+}
+```
+
+Field names match `^[a-z][a-z0-9_]{0,63}$`. Types:
+
+| Type | Accepts | Options |
+| --- | --- | --- |
+| `boolean` | `true` or `false` | |
+| `integer` | an integer | `min`, `max` |
+| `number` | any number | `min`, `max` |
+| `string` | a string | `max_length` (1 to 1,048,576 characters; default 65,536), `values` |
+| `reference` | the ID of a definition | `target`: a definition type the profile declares |
+| `json` | any value | |
+
+`required` (default `false`) makes a field mandatory; an object that lacks
+required fields gets one diagnostic naming them. A key that is not in the
+schema is an error.
+
+## 12. Validation summary
 
 A source tree is valid when every document parses under section 3, every
 document matches its section's shape and the profile's schemas, every
-reference resolves (profile, planes, zones, anchors, prototypes, portal
-targets), file names match content, and no two objects claim the same
-identity. Validators report every error with file, byte span and a stable
-code.
+reference resolves (profile, schemas, planes, zones, anchors, prototypes,
+references, portal targets), file names match content, and no two zones,
+anchors, planes or definitions share an ID. Validators report every error
+with file, byte span, line, column and a stable code, up to a limit they
+state (10,000 by default in the reference loader); past it they report one
+`source.budget` diagnostic instead of the rest:
+
+| Code | Meaning |
+| --- | --- |
+| `jsonc.*` | Syntax and limit errors of section 3. |
+| `source.io`, `source.encoding`, `source.budget` | Unreadable, non-UTF-8, or more files, bytes or problems than the validator allows. |
+| `source.symlink`, `source.unexpected_file`, `source.missing_file` | The file layout of section 2. |
+| `source.path`, `source.name_mismatch` | A path in a document, or a file name that disagrees with its content. |
+| `shape.format`, `shape.unknown_key`, `shape.missing_key`, `shape.type`, `shape.range`, `shape.identifier` | Document shape. |
+| `ref.duplicate`, `ref.unresolved`, `ref.cycle` | Identity and references. |
+| `grid.invalid` | Terrain grid structure. |

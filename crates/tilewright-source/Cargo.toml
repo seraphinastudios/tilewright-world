@@ -1,0 +1,22 @@
+[package]
+name = "tilewright-source"
+description = "Loads and validates Tilewright world source trees into a typed, game-neutral model"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+sha2.workspace = true
+tilewright-jsonc.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

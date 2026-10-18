@@ -1,0 +1,8 @@
+{
+  "format": "tilewright.plane/1",
+  "id": "overworld",
+  "title": "Overworld",
+  "kind": "shared",
+  "chunk_size": 32,
+  "default_zone": "wilderness"
+}

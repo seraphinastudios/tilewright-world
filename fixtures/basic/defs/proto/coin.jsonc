@@ -1,0 +1,1 @@
+{"format": "tilewright.def/1", "type": "proto", "id": "coin", "fields": {"face": "coin.png", "layer": "item", "weight": 0.01}}

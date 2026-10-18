@@ -1,0 +1,497 @@
+// Copyright 2026 Seraphina Studios
+// SPDX-License-Identifier: MIT
+
+//! Bounded access to a source tree. Every path is relative to the root,
+//! `/`-separated and validated; symbolic links are never followed. On Unix
+//! every component is opened through its parent's directory handle without
+//! following links (`beneath`); elsewhere components are checked by path
+//! before use (`portable`).
+
+#[cfg(unix)]
+mod beneath;
+#[cfg(any(not(unix), test))]
+mod portable;
+
+#[cfg(unix)]
+use beneath as platform;
+#[cfg(not(unix))]
+use portable as platform;
+
+use crate::{
+    Code, Diagnostic, LoadOptions,
+    diagnostic::{Diagnostics, Positions},
+};
+use sha2::{Digest, Sha256};
+use std::{collections::BTreeMap, io::Read as _, path::Path};
+use tilewright_jsonc::{Document, ErrorCode};
+
+/// Why a path beneath the root could not be used.
+#[derive(Debug)]
+pub(crate) enum Refused {
+    /// A symbolic link, at this `/`-joined prefix of the path.
+    Link(String),
+    Missing,
+    /// The entry is not of the kind asked for.
+    Unexpected,
+    Io(std::io::Error),
+}
+
+/// What a path names, without following a link.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Found {
+    File,
+    Directory,
+    Other,
+    Missing,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RawKind {
+    File,
+    Directory,
+    Link,
+    Other,
+}
+
+/// A directory entry; `name` is `None` when it is not UTF-8.
+#[derive(Debug)]
+pub(crate) struct RawEntry {
+    pub name: Option<String>,
+    pub kind: RawKind,
+}
+
+/// The components of a relative path.
+fn components(path: &str) -> Vec<&str> {
+    path.split('/')
+        .filter(|component| !component.is_empty())
+        .collect()
+}
+
+/// A parsed source file.
+pub(crate) struct Source {
+    pub path: String,
+    pub document: Document,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum EntryKind {
+    File,
+    Directory,
+    /// Neither a regular file nor a directory, such as a FIFO.
+    Other,
+}
+
+pub(crate) struct Entry {
+    pub name: String,
+    pub kind: EntryKind,
+}
+
+pub(crate) struct Tree<'o> {
+    root: platform::Root,
+    options: &'o LoadOptions,
+    files: usize,
+    entries: usize,
+    bytes: u64,
+    digests: BTreeMap<String, (u64, [u8; 32])>,
+    diagnostics: Diagnostics,
+    exhausted: bool,
+}
+
+/// Whether `path` is a safe relative path ending in `.jsonc`.
+pub(crate) fn is_jsonc_path(path: &str) -> bool {
+    is_safe_relative(path) && path.as_bytes().ends_with(b".jsonc")
+}
+
+/// Whether `path` is a safe relative path: `/`-separated components of
+/// ASCII letters, digits, `_`, `.` and `-`, none starting with `.` or `-`.
+pub(crate) fn is_safe_relative(path: &str) -> bool {
+    let components: Vec<&str> = path.split('/').collect();
+    path.len() <= 1024
+        && components.len() <= 32
+        && components.iter().all(|component| {
+            let bytes = component.as_bytes();
+            !bytes.is_empty()
+                && bytes.len() <= 128
+                && (bytes[0].is_ascii_alphanumeric() || bytes[0] == b'_')
+                && bytes
+                    .iter()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(byte))
+        })
+}
+
+impl<'o> Tree<'o> {
+    pub fn new(root: &Path, options: &'o LoadOptions) -> Self {
+        Self {
+            root: platform::Root::new(root),
+            options,
+            files: 0,
+            entries: 0,
+            bytes: 0,
+            digests: BTreeMap::new(),
+            diagnostics: Diagnostics::new(options.maximum_diagnostics),
+            exhausted: false,
+        }
+    }
+
+    /// Reports the exhausted budget once.
+    fn exhaust(&mut self, path: &str) {
+        if !self.exhausted {
+            self.exhausted = true;
+            self.diagnostics.push(Diagnostic::file(
+                path,
+                Code::Budget,
+                format!(
+                    "the load exceeds {} files, {} directory entries or {} bytes",
+                    self.options.maximum_files,
+                    self.options.maximum_entries,
+                    self.options.maximum_total_bytes
+                ),
+            ));
+        }
+    }
+
+    /// Whether one more file of `length` bytes fits the load's budget.
+    fn within_budget(&self, length: u64) -> bool {
+        !self.exhausted
+            && self.files < self.options.maximum_files
+            && self.bytes.saturating_add(length) <= self.options.maximum_total_bytes
+    }
+
+    pub fn take_diagnostics(&mut self) -> Diagnostics {
+        std::mem::replace(
+            &mut self.diagnostics,
+            Diagnostics::new(self.options.maximum_diagnostics),
+        )
+    }
+
+    /// Reports a symbolic link at `path`.
+    fn link(&mut self, path: &str) {
+        self.diagnostics.push(Diagnostic::file(
+            path,
+            Code::Symlink,
+            "symbolic links are not followed",
+        ));
+    }
+
+    /// Whether a regular file or directory exists at `path`. A symbolic
+    /// link anywhere in the path is reported and counts as neither.
+    pub fn kind(&mut self, path: &str) -> Option<EntryKind> {
+        match self.root.kind(&components(path)) {
+            Ok(Found::File) => Some(EntryKind::File),
+            Ok(Found::Directory) => Some(EntryKind::Directory),
+            Ok(Found::Other) => Some(EntryKind::Other),
+            Ok(Found::Missing) | Err(Refused::Missing | Refused::Unexpected) => None,
+            Err(Refused::Link(link)) => {
+                self.link(&link);
+                None
+            }
+            Err(Refused::Io(error)) => {
+                self.diagnostics.push(Diagnostic::file(
+                    path,
+                    Code::Io,
+                    format!("cannot read file type: {error}"),
+                ));
+                None
+            }
+        }
+    }
+
+    /// Whether the optional directory `path` is present. An entry of
+    /// another kind there is reported, not treated as absent.
+    pub fn container(&mut self, path: &str) -> bool {
+        match self.kind(path) {
+            Some(EntryKind::Directory) => true,
+            Some(EntryKind::File | EntryKind::Other) => {
+                self.diagnostics.push(Diagnostic::file(
+                    path,
+                    Code::UnexpectedFile,
+                    "must be a directory",
+                ));
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// Lists a directory, sorted by name. Symbolic links, special files and
+    /// non-UTF-8 names are reported and skipped.
+    pub fn list(&mut self, path: &str) -> Vec<Entry> {
+        let directory = match self.root.list(&components(path)) {
+            Ok(directory) => directory,
+            Err(Refused::Link(link)) => {
+                self.link(&link);
+                return Vec::new();
+            }
+            Err(refused) => {
+                let reason = match refused {
+                    Refused::Io(error) => error.to_string(),
+                    Refused::Missing => "it is missing".to_owned(),
+                    Refused::Unexpected | Refused::Link(_) => "not a directory".to_owned(),
+                };
+                self.diagnostics.push(Diagnostic::file(
+                    path,
+                    Code::Io,
+                    format!("cannot list directory: {reason}"),
+                ));
+                return Vec::new();
+            }
+        };
+        let mut entries = Vec::new();
+        for entry in directory {
+            if self.exhausted {
+                break;
+            }
+            self.entries += 1;
+            if self.entries > self.options.maximum_entries {
+                self.exhaust(path);
+                break;
+            }
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    self.diagnostics.push(Diagnostic::file(
+                        path,
+                        Code::Io,
+                        format!("cannot list directory: {error}"),
+                    ));
+                    continue;
+                }
+            };
+            let Some(name) = entry.name else {
+                self.diagnostics.push(Diagnostic::file(
+                    path,
+                    Code::UnexpectedFile,
+                    "file name is not UTF-8",
+                ));
+                continue;
+            };
+            let child = join(path, &name);
+            match entry.kind {
+                RawKind::Link => self.link(&child),
+                RawKind::Directory => entries.push(Entry {
+                    name,
+                    kind: EntryKind::Directory,
+                }),
+                RawKind::File => entries.push(Entry {
+                    name,
+                    kind: EntryKind::File,
+                }),
+                RawKind::Other => self.diagnostics.push(Diagnostic::file(
+                    &child,
+                    Code::UnexpectedFile,
+                    "not a regular file or directory",
+                )),
+            }
+        }
+        entries.sort_by(|left, right| left.name.cmp(&right.name));
+        entries
+    }
+
+    /// Reads and parses a JSONC document. Every problem is reported.
+    #[allow(clippy::too_many_lines)]
+    pub fn document(&mut self, path: &str) -> Option<Source> {
+        // The file is opened first and its opened handle checked, so what is
+        // checked is what is read.
+        let (file, length) = match self.root.file(&components(path)) {
+            Ok(opened) => opened,
+            Err(Refused::Link(link)) => {
+                self.link(&link);
+                return None;
+            }
+            Err(Refused::Unexpected) => {
+                self.diagnostics.push(Diagnostic::file(
+                    path,
+                    Code::UnexpectedFile,
+                    "expected a regular file",
+                ));
+                return None;
+            }
+            Err(Refused::Missing) => {
+                self.diagnostics
+                    .push(Diagnostic::file(path, Code::MissingFile, "file is missing"));
+                return None;
+            }
+            Err(Refused::Io(error)) => {
+                self.diagnostics.push(Diagnostic::file(
+                    path,
+                    Code::Io,
+                    format!("cannot read file: {error}"),
+                ));
+                return None;
+            }
+        };
+        let limit = u64::try_from(self.options.limits.max_input_bytes).unwrap_or(u64::MAX);
+        if length > limit {
+            self.diagnostics.push(Diagnostic::file(
+                path,
+                ErrorCode::InputTooLarge,
+                format!("file is larger than {limit} bytes"),
+            ));
+            return None;
+        }
+        if !self.within_budget(length) {
+            self.exhaust(path);
+            return None;
+        }
+        // Read at most one byte past the file limit or the remaining budget,
+        // so a file that grows after the size check cannot force an
+        // unbounded read; its actual length is checked again below.
+        let remaining = self.options.maximum_total_bytes.saturating_sub(self.bytes);
+        let mut bytes = Vec::new();
+        let bytes = match file
+            .take(limit.min(remaining).saturating_add(1))
+            .read_to_end(&mut bytes)
+        {
+            Ok(_) => bytes,
+            Err(error) => {
+                self.diagnostics.push(Diagnostic::file(
+                    path,
+                    Code::Io,
+                    format!("cannot read file: {error}"),
+                ));
+                return None;
+            }
+        };
+        let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        if length > limit {
+            self.diagnostics.push(Diagnostic::file(
+                path,
+                ErrorCode::InputTooLarge,
+                format!("file is larger than {limit} bytes"),
+            ));
+            return None;
+        }
+        if !self.within_budget(length) {
+            self.exhaust(path);
+            return None;
+        }
+        self.files += 1;
+        self.bytes = self.bytes.saturating_add(length);
+        self.digests
+            .insert(path.to_owned(), (length, Sha256::digest(&bytes).into()));
+        let text = match String::from_utf8(bytes) {
+            Ok(text) => text,
+            Err(error) => {
+                self.diagnostics.push(Diagnostic::file(
+                    path,
+                    Code::Encoding,
+                    format!("not UTF-8 at byte {}", error.utf8_error().valid_up_to()),
+                ));
+                return None;
+            }
+        };
+        match Document::parse(text.as_str(), &self.options.limits) {
+            Ok(document) => Some(Source {
+                path: path.to_owned(),
+                document,
+            }),
+            Err(error) => {
+                self.diagnostics.push(Diagnostic::at(
+                    path,
+                    &Positions::new(&text),
+                    error.offset,
+                    error.offset,
+                    error.code,
+                    "invalid JSONC",
+                ));
+                None
+            }
+        }
+    }
+
+    /// SHA-256 over every file read: for each path in byte order, the UTF-8
+    /// path, a zero byte, the length as little-endian `u64`, and the SHA-256
+    /// of the file's bytes.
+    pub fn digest(&self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        for (path, (length, digest)) in &self.digests {
+            hasher.update(path.as_bytes());
+            hasher.update([0]);
+            hasher.update(length.to_le_bytes());
+            hasher.update(digest);
+        }
+        hasher.finalize().into()
+    }
+}
+
+pub(crate) fn join(directory: &str, name: &str) -> String {
+    if directory.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{directory}/{name}")
+    }
+}
+
+/// Both access implementations refuse links themselves, at the component
+/// where they occur, rather than relying on an earlier check.
+#[cfg(all(test, unix))]
+mod tests {
+    use super::{Found, RawKind, Refused};
+    use std::{fs, os::unix::fs::symlink};
+
+    fn tree() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("dir")).unwrap();
+        fs::write(root.path().join("dir/file.jsonc"), "{}").unwrap();
+        symlink(root.path().join("dir"), root.path().join("link")).unwrap();
+        symlink(
+            root.path().join("dir/file.jsonc"),
+            root.path().join("dir/file-link.jsonc"),
+        )
+        .unwrap();
+        root
+    }
+
+    /// The link prefix a refusal names.
+    fn link<T>(result: Result<T, Refused>) -> String {
+        match result {
+            Err(Refused::Link(prefix)) => prefix,
+            Err(other) => panic!("expected a link, got {other:?}"),
+            Ok(_) => panic!("expected a link, got success"),
+        }
+    }
+
+    macro_rules! access_tests {
+        ($name:ident, $module:ident) => {
+            #[test]
+            fn $name() {
+                let directory = tree();
+                let root = super::$module::Root::new(directory.path());
+                assert_eq!(root.file(&["dir", "file.jsonc"]).unwrap().1, 2);
+                assert_eq!(link(root.file(&["link", "file.jsonc"])), "link");
+                assert_eq!(
+                    link(root.file(&["dir", "file-link.jsonc"])),
+                    "dir/file-link.jsonc"
+                );
+                assert!(matches!(root.file(&["dir"]), Err(Refused::Unexpected)));
+                assert!(matches!(root.file(&["dir", "nope"]), Err(Refused::Missing)));
+                assert!(matches!(
+                    root.file(&["dir", "file.jsonc", "x"]),
+                    Err(Refused::Unexpected)
+                ));
+                assert_eq!(root.kind(&["dir"]).unwrap(), Found::Directory);
+                assert_eq!(root.kind(&["dir", "file.jsonc"]).unwrap(), Found::File);
+                assert_eq!(root.kind(&["nope"]).unwrap(), Found::Missing);
+                assert_eq!(link(root.kind(&["link"])), "link");
+                assert_eq!(link(root.list(&["link"])), "link");
+                let mut entries: Vec<(Option<String>, RawKind)> = root
+                    .list(&["dir"])
+                    .unwrap()
+                    .map(|entry| entry.map(|entry| (entry.name, entry.kind)))
+                    .collect::<Result<_, _>>()
+                    .unwrap();
+                entries.sort_by(|left, right| left.0.cmp(&right.0));
+                assert_eq!(
+                    entries,
+                    [
+                        (Some("file-link.jsonc".to_owned()), RawKind::Link),
+                        (Some("file.jsonc".to_owned()), RawKind::File),
+                    ]
+                );
+            }
+        };
+    }
+
+    access_tests!(beneath_refuses_links, beneath);
+    access_tests!(portable_refuses_links, portable);
+}

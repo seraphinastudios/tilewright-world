@@ -1,0 +1,13 @@
+{
+  "format": "tilewright.chunk/1",
+  "plane": "overworld",
+  "layer": -1,
+  "chunk": [0, 0],
+  "terrain": {
+    // A cave floor with two-character keys.
+    "floor": {"palette": {"c1": "cave_floor"}, "cell_width": 2, "fill": "c1"}
+  },
+  "objects": [
+    {"at": [4, 4], "proto": "stairs_up", "portal": {"anchor": "village.well"}}
+  ]
+}

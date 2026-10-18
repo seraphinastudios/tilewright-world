@@ -1,0 +1,8 @@
+{
+  "format": "tilewright.chunk/1",
+  "plane": "vault",
+  "layer": 0,
+  "chunk": [0, 0],
+  "terrain": {"floor": {"palette": {"c": "cave_floor"}, "fill": "c"}},
+  "objects": [{"at": [1, 1], "proto": "chest", "fields": {"loot": "chest_common"}}]
+}

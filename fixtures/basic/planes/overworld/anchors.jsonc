@@ -1,0 +1,7 @@
+{
+  "format": "tilewright.anchors/1",
+  "anchors": [
+    {"id": "village.well", "layer": 0, "at": [10, 12]},
+    {"id": "cave.entrance", "layer": -1, "at": [4, 4]}
+  ]
+}

@@ -303,3 +303,18 @@ fn random_input_never_panics() {
         let _ = Document::parse(source, &Limits::default());
     }
 }
+
+#[test]
+fn canonical_output_is_minified_and_keeps_number_spelling() {
+    let source = "// c\n{ \"b\": [1, -0, 2.50, -0.0, 1e3], /* x */ \"a\": \"q\\\"\\\\\\n\\u0001\\u00e9\", \"n\": null, \"t\": true }\n";
+    let document = parse(source).unwrap();
+    assert_eq!(
+        document.canonical(document.root()),
+        "{\"b\":[1,-0,2.50,-0.0,1e3],\"a\":\"q\\\"\\\\\\n\\u0001\u{e9}\",\"n\":null,\"t\":true}"
+    );
+    let reparsed = parse(&document.canonical(document.root())).unwrap();
+    assert_eq!(
+        reparsed.canonical(reparsed.root()),
+        document.canonical(document.root())
+    );
+}

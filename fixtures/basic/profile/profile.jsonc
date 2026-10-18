@@ -1,0 +1,15 @@
+{
+  "format": "tilewright.profile/1",
+  "id": "example",
+  "version": "1.0.0",
+  "projection": {"kind": "isometric", "tile_width": 48, "tile_height": 24},
+  "render_layers": ["floor", "mask", "item", "wall", "living", "effect"],
+  "ground_layers": ["floor", "mask"],
+  "definition_types": {
+    "proto": {"schema": "schema/proto.jsonc"},
+    "loot": {"schema": "schema/loot.jsonc"}
+  },
+  "object_fields": "schema/object-fields.jsonc",
+  "zone_properties": "schema/zone-properties.jsonc",
+  "movement": {"max_step": 12, "fall_unit": 50}
+}

@@ -1,0 +1,7 @@
+{
+  "format": "tilewright.schema/1",
+  "fields": {
+    "item": {"type": "reference", "target": "proto", "required": true},
+    "chance": {"type": "number", "min": 0, "max": 1}
+  }
+}

@@ -1,0 +1,6 @@
+// A small synthetic world for tests and examples.
+{
+  "format": "tilewright.world/1",
+  "profile": "profile/profile.jsonc",
+  "planes": ["overworld", "vault"]
+}

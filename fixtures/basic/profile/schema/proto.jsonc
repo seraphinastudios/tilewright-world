@@ -1,0 +1,10 @@
+{
+  "format": "tilewright.schema/1",
+  "fields": {
+    "face": {"type": "string", "required": true, "max_length": 128},
+    "layer": {"type": "string", "required": true, "values": ["floor", "mask", "item", "wall", "living", "effect"]},
+    "blocks_view": {"type": "boolean"},
+    "footprint": {"type": "json"},
+    "weight": {"type": "number", "min": 0}
+  }
+}
