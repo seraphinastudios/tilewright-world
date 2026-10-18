@@ -990,6 +990,26 @@ fn layer_height_has_its_documented_range() {
     let copy = workspace();
     edit(copy.path(), PROFILE, "\"layer_height\": 50,", "");
     assert_eq!(load(copy.path()).unwrap().profile().layer_height, None);
+
+    // A problem in an earlier member does not hide one in the layer height.
+    let copy = workspace();
+    edit(
+        copy.path(),
+        PROFILE,
+        "\"layer_height\": 50",
+        "\"layer_height\": 0",
+    );
+    edit(
+        copy.path(),
+        PROFILE,
+        "\"id\": \"example\"",
+        "\"id\": \"Example\"",
+    );
+    let found: Vec<_> = codes(copy.path())
+        .into_iter()
+        .map(|(code, _)| code)
+        .collect();
+    assert_eq!(found, ["shape.identifier", "shape.range"]);
 }
 
 const STAIRWELLS: &str = "planes/vault/stairwells.jsonc";

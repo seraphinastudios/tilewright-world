@@ -105,6 +105,15 @@ pub(crate) fn read_profile(
         ],
     )?;
     let mut ok = reader.format(root, "tilewright.profile/1");
+    // The layer height is read first, so no other member's problem hides
+    // one in it, and a bad one does not stop the profile's other checks.
+    let layer_height = root.get("layer_height").and_then(|value| {
+        let height = reader
+            .integer(value, 1, i64::from(MAXIMUM_LAYER_HEIGHT))
+            .and_then(|height| u32::try_from(height).ok());
+        ok &= height.is_some();
+        height
+    });
     let id = reader.identifier(reader.required(root, "id")?)?;
     let version = reader.text(reader.required(root, "version")?, 64)?;
     let projection_value = reader.required(root, "projection")?;
@@ -174,15 +183,6 @@ pub(crate) fn read_profile(
             ok = false;
         }
     }
-    // A bad layer height is reported without stopping the profile's other
-    // checks.
-    let layer_height = root.get("layer_height").and_then(|value| {
-        let height = reader
-            .integer(value, 1, i64::from(MAXIMUM_LAYER_HEIGHT))
-            .and_then(|height| u32::try_from(height).ok());
-        ok &= height.is_some();
-        height
-    });
     let movement = match root.get("movement") {
         Some(value) => {
             reader.object(value, &["max_step", "fall_unit"])?;
