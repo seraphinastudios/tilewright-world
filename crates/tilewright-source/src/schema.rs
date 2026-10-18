@@ -629,7 +629,8 @@ fn check_value<'a>(
 }
 
 /// Checks a `list` value: an array of `count` items, each of type `items`.
-/// Every item is checked, so each bad one is reported.
+/// Every item is checked, even when the count is wrong, so each bad one is
+/// reported.
 fn check_list<'a>(
     reader: &Reader<'a>,
     value: &'a Value,
@@ -640,7 +641,8 @@ fn check_list<'a>(
     let Some(elements) = reader.array(value) else {
         return false;
     };
-    if !count.contains(&elements.len()) {
+    let mut ok = count.contains(&elements.len());
+    if !ok {
         reader.report(
             value.span(),
             Code::Range,
@@ -651,9 +653,7 @@ fn check_list<'a>(
                 count.end()
             ),
         );
-        return false;
     }
-    let mut ok = true;
     for element in elements {
         ok &= check_value(reader, element, items, references);
     }

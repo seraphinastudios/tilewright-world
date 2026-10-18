@@ -1230,6 +1230,24 @@ fn list_and_object_values_are_checked_at_every_level() {
         ]
     );
 
+    // Items are checked even when there are too many of them.
+    let copy = with_loot(&format!(
+        "{{\"entries\": [{many}, {{\"item\": \"gem\", \"weight\": 1}}, {{\"item\": \"opal\", \"weight\": 1}}]}}"
+    ));
+    let found: Vec<_> = load(copy.path())
+        .expect_err("too many entries, two unresolved")
+        .into_iter()
+        .map(|diagnostic| (diagnostic.code, diagnostic.message))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            ("shape.range", "67 items, outside 1..=64".to_owned()),
+            ("ref.unresolved", "no proto definition \"gem\"".to_owned()),
+            ("ref.unresolved", "no proto definition \"opal\"".to_owned()),
+        ]
+    );
+
     // Object fields of chunk objects are checked the same way.
     for (tags, code) in [
         (["\"a\""; 9].join(", "), "shape.range"),
