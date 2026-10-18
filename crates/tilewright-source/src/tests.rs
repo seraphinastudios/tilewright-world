@@ -589,3 +589,72 @@ fn boundary_chunks_load_and_the_next_ones_are_rejected() {
         );
     }
 }
+
+#[test]
+fn missing_required_fields_are_one_diagnostic_per_owner() {
+    let copy = workspace();
+    let required: Vec<String> = (1..=5)
+        .map(|index| format!("\"r{index}\": {{\"type\": \"boolean\", \"required\": true}}"))
+        .collect();
+    edit(
+        copy.path(),
+        "profile/schema/object-fields.jsonc",
+        "\"fields\": {",
+        &format!("\"fields\": {{{}, ", required.join(", ")),
+    );
+    let found = load(copy.path()).expect_err("required fields are missing");
+    let missing: Vec<_> = found
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "shape.missing_key")
+        .collect();
+    assert!(!missing.is_empty());
+    for diagnostic in &missing {
+        assert_eq!(
+            diagnostic.message,
+            "required fields \"r1\", \"r2\", \"r3\" and 2 more are missing"
+        );
+    }
+    let owners: std::collections::BTreeSet<_> = missing
+        .iter()
+        .map(|diagnostic| (&diagnostic.path, diagnostic.start))
+        .collect();
+    assert_eq!(owners.len(), missing.len());
+}
+
+#[test]
+fn roles_naming_one_schema_share_it() {
+    let copy = workspace();
+    edit(
+        copy.path(),
+        "profile/profile.jsonc",
+        "\"loot\": {\"schema\": \"schema/loot.jsonc\"}",
+        "\"loot\": {\"schema\": \"schema/loot.jsonc\"}, \"scenery\": {\"schema\": \"schema/proto.jsonc\"}",
+    );
+    let world = load(copy.path()).expect("valid");
+    let types = &world.profile.definition_types;
+    assert!(std::sync::Arc::ptr_eq(&types["proto"], &types["scenery"]));
+}
+
+#[test]
+fn document_paths_have_at_most_32_components() {
+    for (depth, valid) in [(31, true), (32, false)] {
+        let copy = workspace();
+        let root = copy.path();
+        let nested = vec!["p"; depth].join("/");
+        copy_tree(&root.join("profile"), &root.join(&nested));
+        edit(
+            root,
+            "world.jsonc",
+            "\"profile/profile.jsonc\"",
+            &format!("\"{nested}/profile.jsonc\""),
+        );
+        if valid {
+            load(root).expect("32 components are allowed");
+        } else {
+            assert_eq!(
+                problems(root),
+                [("source.path", "world.jsonc".to_owned(), 4)]
+            );
+        }
+    }
+}

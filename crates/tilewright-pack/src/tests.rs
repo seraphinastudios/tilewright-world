@@ -525,3 +525,113 @@ fn canonical_json_longer_than_a_source_line_compiles_and_verifies() {
     let chunk = pack.chunk("vault", 0, 0, 0).unwrap().unwrap();
     assert!(chunk.objects[0].custom.as_ref().unwrap().len() > 1024 * 1024);
 }
+
+#[test]
+fn verification_checks_keys_sizes_order_and_cycles() {
+    for (name, sql, problem) in [
+        (
+            "layer.twpack",
+            "UPDATE chunks SET layer = 'bad' WHERE plane = 'vault'",
+            "invalid layer or position",
+        ),
+        (
+            "cx.twpack",
+            "UPDATE chunks SET cx = 281474976710656 WHERE plane = 'vault'",
+            "invalid layer or position",
+        ),
+        (
+            "x.twpack",
+            "UPDATE anchors SET x = 'east' WHERE id = 'village.well'",
+            "invalid ID, layer or position",
+        ),
+        (
+            "size.twpack",
+            "DELETE FROM chunks WHERE plane = 'vault'; UPDATE planes SET chunk_size = 1, document = replace(document, '\"chunk_size\":32', '\"chunk_size\":1') WHERE id = 'vault'",
+            "chunk size other than 32",
+        ),
+        (
+            "cycle.twpack",
+            "UPDATE zones SET parent = 'village', document = replace(document, '\"parent\":\"wilderness\"', '\"parent\":\"village\"') WHERE id = 'island'",
+            "cycle",
+        ),
+        (
+            "order.twpack",
+            "CREATE TEMP TABLE s AS SELECT id, value FROM strings WHERE id IN (1, 2); \
+             UPDATE strings SET value = 'zz.tmp' WHERE id = 1; \
+             UPDATE strings SET value = (SELECT value FROM s WHERE id = 1) WHERE id = 2; \
+             UPDATE strings SET value = (SELECT value FROM s WHERE id = 2) WHERE id = 1",
+            "byte order",
+        ),
+        (
+            "nul-anchor.twpack",
+            "UPDATE anchors SET id = 'village' || char(0) || '!' WHERE id = 'village.well'",
+            "invalid ID",
+        ),
+        (
+            "nul-string.twpack",
+            "UPDATE strings SET value = value || char(0) WHERE id = (SELECT max(id) FROM strings)",
+            "without NUL",
+        ),
+    ] {
+        let (_directory, copy) = tampered(name, sql);
+        let error = Pack::open(&copy).unwrap().verify().unwrap_err();
+        assert!(error.to_string().contains(problem), "{name}: {error}");
+    }
+}
+
+#[test]
+fn opening_stops_at_an_oversized_schema() {
+    let tables = (0..100)
+        .map(|index| format!("CREATE TABLE extra{index} (x);"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let long = format!("CREATE TABLE extra ({} INTEGER)", "x".repeat(2000));
+    for (name, sql) in [("tables.twpack", tables), ("long.twpack", long)] {
+        let (_directory, copy) = tampered(name, &sql);
+        let error = Pack::open(&copy).err().unwrap();
+        assert!(error.to_string().contains("schema"), "{name}: {error}");
+    }
+}
+
+#[test]
+fn malformed_worlds_fail_to_compile_without_panicking() {
+    let mut cell = world();
+    let chunk = cell
+        .planes
+        .get_mut("vault")
+        .unwrap()
+        .chunks
+        .values_mut()
+        .next()
+        .unwrap();
+    chunk.ground[0].cells[0] = 99;
+    assert!(compile(&cell).is_err());
+
+    let mut outside = world();
+    let chunk = outside
+        .planes
+        .get_mut("vault")
+        .unwrap()
+        .chunks
+        .values_mut()
+        .next()
+        .unwrap();
+    chunk.objects[0].at = Some([40, 0]);
+    assert!(compile(&outside).is_err());
+}
+
+#[test]
+fn existing_packs_are_compared_without_replacing_them() {
+    let world = world();
+    let directory = tempfile::tempdir().unwrap();
+    let written = write_pack(&world, directory.path()).unwrap();
+    let mut bytes = std::fs::read(&written.path).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 1;
+    std::fs::write(&written.path, &bytes).unwrap();
+    assert!(write_pack(&world, directory.path()).is_err());
+    assert_eq!(std::fs::read(&written.path).unwrap(), bytes);
+    std::fs::remove_file(&written.path).unwrap();
+    std::fs::create_dir(&written.path).unwrap();
+    assert!(write_pack(&world, directory.path()).is_err());
+}

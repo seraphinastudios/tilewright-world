@@ -119,11 +119,13 @@ A full verification also:
 
 - runs SQLite's integrity check, and compares the file's SHA-256 (hashed in
   bounded blocks) with its name when the name is a digest;
-- checks that string IDs are exactly `1..=count` and every string is text of
-  at most 1 MiB;
-- checks that plane, zone, anchor and definition keys are identifiers, plane
-  kinds and chunk sizes, zone planes and parents, and anchor planes and
-  layers;
+- checks that string IDs are exactly `1..=count` in byte order of their
+  values, and every string is text of at most 1 MiB without NUL;
+- checks that plane, zone, anchor and definition keys are identifiers; plane
+  kinds, and a chunk size of 32 as format 1 requires; zone planes, parents
+  and that parent chains end at a root; anchor planes, layers and positions;
+  and chunk planes, layers and coordinates, which keep every tile within the
+  source format's integer range;
 - checks that every `document` column, and the `profile` meta value, is
   canonical JSON of an object of at most 64 MiB whose identity agrees with
   its row: `format`, `id`, `kind` and `chunk_size` for planes, `id` and

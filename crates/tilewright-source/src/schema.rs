@@ -283,17 +283,39 @@ pub(crate) fn read_fields<'a>(
             None => ok = false,
         }
     }
-    for (name, spec) in &schema.fields {
-        if spec.required && !members.iter().any(|member| &member.key == name) {
-            reader.report(
-                fields.unwrap_or(owner).span(),
-                Code::MissingKey,
-                format!("required field \"{name}\" is missing"),
-            );
-            ok = false;
-        }
+    // One diagnostic per owner, however many fields it lacks.
+    let present: BTreeSet<&str> = members.iter().map(|member| member.key.as_str()).collect();
+    let missing: Vec<&str> = schema
+        .fields
+        .iter()
+        .filter(|(name, spec)| spec.required && !present.contains(name.as_str()))
+        .map(|(name, _)| name.as_str())
+        .collect();
+    if let Some(message) = missing_message(&missing) {
+        reader.report(fields.unwrap_or(owner).span(), Code::MissingKey, message);
+        ok = false;
     }
     ok.then_some(output)
+}
+
+/// Names a few missing required fields and counts the rest.
+fn missing_message(missing: &[&str]) -> Option<String> {
+    const NAMED: usize = 3;
+    let named = missing
+        .iter()
+        .take(NAMED)
+        .map(|name| format!("\"{name}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    match missing.len() {
+        0 => None,
+        1 => Some(format!("required field {named} is missing")),
+        count if count <= NAMED => Some(format!("required fields {named} are missing")),
+        count => Some(format!(
+            "required fields {named} and {} more are missing",
+            count - NAMED
+        )),
+    }
 }
 
 fn check_field<'a>(

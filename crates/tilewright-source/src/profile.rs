@@ -7,9 +7,12 @@ use crate::{
     Code, Diagnostic, MAXIMUM_GROUND_LAYERS, Movement, Profile, Projection,
     files::{Tree, is_jsonc_path},
     read::Reader,
-    schema::{FieldType, read_schema},
+    schema::{FieldType, Schema, read_schema},
 };
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 /// Reads `world.jsonc`: the profile path and the plane list.
 pub(crate) fn read_manifest(
@@ -33,6 +36,29 @@ pub(crate) fn read_manifest(
     let planes = reader.identifiers(reader.required(root, "planes")?)?;
     reader.custom(root);
     format_ok.then(|| (profile.to_owned(), planes))
+}
+
+/// Whether every reference field of `schema` targets a declared definition
+/// type; reports each one that does not.
+fn references_resolve(
+    schema: &Schema,
+    type_names: &BTreeSet<String>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> bool {
+    let mut ok = true;
+    for (name, spec) in &schema.fields {
+        if let FieldType::Reference { target } = &spec.field_type
+            && !type_names.contains(target)
+        {
+            diagnostics.push(Diagnostic::file(
+                &schema.path,
+                Code::Reference,
+                format!("field \"{name}\" references unknown definition type \"{target}\""),
+            ));
+            ok = false;
+        }
+    }
+    ok
 }
 
 /// What a schema document is for.
@@ -229,7 +255,7 @@ pub(crate) fn read_profile(
             None => ok = false,
         }
     }
-    let type_names: Vec<String> = schema_paths
+    let type_names: BTreeSet<String> = schema_paths
         .iter()
         .filter_map(|(role, _)| match role {
             Role::Definition(kind) => Some(kind.clone()),
@@ -237,26 +263,26 @@ pub(crate) fn read_profile(
         })
         .collect();
 
+    // Each schema path is read and checked once; roles that name the same
+    // path share one schema. `None` marks a schema that failed.
+    let mut loaded: BTreeMap<String, Option<Arc<Schema>>> = BTreeMap::new();
     let mut definition_types = BTreeMap::new();
     let mut object_fields = None;
     let mut zone_properties = None;
     for (role, schema_path) in schema_paths {
-        let Some(schema) = read_schema(tree, &schema_path, diagnostics) else {
+        let schema = if let Some(schema) = loaded.get(&schema_path) {
+            schema.clone()
+        } else {
+            let schema = read_schema(tree, &schema_path, diagnostics)
+                .filter(|schema| references_resolve(schema, &type_names, diagnostics))
+                .map(Arc::new);
+            loaded.insert(schema_path, schema.clone());
+            schema
+        };
+        let Some(schema) = schema else {
             ok = false;
             continue;
         };
-        for (name, spec) in &schema.fields {
-            if let FieldType::Reference { target } = &spec.field_type
-                && !type_names.contains(target)
-            {
-                diagnostics.push(Diagnostic::file(
-                    &schema.path,
-                    Code::Reference,
-                    format!("field \"{name}\" references unknown definition type \"{target}\""),
-                ));
-                ok = false;
-            }
-        }
         match role {
             Role::Definition(kind) => {
                 definition_types.insert(kind, schema);

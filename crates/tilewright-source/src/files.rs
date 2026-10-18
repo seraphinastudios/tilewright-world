@@ -2,17 +2,67 @@
 // SPDX-License-Identifier: MIT
 
 //! Bounded access to a source tree. Every path is relative to the root,
-//! `/`-separated and validated; symbolic links are never followed.
+//! `/`-separated and validated; symbolic links are never followed. On Unix
+//! every component is opened through its parent's directory handle without
+//! following links (`beneath`); elsewhere components are checked by path
+//! before use (`portable`).
+
+#[cfg(unix)]
+mod beneath;
+#[cfg(any(not(unix), test))]
+mod portable;
+
+#[cfg(unix)]
+use beneath as platform;
+#[cfg(not(unix))]
+use portable as platform;
 
 use crate::{Code, Diagnostic, LoadOptions, diagnostic::Positions};
 use sha2::{Digest, Sha256};
-use std::{
-    collections::BTreeMap,
-    fs,
-    io::Read as _,
-    path::{Path, PathBuf},
-};
+use std::{collections::BTreeMap, io::Read as _, path::Path};
 use tilewright_jsonc::{Document, ErrorCode};
+
+/// Why a path beneath the root could not be used.
+#[derive(Debug)]
+pub(crate) enum Refused {
+    /// A symbolic link, at this `/`-joined prefix of the path.
+    Link(String),
+    Missing,
+    /// The entry is not of the kind asked for.
+    Unexpected,
+    Io(std::io::Error),
+}
+
+/// What a path names, without following a link.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Found {
+    File,
+    Directory,
+    Other,
+    Missing,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RawKind {
+    File,
+    Directory,
+    Link,
+    Other,
+}
+
+/// A directory entry; `name` is `None` when it is not UTF-8.
+#[derive(Debug)]
+pub(crate) struct RawEntry {
+    pub name: Option<String>,
+    pub kind: RawKind,
+}
+
+/// The components of a relative path.
+fn components(path: &str) -> Vec<&str> {
+    path.split('/')
+        .filter(|component| !component.is_empty())
+        .collect()
+}
 
 /// A parsed source file.
 pub(crate) struct Source {
@@ -32,7 +82,7 @@ pub(crate) struct Entry {
 }
 
 pub(crate) struct Tree<'o> {
-    root: PathBuf,
+    root: platform::Root,
     options: &'o LoadOptions,
     files: usize,
     entries: usize,
@@ -67,7 +117,7 @@ pub(crate) fn is_safe_relative(path: &str) -> bool {
 impl<'o> Tree<'o> {
     pub fn new(root: &Path, options: &'o LoadOptions) -> Self {
         Self {
-            root: root.to_path_buf(),
+            root: platform::Root::new(root),
             options,
             files: 0,
             entries: 0,
@@ -106,68 +156,56 @@ impl<'o> Tree<'o> {
         std::mem::take(&mut self.diagnostics)
     }
 
-    fn absolute(&self, path: &str) -> PathBuf {
-        path.split('/')
-            .filter(|component| !component.is_empty())
-            .fold(self.root.clone(), |absolute, component| {
-                absolute.join(component)
-            })
-    }
-
-    /// Checks that no component of `path` is a symbolic link. Reports and
-    /// returns `false` otherwise.
-    fn no_links(&mut self, path: &str) -> bool {
-        let mut current = self.root.clone();
-        let mut walked = String::new();
-        for component in path.split('/').filter(|component| !component.is_empty()) {
-            current.push(component);
-            if !walked.is_empty() {
-                walked.push('/');
-            }
-            walked.push_str(component);
-            if fs::symlink_metadata(&current)
-                .is_ok_and(|metadata| metadata.file_type().is_symlink())
-            {
-                self.diagnostics.push(Diagnostic::file(
-                    &walked,
-                    Code::Symlink,
-                    "symbolic links are not followed",
-                ));
-                return false;
-            }
-        }
-        true
+    /// Reports a symbolic link at `path`.
+    fn link(&mut self, path: &str) {
+        self.diagnostics.push(Diagnostic::file(
+            path,
+            Code::Symlink,
+            "symbolic links are not followed",
+        ));
     }
 
     /// Whether a regular file or directory exists at `path`. A symbolic
     /// link anywhere in the path is reported and counts as neither.
     pub fn kind(&mut self, path: &str) -> Option<EntryKind> {
-        if !self.no_links(path) {
-            return None;
-        }
-        let metadata = fs::symlink_metadata(self.absolute(path)).ok()?;
-        if metadata.is_file() {
-            Some(EntryKind::File)
-        } else if metadata.is_dir() {
-            Some(EntryKind::Directory)
-        } else {
-            None
+        match self.root.kind(&components(path)) {
+            Ok(Found::File) => Some(EntryKind::File),
+            Ok(Found::Directory) => Some(EntryKind::Directory),
+            Ok(Found::Other | Found::Missing) | Err(Refused::Missing | Refused::Unexpected) => None,
+            Err(Refused::Link(link)) => {
+                self.link(&link);
+                None
+            }
+            Err(Refused::Io(error)) => {
+                self.diagnostics.push(Diagnostic::file(
+                    path,
+                    Code::Io,
+                    format!("cannot read file type: {error}"),
+                ));
+                None
+            }
         }
     }
 
     /// Lists a directory, sorted by name. Symbolic links, special files and
     /// non-UTF-8 names are reported and skipped.
     pub fn list(&mut self, path: &str) -> Vec<Entry> {
-        if !self.no_links(path) {
-            return Vec::new();
-        }
-        let directory = match fs::read_dir(self.absolute(path)) {
+        let directory = match self.root.list(&components(path)) {
             Ok(directory) => directory,
-            Err(error) => {
+            Err(Refused::Link(link)) => {
+                self.link(&link);
+                return Vec::new();
+            }
+            Err(refused) => {
+                let reason = match refused {
+                    Refused::Io(error) => error.to_string(),
+                    Refused::Missing => "it is missing".to_owned(),
+                    Refused::Unexpected | Refused::Link(_) => "not a directory".to_owned(),
+                };
                 self.diagnostics.push(Diagnostic::file(
                     path,
                     Code::Io,
-                    format!("cannot list directory: {error}"),
+                    format!("cannot list directory: {reason}"),
                 ));
                 return Vec::new();
             }
@@ -193,7 +231,7 @@ impl<'o> Tree<'o> {
                     continue;
                 }
             };
-            let Ok(name) = entry.file_name().into_string() else {
+            let Some(name) = entry.name else {
                 self.diagnostics.push(Diagnostic::file(
                     path,
                     Code::UnexpectedFile,
@@ -202,29 +240,20 @@ impl<'o> Tree<'o> {
                 continue;
             };
             let child = join(path, &name);
-            match entry.file_type() {
-                Ok(kind) if kind.is_symlink() => self.diagnostics.push(Diagnostic::file(
-                    &child,
-                    Code::Symlink,
-                    "symbolic links are not followed",
-                )),
-                Ok(kind) if kind.is_dir() => entries.push(Entry {
+            match entry.kind {
+                RawKind::Link => self.link(&child),
+                RawKind::Directory => entries.push(Entry {
                     name,
                     kind: EntryKind::Directory,
                 }),
-                Ok(kind) if kind.is_file() => entries.push(Entry {
+                RawKind::File => entries.push(Entry {
                     name,
                     kind: EntryKind::File,
                 }),
-                Ok(_) => self.diagnostics.push(Diagnostic::file(
+                RawKind::Other => self.diagnostics.push(Diagnostic::file(
                     &child,
                     Code::UnexpectedFile,
                     "not a regular file or directory",
-                )),
-                Err(error) => self.diagnostics.push(Diagnostic::file(
-                    &child,
-                    Code::Io,
-                    format!("cannot read file type: {error}"),
                 )),
             }
         }
@@ -235,13 +264,15 @@ impl<'o> Tree<'o> {
     /// Reads and parses a JSONC document. Every problem is reported.
     #[allow(clippy::too_many_lines)]
     pub fn document(&mut self, path: &str) -> Option<Source> {
-        if !self.no_links(path) {
-            return None;
-        }
-        let absolute = self.absolute(path);
-        let metadata = match fs::symlink_metadata(&absolute) {
-            Ok(metadata) if metadata.is_file() => metadata,
-            Ok(_) => {
+        // The file is opened first and its opened handle checked, so what is
+        // checked is what is read.
+        let (file, length) = match self.root.file(&components(path)) {
+            Ok(opened) => opened,
+            Err(Refused::Link(link)) => {
+                self.link(&link);
+                return None;
+            }
+            Err(Refused::Unexpected) => {
                 self.diagnostics.push(Diagnostic::file(
                     path,
                     Code::UnexpectedFile,
@@ -249,12 +280,12 @@ impl<'o> Tree<'o> {
                 ));
                 return None;
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(Refused::Missing) => {
                 self.diagnostics
                     .push(Diagnostic::file(path, Code::MissingFile, "file is missing"));
                 return None;
             }
-            Err(error) => {
+            Err(Refused::Io(error)) => {
                 self.diagnostics.push(Diagnostic::file(
                     path,
                     Code::Io,
@@ -264,7 +295,7 @@ impl<'o> Tree<'o> {
             }
         };
         let limit = u64::try_from(self.options.limits.max_input_bytes).unwrap_or(u64::MAX);
-        if metadata.len() > limit {
+        if length > limit {
             self.diagnostics.push(Diagnostic::file(
                 path,
                 ErrorCode::InputTooLarge,
@@ -272,7 +303,7 @@ impl<'o> Tree<'o> {
             ));
             return None;
         }
-        if !self.within_budget(metadata.len()) {
+        if !self.within_budget(length) {
             self.exhaust(path);
             return None;
         }
@@ -280,13 +311,12 @@ impl<'o> Tree<'o> {
         // so a file that grows after the size check cannot force an
         // unbounded read; its actual length is checked again below.
         let remaining = self.options.maximum_total_bytes.saturating_sub(self.bytes);
-        let bytes = match fs::File::open(&absolute).and_then(|file| {
-            let mut bytes = Vec::new();
-            file.take(limit.min(remaining).saturating_add(1))
-                .read_to_end(&mut bytes)?;
-            Ok(bytes)
-        }) {
-            Ok(bytes) => bytes,
+        let mut bytes = Vec::new();
+        let bytes = match file
+            .take(limit.min(remaining).saturating_add(1))
+            .read_to_end(&mut bytes)
+        {
+            Ok(_) => bytes,
             Err(error) => {
                 self.diagnostics.push(Diagnostic::file(
                     path,
@@ -364,4 +394,78 @@ pub(crate) fn join(directory: &str, name: &str) -> String {
     } else {
         format!("{directory}/{name}")
     }
+}
+
+/// Both access implementations refuse links themselves, at the component
+/// where they occur, rather than relying on an earlier check.
+#[cfg(all(test, unix))]
+mod tests {
+    use super::{Found, RawKind, Refused};
+    use std::{fs, os::unix::fs::symlink};
+
+    fn tree() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("dir")).unwrap();
+        fs::write(root.path().join("dir/file.jsonc"), "{}").unwrap();
+        symlink(root.path().join("dir"), root.path().join("link")).unwrap();
+        symlink(
+            root.path().join("dir/file.jsonc"),
+            root.path().join("dir/file-link.jsonc"),
+        )
+        .unwrap();
+        root
+    }
+
+    /// The link prefix a refusal names.
+    fn link<T>(result: Result<T, Refused>) -> String {
+        match result {
+            Err(Refused::Link(prefix)) => prefix,
+            Err(other) => panic!("expected a link, got {other:?}"),
+            Ok(_) => panic!("expected a link, got success"),
+        }
+    }
+
+    macro_rules! access_tests {
+        ($name:ident, $module:ident) => {
+            #[test]
+            fn $name() {
+                let directory = tree();
+                let root = super::$module::Root::new(directory.path());
+                assert_eq!(root.file(&["dir", "file.jsonc"]).unwrap().1, 2);
+                assert_eq!(link(root.file(&["link", "file.jsonc"])), "link");
+                assert_eq!(
+                    link(root.file(&["dir", "file-link.jsonc"])),
+                    "dir/file-link.jsonc"
+                );
+                assert!(matches!(root.file(&["dir"]), Err(Refused::Unexpected)));
+                assert!(matches!(root.file(&["dir", "nope"]), Err(Refused::Missing)));
+                assert!(matches!(
+                    root.file(&["dir", "file.jsonc", "x"]),
+                    Err(Refused::Unexpected)
+                ));
+                assert_eq!(root.kind(&["dir"]).unwrap(), Found::Directory);
+                assert_eq!(root.kind(&["dir", "file.jsonc"]).unwrap(), Found::File);
+                assert_eq!(root.kind(&["nope"]).unwrap(), Found::Missing);
+                assert_eq!(link(root.kind(&["link"])), "link");
+                assert_eq!(link(root.list(&["link"])), "link");
+                let mut entries: Vec<(Option<String>, RawKind)> = root
+                    .list(&["dir"])
+                    .unwrap()
+                    .map(|entry| entry.map(|entry| (entry.name, entry.kind)))
+                    .collect::<Result<_, _>>()
+                    .unwrap();
+                entries.sort_by(|left, right| left.0.cmp(&right.0));
+                assert_eq!(
+                    entries,
+                    [
+                        (Some("file-link.jsonc".to_owned()), RawKind::Link),
+                        (Some("file.jsonc".to_owned()), RawKind::File),
+                    ]
+                );
+            }
+        };
+    }
+
+    access_tests!(beneath_refuses_links, beneath);
+    access_tests!(portable_refuses_links, portable);
 }

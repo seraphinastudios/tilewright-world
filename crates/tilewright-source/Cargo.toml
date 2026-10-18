@@ -12,6 +12,9 @@ authors.workspace = true
 sha2.workspace = true
 tilewright-jsonc.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 

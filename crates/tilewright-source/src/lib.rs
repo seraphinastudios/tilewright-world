@@ -26,7 +26,7 @@ mod profile;
 mod read;
 mod schema;
 
-use std::{collections::BTreeMap, path::Path};
+use std::{collections::BTreeMap, path::Path, sync::Arc};
 use tilewright_jsonc::Limits;
 
 pub use diagnostic::{Code, Diagnostic};
@@ -83,9 +83,11 @@ pub struct Profile {
     pub render_layers: Vec<String>,
     /// Ground layers in profile order; each chunk stores one grid per entry.
     pub ground_layers: Vec<String>,
-    pub definition_types: BTreeMap<String, Schema>,
-    pub object_fields: Schema,
-    pub zone_properties: Schema,
+    /// Schemas by definition type. Roles that name the same schema path
+    /// share one schema.
+    pub definition_types: BTreeMap<String, Arc<Schema>>,
+    pub object_fields: Arc<Schema>,
+    pub zone_properties: Arc<Schema>,
     pub movement: Option<Movement>,
     /// Canonical JSON of the profile document.
     pub canonical: String,

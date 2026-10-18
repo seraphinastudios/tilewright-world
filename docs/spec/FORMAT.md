@@ -56,8 +56,10 @@ path or by an ID the profile defines.
 
 Paths written inside documents (the profile path, schema paths) are relative,
 `/`-separated, made of ASCII letters, digits, `_`, `.` and `-`, with no
-component starting with `.` or `-`, and end in `.jsonc`. Schema paths are
-relative to the profile's directory and cannot leave it.
+component starting with `.` or `-`, and end in `.jsonc`. A path is at most
+1,024 bytes and 32 components, each at most 128 bytes. Schema paths are
+relative to the profile's directory and cannot leave it. Several roles may
+name the same schema; it is read once.
 
 ## 3. Syntax: strict JSONC
 
@@ -290,8 +292,9 @@ Field names match `^[a-z][a-z0-9_]{0,63}$`. Types:
 | `reference` | the ID of a definition | `target`: a definition type the profile declares |
 | `json` | any value | |
 
-`required` (default `false`) makes a field mandatory. A key that is not in
-the schema is an error.
+`required` (default `false`) makes a field mandatory; an object that lacks
+required fields gets one diagnostic naming them. A key that is not in the
+schema is an error.
 
 ## 12. Validation summary
 

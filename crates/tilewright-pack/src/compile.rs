@@ -11,7 +11,7 @@ use rusqlite::{Connection, MAIN_DB, params};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::Write as _,
+    io::{Read as _, Write as _},
     path::{Path, PathBuf},
 };
 use tilewright_source::{Chunk, FieldValue, Object, Portal, Profile, World};
@@ -32,7 +32,7 @@ impl Strings {
                     let used: BTreeSet<u16> = grid.cells.iter().copied().collect();
                     for cell in used {
                         if let Some(index) = usize::from(cell).checked_sub(1) {
-                            values.insert(grid.palette[index].clone());
+                            values.insert(palette_value(grid, index)?.to_owned());
                         }
                     }
                 }
@@ -78,6 +78,14 @@ impl Strings {
     }
 }
 
+/// The palette value of a grid cell's index.
+fn palette_value(grid: &tilewright_source::Grid, index: usize) -> Result<&str, Error> {
+    grid.palette
+        .get(index)
+        .map(String::as_str)
+        .ok_or_else(|| Error::Invalid("a grid cell has no palette entry".into()))
+}
+
 /// Render layer names to their record value, index plus one.
 type Layers<'p> = BTreeMap<&'p str, u16>;
 
@@ -100,7 +108,11 @@ fn object_record(
     strings: &Strings,
     chunk_size: u16,
 ) -> Result<ObjectRecord, Error> {
-    let tile = object.at.map(|[x, y]| y * chunk_size + x);
+    let tile = match object.at {
+        Some([x, y]) if x < chunk_size && y < chunk_size => Some(y * chunk_size + x),
+        Some(_) => return Err(Error::Invalid("an object lies outside its chunk".into())),
+        None => None,
+    };
     let layer = match &object.layer {
         Some(name) => layers
             .get(name.as_str())
@@ -163,7 +175,7 @@ fn chunk_record(
     for grid in chunk.ground.iter().chain([&chunk.zones]) {
         for cell in &grid.cells {
             if let Some(index) = usize::from(*cell).checked_sub(1) {
-                used.insert(strings.id(&grid.palette[index])?);
+                used.insert(strings.id(palette_value(grid, index)?)?);
             }
         }
     }
@@ -301,6 +313,29 @@ pub fn compile(world: &World) -> Result<Vec<u8>, Error> {
     Ok(data.to_vec())
 }
 
+/// Whether `path` is a regular file holding exactly `data`. The length is
+/// compared first and the contents in fixed-size blocks, so a large file is
+/// never loaded whole.
+fn same_file_contents(path: &Path, data: &[u8]) -> Result<bool, Error> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.is_file() || metadata.len() != u64::try_from(data.len()).unwrap_or(u64::MAX) {
+        return Ok(false);
+    }
+    let mut file = std::fs::File::open(path)?;
+    let mut buffer = vec![0; 64 * 1024];
+    let mut offset = 0;
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            return Ok(offset == data.len());
+        }
+        match data.get(offset..offset + read) {
+            Some(expected) if expected == &buffer[..read] => offset += read,
+            _ => return Ok(false),
+        }
+    }
+}
+
 /// A pack written to disk.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Written {
@@ -325,9 +360,8 @@ pub fn write_pack(world: &World, directory: &Path) -> Result<Written, Error> {
     let digest: [u8; 32] = Sha256::digest(&data).into();
     let path = directory.join(format!("{}.twpack", hex(&digest)));
     let bytes = u64::try_from(data.len()).unwrap_or(u64::MAX);
-    if path.exists() {
-        let existing = std::fs::read(&path)?;
-        if existing == data {
+    if std::fs::symlink_metadata(&path).is_ok() {
+        if same_file_contents(&path, &data)? {
             return Ok(Written {
                 path,
                 digest,

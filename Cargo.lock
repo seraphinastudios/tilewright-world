@@ -267,6 +267,7 @@ dependencies = [
 name = "tilewright-source"
 version = "0.1.0"
 dependencies = [
+ "rustix",
  "sha2",
  "tempfile",
  "tilewright-jsonc",

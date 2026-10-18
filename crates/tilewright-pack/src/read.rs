@@ -23,10 +23,14 @@ use std::{
     io::Read as _,
     path::{Path, PathBuf},
 };
-use tilewright_jsonc::{Document, Limits, Value};
+use tilewright_jsonc::{Document, Limits, MAX_SAFE_INTEGER, Value};
+use tilewright_source::CHUNK_SIZE;
 
 /// Largest `meta` value other than `profile`.
 const MAXIMUM_META_BYTES: usize = 1024;
+
+/// Largest `sqlite_schema` value loaded; every expected one is shorter.
+const MAXIMUM_SCHEMA_BYTES: usize = 1024;
 
 /// Row counts of a pack.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -89,8 +93,10 @@ fn maximum_string_bytes() -> i64 {
 /// (`^[a-z0-9][a-z0-9_.-]{0,127}$`). The length is checked first, without
 /// loading the value.
 fn not_identifier(column: &str) -> String {
+    // GLOB stops at a NUL byte, so NUL is rejected separately.
     format!(
         "(typeof({column}) != 'text' OR octet_length({column}) NOT BETWEEN 1 AND 128 \
+         OR instr({column}, char(0)) != 0 \
          OR {column} NOT GLOB '[a-z0-9]*' OR {column} GLOB '*[^a-z0-9_.-]*')"
     )
 }
@@ -163,16 +169,29 @@ impl Pack {
         connection.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
         connection.set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)?;
         connection.execute_batch("PRAGMA query_only = ON")?;
-        let mut schema = connection.prepare(
-            "SELECT type, name, sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY name",
-        )?;
-        let found: Vec<(String, String, String)> = schema
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        // At most one row more than expected, each value bounded, is loaded.
+        let mut schema = connection.prepare(&format!(
+            "SELECT {}, {}, {} FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY name LIMIT {}",
+            bounded_text("type"),
+            bounded_text("name"),
+            bounded_text("sql"),
+            SCHEMA_TABLES.len() + 1
+        ))?;
+        let found: Vec<(Option<String>, Option<String>, Option<String>)> = schema
+            .query_map([bound(MAXIMUM_SCHEMA_BYTES)], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
             .collect::<Result<_, _>>()?;
         drop(schema);
-        let mut expected: Vec<(String, String, String)> = SCHEMA_TABLES
+        let mut expected: Vec<(Option<String>, Option<String>, Option<String>)> = SCHEMA_TABLES
             .iter()
-            .map(|(name, sql)| ("table".to_owned(), (*name).to_owned(), (*sql).to_owned()))
+            .map(|(name, sql)| {
+                (
+                    Some("table".to_owned()),
+                    Some((*name).to_owned()),
+                    Some((*sql).to_owned()),
+                )
+            })
             .collect();
         expected.sort_by(|left, right| left.1.cmp(&right.1));
         if found != expected {
@@ -421,17 +440,21 @@ impl Pack {
         let checks = [
             (
                 format!(
-                    "SELECT count(*) FROM strings WHERE typeof(value) != 'text' OR octet_length(value) > {}",
+                    "SELECT count(*) FROM strings WHERE typeof(value) != 'text' OR octet_length(value) > {} OR instr(value, char(0)) != 0",
                     maximum_string_bytes()
                 ),
-                "a string is not text of at most 1 MiB",
+                "a string is not text of at most 1 MiB without NUL",
+            ),
+            (
+                "SELECT count(*) FROM strings a JOIN strings b ON b.id = a.id + 1 WHERE b.value <= a.value".to_owned(),
+                "string IDs are not in byte order of their values",
             ),
             (
                 format!(
-                    "SELECT count(*) FROM planes WHERE {} OR kind NOT IN ('shared', 'instanced', 'per_player') OR typeof(chunk_size) != 'integer' OR chunk_size NOT BETWEEN 1 AND 255",
+                    "SELECT count(*) FROM planes WHERE {} OR kind NOT IN ('shared', 'instanced', 'per_player') OR typeof(chunk_size) != 'integer' OR chunk_size != {CHUNK_SIZE}",
                     not_identifier("id")
                 ),
-                "a plane has an invalid ID, kind or chunk size",
+                "a plane has an invalid ID or kind, or a chunk size other than 32",
             ),
             (
                 format!(
@@ -441,11 +464,34 @@ impl Pack {
                 "a zone has an invalid ID or names an unknown plane or parent",
             ),
             (
+                // Zones reached from a root by following children: with one
+                // parent each, a zone is reached once or, on or below a
+                // cycle, never.
+                "WITH RECURSIVE children(plane, parent, id) AS MATERIALIZED \
+                 (SELECT plane, parent, id FROM zones WHERE parent IS NOT NULL), \
+                 rooted(plane, id) AS (SELECT plane, id FROM zones WHERE parent IS NULL \
+                 UNION ALL SELECT c.plane, c.id FROM rooted r JOIN children c ON c.plane = r.plane AND c.parent = r.id) \
+                 SELECT (SELECT count(*) FROM zones) - (SELECT count(*) FROM rooted)"
+                    .to_owned(),
+                "zone parents form a cycle",
+            ),
+            (
                 format!(
-                    "SELECT count(*) FROM anchors a WHERE {} OR NOT EXISTS (SELECT 1 FROM planes p WHERE p.id = a.plane) OR typeof(a.layer) != 'integer' OR a.layer NOT BETWEEN -2147483648 AND 2147483647",
+                    "SELECT count(*) FROM anchors a WHERE {} OR NOT EXISTS (SELECT 1 FROM planes p WHERE p.id = a.plane) OR typeof(a.layer) != 'integer' OR a.layer NOT BETWEEN -2147483648 AND 2147483647 OR typeof(a.x) != 'integer' OR a.x NOT BETWEEN -{MAX_SAFE_INTEGER} AND {MAX_SAFE_INTEGER} OR typeof(a.y) != 'integer' OR a.y NOT BETWEEN -{MAX_SAFE_INTEGER} AND {MAX_SAFE_INTEGER}",
                     not_identifier("a.id")
                 ),
-                "an anchor has an invalid ID or layer or names an unknown plane",
+                "an anchor has an invalid ID, layer or position, or names an unknown plane",
+            ),
+            (
+                // Chunk `c` covers tiles `c * size ..= c * size + size - 1`.
+                format!(
+                    "SELECT count(*) FROM chunks c LEFT JOIN planes p ON p.id = c.plane WHERE p.id IS NULL \
+                     OR typeof(c.layer) != 'integer' OR c.layer NOT BETWEEN -2147483648 AND 2147483647 \
+                     OR typeof(c.cx) != 'integer' OR typeof(c.cy) != 'integer' \
+                     OR c.cx NOT BETWEEN -({MAX_SAFE_INTEGER} / p.chunk_size) AND ({MAX_SAFE_INTEGER} - p.chunk_size + 1) / p.chunk_size \
+                     OR c.cy NOT BETWEEN -({MAX_SAFE_INTEGER} / p.chunk_size) AND ({MAX_SAFE_INTEGER} - p.chunk_size + 1) / p.chunk_size"
+                ),
+                "a chunk names an unknown plane or has an invalid layer or position",
             ),
             (
                 format!(
