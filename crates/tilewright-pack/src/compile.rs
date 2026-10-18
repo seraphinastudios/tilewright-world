@@ -4,7 +4,7 @@
 //! Deterministic compilation of a validated world into a pack.
 
 use crate::{
-    APPLICATION_ID, Error, FORMAT, SCHEMA,
+    APPLICATION_ID, Error, FORMAT, SCHEMA, USER_VERSION,
     chunk::{CHUNK_ENCODING, ChunkData, FieldRecord, ObjectRecord, PortalRecord, encode_chunk},
 };
 use rusqlite::{Connection, MAIN_DB, params};
@@ -78,17 +78,33 @@ impl Strings {
     }
 }
 
+/// Render layer names to their record value, index plus one.
+type Layers<'p> = BTreeMap<&'p str, u16>;
+
+fn render_layers(profile: &Profile) -> Result<Layers<'_>, Error> {
+    profile
+        .render_layers
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            u16::try_from(index + 1)
+                .map(|value| (name.as_str(), value))
+                .map_err(|_| Error::Invalid("too many render layers".into()))
+        })
+        .collect()
+}
+
 fn object_record(
     object: &Object,
-    profile: &Profile,
+    layers: &Layers<'_>,
     strings: &Strings,
     chunk_size: u16,
 ) -> Result<ObjectRecord, Error> {
     let tile = object.at.map(|[x, y]| y * chunk_size + x);
     let layer = match &object.layer {
-        Some(name) => profile
-            .render_layer_index(name)
-            .and_then(|index| u16::try_from(index + 1).ok())
+        Some(name) => layers
+            .get(name.as_str())
+            .copied()
             .ok_or_else(|| Error::Invalid(format!("unknown render layer \"{name}\"")))?,
         None => 0,
     };
@@ -120,7 +136,7 @@ fn object_record(
     let inventory = object
         .inventory
         .iter()
-        .map(|item| object_record(item, profile, strings, chunk_size))
+        .map(|item| object_record(item, layers, strings, chunk_size))
         .collect::<Result<_, _>>()?;
     Ok(ObjectRecord {
         tile,
@@ -139,7 +155,7 @@ fn object_record(
 /// use, in ascending order.
 fn chunk_record(
     chunk: &Chunk,
-    profile: &Profile,
+    layers: &Layers<'_>,
     strings: &Strings,
     chunk_size: u16,
 ) -> Result<ChunkData, Error> {
@@ -188,7 +204,7 @@ fn chunk_record(
         objects: chunk
             .objects
             .iter()
-            .map(|object| object_record(object, profile, strings, chunk_size))
+            .map(|object| object_record(object, layers, strings, chunk_size))
             .collect::<Result<_, _>>()?,
         palette,
     })
@@ -209,11 +225,12 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 /// Returns an error if SQLite fails or the world exceeds the pack's bounds.
 pub fn compile(world: &World) -> Result<Vec<u8>, Error> {
     let strings = Strings::collect(world)?;
+    let layers = render_layers(&world.profile)?;
     let connection = Connection::open_in_memory()?;
     let schema: &str = &SCHEMA;
     connection.execute_batch(&format!(
         "PRAGMA page_size = 4096; PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF;
-         PRAGMA application_id = {APPLICATION_ID}; PRAGMA user_version = 1; {schema}"
+         PRAGMA application_id = {APPLICATION_ID}; PRAGMA user_version = {USER_VERSION}; {schema}"
     ))?;
     connection.execute_batch("BEGIN")?;
     {
@@ -268,7 +285,7 @@ pub fn compile(world: &World) -> Result<Vec<u8>, Error> {
                 ])?;
             }
             for ((layer, cx, cy), chunk) in &plane.chunks {
-                let record = chunk_record(chunk, profile, &strings, plane.chunk_size)?;
+                let record = chunk_record(chunk, &layers, &strings, plane.chunk_size)?;
                 let data = encode_chunk(&record).map_err(|error| Error::Invalid(error.0))?;
                 chunks.execute(params![id, layer, cx, cy, CHUNK_ENCODING, data])?;
             }

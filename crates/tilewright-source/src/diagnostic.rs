@@ -118,31 +118,97 @@ impl Diagnostic {
         }
     }
 
-    /// A diagnostic at a byte span of `source`.
+    /// A diagnostic at a byte span of the text `positions` indexes.
     pub(crate) fn at(
         path: &str,
-        source: &str,
+        positions: &Positions<'_>,
         start: usize,
         end: usize,
         code: impl CodeName,
         message: impl Into<String>,
     ) -> Self {
-        let mut boundary = start.min(source.len());
-        while !source.is_char_boundary(boundary) {
-            boundary -= 1;
-        }
-        let before = &source[..boundary];
-        let line = before.bytes().filter(|byte| *byte == b'\n').count() + 1;
-        let line_start = before.rfind('\n').map_or(0, |index| index + 1);
+        let (line, column) = positions.locate(start);
         Self {
             path: path.to_owned(),
             start,
             end,
             line,
-            column: source[line_start..boundary].chars().count() + 1,
+            column,
             code: code.name(),
             message: message.into(),
         }
+    }
+}
+
+/// Bytes between character-count checkpoints in [`Positions`].
+const STRIDE: usize = 256;
+
+/// Whether `byte` continues a UTF-8 character rather than starting one.
+const fn is_continuation(byte: u8) -> bool {
+    byte & 0xC0 == 0x80
+}
+
+/// Line and column lookup for one text. Building it reads the text once;
+/// each lookup is then a binary search and a scan of at most [`STRIDE`]
+/// bytes, so a document with many diagnostics is not rescanned for each.
+pub(crate) struct Positions<'s> {
+    source: &'s str,
+    /// The byte offset where each line starts.
+    lines: Vec<usize>,
+    /// Characters before byte `i * STRIDE`, for every such offset up to and
+    /// including the end of the text.
+    characters: Vec<usize>,
+}
+
+impl<'s> Positions<'s> {
+    pub(crate) fn new(source: &'s str) -> Self {
+        let mut lines = vec![0];
+        let mut characters = Vec::with_capacity(source.len() / STRIDE + 1);
+        let mut count = 0;
+        for (index, byte) in source.bytes().enumerate() {
+            if index.is_multiple_of(STRIDE) {
+                characters.push(count);
+            }
+            if byte == b'\n' {
+                lines.push(index + 1);
+            }
+            if !is_continuation(byte) {
+                count += 1;
+            }
+        }
+        if source.len().is_multiple_of(STRIDE) {
+            characters.push(count);
+        }
+        Self {
+            source,
+            lines,
+            characters,
+        }
+    }
+
+    /// Characters before `offset`, a character boundary within the text.
+    fn characters_before(&self, offset: usize) -> usize {
+        let block = offset / STRIDE;
+        self.characters[block]
+            + self.source.as_bytes()[block * STRIDE..offset]
+                .iter()
+                .filter(|byte| !is_continuation(**byte))
+                .count()
+    }
+
+    /// The 1-based line and column, in characters, of `offset`, clamped to
+    /// the text and moved back to a character boundary.
+    pub(crate) fn locate(&self, offset: usize) -> (usize, usize) {
+        let mut boundary = offset.min(self.source.len());
+        while !self.source.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        let line = self.lines.partition_point(|start| *start <= boundary);
+        let start = self.lines[line - 1];
+        (
+            line,
+            self.characters_before(boundary) - self.characters_before(start) + 1,
+        )
     }
 }
 

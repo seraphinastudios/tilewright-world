@@ -4,7 +4,7 @@
 //! Bounded access to a source tree. Every path is relative to the root,
 //! `/`-separated and validated; symbolic links are never followed.
 
-use crate::{Code, Diagnostic, LoadOptions};
+use crate::{Code, Diagnostic, LoadOptions, diagnostic::Positions};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -95,6 +95,13 @@ impl<'o> Tree<'o> {
         }
     }
 
+    /// Whether one more file of `length` bytes fits the load's budget.
+    fn within_budget(&self, length: u64) -> bool {
+        !self.exhausted
+            && self.files < self.options.maximum_files
+            && self.bytes.saturating_add(length) <= self.options.maximum_total_bytes
+    }
+
     pub fn take_diagnostics(&mut self) -> Vec<Diagnostic> {
         std::mem::take(&mut self.diagnostics)
     }
@@ -132,8 +139,12 @@ impl<'o> Tree<'o> {
         true
     }
 
-    /// Whether a regular file or directory exists at `path` (links excluded).
-    pub fn kind(&self, path: &str) -> Option<EntryKind> {
+    /// Whether a regular file or directory exists at `path`. A symbolic
+    /// link anywhere in the path is reported and counts as neither.
+    pub fn kind(&mut self, path: &str) -> Option<EntryKind> {
+        if !self.no_links(path) {
+            return None;
+        }
         let metadata = fs::symlink_metadata(self.absolute(path)).ok()?;
         if metadata.is_file() {
             Some(EntryKind::File)
@@ -261,18 +272,18 @@ impl<'o> Tree<'o> {
             ));
             return None;
         }
-        if self.exhausted
-            || self.files >= self.options.maximum_files
-            || self.bytes.saturating_add(metadata.len()) > self.options.maximum_total_bytes
-        {
+        if !self.within_budget(metadata.len()) {
             self.exhaust(path);
             return None;
         }
-        // Read at most one byte past the limit, so a file that grows after
-        // the size check still cannot force an unbounded read.
+        // Read at most one byte past the file limit or the remaining budget,
+        // so a file that grows after the size check cannot force an
+        // unbounded read; its actual length is checked again below.
+        let remaining = self.options.maximum_total_bytes.saturating_sub(self.bytes);
         let bytes = match fs::File::open(&absolute).and_then(|file| {
             let mut bytes = Vec::new();
-            file.take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
+            file.take(limit.min(remaining).saturating_add(1))
+                .read_to_end(&mut bytes)?;
             Ok(bytes)
         }) {
             Ok(bytes) => bytes,
@@ -292,6 +303,10 @@ impl<'o> Tree<'o> {
                 ErrorCode::InputTooLarge,
                 format!("file is larger than {limit} bytes"),
             ));
+            return None;
+        }
+        if !self.within_budget(length) {
+            self.exhaust(path);
             return None;
         }
         self.files += 1;
@@ -317,7 +332,7 @@ impl<'o> Tree<'o> {
             Err(error) => {
                 self.diagnostics.push(Diagnostic::at(
                     path,
-                    &text,
+                    &Positions::new(&text),
                     error.offset,
                     error.offset,
                     error.code,

@@ -19,9 +19,9 @@ mod compile;
 mod read;
 
 pub use chunk::{
-    CHUNK_ENCODING, ChunkData, DecodeError, FieldRecord, MAXIMUM_DEPTH, MAXIMUM_RECORD_BYTES,
-    ObjectRecord, PortalRecord, ZSTD_LEVEL, decode_chunk, decode_record, encode_chunk,
-    encode_record,
+    CHUNK_ENCODING, ChunkData, DecodeError, FieldRecord, MAXIMUM_CHUNK_BYTES, MAXIMUM_DEPTH,
+    MAXIMUM_RECORD_BYTES, ObjectRecord, PortalRecord, ZSTD_LEVEL, decode_chunk, decode_record,
+    encode_chunk, encode_record,
 };
 pub use compile::{COMPILER, Written, compile, write_pack};
 pub use read::{Pack, Summary};
@@ -33,6 +33,9 @@ pub const FORMAT: &str = "tilewright.pack/1";
 
 /// SQLite `application_id` of a pack: `"TWP1"`.
 pub const APPLICATION_ID: i32 = 0x5457_5031;
+
+/// SQLite `user_version` of a pack of this format.
+pub const USER_VERSION: i32 = 1;
 
 /// Every `meta` key, in byte order. A pack has exactly these.
 pub const META_KEYS: [&str; 7] = [

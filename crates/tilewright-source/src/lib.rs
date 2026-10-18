@@ -282,7 +282,7 @@ fn load_tree(tree: &mut files::Tree, diagnostics: &mut Vec<Diagnostic>) -> Optio
     for plane in plane::read_planes(tree, &profile, &plane_ids, &mut references, diagnostics) {
         planes.insert(plane.id.clone(), plane);
     }
-    references.check(&definitions, &planes, diagnostics);
+    references.check(&profile, &definitions, &planes, diagnostics);
     Some(World {
         profile,
         planes,

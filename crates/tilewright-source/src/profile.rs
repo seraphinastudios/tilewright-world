@@ -104,9 +104,12 @@ pub(crate) fn read_profile(
             return None;
         }
     };
+    // List lengths are capped before their entries are checked.
     let render_value = reader.required(root, "render_layers")?;
-    let render_layers = reader.identifiers(render_value)?;
-    if render_layers.is_empty() || render_layers.len() > usize::from(u16::MAX - 1) {
+    if render_value
+        .as_array()
+        .is_some_and(|items| items.is_empty() || items.len() > usize::from(u16::MAX - 1))
+    {
         reader.report(
             render_value.span(),
             Code::Range,
@@ -114,16 +117,20 @@ pub(crate) fn read_profile(
         );
         return None;
     }
+    let render_layers = reader.identifiers(render_value)?;
     let ground_value = reader.required(root, "ground_layers")?;
-    let ground_layers = reader.identifiers(ground_value)?;
-    if ground_layers.len() > MAXIMUM_GROUND_LAYERS {
+    if ground_value
+        .as_array()
+        .is_some_and(|items| items.len() > MAXIMUM_GROUND_LAYERS)
+    {
         reader.report(
             ground_value.span(),
             Code::Range,
             format!("at most {MAXIMUM_GROUND_LAYERS} ground layers"),
         );
-        ok = false;
+        return None;
     }
+    let ground_layers = reader.identifiers(ground_value)?;
     for (index, layer) in ground_layers.iter().enumerate() {
         if !render_layers.contains(layer) || ["height", "zone"].contains(&layer.as_str()) {
             let span = ground_value

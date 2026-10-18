@@ -312,6 +312,15 @@ fn metadata_must_be_exactly_the_format_keys() {
             "digest.twpack",
             "UPDATE meta SET value = 'XYZ' WHERE key = 'source_digest'",
         ),
+        ("version.twpack", "PRAGMA user_version = 2"),
+        (
+            "long.twpack",
+            "UPDATE meta SET value = value || replace(hex(zeroblob(1024)), '00', 'x') WHERE key = 'compiler'",
+        ),
+        (
+            "blob.twpack",
+            "UPDATE meta SET value = CAST(value AS BLOB) WHERE key = 'profile_id'",
+        ),
     ] {
         let (_directory, copy) = tampered(name, sql);
         assert!(Pack::open(&copy).is_err(), "{name} opened");
@@ -368,4 +377,119 @@ fn palettes_and_embedded_json_must_be_canonical() {
     record[14..18].copy_from_slice(&9_u32.to_le_bytes());
     record[18..22].copy_from_slice(&7_u32.to_le_bytes());
     assert!(decode_record(&record).is_err());
+}
+
+#[test]
+fn oversized_chunk_data_is_rejected_before_decoding() {
+    assert_eq!(
+        zstd::zstd_safe::compress_bound(super::MAXIMUM_RECORD_BYTES),
+        super::MAXIMUM_CHUNK_BYTES
+    );
+    let error = decode_chunk(&vec![0; super::MAXIMUM_CHUNK_BYTES + 1]).unwrap_err();
+    assert!(error.to_string().contains("exceeds"), "{error}");
+    for (name, sql) in [
+        (
+            "large.twpack",
+            format!(
+                "UPDATE chunks SET data = zeroblob({}) WHERE plane = 'vault'",
+                super::MAXIMUM_CHUNK_BYTES + 1
+            ),
+        ),
+        (
+            "text.twpack",
+            "UPDATE chunks SET data = 'twc1' WHERE plane = 'vault'".to_owned(),
+        ),
+    ] {
+        let (_directory, copy) = tampered(name, &sql);
+        let pack = Pack::open(&copy).unwrap();
+        let error = pack.chunk("vault", 0, 0, 0).unwrap_err();
+        assert!(
+            error.to_string().contains("not a blob of at most"),
+            "{name}: {error}"
+        );
+        let error = pack.verify().unwrap_err();
+        assert!(
+            error.to_string().contains("not a blob of at most"),
+            "{name}: {error}"
+        );
+    }
+}
+
+#[test]
+fn verification_bounds_strings_and_looks_up_targets() {
+    for (name, sql) in [
+        (
+            "renamed.twpack",
+            "UPDATE strings SET value = 'vaultx' WHERE value = 'vault'",
+        ),
+        (
+            "blob.twpack",
+            "UPDATE strings SET value = CAST(value AS BLOB) WHERE id = 1",
+        ),
+        (
+            "long.twpack",
+            "UPDATE strings SET value = replace(hex(zeroblob(1048577)), '00', 'x') WHERE id = 1",
+        ),
+        (
+            "anchor-id.twpack",
+            "UPDATE anchors SET id = 'Village.Well' WHERE id = 'village.well'",
+        ),
+        (
+            "zone-id.twpack",
+            "UPDATE zones SET id = 'a b' WHERE id = 'village'",
+        ),
+    ] {
+        let (_directory, copy) = tampered(name, sql);
+        assert!(
+            Pack::open(&copy).unwrap().verify().is_err(),
+            "{name} verified"
+        );
+    }
+    let (_directory, copy) = tampered(
+        "string.twpack",
+        "UPDATE strings SET value = replace(hex(zeroblob(1048577)), '00', 'x') WHERE id = 1",
+    );
+    assert!(Pack::open(&copy).unwrap().string(1).is_err());
+}
+
+#[test]
+fn stored_documents_must_be_canonical_and_agree_with_their_rows() {
+    for (name, sql) in [
+        (
+            "plane.twpack",
+            "UPDATE planes SET document = 'not-json' WHERE id = 'vault'",
+        ),
+        (
+            "kind.twpack",
+            "UPDATE planes SET document = replace(document, '\"instanced\"', '\"shared\"') WHERE id = 'vault'",
+        ),
+        (
+            "zone.twpack",
+            "UPDATE zones SET document = '{\"id\":\"elsewhere\"}' WHERE id = 'village'",
+        ),
+        (
+            "parent.twpack",
+            "UPDATE zones SET document = replace(document, ',\"parent\":\"island\"', '') WHERE id = 'village'",
+        ),
+        (
+            "spacing.twpack",
+            "UPDATE definitions SET document = replace(document, '\"id\":', '\"id\": ') WHERE id = 'coin'",
+        ),
+        (
+            "array.twpack",
+            "UPDATE definitions SET document = '[]' WHERE id = 'coin'",
+        ),
+        (
+            "profile.twpack",
+            "UPDATE meta SET value = ' ' || value WHERE key = 'profile'",
+        ),
+        (
+            "profile-id.twpack",
+            "UPDATE meta SET value = 'other' WHERE key = 'profile_id'",
+        ),
+    ] {
+        let (_directory, copy) = tampered(name, sql);
+        let pack = Pack::open(&copy).unwrap();
+        assert!(pack.verify().is_err(), "{name} verified");
+    }
 }

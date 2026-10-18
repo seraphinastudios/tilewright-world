@@ -52,7 +52,9 @@ plane and anchor IDs. IDs run from 1 in byte order of the values; 0 means
 ## 2. Chunk encoding `twc1+zstd`
 
 `data` is a zstd frame (level 19, no dictionary, content size recorded)
-containing a `twc1` record of at most 16 MiB. All integers are little-endian.
+containing a `twc1` record of at most 16 MiB. The frame itself is at most
+16,842,752 bytes, zstd's compression bound for 16 MiB, so every encoded chunk
+fits. All integers are little-endian.
 
 ```text
 magic         4 bytes  "TWC1"
@@ -94,23 +96,40 @@ deep.
 
 ## 3. Reading
 
-Packs are untrusted input. Readers:
+Packs are untrusted input. Readers check a value's type and size in SQL before
+loading it, and never load a whole table into memory. Readers:
 
 - open the file read-only and immutable, with SQLite's defensive mode on and
   untrusted schemas disabled;
 - reject the file unless its schema is exactly section 1, its
-  `application_id` is `"TWP1"`, and `meta` holds exactly the keys of section
-  1, names this format and encoding, and has a lowercase hex `source_digest`;
-- reject any chunk row whose `encoding` is not `twc1+zstd`, even when reading
-  a single chunk;
+  `application_id` is `"TWP1"`, its `user_version` is 1, and `meta` holds
+  exactly the keys of section 1, as text of at most 64 MiB for `profile` and
+  1 KiB for the others, names this format and encoding, and has a lowercase
+  hex `source_digest`;
+- reject any chunk row whose `encoding` is not `twc1+zstd`, or whose `data` is
+  not a blob within the bound of section 2, even when reading a single chunk;
+- reject a string that is not text of at most 1 MiB, the source format's
+  string limit, even when reading a single string;
 - reject chunk records with an unknown version, flags or tags, out-of-range
   tiles, palette indexes or sizes, a palette that is not nonzero and strictly
   ascending, embedded JSON that is not canonical or not the required shape, a
   decompressed size above 16 MiB, or trailing bytes.
 
-A full verification also runs SQLite's integrity check, compares the file's
-SHA-256 (hashed in bounded blocks) with its name when the name is a digest,
-checks that string IDs are exactly `1..=count`, checks plane kinds and chunk
-sizes, zone planes and parents and anchor planes and layers, and checks every
-string ID, render layer index, ground count and portal target (plane and
-anchor) that a chunk references.
+A full verification also:
+
+- runs SQLite's integrity check, and compares the file's SHA-256 (hashed in
+  bounded blocks) with its name when the name is a digest;
+- checks that string IDs are exactly `1..=count` and every string is text of
+  at most 1 MiB;
+- checks that plane, zone, anchor and definition keys are identifiers, plane
+  kinds and chunk sizes, zone planes and parents, and anchor planes and
+  layers;
+- checks that every `document` column, and the `profile` meta value, is
+  canonical JSON of an object of at most 64 MiB whose identity agrees with
+  its row: `format`, `id`, `kind` and `chunk_size` for planes, `id` and
+  `parent` for zones, `format`, `type` and `id` for definitions, and `format`,
+  `id` and `version` against `profile_id` and `profile_version` for the
+  profile;
+- checks every string ID, render layer index, ground count and portal target
+  (plane and anchor) that a chunk references, looking targets up rather than
+  loading the tables.

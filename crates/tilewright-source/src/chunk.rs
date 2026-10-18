@@ -400,14 +400,14 @@ fn read_object<'a>(
     let layer = match entry.get("layer") {
         Some(layer_value) => {
             let layer = reader.identifier(layer_value)?;
-            if context.profile.render_layer_index(&layer).is_none() {
-                reader.report(
+            context.references.add(
+                Target::RenderLayer(layer.clone()),
+                reader.diagnostic(
                     layer_value.span(),
                     Code::Reference,
                     format!("\"{layer}\" is not a render layer of the profile"),
-                );
-                return None;
-            }
+                ),
+            );
             Some(layer)
         }
         None => None,

@@ -365,3 +365,227 @@ fn directory_listings_count_against_the_budget() {
         .count();
     assert!(reported < 50, "{reported} unexpected files reported");
 }
+
+#[test]
+fn positions_match_a_direct_count() {
+    // Several checkpoints long, with multi-byte characters and lines that
+    // cross checkpoints.
+    let text: String = (0..900)
+        .map(|index| match index % 97 {
+            96 => '\n',
+            value if value % 3 == 0 => 'a',
+            value if value % 3 == 1 => 'é',
+            _ => '🦀',
+        })
+        .collect();
+    let positions = super::diagnostic::Positions::new(&text);
+    for offset in 0..=text.len() + 2 {
+        let mut boundary = offset.min(text.len());
+        while !text.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        let before = &text[..boundary];
+        let start = before.rfind('\n').map_or(0, |index| index + 1);
+        let expected = (
+            before.matches('\n').count() + 1,
+            text[start..boundary].chars().count() + 1,
+        );
+        assert_eq!(positions.locate(offset), expected, "offset {offset}");
+    }
+    let exact = "a".repeat(512);
+    assert_eq!(
+        super::diagnostic::Positions::new(&exact).locate(512),
+        (1, 513)
+    );
+    assert_eq!(super::diagnostic::Positions::new("").locate(0), (1, 1));
+}
+
+#[test]
+fn many_objects_keep_exact_positions() {
+    let copy = workspace();
+    let root = copy.path();
+    let count = 20_000;
+    let mut objects = vec!["{\"at\": [1, 1], \"proto\": \"coin\"}"; count];
+    objects.push("{\"at\": [1, 1], \"proto\": \"missing\"}");
+    fs::write(
+        root.join("planes/vault/layers/0/0_0.jsonc"),
+        format!(
+            "{{\"format\": \"tilewright.chunk/1\", \"plane\": \"vault\", \"layer\": 0, \"chunk\": [0, 0], \"objects\": [\n{}\n]}}\n",
+            objects.join(",\n")
+        ),
+    )
+    .unwrap();
+    let found = load(root).expect_err("the missing proto is reported");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(
+        (found[0].code, found[0].line, found[0].column),
+        ("ref.unresolved", count + 2, 25)
+    );
+}
+
+#[test]
+fn profile_lists_are_capped_before_their_entries_are_checked() {
+    const LAYERS: &str =
+        "\"render_layers\": [\"floor\", \"mask\", \"item\", \"wall\", \"living\", \"effect\"]";
+    let copy = workspace();
+    edit(
+        copy.path(),
+        "profile/profile.jsonc",
+        LAYERS,
+        &format!("\"render_layers\": [{}]", vec!["\"X\""; 65_535].join(", ")),
+    );
+    assert_eq!(
+        problems(copy.path()),
+        [("shape.range", "profile/profile.jsonc".to_owned(), 6)]
+    );
+
+    let copy = workspace();
+    let mut layers: Vec<String> = (0..60_000)
+        .map(|index| format!("\"layer.{index}\""))
+        .collect();
+    layers.extend(["\"floor\"", "\"mask\"", "\"layer.59999\""].map(str::to_owned));
+    edit(
+        copy.path(),
+        "profile/profile.jsonc",
+        LAYERS,
+        &format!("\"render_layers\": [{}]", layers.join(", ")),
+    );
+    assert_eq!(
+        problems(copy.path()),
+        [("ref.duplicate", "profile/profile.jsonc".to_owned(), 6)]
+    );
+
+    let copy = workspace();
+    edit(
+        copy.path(),
+        "profile/schema/proto.jsonc",
+        "\"values\": [\"floor\",",
+        "\"values\": [\"floor\", \"floor\",",
+    );
+    assert!(has(
+        &problems(copy.path()),
+        "ref.duplicate",
+        "profile/schema/proto.jsonc"
+    ));
+}
+
+#[test]
+fn unknown_object_layers_are_reported() {
+    let copy = workspace();
+    edit(
+        copy.path(),
+        CHUNK,
+        "\"layer\": \"wall\"",
+        "\"layer\": \"roof\"",
+    );
+    let found = problems(copy.path());
+    assert_eq!(found, [("ref.unresolved", CHUNK.to_owned(), 157)]);
+}
+
+#[test]
+fn long_zone_chains_are_walked_once() {
+    let copy = workspace();
+    // A rooted chain listed leaf first, a two-zone loop, and a chain that
+    // runs into the loop.
+    let length = 5_000;
+    let mut zones: Vec<String> = (1..length)
+        .rev()
+        .map(|index| format!("{{\"id\": \"z{index}\", \"parent\": \"z{}\"}}", index - 1))
+        .collect();
+    zones.push("{\"id\": \"z0\"}".to_owned());
+    zones.push("{\"id\": \"loop.a\", \"parent\": \"loop.b\"}".to_owned());
+    zones.push("{\"id\": \"loop.b\", \"parent\": \"loop.a\"}".to_owned());
+    zones.extend((0..length).map(|index| {
+        let parent = if index == 0 {
+            "loop.a".to_owned()
+        } else {
+            format!("tail{}", index - 1)
+        };
+        format!("{{\"id\": \"tail{index}\", \"parent\": \"{parent}\"}}")
+    }));
+    fs::write(
+        copy.path().join("planes/vault/zones.jsonc"),
+        format!(
+            "{{\"format\": \"tilewright.zones/1\", \"zones\": [\n{}\n]}}\n",
+            zones.join(",\n")
+        ),
+    )
+    .unwrap();
+    let found = problems(copy.path());
+    assert!(
+        found
+            .iter()
+            .all(|(code, path, _)| *code == "ref.cycle" && path == "planes/vault/zones.jsonc"),
+        "{found:?}"
+    );
+    assert_eq!(found.len(), length + 2);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn files_that_outgrow_their_metadata_count_against_the_budget() {
+    // Files in /proc report a length of 0 yet read as text, like a file
+    // that grows after its size was checked.
+    let options = LoadOptions {
+        maximum_total_bytes: 16,
+        ..LoadOptions::default()
+    };
+    let mut tree = super::files::Tree::new(Path::new("/proc/self"), &options);
+    assert!(tree.document("status").is_none());
+    let found = tree.take_diagnostics();
+    assert!(
+        found
+            .iter()
+            .any(|diagnostic| diagnostic.code == "source.budget"),
+        "{found:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn linked_top_level_directories_are_reported() {
+    let copy = workspace();
+    let root = copy.path();
+    for name in ["defs", "planes"] {
+        let real = root.join(format!("{name}-real"));
+        fs::rename(root.join(name), &real).unwrap();
+        std::os::unix::fs::symlink(&real, root.join(name)).unwrap();
+    }
+    let found = problems(root);
+    assert!(has(&found, "source.symlink", "defs"), "{found:?}");
+    assert!(has(&found, "source.symlink", "planes"), "{found:?}");
+}
+
+#[test]
+fn boundary_chunks_load_and_the_next_ones_are_rejected() {
+    // The last chunk on each side whose tiles stay within ±(2^53 - 1).
+    const EDGE: i64 = 281_474_976_710_655;
+    let copy = workspace();
+    let root = copy.path();
+    let layer = root.join("planes/vault/layers/0");
+    let text = fs::read_to_string(layer.join("0_0.jsonc")).unwrap();
+    for (cx, cy) in [(EDGE, 0), (-EDGE, 0), (0, EDGE), (0, -EDGE)] {
+        fs::write(
+            layer.join(format!("{cx}_{cy}.jsonc")),
+            text.replace("\"chunk\": [0, 0]", &format!("\"chunk\": [{cx}, {cy}]")),
+        )
+        .unwrap();
+    }
+    let world = load(root).expect("boundary chunks are valid");
+    assert_eq!(world.planes["vault"].chunks.len(), 5);
+    let names = [
+        format!("{}_0.jsonc", EDGE + 1),
+        format!("0_{}.jsonc", -EDGE - 1),
+    ];
+    for name in &names {
+        fs::write(layer.join(name), &text).unwrap();
+    }
+    let found = problems(root);
+    for name in &names {
+        let path = format!("planes/vault/layers/0/{name}");
+        assert!(
+            has(&found, "source.unexpected_file", &path),
+            "{path}: {found:?}"
+        );
+    }
+}

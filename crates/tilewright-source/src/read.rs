@@ -4,8 +4,11 @@
 //! Shape checks shared by every document reader. Each helper reports its
 //! own diagnostic and returns `None` when the value is unusable.
 
-use crate::{Code, Diagnostic, FieldValue, files::Source};
-use std::cell::RefCell;
+use crate::{Code, Diagnostic, FieldValue, diagnostic::Positions, files::Source};
+use std::{
+    cell::{OnceCell, RefCell},
+    collections::BTreeSet,
+};
 use tilewright_jsonc::{MAX_SAFE_INTEGER, Member, Span, Value};
 
 /// Whether `text` matches `^[a-z0-9][a-z0-9_.-]{0,127}$`.
@@ -35,6 +38,8 @@ pub(crate) fn is_namespace(text: &str) -> bool {
 pub(crate) struct Reader<'a> {
     pub source: &'a Source,
     diagnostics: RefCell<&'a mut Vec<Diagnostic>>,
+    /// Built at the first diagnostic.
+    positions: OnceCell<Positions<'a>>,
 }
 
 impl<'a> Reader<'a> {
@@ -42,6 +47,7 @@ impl<'a> Reader<'a> {
         Self {
             source,
             diagnostics: RefCell::new(diagnostics),
+            positions: OnceCell::new(),
         }
     }
 
@@ -55,9 +61,12 @@ impl<'a> Reader<'a> {
 
     /// Builds a diagnostic at `span` without recording it.
     pub fn diagnostic(&self, span: Span, code: Code, message: impl Into<String>) -> Diagnostic {
+        let positions = self
+            .positions
+            .get_or_init(|| Positions::new(self.source.document.source()));
         Diagnostic::at(
             &self.source.path,
-            self.source.document.source(),
+            positions,
             span.start,
             span.end,
             code,
@@ -242,13 +251,14 @@ impl<'a> Reader<'a> {
         }
     }
 
-    /// A list of unique identifiers.
+    /// A list of unique identifiers. Callers cap the list's length first.
     pub fn identifiers(&self, value: &'a Value) -> Option<Vec<String>> {
         let items = self.array(value)?;
-        let mut output: Vec<String> = Vec::with_capacity(items.len());
+        let mut seen = BTreeSet::new();
+        let mut output = Vec::with_capacity(items.len());
         for item in items {
             let identifier = self.identifier(item)?;
-            if output.contains(&identifier) {
+            if !seen.insert(identifier.clone()) {
                 self.report(
                     item.span(),
                     Code::Duplicate,

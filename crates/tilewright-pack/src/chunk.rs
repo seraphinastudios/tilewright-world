@@ -15,6 +15,9 @@ pub const CHUNK_ENCODING: &str = "twc1+zstd";
 pub const ZSTD_LEVEL: i32 = 19;
 /// Largest decompressed record accepted.
 pub const MAXIMUM_RECORD_BYTES: usize = 16 * 1024 * 1024;
+/// Largest stored (compressed) chunk accepted: zstd's compression bound for
+/// a record of [`MAXIMUM_RECORD_BYTES`], so every encoded chunk fits.
+pub const MAXIMUM_CHUNK_BYTES: usize = MAXIMUM_RECORD_BYTES + (MAXIMUM_RECORD_BYTES >> 8);
 /// Deepest inventory nesting accepted.
 pub const MAXIMUM_DEPTH: usize = 16;
 
@@ -306,6 +309,9 @@ fn encode_object(
 /// Returns an error for anything other than a well-formed record within the
 /// encoding's bounds.
 pub fn decode_chunk(data: &[u8]) -> Result<ChunkData, DecodeError> {
+    if data.len() > MAXIMUM_CHUNK_BYTES {
+        return invalid(format!("stored chunk exceeds {MAXIMUM_CHUNK_BYTES} bytes"));
+    }
     match zstd::zstd_safe::get_frame_content_size(data) {
         Ok(Some(size)) if size <= MAXIMUM_RECORD_BYTES as u64 => {}
         Ok(Some(_)) => return invalid("record exceeds 16 MiB"),

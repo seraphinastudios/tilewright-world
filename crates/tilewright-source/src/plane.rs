@@ -11,7 +11,7 @@ use crate::{
     schema::{References, read_fields},
 };
 use std::collections::{BTreeMap, BTreeSet};
-use tilewright_jsonc::MAX_SAFE_INTEGER;
+use tilewright_jsonc::{MAX_SAFE_INTEGER, Span};
 
 /// Parses a canonical decimal integer: no sign other than a leading `-`, no
 /// leading zeros, and no `-0`.
@@ -31,12 +31,13 @@ pub(crate) fn read_planes(
     references: &mut References,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Vec<Plane> {
+    let listed: BTreeSet<&str> = plane_ids.iter().map(String::as_str).collect();
     let present: BTreeSet<String> = match tree.kind("planes") {
         Some(EntryKind::Directory) => tree
             .list("planes")
             .into_iter()
             .filter_map(|entry| {
-                if entry.kind == EntryKind::Directory && plane_ids.contains(&entry.name) {
+                if entry.kind == EntryKind::Directory && listed.contains(entry.name.as_str()) {
                     Some(entry.name)
                 } else {
                     diagnostics.push(Diagnostic::file(
@@ -287,23 +288,44 @@ fn read_zones(
             );
         }
     }
-    // Every zone must reach a root by following parents.
-    for (id, _, span) in &parents {
-        let mut seen = BTreeSet::new();
-        let mut current = Some(id.clone());
-        while let Some(zone) = current {
-            if !seen.insert(zone.clone()) {
-                reader.report(
-                    *span,
-                    Code::Cycle,
-                    format!("zone \"{id}\" is its own ancestor"),
-                );
-                break;
+    report_cycles(&reader, &zones, &parents);
+    zones
+}
+
+/// Reports every zone whose parent chain never reaches a root. Each zone is
+/// walked once: a walk stops at the first zone whose outcome is known.
+fn report_cycles(
+    reader: &Reader<'_>,
+    zones: &BTreeMap<String, Zone>,
+    parents: &[(String, String, Span)],
+) {
+    let mut rooted: BTreeMap<&str, bool> = BTreeMap::new();
+    for (id, _, span) in parents {
+        let mut path = Vec::new();
+        let mut on_path = BTreeSet::new();
+        let mut current = Some(id.as_str());
+        let reaches_root = loop {
+            let Some(zone) = current else {
+                break true;
+            };
+            if let Some(known) = rooted.get(zone) {
+                break *known;
             }
-            current = zones.get(&zone).and_then(|zone| zone.parent.clone());
+            if !on_path.insert(zone) {
+                break false;
+            }
+            path.push(zone);
+            current = zones.get(zone).and_then(|zone| zone.parent.as_deref());
+        };
+        rooted.extend(path.into_iter().map(|zone| (zone, reaches_root)));
+        if !reaches_root {
+            reader.report(
+                *span,
+                Code::Cycle,
+                format!("zone \"{id}\" is its own ancestor"),
+            );
         }
     }
-    zones
 }
 
 fn read_anchors(
@@ -367,8 +389,10 @@ fn read_layers(
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     let layers = join(directory, "layers");
+    // Chunk `c` covers tiles `c * size ..= c * size + size - 1`; both ends
+    // must stay within the format's integer range.
     let size = i64::from(plane.chunk_size);
-    let chunk_limit = MAX_SAFE_INTEGER / size - 1;
+    let chunks = -(MAX_SAFE_INTEGER / size)..=(MAX_SAFE_INTEGER - (size - 1)) / size;
     for layer_entry in tree.list(&layers) {
         let layer_directory = join(&layers, &layer_entry.name);
         let layer = canonical_integer(&layer_entry.name)
@@ -389,10 +413,7 @@ fn read_layers(
                 .strip_suffix(".jsonc")
                 .and_then(|stem| stem.split_once('_'))
                 .and_then(|(x, y)| Some((canonical_integer(x)?, canonical_integer(y)?)))
-                .filter(|(cx, cy)| {
-                    (-chunk_limit..=chunk_limit).contains(cx)
-                        && (-chunk_limit..=chunk_limit).contains(cy)
-                })
+                .filter(|(cx, cy)| chunks.contains(cx) && chunks.contains(cy))
                 .filter(|_| chunk_entry.kind == EntryKind::File);
             let Some((cx, cy)) = coordinates else {
                 diagnostics.push(Diagnostic::file(

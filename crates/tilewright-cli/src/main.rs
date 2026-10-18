@@ -3,7 +3,12 @@
 
 //! `tilewright`: validate world sources, compile packs and inspect them.
 
-use std::{fmt::Write as _, path::Path, process::ExitCode};
+use std::{
+    ffi::{OsStr, OsString},
+    fmt::Write as _,
+    path::Path,
+    process::ExitCode,
+};
 use tilewright_jsonc::write_json_string;
 use tilewright_source::Diagnostic;
 
@@ -14,8 +19,9 @@ const USAGE: &str = "usage:
   tilewright --version";
 
 fn main() -> ExitCode {
-    let arguments: Vec<String> = std::env::args().skip(1).collect();
-    let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
+    // Paths need not be UTF-8, so arguments are read as OS strings.
+    let arguments: Vec<OsString> = std::env::args_os().skip(1).collect();
+    let arguments: Vec<&OsStr> = arguments.iter().map(OsString::as_os_str).collect();
     match run(&arguments) {
         Ok(output) => {
             print!("{output}");
@@ -47,13 +53,19 @@ impl Failure {
     }
 }
 
-fn run(arguments: &[&str]) -> Result<String, Failure> {
+fn run(arguments: &[&OsStr]) -> Result<String, Failure> {
     match arguments {
-        ["--version"] => Ok(format!("tilewright {}\n", env!("CARGO_PKG_VERSION"))),
-        ["validate", root] => validate(Path::new(root), false),
-        ["validate", "--json", root] => validate(Path::new(root), true),
-        ["compile", root, output] => compile(Path::new(root), Path::new(output)),
-        ["inspect", pack] => inspect(Path::new(pack)),
+        [command] if *command == "--version" => {
+            Ok(format!("tilewright {}\n", env!("CARGO_PKG_VERSION")))
+        }
+        [command, root] if *command == "validate" => validate(Path::new(root), false),
+        [command, flag, root] if *command == "validate" && *flag == "--json" => {
+            validate(Path::new(root), true)
+        }
+        [command, root, output] if *command == "compile" => {
+            compile(Path::new(root), Path::new(output))
+        }
+        [command, pack] if *command == "inspect" => inspect(Path::new(pack)),
         _ => Err(Failure::message(USAGE)),
     }
 }
@@ -168,8 +180,13 @@ fn inspect(path: &Path) -> Result<String, Failure> {
 
 #[cfg(test)]
 mod tests {
-    use super::run;
-    use std::path::Path;
+    use super::Failure;
+    use std::{ffi::OsStr, path::Path};
+
+    fn run(arguments: &[&str]) -> Result<String, Failure> {
+        let arguments: Vec<&OsStr> = arguments.iter().map(OsStr::new).collect();
+        super::run(&arguments)
+    }
 
     fn fixture() -> String {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -199,6 +216,41 @@ mod tests {
         assert!(inspected.contains("format: tilewright.pack/1"));
         assert!(inspected.contains("objects: 11"));
         assert!(inspected.contains("verified: yes"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn paths_need_not_be_utf8() {
+        use std::os::unix::ffi::OsStrExt;
+
+        fn copy_tree(from: &Path, to: &Path) {
+            std::fs::create_dir_all(to).unwrap();
+            for entry in std::fs::read_dir(from).unwrap() {
+                let entry = entry.unwrap();
+                let target = to.join(entry.file_name());
+                if entry.file_type().unwrap().is_dir() {
+                    copy_tree(&entry.path(), &target);
+                } else {
+                    std::fs::copy(entry.path(), target).unwrap();
+                }
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join(OsStr::from_bytes(b"source-\xff"));
+        copy_tree(Path::new(&fixture()), &root);
+        let output = directory.path().join(OsStr::from_bytes(b"packs-\xfe"));
+        let run = |arguments: &[&OsStr]| super::run(arguments).unwrap();
+        assert!(run(&[OsStr::new("validate"), root.as_os_str()]).starts_with("valid: "));
+        run(&[OsStr::new("compile"), root.as_os_str(), output.as_os_str()]);
+        let pack = std::fs::read_dir(&output)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert!(run(&[OsStr::new("inspect"), pack.as_os_str()]).contains("verified: yes"));
+        assert!(super::run(&[OsStr::from_bytes(b"\xff")]).is_err());
     }
 
     #[test]

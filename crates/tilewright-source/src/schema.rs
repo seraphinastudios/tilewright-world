@@ -4,11 +4,11 @@
 //! Closed field schemas (`tilewright.schema/1`) and deferred references.
 
 use crate::{
-    Code, Definition, Diagnostic, FieldValue, Plane,
+    Code, Definition, Diagnostic, FieldValue, Plane, Profile,
     files::Tree,
     read::{Reader, is_identifier},
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use tilewright_jsonc::{MAX_SAFE_INTEGER, Value};
 
 /// Longest string a `string` field accepts unless its schema says less.
@@ -49,11 +49,11 @@ pub enum FieldType {
         minimum: f64,
         maximum: f64,
     },
-    /// A string of at most `maximum_length` characters, optionally one of
-    /// `values`.
+    /// A string of at most `maximum_length` characters, one of `values`
+    /// when that is not empty.
     String {
         maximum_length: usize,
-        values: Vec<String>,
+        values: BTreeSet<String>,
     },
     /// The identifier of a definition of type `target`.
     Reference {
@@ -173,18 +173,16 @@ fn read_spec<'a>(reader: &Reader<'a>, value: &'a Value) -> Option<FieldSpec> {
             };
             let values = match spec.get("values") {
                 Some(value) => {
-                    let mut values = Vec::new();
+                    let mut values = BTreeSet::new();
                     for item in reader.array(value)? {
-                        let text = reader.string(item)?.to_owned();
-                        if values.contains(&text) {
+                        if !values.insert(reader.string(item)?.to_owned()) {
                             reader.report(item.span(), Code::Duplicate, "value listed twice");
                             return None;
                         }
-                        values.push(text);
                     }
                     values
                 }
-                None => Vec::new(),
+                None => BTreeSet::new(),
             };
             FieldType::String {
                 maximum_length,
@@ -215,6 +213,7 @@ pub(crate) enum Target {
     Definition { kind: String, id: String },
     Plane(String),
     Anchor { plane: String, id: String },
+    RenderLayer(String),
 }
 
 #[derive(Default)]
@@ -229,10 +228,13 @@ impl References {
 
     pub fn check(
         self,
+        profile: &Profile,
         definitions: &BTreeMap<(String, String), Definition>,
         planes: &BTreeMap<String, Plane>,
         diagnostics: &mut Vec<Diagnostic>,
     ) {
+        let render_layers: BTreeSet<&str> =
+            profile.render_layers.iter().map(String::as_str).collect();
         for (target, diagnostic) in self.pending {
             let resolved = match &target {
                 Target::Definition { kind, id } => {
@@ -242,6 +244,7 @@ impl References {
                 Target::Anchor { plane, id } => planes
                     .get(plane)
                     .is_some_and(|plane| plane.anchors.contains_key(id)),
+                Target::RenderLayer(layer) => render_layers.contains(layer.as_str()),
             };
             if !resolved {
                 diagnostics.push(diagnostic);
