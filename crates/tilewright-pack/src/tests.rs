@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 use super::{
-    ChunkData, FieldRecord, ObjectRecord, Pack, PortalRecord, compile, decode_chunk, decode_record,
-    encode_chunk, encode_record, write_pack,
+    ChunkData, FieldRecord, ObjectRecord, Pack, PortalRecord, VerifyLimits, compile, decode_chunk,
+    decode_record, encode_chunk, encode_record, write_pack,
 };
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -140,7 +140,7 @@ fn packs_verify_and_decode_back_to_the_source() {
     );
     assert_eq!(
         pack.meta("source_digest").unwrap().unwrap(),
-        hex(&world.source_digest)
+        hex(&world.source_digest())
     );
     assert_eq!(pack.meta("profile_id").unwrap().as_deref(), Some("example"));
 
@@ -594,33 +594,6 @@ fn opening_stops_at_an_oversized_schema() {
 }
 
 #[test]
-fn malformed_worlds_fail_to_compile_without_panicking() {
-    let mut cell = world();
-    let chunk = cell
-        .planes
-        .get_mut("vault")
-        .unwrap()
-        .chunks
-        .values_mut()
-        .next()
-        .unwrap();
-    chunk.ground[0].cells[0] = 99;
-    assert!(compile(&cell).is_err());
-
-    let mut outside = world();
-    let chunk = outside
-        .planes
-        .get_mut("vault")
-        .unwrap()
-        .chunks
-        .values_mut()
-        .next()
-        .unwrap();
-    chunk.objects[0].at = Some([40, 0]);
-    assert!(compile(&outside).is_err());
-}
-
-#[test]
 fn existing_packs_are_compared_without_replacing_them() {
     let world = world();
     let directory = tempfile::tempdir().unwrap();
@@ -634,57 +607,6 @@ fn existing_packs_are_compared_without_replacing_them() {
     std::fs::remove_file(&written.path).unwrap();
     std::fs::create_dir(&written.path).unwrap();
     assert!(write_pack(&world, directory.path()).is_err());
-}
-
-#[test]
-fn malformed_sizes_and_depths_fail_to_compile_without_panicking() {
-    let mut size = world();
-    let vault = size.planes.get_mut("vault").unwrap();
-    vault.chunk_size = 300;
-    vault.chunks.values_mut().next().unwrap().objects[0].at = Some([299, 299]);
-    assert!(compile(&size).is_err());
-
-    // Far deeper than any stack could recurse through.
-    let mut deep = world();
-    let chunk = deep
-        .planes
-        .get_mut("vault")
-        .unwrap()
-        .chunks
-        .values_mut()
-        .next()
-        .unwrap();
-    let coin = |inventory| tilewright_source::Object {
-        at: None,
-        proto: "coin".to_owned(),
-        layer: None,
-        sub_layer: 0,
-        z: 0,
-        fields: Vec::new(),
-        portal: None,
-        inventory,
-        custom: None,
-    };
-    let mut item = coin(Vec::new());
-    for _ in 0..200_000 {
-        item = coin(vec![item]);
-    }
-    chunk.objects[0].inventory = vec![item];
-    let error = compile(&deep).unwrap_err();
-    assert!(error.to_string().contains("deep"), "{error}");
-    // Dismantle the chain without recursing through it.
-    let chunk = deep
-        .planes
-        .get_mut("vault")
-        .unwrap()
-        .chunks
-        .values_mut()
-        .next()
-        .unwrap();
-    let mut stack = std::mem::take(&mut chunk.objects);
-    while let Some(mut object) = stack.pop() {
-        stack.append(&mut object.inventory);
-    }
 }
 
 #[test]
@@ -815,58 +737,6 @@ fn grid_and_object_values_must_name_their_targets() {
 }
 
 #[test]
-fn compiled_packs_always_verify() {
-    let mut far = world();
-    let vault = far.planes.get_mut("vault").unwrap();
-    let chunk = vault.chunks.values().next().unwrap().clone();
-    vault.chunks.insert((0, 281_474_976_710_656, 0), chunk);
-    let error = compile(&far).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("does not compile to a valid pack"),
-        "{error}"
-    );
-
-    let mut zone = world();
-    let overworld = zone.planes.get_mut("overworld").unwrap();
-    let village = overworld.zones.remove("village").unwrap();
-    overworld.zones.insert("Village".to_owned(), village);
-    assert!(compile(&zone).is_err());
-
-    let mut heights = world();
-    heights
-        .planes
-        .get_mut("vault")
-        .unwrap()
-        .chunks
-        .values_mut()
-        .next()
-        .unwrap()
-        .heights
-        .truncate(2);
-    let error = compile(&heights).unwrap_err();
-    assert!(error.to_string().contains("grids"), "{error}");
-
-    let mut large = world();
-    large
-        .planes
-        .get_mut("vault")
-        .unwrap()
-        .chunks
-        .values_mut()
-        .next()
-        .unwrap()
-        .objects[0]
-        .custom = Some(format!(
-        "{{\"example.org\":\"{}\"}}",
-        "x".repeat(super::MAXIMUM_RECORD_BYTES)
-    ));
-    let error = compile(&large).unwrap_err();
-    assert!(error.to_string().contains("16 MiB"), "{error}");
-}
-
-#[test]
 fn a_minimal_object_fits_the_last_bytes_of_a_record() {
     // `length` characters over a fixed 17 strings (each under the 1 MiB
     // string limit), so the JSON's overhead does not depend on `length`.
@@ -901,17 +771,6 @@ fn a_minimal_object_fits_the_last_bytes_of_a_record() {
 }
 
 #[test]
-fn the_profile_document_must_list_the_typed_layers() {
-    let mut reordered = world();
-    reordered.profile.render_layers.swap(0, 1);
-    let error = compile(&reordered).unwrap_err();
-    assert!(error.to_string().contains("layers differ"), "{error}");
-    let mut ground = world();
-    ground.profile.ground_layers.reverse();
-    assert!(compile(&ground).is_err());
-}
-
-#[test]
 fn stored_default_zones_and_profile_layers_must_resolve() {
     for (name, sql, problem) in [
         (
@@ -942,46 +801,6 @@ fn stored_default_zones_and_profile_layers_must_resolve() {
 }
 
 #[test]
-fn a_chunk_of_exactly_16_mib_compiles() {
-    // `length` characters over a fixed 17 strings, as in the codec test.
-    let sized = |length: usize| {
-        let strings: Vec<String> = (0..17)
-            .map(|index| {
-                let start = (index * 1_000_000).min(length);
-                let end = ((index + 1) * 1_000_000).min(length);
-                format!("\"{}\"", "x".repeat(end - start))
-            })
-            .collect();
-        let mut world = world();
-        world
-            .planes
-            .get_mut("vault")
-            .unwrap()
-            .chunks
-            .values_mut()
-            .next()
-            .unwrap()
-            .objects[0]
-            .custom = Some(format!("{{\"example.org\":[{}]}}", strings.join(",")));
-        world
-    };
-    let record_length = |world: &World| {
-        let directory = tempfile::tempdir().unwrap();
-        let written = write_pack(world, directory.path()).unwrap();
-        let chunk = Pack::open(&written.path)
-            .unwrap()
-            .chunk("vault", 0, 0, 0)
-            .unwrap()
-            .unwrap();
-        encode_record(&chunk).unwrap().len()
-    };
-    let base = record_length(&sized(0));
-    let exact = sized(super::MAXIMUM_RECORD_BYTES - base);
-    assert_eq!(record_length(&exact), super::MAXIMUM_RECORD_BYTES);
-    assert!(compile(&sized(super::MAXIMUM_RECORD_BYTES - base + 1)).is_err());
-}
-
-#[test]
 fn identity_page_size_and_profile_limits_are_checked() {
     let (_directory, copy) = tampered("pages.twpack", "PRAGMA page_size = 8192; VACUUM;");
     let error = Pack::open(&copy).err().unwrap();
@@ -1004,34 +823,193 @@ fn identity_page_size_and_profile_limits_are_checked() {
     }
 }
 
+// A `World` is only built by `tilewright_source::load`, so the compiler's own
+// bounds are checked through its internal steps, with parts of a loaded world.
+
+fn vault_chunk(world: &World) -> tilewright_source::Chunk {
+    world.planes()["vault"]
+        .chunks
+        .values()
+        .next()
+        .unwrap()
+        .clone()
+}
+
 #[test]
-fn hand_built_strings_are_bounded_before_they_are_kept() {
-    fn object(world: &mut World) -> &mut tilewright_source::Object {
-        &mut world
-            .planes
-            .get_mut("vault")
-            .unwrap()
-            .chunks
-            .values_mut()
-            .next()
-            .unwrap()
-            .objects[0]
+fn compile_checks_grids_before_copying_them() {
+    use super::compile::{check_chunk_shape, palette_value};
+    let world = world();
+    let ground = world.profile().ground_layers.len();
+    let mut chunk = vault_chunk(&world);
+    check_chunk_shape(&chunk, ground).unwrap();
+    assert!(palette_value(&chunk.ground[0], 98).is_err());
+    chunk.heights.truncate(2);
+    let error = check_chunk_shape(&chunk, ground).unwrap_err();
+    assert!(error.to_string().contains("grids"), "{error}");
+}
+
+#[test]
+fn compile_bounds_object_records() {
+    use super::compile::{Strings, object_record, render_layers};
+    let world = world();
+    let strings = Strings::collect(&world).unwrap();
+    let layers = render_layers(world.profile()).unwrap();
+    let chest = vault_chunk(&world).objects[0].clone();
+    let record = |object: &tilewright_source::Object, budget: usize| {
+        let mut budget = budget;
+        object_record(object, &layers, &strings, 0, &mut budget)
+    };
+    record(&chest, usize::MAX).unwrap();
+
+    let mut outside = chest.clone();
+    outside.at = Some([40, 0]);
+    assert!(record(&outside, usize::MAX).is_err());
+
+    let mut portal = chest.clone();
+    portal.portal = Some(tilewright_source::Portal::Location {
+        plane: None,
+        layer: 0,
+        at: [tilewright_jsonc::MAX_SAFE_INTEGER + 1, 0],
+    });
+    let error = record(&portal, usize::MAX).unwrap_err();
+    assert!(error.to_string().contains("integer range"), "{error}");
+
+    let mut large = chest.clone();
+    large.custom = Some(format!(
+        "{{\"example.org\":\"{}\"}}",
+        "x".repeat(super::MAXIMUM_RECORD_BYTES)
+    ));
+    let error = record(&large, super::MAXIMUM_RECORD_BYTES).unwrap_err();
+    assert!(error.to_string().contains("16 MiB"), "{error}");
+
+    // Far deeper than any stack could recurse through.
+    let coin = |inventory| tilewright_source::Object {
+        at: None,
+        proto: "coin".to_owned(),
+        layer: None,
+        sub_layer: 0,
+        z: 0,
+        fields: Vec::new(),
+        portal: None,
+        inventory,
+        custom: None,
+    };
+    let mut item = coin(Vec::new());
+    for _ in 0..200_000 {
+        item = coin(vec![item]);
     }
-    let mut proto = world();
-    object(&mut proto).proto = "x".repeat(10 * 1024 * 1024);
-    let error = compile(&proto).unwrap_err();
+    let mut deep = chest;
+    deep.inventory = vec![item];
+    let error = record(&deep, usize::MAX).unwrap_err();
+    assert!(error.to_string().contains("deep"), "{error}");
+    // Dismantle the chain without recursing through it.
+    let mut stack = std::mem::take(&mut deep.inventory);
+    while let Some(mut object) = stack.pop() {
+        stack.append(&mut object.inventory);
+    }
+}
+
+#[test]
+fn compile_bounds_strings_and_documents_by_role() {
+    use super::compile::{document, field_name, identifier, text};
+    assert!(identifier("coin").is_ok());
+    let error = identifier(&"x".repeat(10 * 1024 * 1024)).unwrap_err();
     assert!(error.to_string().contains("not an identifier"), "{error}");
-
-    let mut value = world();
-    object(&mut value).fields = vec![(
-        "name".to_owned(),
-        tilewright_source::FieldValue::String("x".repeat(1024 * 1024 + 1)),
-    )];
-    let error = compile(&value).unwrap_err();
+    assert!(field_name("count").is_ok());
+    assert!(field_name("Count").is_err());
+    assert!(text(&"x".repeat(1024 * 1024)).is_ok());
+    let error = text(&"x".repeat(1024 * 1024 + 1)).unwrap_err();
     assert!(error.to_string().contains("longer than 1 MiB"), "{error}");
-
-    let mut plane = world();
-    plane.planes.get_mut("vault").unwrap().canonical = "x".repeat(64 * 1024 * 1024 + 1);
-    let error = compile(&plane).unwrap_err();
+    assert!(text("a\0b").is_err());
+    let error = document(&"x".repeat(64 * 1024 * 1024 + 1)).unwrap_err();
     assert!(error.to_string().contains("longer than 64 MiB"), "{error}");
+}
+
+#[test]
+fn the_profile_document_must_list_the_typed_layers() {
+    use super::compile::check_profile_layers;
+    let world = world();
+    check_profile_layers(world.profile()).unwrap();
+    let mut reordered = world.profile().clone();
+    reordered.render_layers.swap(0, 1);
+    let error = check_profile_layers(&reordered).unwrap_err();
+    assert!(error.to_string().contains("layers differ"), "{error}");
+    let mut ground = world.profile().clone();
+    ground.ground_layers.reverse();
+    assert!(check_profile_layers(&ground).is_err());
+}
+
+#[test]
+fn a_chunk_of_exactly_16_mib_compiles() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("source");
+    copy_tree(&fixture(), &root);
+    let vault = root.join("planes/vault/layers/0/0_0.jsonc");
+    let original = std::fs::read_to_string(&vault).unwrap();
+    // `length` characters over a fixed 17 strings on their own lines, each
+    // under the source string and line limits.
+    let sized = |length: usize| {
+        let strings: Vec<String> = (0..17)
+            .map(|index| {
+                let start = (index * 1_000_000).min(length);
+                let end = ((index + 1) * 1_000_000).min(length);
+                format!("\"{}\"", "x".repeat(end - start))
+            })
+            .collect();
+        std::fs::write(
+            &vault,
+            original.replace(
+                "\"fields\": {\"loot\": \"chest_common\"}",
+                &format!(
+                    "\"fields\": {{\"loot\": \"chest_common\"}}, \"custom\": {{\"example.org\": [\n{}\n]}}",
+                    strings.join(",\n")
+                ),
+            ),
+        )
+        .unwrap();
+        tilewright_source::load(&root).unwrap()
+    };
+    let record_length = |world: &World| {
+        let output = tempfile::tempdir().unwrap();
+        let written = write_pack(world, output.path()).unwrap();
+        let chunk = Pack::open(&written.path)
+            .unwrap()
+            .chunk("vault", 0, 0, 0)
+            .unwrap()
+            .unwrap();
+        encode_record(&chunk).unwrap().len()
+    };
+    let base = record_length(&sized(0));
+    assert_eq!(
+        record_length(&sized(super::MAXIMUM_RECORD_BYTES - base)),
+        super::MAXIMUM_RECORD_BYTES
+    );
+    assert!(compile(&sized(super::MAXIMUM_RECORD_BYTES - base + 1)).is_err());
+}
+
+#[test]
+fn verification_stops_at_its_decoded_byte_budget() {
+    assert_eq!(super::DEFAULT_MAXIMUM_DECODED_BYTES, 8 * 1024 * 1024 * 1024);
+    let directory = tempfile::tempdir().unwrap();
+    let written = write_pack(&world(), directory.path()).unwrap();
+    let pack = Pack::open(&written.path).unwrap();
+    let total: u64 = [
+        ("overworld", -1, 0, 0),
+        ("overworld", 0, -1, 0),
+        ("overworld", 0, 0, 0),
+        ("vault", 0, 0, 0),
+    ]
+    .iter()
+    .map(|(plane, layer, cx, cy)| {
+        let chunk = pack.chunk(plane, *layer, *cx, *cy).unwrap().unwrap();
+        u64::try_from(encode_record(&chunk).unwrap().len()).unwrap()
+    })
+    .sum();
+    let limits = |maximum_decoded_bytes| VerifyLimits {
+        maximum_decoded_bytes,
+    };
+    pack.verify_with(&limits(total)).unwrap();
+    let error = pack.verify_with(&limits(total - 1)).unwrap_err();
+    assert!(error.to_string().contains("verification limit"), "{error}");
+    assert!(pack.verify_with(&limits(0)).is_err());
 }

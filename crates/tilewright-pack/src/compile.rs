@@ -28,10 +28,10 @@ pub const COMPILER: &str = concat!("tilewright-pack ", env!("CARGO_PKG_VERSION")
 /// "none" wherever an ID is optional.
 /// The strings are borrowed from the world, and each is checked against its
 /// role's limits before it is kept: the model is public.
-struct Strings<'w>(BTreeMap<&'w str, u32>);
+pub(crate) struct Strings<'w>(BTreeMap<&'w str, u32>);
 
 /// `value` if it is an identifier.
-fn identifier(value: &str) -> Result<&str, Error> {
+pub(crate) fn identifier(value: &str) -> Result<&str, Error> {
     if is_identifier(value) {
         Ok(value)
     } else {
@@ -43,7 +43,7 @@ fn identifier(value: &str) -> Result<&str, Error> {
 }
 
 /// `value` if it is a field name.
-fn field_name(value: &str) -> Result<&str, Error> {
+pub(crate) fn field_name(value: &str) -> Result<&str, Error> {
     if is_field_name(value) {
         Ok(value)
     } else {
@@ -52,7 +52,7 @@ fn field_name(value: &str) -> Result<&str, Error> {
 }
 
 /// `value` if it fits a source string: at most 1 MiB, without NUL.
-fn text(value: &str) -> Result<&str, Error> {
+pub(crate) fn text(value: &str) -> Result<&str, Error> {
     if value.len() <= Limits::default().max_string_bytes && !value.contains('\0') {
         Ok(value)
     } else {
@@ -63,7 +63,7 @@ fn text(value: &str) -> Result<&str, Error> {
 }
 
 /// `value` if it fits a source document: at most 64 MiB.
-fn document(value: &str) -> Result<&str, Error> {
+pub(crate) fn document(value: &str) -> Result<&str, Error> {
     if value.len() <= Limits::default().max_input_bytes {
         Ok(value)
     } else {
@@ -74,9 +74,9 @@ fn document(value: &str) -> Result<&str, Error> {
 }
 
 impl<'w> Strings<'w> {
-    fn collect(world: &'w World) -> Result<Self, Error> {
+    pub(crate) fn collect(world: &'w World) -> Result<Self, Error> {
         let mut values: BTreeSet<&'w str> = BTreeSet::new();
-        for (id, plane) in &world.planes {
+        for (id, plane) in world.planes() {
             if plane.chunk_size != CHUNK_SIZE {
                 return Err(Error::Invalid(format!(
                     "plane {id} has chunk size {}, not {CHUNK_SIZE}",
@@ -84,7 +84,7 @@ impl<'w> Strings<'w> {
                 )));
             }
             for chunk in plane.chunks.values() {
-                check_chunk_shape(chunk, world.profile.ground_layers.len())?;
+                check_chunk_shape(chunk, world.profile().ground_layers.len())?;
                 for grid in chunk.ground.iter().chain([&chunk.zones]) {
                     let used: BTreeSet<u16> = grid.cells.iter().copied().collect();
                     for cell in used {
@@ -142,7 +142,7 @@ impl<'w> Strings<'w> {
 }
 
 /// The palette value of a grid cell's index.
-fn palette_value(grid: &tilewright_source::Grid, index: usize) -> Result<&str, Error> {
+pub(crate) fn palette_value(grid: &tilewright_source::Grid, index: usize) -> Result<&str, Error> {
     grid.palette
         .get(index)
         .map(String::as_str)
@@ -150,9 +150,9 @@ fn palette_value(grid: &tilewright_source::Grid, index: usize) -> Result<&str, E
 }
 
 /// Render layer names to their record value, index plus one.
-type Layers<'p> = BTreeMap<&'p str, u16>;
+pub(crate) type Layers<'p> = BTreeMap<&'p str, u16>;
 
-fn render_layers(profile: &Profile) -> Result<Layers<'_>, Error> {
+pub(crate) fn render_layers(profile: &Profile) -> Result<Layers<'_>, Error> {
     profile
         .render_layers
         .iter()
@@ -168,7 +168,7 @@ fn render_layers(profile: &Profile) -> Result<Layers<'_>, Error> {
 /// Checks that the stored profile document lists the same render and ground
 /// layers, in the same order, as the typed profile the records are built
 /// from: the model is public, and readers interpret indexes by the document.
-fn check_profile_layers(profile: &Profile) -> Result<(), Error> {
+pub(crate) fn check_profile_layers(profile: &Profile) -> Result<(), Error> {
     let document =
         tilewright_jsonc::Document::parse(profile.canonical.as_str(), &crate::canonical_limits())
             .map_err(|error| Error::Invalid(format!("the profile document: {error}")))?;
@@ -197,7 +197,7 @@ fn check_profile_layers(profile: &Profile) -> Result<(), Error> {
 
 /// Checks a public model's chunk against format 1 before anything is
 /// copied from it.
-fn check_chunk_shape(chunk: &Chunk, ground_layers: usize) -> Result<(), Error> {
+pub(crate) fn check_chunk_shape(chunk: &Chunk, ground_layers: usize) -> Result<(), Error> {
     let cells = usize::from(CHUNK_SIZE) * usize::from(CHUNK_SIZE);
     let grid_ok = |grid: &tilewright_source::Grid| {
         grid.cells.len() == cells && grid.palette.len() < usize::from(u16::MAX)
@@ -248,7 +248,7 @@ fn encoded_size(object: &Object) -> usize {
 /// Builds an object record. `depth` is the object's inventory depth and
 /// `budget` the bytes left in the chunk's record; the model is public, so
 /// its bounds are checked here rather than assumed.
-fn object_record(
+pub(crate) fn object_record(
     object: &Object,
     layers: &Layers<'_>,
     strings: &Strings<'_>,
@@ -416,8 +416,8 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 /// Returns an error if SQLite fails or the world exceeds the pack's bounds.
 pub fn compile(world: &World) -> Result<Vec<u8>, Error> {
     let strings = Strings::collect(world)?;
-    check_profile_layers(&world.profile)?;
-    let layers = render_layers(&world.profile)?;
+    check_profile_layers(world.profile())?;
+    let layers = render_layers(world.profile())?;
     let connection = Connection::open_in_memory()?;
     let schema: &str = &SCHEMA;
     connection.execute_batch(&format!(
@@ -426,8 +426,8 @@ pub fn compile(world: &World) -> Result<Vec<u8>, Error> {
     ))?;
     connection.execute_batch("BEGIN")?;
     {
-        let profile = &world.profile;
-        let digest = hex(&world.source_digest);
+        let profile = world.profile();
+        let digest = hex(&world.source_digest());
         let mut meta = connection.prepare("INSERT INTO meta (key, value) VALUES (?1, ?2)")?;
         for (key, value) in [
             ("chunk_encoding", CHUNK_ENCODING),
@@ -457,7 +457,7 @@ pub fn compile(world: &World) -> Result<Vec<u8>, Error> {
         let mut chunks = connection.prepare(
             "INSERT INTO chunks (plane, layer, cx, cy, encoding, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )?;
-        for (id, plane) in &world.planes {
+        for (id, plane) in world.planes() {
             planes.execute(params![
                 id,
                 plane.kind.as_str(),
@@ -489,7 +489,7 @@ pub fn compile(world: &World) -> Result<Vec<u8>, Error> {
         }
         let mut definitions = connection
             .prepare("INSERT INTO definitions (type, id, document) VALUES (?1, ?2, ?3)")?;
-        for ((kind, id), definition) in &world.definitions {
+        for ((kind, id), definition) in world.definitions() {
             definitions.execute(params![kind, id, document(&definition.canonical)?])?;
         }
     }
@@ -497,7 +497,8 @@ pub fn compile(world: &World) -> Result<Vec<u8>, Error> {
     // The model is public, so the compiled pack is verified like any other
     // before it is returned: a malformed model never yields an invalid pack.
     let pack = Pack::compiled(connection)?;
-    pack.verify_contents().map_err(|error| {
+    // The compiler decodes only what it just encoded, so no budget applies.
+    pack.verify_contents(u64::MAX).map_err(|error| {
         Error::Invalid(format!(
             "the world does not compile to a valid pack: {error}"
         ))

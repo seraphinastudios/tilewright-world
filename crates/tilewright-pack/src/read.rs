@@ -37,6 +37,26 @@ const MAXIMUM_META_BYTES: usize = 1024;
 /// Largest `sqlite_schema` value loaded; every expected one is shorter.
 const MAXIMUM_SCHEMA_BYTES: usize = 1024;
 
+/// The default [`VerifyLimits::maximum_decoded_bytes`]: 8 GiB.
+pub const DEFAULT_MAXIMUM_DECODED_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+
+/// Bounds on the work a full verification may do.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VerifyLimits {
+    /// Most bytes of chunk records decoded, summed over every chunk.
+    /// Verification fails once the chunks' recorded sizes pass it, before
+    /// the chunk that would pass it is decompressed.
+    pub maximum_decoded_bytes: u64,
+}
+
+impl Default for VerifyLimits {
+    fn default() -> Self {
+        Self {
+            maximum_decoded_bytes: DEFAULT_MAXIMUM_DECODED_BYTES,
+        }
+    }
+}
+
 /// Row counts of a pack.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Summary {
@@ -117,6 +137,18 @@ fn chunk_data_sql() -> String {
          THEN c.data ELSE 1 END ELSE 0 END",
         length = CHUNK_ENCODING.len()
     )
+}
+
+/// The decoded size a chunk's zstd frame records, or 0 when it has none
+/// (such a chunk fails to decode).
+fn recorded_size(value: &types::Value) -> u64 {
+    match value {
+        types::Value::Blob(data) => zstd::zstd_safe::get_frame_content_size(data)
+            .ok()
+            .flatten()
+            .unwrap_or(0),
+        _ => 0,
+    }
 }
 
 /// Decodes the value of [`chunk_data_sql`].
@@ -283,7 +315,12 @@ impl Pack {
         })
     }
 
-    /// The SHA-256 of the pack file.
+    /// The SHA-256 of the pack file, read from its path when called.
+    ///
+    /// This hashes whatever file is at the pack's path now, not necessarily
+    /// the file SQLite opened: the digest binds to the path. Packs are
+    /// content-addressed files opened from directories the caller controls;
+    /// a directory that others can write to is not supported.
     ///
     /// # Errors
     /// Returns an error if the file cannot be read.
@@ -305,14 +342,29 @@ impl Pack {
         Ok(hasher.finalize().into())
     }
 
+    /// Checks the whole pack with [`VerifyLimits::default`]; see
+    /// [`Pack::verify_with`].
+    ///
+    /// # Errors
+    /// Returns the first problem found.
+    pub fn verify(&self) -> Result<Summary, Error> {
+        self.verify_with(&VerifyLimits::default())
+    }
+
     /// Checks the whole pack: SQLite integrity, the file name digest when the
     /// name is one, string, plane, zone, anchor and definition rows, every
     /// stored document, every chunk record, and every string, layer, ground
     /// count and portal target a record references.
     ///
+    /// Decoding every chunk is linear in the pack's decoded size, which
+    /// compression can make far larger than the file, so it stops and fails
+    /// once `limits.maximum_decoded_bytes` would be passed. The file name
+    /// check hashes the file at the pack's path, so it binds to the path; see
+    /// [`Pack::file_digest`].
+    ///
     /// # Errors
-    /// Returns the first problem found.
-    pub fn verify(&self) -> Result<Summary, Error> {
+    /// Returns the first problem found, including an exceeded limit.
+    pub fn verify_with(&self, limits: &VerifyLimits) -> Result<Summary, Error> {
         let integrity: String = self
             .connection
             .query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
@@ -337,12 +389,12 @@ impl Pack {
                 )));
             }
         }
-        self.verify_contents()
+        self.verify_contents(limits.maximum_decoded_bytes)
     }
 
     /// Everything [`Pack::verify`] checks except SQLite integrity and the
     /// file name: what the compiler checks of every pack it builds.
-    pub(crate) fn verify_contents(&self) -> Result<Summary, Error> {
+    pub(crate) fn verify_contents(&self, maximum_decoded_bytes: u64) -> Result<Summary, Error> {
         let mut summary = self.summary()?;
         let (minimum, maximum): (Option<i64>, Option<i64>) =
             self.connection
@@ -385,10 +437,20 @@ impl Pack {
         ))?;
         let mut rows = statement.query([])?;
         let mut checked = 0;
+        let mut decoded: u64 = 0;
         while let Some(row) = rows.next()? {
             let plane: String = row.get(0)?;
             let chunk_size: u16 = row.get(1)?;
-            let chunk = chunk_data(row.get(2)?)?;
+            let data: types::Value = row.get(2)?;
+            // The frame records its decoded size, so the budget is checked
+            // before the chunk is decompressed.
+            decoded = decoded.saturating_add(recorded_size(&data));
+            if decoded > maximum_decoded_bytes {
+                return Err(Error::Invalid(format!(
+                    "the chunks decode to more than {maximum_decoded_bytes} bytes, the verification limit"
+                )));
+            }
+            let chunk = chunk_data(data)?;
             if chunk.chunk_size != chunk_size || chunk.ground.len() != ground_layers {
                 return Err(Error::Invalid(
                     "a chunk disagrees with its plane or profile".into(),

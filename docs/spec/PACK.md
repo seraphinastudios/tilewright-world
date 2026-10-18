@@ -115,11 +115,21 @@ loading it, and never load a whole table into memory. Readers:
   ascending, embedded JSON that is not canonical or not the required shape, a
   decompressed size above 16 MiB, or trailing bytes.
 
+Decoding is linear in a pack's decoded size, which compression can make
+thousands of times its file size. A full verification therefore has a
+decoded-byte budget, which the caller sets and which is 8 GiB by default: the
+sum of the decoded sizes the chunks' zstd frames record. It fails as soon as
+the next chunk would pass the budget, before decompressing that chunk. The
+`tilewright inspect` command sets the budget with `--max-decoded-bytes`.
+
 A full verification also:
 
 - runs SQLite's integrity check, and compares the file's SHA-256 (hashed in
   bounded blocks) with its name when the name is 64 hex digits, which must be
-  the lowercase digest;
+  the lowercase digest. The digest is computed from the file at the pack's
+  path when the check runs, so it binds to the path, not to the file the
+  database connection opened; packs are content-addressed files opened from
+  directories the caller controls;
 - checks that string IDs are exactly `1..=count` in byte order of their
   values, and every string is UTF-8 text of at most 1 MiB without NUL;
 - checks that plane, zone, anchor and definition keys are identifiers; plane

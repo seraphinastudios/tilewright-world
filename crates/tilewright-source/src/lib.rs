@@ -10,10 +10,16 @@
 //! reported as a [`Diagnostic`] with its file, byte span and a stable code.
 //! A world is returned only when there are no diagnostics at all.
 //!
+//! On Unix every path component is opened through its parent directory's
+//! handle without following symbolic links, so a link swapped into the tree
+//! during a load is never followed. Other platforms check each component by
+//! path before using it; that is a best effort which a local process changing
+//! the tree during the load can race. Race-free loading is Unix-only.
+//!
 //! ```no_run
 //! let world = tilewright_source::load(std::path::Path::new("content"))
 //!     .map_err(|diagnostics| diagnostics.len())?;
-//! println!("{} planes", world.planes.len());
+//! println!("{} planes", world.planes().len());
 //! # Ok::<(), usize>(())
 //! ```
 
@@ -70,14 +76,47 @@ impl Default for LoadOptions {
 }
 
 /// A validated world source tree.
+///
+/// A `World` can only be produced by [`load`] or [`load_with`], so every one
+/// has passed validation; its parts are read through accessors and cannot be
+/// changed in place.
+///
+/// ```compile_fail
+/// # fn planes(world: tilewright_source::World) {
+/// let planes = world.planes; // the fields are private
+/// # }
+/// ```
 #[derive(Clone, Debug, PartialEq)]
 pub struct World {
-    pub profile: Profile,
-    pub planes: BTreeMap<String, Plane>,
+    profile: Profile,
+    planes: BTreeMap<String, Plane>,
+    definitions: BTreeMap<(String, String), Definition>,
+    source_digest: [u8; 32],
+}
+
+impl World {
+    #[must_use]
+    pub const fn profile(&self) -> &Profile {
+        &self.profile
+    }
+
+    /// Planes by ID.
+    #[must_use]
+    pub const fn planes(&self) -> &BTreeMap<String, Plane> {
+        &self.planes
+    }
+
     /// Definitions keyed by `(type, id)`.
-    pub definitions: BTreeMap<(String, String), Definition>,
+    #[must_use]
+    pub const fn definitions(&self) -> &BTreeMap<(String, String), Definition> {
+        &self.definitions
+    }
+
     /// SHA-256 over every file read, as defined in `docs/spec/PACK.md`.
-    pub source_digest: [u8; 32],
+    #[must_use]
+    pub const fn source_digest(&self) -> [u8; 32] {
+        self.source_digest
+    }
 }
 
 /// The game profile.

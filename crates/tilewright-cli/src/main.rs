@@ -15,8 +15,11 @@ use tilewright_source::Diagnostic;
 const USAGE: &str = "usage:
   tilewright validate [--json] ROOT
   tilewright compile ROOT OUTPUT_DIRECTORY
-  tilewright inspect PACK
-  tilewright --version";
+  tilewright inspect [--max-decoded-bytes BYTES] PACK
+  tilewright --version
+
+inspect verifies the pack and stops once its chunks decode to more than
+BYTES (default 8589934592, 8 GiB).";
 
 fn main() -> ExitCode {
     // Paths need not be UTF-8, so arguments are read as OS strings.
@@ -65,7 +68,21 @@ fn run(arguments: &[&OsStr]) -> Result<String, Failure> {
         [command, root, output] if *command == "compile" => {
             compile(Path::new(root), Path::new(output))
         }
-        [command, pack] if *command == "inspect" => inspect(Path::new(pack)),
+        [command, pack] if *command == "inspect" => {
+            inspect(Path::new(pack), tilewright_pack::VerifyLimits::default())
+        }
+        [command, flag, bytes, pack] if *command == "inspect" && *flag == "--max-decoded-bytes" => {
+            let maximum_decoded_bytes = bytes
+                .to_str()
+                .and_then(|bytes| bytes.parse().ok())
+                .ok_or_else(|| Failure::message(USAGE))?;
+            inspect(
+                Path::new(pack),
+                tilewright_pack::VerifyLimits {
+                    maximum_decoded_bytes,
+                },
+            )
+        }
         _ => Err(Failure::message(USAGE)),
     }
 }
@@ -118,12 +135,16 @@ fn validate(root: &Path, json: bool) -> Result<String, Failure> {
     if json {
         return Ok("[]\n".to_owned());
     }
-    let chunks: usize = world.planes.values().map(|plane| plane.chunks.len()).sum();
+    let chunks: usize = world
+        .planes()
+        .values()
+        .map(|plane| plane.chunks.len())
+        .sum();
     Ok(format!(
         "valid: {} plane(s), {chunks} chunk(s), {} definition(s), source {}\n",
-        world.planes.len(),
-        world.definitions.len(),
-        hex(&world.source_digest)
+        world.planes().len(),
+        world.definitions().len(),
+        hex(&world.source_digest())
     ))
 }
 
@@ -143,11 +164,11 @@ fn compile(root: &Path, output: &Path) -> Result<String, Failure> {
     ))
 }
 
-fn inspect(path: &Path) -> Result<String, Failure> {
+fn inspect(path: &Path, limits: tilewright_pack::VerifyLimits) -> Result<String, Failure> {
     let fail =
         |error: tilewright_pack::Error| Failure::message(format!("{}: {error}", path.display()));
     let pack = tilewright_pack::Pack::open(path).map_err(fail)?;
-    let summary = pack.verify().map_err(fail)?;
+    let summary = pack.verify_with(&limits).map_err(fail)?;
     let mut output = String::new();
     for key in [
         "format",
@@ -216,6 +237,19 @@ mod tests {
         assert!(inspected.contains("format: tilewright.pack/1"));
         assert!(inspected.contains("objects: 11"));
         assert!(inspected.contains("verified: yes"));
+        assert!(
+            run(&["inspect", "--max-decoded-bytes", "100000000", &pack])
+                .unwrap()
+                .contains("verified: yes")
+        );
+        let limited = run(&["inspect", "--max-decoded-bytes", "1000", &pack]).unwrap_err();
+        assert!(
+            limited.message.contains("verification limit"),
+            "{}",
+            limited.message
+        );
+        let bad = run(&["inspect", "--max-decoded-bytes", "lots", &pack]).unwrap_err();
+        assert!(bad.message.starts_with("usage:"));
     }
 
     #[cfg(target_os = "linux")]
