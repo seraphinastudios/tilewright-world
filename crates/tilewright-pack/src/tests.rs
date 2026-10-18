@@ -1266,6 +1266,26 @@ fn packs_past_the_size_limit_are_not_opened_or_hashed() {
         .unwrap();
     let error = pack.file_digest().unwrap_err();
     assert!(error.to_string().contains("pack size limit"), "{error}");
+
+    // Verifying keeps the limit the pack was opened with, whatever limits
+    // it is given: it fails on the size before the name's digest is
+    // compared.
+    let named = tempfile::tempdir().unwrap();
+    let copy = named.path().join(written.path.file_name().unwrap());
+    std::fs::copy(&written.path, &copy).unwrap();
+    let pack = Pack::open_with(&copy, &exact).unwrap();
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&copy)
+        .unwrap()
+        .set_len(written.bytes + 1)
+        .unwrap();
+    for error in [
+        pack.verify().unwrap_err(),
+        pack.verify_with(&VerifyLimits::default()).unwrap_err(),
+    ] {
+        assert!(error.to_string().contains("pack size limit"), "{error}");
+    }
 }
 
 #[test]

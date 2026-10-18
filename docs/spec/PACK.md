@@ -123,10 +123,12 @@ loading it, and never load a whole table into memory. Readers:
 
 Readers also have a pack-size limit, which the caller sets and which is 8 GiB
 by default. A file longer than the limit is rejected before SQLite opens it,
-a full verification checks `page_count × 4096` against it again before its
-integrity check, and hashing the file fails as soon as it has read more than
-the limit, even if the file has grown since it was opened. The
-`tilewright inspect` command sets the limit with `--max-pack-bytes`.
+and again once it is open, by its `page_count × 4096`. A full verification
+checks the pages against it before its integrity check, and hashing the file
+fails as soon as it has read more than the limit, even if the file has grown
+since it was opened. Verification never uses a higher limit than the one the
+pack was opened with. The `tilewright inspect` command sets the limit with
+`--max-pack-bytes`.
 
 Free pages hold no data, so a sparse file could keep any number of them as
 holes that take no space on disk, which the integrity check skips but hashing

@@ -54,6 +54,8 @@ pub struct VerifyLimits {
     /// file's length before SQLite opens it, verification checks the pages
     /// again before its integrity check, and hashing fails once it has read
     /// more, even from a file that has grown since it was opened.
+    /// Verification uses the lower of this and the limit the pack was
+    /// opened with.
     pub maximum_pack_bytes: u64,
 }
 
@@ -315,6 +317,11 @@ impl Pack {
                 "the file is {length} bytes, not its {pages} pages of {PAGE_SIZE} bytes"
             )));
         }
+        // The file SQLite opened may have replaced the one whose length was
+        // checked, so its pages are checked against the limit too.
+        if length > limits.maximum_pack_bytes {
+            return Err(too_long(limits.maximum_pack_bytes));
+        }
         Ok(Self {
             connection,
             path: Some(path),
@@ -328,8 +335,8 @@ impl Pack {
         Ok(Self {
             connection,
             path: None,
-            // There is no file to hash.
-            maximum_bytes: 0,
+            // There is no file to hash, so the limit is never used.
+            maximum_bytes: u64::MAX,
         })
     }
 
@@ -473,13 +480,16 @@ impl Pack {
         Ok(hasher.finalize().into())
     }
 
-    /// Checks the whole pack with [`VerifyLimits::default`]; see
-    /// [`Pack::verify_with`].
+    /// Checks the whole pack with the default decoded-byte budget and the
+    /// pack size limit the pack was opened with; see [`Pack::verify_with`].
     ///
     /// # Errors
     /// Returns the first problem found.
     pub fn verify(&self) -> Result<Summary, Error> {
-        self.verify_with(&VerifyLimits::default())
+        self.verify_with(&VerifyLimits {
+            maximum_pack_bytes: self.maximum_bytes,
+            ..VerifyLimits::default()
+        })
     }
 
     /// Checks the whole pack: SQLite integrity, the file name digest when the
@@ -491,23 +501,26 @@ impl Pack {
     /// compression can make far larger than the file, so it stops and fails
     /// once `limits.maximum_decoded_bytes` would be passed. The integrity
     /// check and the hash are linear in the file's size, so the pages are
-    /// checked against `limits.maximum_pack_bytes` before either runs, and
-    /// the hash reads at most that many bytes. The file name check hashes
-    /// the file at the pack's path, so it binds to the path; see
+    /// checked against the pack size limit before either runs, and the hash
+    /// reads at most that many bytes. The limit is the lower of
+    /// `limits.maximum_pack_bytes` and the one the pack was opened with, so
+    /// verifying never reads more than opening allowed. The file name check
+    /// hashes the file at the pack's path, so it binds to the path; see
     /// [`Pack::file_digest`].
     ///
     /// # Errors
     /// Returns the first problem found, including an exceeded limit.
     pub fn verify_with(&self, limits: &VerifyLimits) -> Result<Summary, Error> {
+        let maximum_bytes = limits.maximum_pack_bytes.min(self.maximum_bytes);
         let pages: i64 = self
             .connection
             .query_row("PRAGMA page_count", [], |row| row.get(0))?;
         if u64::try_from(pages)
             .ok()
             .and_then(|pages| pages.checked_mul(PAGE_SIZE.unsigned_abs()))
-            .is_none_or(|bytes| bytes > limits.maximum_pack_bytes)
+            .is_none_or(|bytes| bytes > maximum_bytes)
         {
-            return Err(too_long(limits.maximum_pack_bytes));
+            return Err(too_long(maximum_bytes));
         }
         let integrity: String = self
             .connection
@@ -526,7 +539,7 @@ impl Pack {
             .filter(|stem| stem.len() == 64 && stem.bytes().all(|byte| byte.is_ascii_hexdigit()))
         {
             // The name must be the lowercase digest; other cases do not match.
-            let digest = crate::compile::hex(&self.digest_within(limits.maximum_pack_bytes)?);
+            let digest = crate::compile::hex(&self.digest_within(maximum_bytes)?);
             if digest != stem {
                 return Err(Error::Invalid(format!(
                     "file digest {digest} does not match its name"
