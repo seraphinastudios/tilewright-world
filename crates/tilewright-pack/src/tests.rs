@@ -1003,3 +1003,35 @@ fn identity_page_size_and_profile_limits_are_checked() {
         assert!(error.to_string().contains("profile"), "{name}: {error}");
     }
 }
+
+#[test]
+fn hand_built_strings_are_bounded_before_they_are_kept() {
+    fn object(world: &mut World) -> &mut tilewright_source::Object {
+        &mut world
+            .planes
+            .get_mut("vault")
+            .unwrap()
+            .chunks
+            .values_mut()
+            .next()
+            .unwrap()
+            .objects[0]
+    }
+    let mut proto = world();
+    object(&mut proto).proto = "x".repeat(10 * 1024 * 1024);
+    let error = compile(&proto).unwrap_err();
+    assert!(error.to_string().contains("not an identifier"), "{error}");
+
+    let mut value = world();
+    object(&mut value).fields = vec![(
+        "name".to_owned(),
+        tilewright_source::FieldValue::String("x".repeat(1024 * 1024 + 1)),
+    )];
+    let error = compile(&value).unwrap_err();
+    assert!(error.to_string().contains("longer than 1 MiB"), "{error}");
+
+    let mut plane = world();
+    plane.planes.get_mut("vault").unwrap().canonical = "x".repeat(64 * 1024 * 1024 + 1);
+    let error = compile(&plane).unwrap_err();
+    assert!(error.to_string().contains("longer than 64 MiB"), "{error}");
+}

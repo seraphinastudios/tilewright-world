@@ -9,6 +9,7 @@ use crate::{
         CHUNK_ENCODING, ChunkData, FieldRecord, MAXIMUM_DEPTH, MAXIMUM_RECORD_BYTES, ObjectRecord,
         PortalRecord, encode_chunk,
     },
+    is_field_name, is_identifier,
 };
 use rusqlite::{Connection, MAIN_DB, params};
 use sha2::{Digest, Sha256};
@@ -17,7 +18,7 @@ use std::{
     io::{Read as _, Write as _},
     path::{Path, PathBuf},
 };
-use tilewright_jsonc::MAX_SAFE_INTEGER;
+use tilewright_jsonc::{Limits, MAX_SAFE_INTEGER};
 use tilewright_source::{CHUNK_SIZE, Chunk, FieldValue, Object, Portal, Profile, World};
 
 /// The `compiler` meta value.
@@ -25,11 +26,56 @@ pub const COMPILER: &str = concat!("tilewright-pack ", env!("CARGO_PKG_VERSION")
 
 /// Interned strings: IDs start at 1 in byte order of the values; 0 means
 /// "none" wherever an ID is optional.
-struct Strings(BTreeMap<String, u32>);
+/// The strings are borrowed from the world, and each is checked against its
+/// role's limits before it is kept: the model is public.
+struct Strings<'w>(BTreeMap<&'w str, u32>);
 
-impl Strings {
-    fn collect(world: &World) -> Result<Self, Error> {
-        let mut values = BTreeSet::new();
+/// `value` if it is an identifier.
+fn identifier(value: &str) -> Result<&str, Error> {
+    if is_identifier(value) {
+        Ok(value)
+    } else {
+        Err(Error::Invalid(format!(
+            "{:?} is not an identifier",
+            value.chars().take(128).collect::<String>()
+        )))
+    }
+}
+
+/// `value` if it is a field name.
+fn field_name(value: &str) -> Result<&str, Error> {
+    if is_field_name(value) {
+        Ok(value)
+    } else {
+        Err(Error::Invalid("a field name is not valid".into()))
+    }
+}
+
+/// `value` if it fits a source string: at most 1 MiB, without NUL.
+fn text(value: &str) -> Result<&str, Error> {
+    if value.len() <= Limits::default().max_string_bytes && !value.contains('\0') {
+        Ok(value)
+    } else {
+        Err(Error::Invalid(
+            "a string value is longer than 1 MiB or contains NUL".into(),
+        ))
+    }
+}
+
+/// `value` if it fits a source document: at most 64 MiB.
+fn document(value: &str) -> Result<&str, Error> {
+    if value.len() <= Limits::default().max_input_bytes {
+        Ok(value)
+    } else {
+        Err(Error::Invalid(
+            "a stored document is longer than 64 MiB".into(),
+        ))
+    }
+}
+
+impl<'w> Strings<'w> {
+    fn collect(world: &'w World) -> Result<Self, Error> {
+        let mut values: BTreeSet<&'w str> = BTreeSet::new();
         for (id, plane) in &world.planes {
             if plane.chunk_size != CHUNK_SIZE {
                 return Err(Error::Invalid(format!(
@@ -43,26 +89,32 @@ impl Strings {
                     let used: BTreeSet<u16> = grid.cells.iter().copied().collect();
                     for cell in used {
                         if let Some(index) = usize::from(cell).checked_sub(1) {
-                            values.insert(palette_value(grid, index)?.to_owned());
+                            values.insert(identifier(palette_value(grid, index)?)?);
                         }
                     }
                 }
                 let mut stack: Vec<&Object> = chunk.objects.iter().collect();
                 while let Some(object) = stack.pop() {
-                    values.insert(object.proto.clone());
+                    values.insert(identifier(&object.proto)?);
                     for (name, value) in &object.fields {
-                        values.insert(name.clone());
-                        if let FieldValue::String(text) = value {
-                            values.insert(text.clone());
+                        values.insert(field_name(name)?);
+                        if let FieldValue::String(value) = value {
+                            values.insert(text(value)?);
                         }
                     }
                     match &object.portal {
-                        Some(Portal::Location { plane, .. }) => values.extend(plane.clone()),
-                        Some(Portal::Anchor { plane, anchor }) => {
-                            values.extend(plane.clone());
-                            values.insert(anchor.clone());
+                        Some(Portal::Location {
+                            plane: Some(plane), ..
+                        }) => {
+                            values.insert(identifier(plane)?);
                         }
-                        None => {}
+                        Some(Portal::Anchor { plane, anchor }) => {
+                            if let Some(plane) = plane {
+                                values.insert(identifier(plane)?);
+                            }
+                            values.insert(identifier(anchor)?);
+                        }
+                        Some(Portal::Location { plane: None, .. }) | None => {}
                     }
                     stack.extend(&object.inventory);
                 }
@@ -199,7 +251,7 @@ fn encoded_size(object: &Object) -> usize {
 fn object_record(
     object: &Object,
     layers: &Layers<'_>,
-    strings: &Strings,
+    strings: &Strings<'_>,
     depth: usize,
     budget: &mut usize,
 ) -> Result<ObjectRecord, Error> {
@@ -287,7 +339,11 @@ fn object_record(
 
 /// Builds a chunk record. The chunk palette holds the string IDs its grids
 /// use, in ascending order.
-fn chunk_record(chunk: &Chunk, layers: &Layers<'_>, strings: &Strings) -> Result<ChunkData, Error> {
+fn chunk_record(
+    chunk: &Chunk,
+    layers: &Layers<'_>,
+    strings: &Strings<'_>,
+) -> Result<ChunkData, Error> {
     let chunk_size = CHUNK_SIZE;
     let mut used = BTreeSet::new();
     for grid in chunk.ground.iter().chain([&chunk.zones]) {
@@ -312,7 +368,7 @@ fn chunk_record(chunk: &Chunk, layers: &Layers<'_>, strings: &Strings) -> Result
             .map(|value| {
                 strings
                     .0
-                    .get(value)
+                    .get(value.as_str())
                     .and_then(|id| palette.binary_search(id).ok())
                     .and_then(|index| u16::try_from(index + 1).ok())
                     .unwrap_or(0)
@@ -377,7 +433,7 @@ pub fn compile(world: &World) -> Result<Vec<u8>, Error> {
             ("chunk_encoding", CHUNK_ENCODING),
             ("compiler", COMPILER),
             ("format", FORMAT),
-            ("profile", profile.canonical.as_str()),
+            ("profile", document(&profile.canonical)?),
             ("profile_id", profile.id.as_str()),
             ("profile_version", profile.version.as_str()),
             ("source_digest", digest.as_str()),
@@ -385,7 +441,7 @@ pub fn compile(world: &World) -> Result<Vec<u8>, Error> {
             meta.execute(params![key, value])?;
         }
         let mut insert = connection.prepare("INSERT INTO strings (id, value) VALUES (?1, ?2)")?;
-        let mut by_id: Vec<(&u32, &String)> =
+        let mut by_id: Vec<(&u32, &&str)> =
             strings.0.iter().map(|(value, id)| (id, value)).collect();
         by_id.sort();
         for (id, value) in by_id {
@@ -406,10 +462,15 @@ pub fn compile(world: &World) -> Result<Vec<u8>, Error> {
                 id,
                 plane.kind.as_str(),
                 plane.chunk_size,
-                plane.canonical
+                document(&plane.canonical)?
             ])?;
             for (zone_id, zone) in &plane.zones {
-                zones.execute(params![id, zone_id, zone.parent, zone.canonical])?;
+                zones.execute(params![
+                    id,
+                    zone_id,
+                    zone.parent,
+                    document(&zone.canonical)?
+                ])?;
             }
             for (anchor_id, anchor) in &plane.anchors {
                 anchors.execute(params![
@@ -429,7 +490,7 @@ pub fn compile(world: &World) -> Result<Vec<u8>, Error> {
         let mut definitions = connection
             .prepare("INSERT INTO definitions (type, id, document) VALUES (?1, ?2, ?3)")?;
         for ((kind, id), definition) in &world.definitions {
-            definitions.execute(params![kind, id, definition.canonical])?;
+            definitions.execute(params![kind, id, document(&definition.canonical)?])?;
         }
     }
     connection.execute_batch("COMMIT; VACUUM;")?;

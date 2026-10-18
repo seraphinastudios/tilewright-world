@@ -80,6 +80,27 @@ pub const SCHEMA_TABLES: [(&str, &str); 7] = [
     ),
 ];
 
+/// Whether `text` matches `^[a-z0-9][a-z0-9_.-]{0,127}$`, the source
+/// format's identifier pattern.
+pub(crate) fn is_identifier(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    (1..=128).contains(&bytes.len())
+        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_.-".contains(byte))
+}
+
+/// Whether `text` is a field name: `^[a-z][a-z0-9_]{0,63}$`.
+pub(crate) fn is_field_name(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    (1..=64).contains(&bytes.len())
+        && bytes[0].is_ascii_lowercase()
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_')
+}
+
 /// Limits for parsing canonical JSON stored in a pack. Canonical JSON is
 /// one line, so the physical line limit is the input limit; every other
 /// limit is the source format's, which the source document already met.

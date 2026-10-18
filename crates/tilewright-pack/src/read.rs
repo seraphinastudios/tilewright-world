@@ -13,6 +13,7 @@ use crate::{
         CHUNK_ENCODING, ChunkData, FieldRecord, MAXIMUM_CHUNK_BYTES, ObjectRecord, PortalRecord,
         decode_chunk,
     },
+    is_identifier,
 };
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Statement, config::DbConfig, params, types,
@@ -77,17 +78,6 @@ fn uri(path: &Path) -> Result<String, Error> {
     }
     encoded.push_str("?immutable=1");
     Ok(encoded)
-}
-
-/// Whether `text` matches `^[a-z0-9][a-z0-9_.-]{0,127}$`, the source
-/// format's identifier pattern.
-fn is_identifier(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    (1..=128).contains(&bytes.len())
-        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
-        && bytes
-            .iter()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_.-".contains(byte))
 }
 
 /// A size bound as an SQL parameter.
