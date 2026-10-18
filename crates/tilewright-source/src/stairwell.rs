@@ -36,17 +36,21 @@ pub(crate) fn read_stairwells(
     else {
         return stairwells;
     };
-    // Every valid ID so far, and the entry, by position in `items`, whose
-    // step holds each tile across the plane. IDs are checked for every
-    // entry whose ID is valid, and tiles for every entry whose steps are,
-    // so one problem never hides another.
+    // Every valid ID so far; each parsed entry's ID, if valid; and, for each
+    // tile holding a parsed step, its entry's position in `names`.
+    // Duplicates are checked for every valid ID and overlaps for every step
+    // that parses, so one problem never hides another, and messages only
+    // name a valid, bounded ID.
     let mut ids = BTreeSet::new();
+    let mut names: Vec<Option<String>> = Vec::new();
     let mut tiles: BTreeMap<(i32, i64, i64), usize> = BTreeMap::new();
-    for (position, item) in items.iter().enumerate() {
+    for item in items {
         let Some(entry) = read_entry(&reader, item, references) else {
             continue;
         };
-        let mut ok = entry.rest.is_some();
+        let position = names.len();
+        names.push(entry.id.clone());
+        let mut ok = entry.steps.complete && entry.rest.is_some();
         if let Some(id) = &entry.id
             && !ids.insert(id.clone())
         {
@@ -58,20 +62,18 @@ pub(crate) fn read_stairwells(
             );
             ok = false;
         }
-        let values = item.get("steps").and_then(Value::as_array).unwrap_or(&[]);
-        for (step, value) in entry.steps.iter().flatten().zip(values) {
+        for (value, step) in &entry.steps.parsed {
             let tile = (step.layer, step.at[0], step.at[1]);
             if let Some(other) = tiles.get(&tile) {
-                let other = items
-                    .get(*other)
-                    .and_then(|entry| entry.get("id"))
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
+                let other = names.get(*other).and_then(Option::as_ref).map_or_else(
+                    || "an earlier stairwell".to_owned(),
+                    |id| format!("stairwell \"{id}\""),
+                );
                 reader.report(
                     value.span(),
                     Code::StairwellOverlap,
                     format!(
-                        "layer {} tile [{}, {}] already holds a step of stairwell \"{other}\"",
+                        "layer {} tile [{}, {}] already holds a step of {other}",
                         tile.0, tile.1, tile.2
                     ),
                 );
@@ -80,14 +82,19 @@ pub(crate) fn read_stairwells(
                 tiles.insert(tile, position);
             }
         }
-        if let (true, Some(id), Some(steps), Some((direction, hidden_on_other_layers, custom))) =
-            (ok, entry.id, entry.steps, entry.rest)
+        if let (true, Some(id), Some((direction, hidden_on_other_layers, custom))) =
+            (ok, entry.id, entry.rest)
         {
             stairwells.insert(
                 id.clone(),
                 Stairwell {
                     id,
-                    steps,
+                    steps: entry
+                        .steps
+                        .parsed
+                        .into_iter()
+                        .map(|(_, step)| step)
+                        .collect(),
                     direction,
                     hidden_on_other_layers,
                     custom,
@@ -99,17 +106,29 @@ pub(crate) fn read_stairwells(
     stairwells
 }
 
-/// The parts of a stairwell entry, each `None` when it is invalid: its ID,
-/// its steps, and the rest (direction, flag and custom data).
-struct Entry {
+/// The parts of a stairwell entry: its ID and the rest (direction, flag and
+/// custom data), each `None` when invalid, and its steps.
+struct Entry<'a> {
     id: Option<String>,
-    steps: Option<Vec<StairwellStep>>,
+    steps: Steps<'a>,
     rest: Option<(StairwellDirection, bool, Option<String>)>,
+}
+
+/// The steps of an entry that parse, with their values, and whether the
+/// list was complete and connected.
+#[derive(Default)]
+struct Steps<'a> {
+    parsed: Vec<(&'a Value, StairwellStep)>,
+    complete: bool,
 }
 
 /// Reads one entry, reporting every problem in it. `None` when it is not an
 /// object.
-fn read_entry<'a>(reader: &Reader<'a>, item: &'a Value, references: &References) -> Option<Entry> {
+fn read_entry<'a>(
+    reader: &Reader<'a>,
+    item: &'a Value,
+    references: &References,
+) -> Option<Entry<'a>> {
     let entry = reader.object(
         item,
         &[
@@ -143,7 +162,8 @@ fn read_entry<'a>(reader: &Reader<'a>, item: &'a Value, references: &References)
     };
     let steps = reader
         .required(entry, "steps")
-        .and_then(|value| read_steps(reader, value, references));
+        .map(|value| read_steps(reader, value, references))
+        .unwrap_or_default();
     // `custom` reports its own problems, which reject the tree.
     let custom = reader.custom(entry);
     let rest = direction
@@ -152,34 +172,33 @@ fn read_entry<'a>(reader: &Reader<'a>, item: &'a Value, references: &References)
     Some(Entry { id, steps, rest })
 }
 
-/// Reads at least two steps, each following the one before it.
-fn read_steps<'a>(
-    reader: &Reader<'a>,
-    value: &'a Value,
-    references: &References,
-) -> Option<Vec<StairwellStep>> {
-    let items = reader.array(value)?;
-    // Too few steps is reported, and each step is still checked.
-    let mut ok = items.len() >= 2;
-    if !ok {
+/// Reads every step. The list is complete when it has at least two steps,
+/// every one parses, and each follows the step before it; each pair of
+/// adjacent steps that parse is checked.
+fn read_steps<'a>(reader: &Reader<'a>, value: &'a Value, references: &References) -> Steps<'a> {
+    let Some(items) = reader.array(value) else {
+        return Steps::default();
+    };
+    let mut complete = items.len() >= 2;
+    if !complete {
         reader.report(
             value.span(),
             Code::Range,
             "a stairwell has at least two steps",
         );
     }
-    let mut steps: Vec<StairwellStep> = Vec::with_capacity(items.len());
+    let mut parsed: Vec<(&Value, StairwellStep)> = Vec::with_capacity(items.len());
     // Whether the steps go up; the first two adjacent steps set it.
     let mut up = None;
-    // Whether the last step pushed is the one just before this item.
+    // Whether the last parsed step is the one just before this item.
     let mut previous_read = false;
     for item in items {
         let Some(step) = read_step(reader, item, references) else {
-            ok = false;
+            complete = false;
             previous_read = false;
             continue;
         };
-        if let Some(previous) = steps.last().filter(|_| previous_read) {
+        if let Some((_, previous)) = parsed.last().filter(|_| previous_read) {
             let going_up = up.unwrap_or(step.layer > previous.layer);
             if previous.leads_to(&step, going_up) {
                 up = Some(going_up);
@@ -189,36 +208,43 @@ fn read_steps<'a>(
                     Code::StairwellStep,
                     "each step is on the layer next to the step before it, in the stairwell's direction, and at most one tile away on each axis",
                 );
-                ok = false;
+                complete = false;
             }
         }
-        steps.push(step);
+        parsed.push((item, step));
         previous_read = true;
     }
-    ok.then_some(steps)
+    Steps { parsed, complete }
 }
 
+/// Reads one step, checking each of its members.
 fn read_step<'a>(
     reader: &Reader<'a>,
     item: &'a Value,
     references: &References,
 ) -> Option<StairwellStep> {
     let step = reader.object(item, &["layer", "at", "proto"])?;
-    let layer = reader.i32(reader.required(step, "layer")?);
-    let at = reader.coordinates(reader.required(step, "at")?);
-    let proto_value = reader.required(step, "proto")?;
-    let proto = reader.identifier(proto_value)?;
-    reader.reference(
-        references,
-        &Target::Definition {
-            kind: "proto".to_owned(),
-            id: proto.clone(),
-        },
-        proto_value.span(),
-    );
+    let layer = reader
+        .required(step, "layer")
+        .and_then(|value| reader.i32(value));
+    let at = reader
+        .required(step, "at")
+        .and_then(|value| reader.coordinates(value));
+    let proto = reader.required(step, "proto").and_then(|value| {
+        let proto = reader.identifier(value)?;
+        reader.reference(
+            references,
+            &Target::Definition {
+                kind: "proto".to_owned(),
+                id: proto.clone(),
+            },
+            value.span(),
+        );
+        Some(proto)
+    });
     Some(StairwellStep {
         layer: layer?,
         at: at?,
-        proto,
+        proto: proto?,
     })
 }

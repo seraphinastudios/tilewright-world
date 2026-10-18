@@ -236,9 +236,11 @@ fn read_spec<'a>(
     }
     allowed.extend(options);
     reader.object(spec, &allowed)?;
+    // Every key is read before any result is used, so one bad key never
+    // hides a problem in another.
     let required = match spec.get("required").filter(|_| takes_required) {
-        Some(flag) => reader.boolean(flag)?,
-        None => false,
+        Some(flag) => reader.boolean(flag),
+        None => Some(false),
     };
     if matches!(kind.as_str(), Some("list" | "object")) && depth >= MAXIMUM_FIELD_DEPTH {
         reader.report(
@@ -249,23 +251,27 @@ fn read_spec<'a>(
         return None;
     }
     let field_type = match kind.as_str() {
-        Some("boolean") => FieldType::Boolean,
-        Some("json") => FieldType::Json,
+        Some("boolean") => Some(FieldType::Boolean),
+        Some("json") => Some(FieldType::Json),
         Some("integer") => {
-            let bound = |reader: &Reader<'a>, key, default| match spec.get(key) {
+            let bound = |key, default| match spec.get(key) {
                 Some(value) => reader.integer(value, -MAX_SAFE_INTEGER, MAX_SAFE_INTEGER),
                 None => Some(default),
             };
-            let minimum = bound(reader, "min", -MAX_SAFE_INTEGER)?;
-            let maximum = bound(reader, "max", MAX_SAFE_INTEGER)?;
-            if minimum > maximum {
-                reader.report(spec.span(), Code::Range, "min is greater than max");
-                return None;
-            }
-            FieldType::Integer { minimum, maximum }
+            let (minimum, maximum) = (
+                bound("min", -MAX_SAFE_INTEGER),
+                bound("max", MAX_SAFE_INTEGER),
+            );
+            ordered(
+                reader,
+                spec,
+                minimum.zip(maximum),
+                "min is greater than max",
+            )
+            .map(|(minimum, maximum)| FieldType::Integer { minimum, maximum })
         }
         Some("number") => {
-            let bound = |reader: &Reader<'a>, key, default: f64| match spec.get(key) {
+            let bound = |key, default: f64| match spec.get(key) {
                 Some(value) => {
                     let number = value.as_f64();
                     if number.is_none() {
@@ -275,79 +281,115 @@ fn read_spec<'a>(
                 }
                 None => Some(default),
             };
-            let minimum = bound(reader, "min", f64::MIN)?;
-            let maximum = bound(reader, "max", f64::MAX)?;
-            if minimum > maximum {
-                reader.report(spec.span(), Code::Range, "min is greater than max");
-                return None;
-            }
-            FieldType::Number { minimum, maximum }
+            let (minimum, maximum) = (bound("min", f64::MIN), bound("max", f64::MAX));
+            ordered(
+                reader,
+                spec,
+                minimum.zip(maximum),
+                "min is greater than max",
+            )
+            .map(|(minimum, maximum)| FieldType::Number { minimum, maximum })
         }
         Some("string") => {
             let maximum_length = match spec.get("max_length") {
-                Some(value) => usize::try_from(reader.integer(value, 1, 1_048_576)?).ok()?,
-                None => DEFAULT_MAXIMUM_STRING,
+                Some(value) => reader
+                    .integer(value, 1, 1_048_576)
+                    .and_then(|length| usize::try_from(length).ok()),
+                None => Some(DEFAULT_MAXIMUM_STRING),
             };
             let values = match spec.get("values") {
-                Some(value) => {
-                    let mut values = BTreeSet::new();
-                    for item in reader.array(value)? {
-                        if !values.insert(reader.string(item)?.to_owned()) {
-                            reader.report(item.span(), Code::Duplicate, "value listed twice");
-                            return None;
-                        }
-                    }
-                    values
-                }
-                None => BTreeSet::new(),
+                Some(value) => read_values(reader, value),
+                None => Some(BTreeSet::new()),
             };
-            FieldType::String {
-                maximum_length,
-                values,
-            }
+            maximum_length
+                .zip(values)
+                .map(|(maximum_length, values)| FieldType::String {
+                    maximum_length,
+                    values,
+                })
         }
-        Some("reference") => FieldType::Reference {
-            target: reader.identifier(reader.required(spec, "target")?)?,
-        },
+        Some("reference") => reader
+            .required(spec, "target")
+            .and_then(|target| reader.identifier(target))
+            .map(|target| FieldType::Reference { target }),
         Some("list") => {
             let count = |key, default| match spec.get(key) {
                 Some(value) => {
                     let limit = i64::try_from(MAXIMUM_LIST_ITEMS).unwrap_or(i64::MAX);
-                    usize::try_from(reader.integer(value, 0, limit)?).ok()
+                    reader
+                        .integer(value, 0, limit)
+                        .and_then(|count| usize::try_from(count).ok())
                 }
                 None => Some(default),
             };
-            let minimum_items = count("min_items", 0)?;
-            let maximum_items = count("max_items", MAXIMUM_LIST_ITEMS)?;
-            if minimum_items > maximum_items {
-                reader.report(
-                    spec.span(),
-                    Code::Range,
-                    "min_items is greater than max_items",
-                );
-                return None;
-            }
-            let items = reader.required(spec, "items")?;
-            let (items, _) = read_spec(reader, items, path, depth + 1, false)?;
-            FieldType::List {
-                items: Box::new(items),
-                minimum_items,
-                maximum_items,
-            }
+            let (minimum, maximum) = (
+                count("min_items", 0),
+                count("max_items", MAXIMUM_LIST_ITEMS),
+            );
+            let items = reader
+                .required(spec, "items")
+                .and_then(|items| read_spec(reader, items, path, depth + 1, false));
+            let bounds = ordered(
+                reader,
+                spec,
+                minimum.zip(maximum),
+                "min_items is greater than max_items",
+            );
+            bounds.zip(items).map(
+                |((minimum_items, maximum_items), (items, _))| FieldType::List {
+                    items: Box::new(items),
+                    minimum_items,
+                    maximum_items,
+                },
+            )
         }
-        Some("object") => FieldType::Object {
-            fields: read_field_specs(reader, reader.required(spec, "fields")?, path, depth + 1)?,
-        },
+        Some("object") => reader
+            .required(spec, "fields")
+            .and_then(|fields| read_field_specs(reader, fields, path, depth + 1))
+            .map(|fields| FieldType::Object { fields }),
         _ => {
             reader.report(
                 kind.span(),
                 Code::Range,
                 "type must be boolean, integer, number, string, reference, json, list or object",
             );
-            return None;
+            None
         }
     };
-    Some((field_type, required))
+    field_type.zip(required)
+}
+
+/// `bounds` when its lower end is not above its upper end; otherwise reports
+/// `message` at `spec`.
+fn ordered<T: PartialOrd>(
+    reader: &Reader<'_>,
+    spec: &Value,
+    bounds: Option<(T, T)>,
+    message: &str,
+) -> Option<(T, T)> {
+    let (lower, upper) = bounds?;
+    if lower > upper {
+        reader.report(spec.span(), Code::Range, message);
+        return None;
+    }
+    Some((lower, upper))
+}
+
+/// A string spec's `values`: unique strings, every item checked.
+fn read_values<'a>(reader: &Reader<'a>, value: &'a Value) -> Option<BTreeSet<String>> {
+    let mut values = BTreeSet::new();
+    let mut ok = true;
+    for item in reader.array(value)? {
+        match reader.string(item) {
+            Some(text) if !values.insert(text.to_owned()) => {
+                reader.report(item.span(), Code::Duplicate, "value listed twice");
+                ok = false;
+            }
+            Some(_) => {}
+            None => ok = false,
+        }
+    }
+    ok.then_some(values)
 }
 
 /// What a reference names.

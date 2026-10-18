@@ -174,14 +174,15 @@ pub(crate) fn read_profile(
             ok = false;
         }
     }
-    let layer_height = match root.get("layer_height") {
-        Some(value) => Some(
-            reader
-                .integer(value, 1, i64::from(MAXIMUM_LAYER_HEIGHT))
-                .and_then(|height| u32::try_from(height).ok())?,
-        ),
-        None => None,
-    };
+    // A bad layer height is reported without stopping the profile's other
+    // checks.
+    let layer_height = root.get("layer_height").and_then(|value| {
+        let height = reader
+            .integer(value, 1, i64::from(MAXIMUM_LAYER_HEIGHT))
+            .and_then(|height| u32::try_from(height).ok());
+        ok &= height.is_some();
+        height
+    });
     let movement = match root.get("movement") {
         Some(value) => {
             reader.object(value, &["max_step", "fall_unit"])?;

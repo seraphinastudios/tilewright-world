@@ -1095,6 +1095,55 @@ fn stairwell_tiles_hold_one_step() {
 }
 
 #[test]
+fn every_stairwell_problem_is_reported() {
+    let found = |entries: &str| -> Vec<(&'static str, usize, String)> {
+        let copy = with_stairwells(entries);
+        load(copy.path())
+            .expect_err("invalid")
+            .into_iter()
+            .map(|diagnostic| (diagnostic.code, diagnostic.line, diagnostic.message))
+            .collect()
+    };
+    // An invalid ID is never copied into another entry's message.
+    let invalid = format!("I{}", "D".repeat(1000));
+    let messages = found(&format!(
+        "{},\n{}",
+        stairwell(&invalid, &[(0, 1, 1), (1, 1, 1)]),
+        stairwell("b", &[(1, 1, 1), (2, 1, 1)])
+    ));
+    assert_eq!(messages[1].0, "stairwell.overlap", "{messages:?}");
+    assert_eq!(
+        messages[1].2,
+        "layer 1 tile [1, 1] already holds a step of an earlier stairwell"
+    );
+    // A disconnected step does not hide an overlap in the same entry.
+    let codes: Vec<_> = found(&format!(
+        "{},\n{}",
+        stairwell("a", &[(0, 1, 1), (1, 1, 1)]),
+        stairwell("b", &[(2, 5, 5), (0, 1, 1)])
+    ))
+    .into_iter()
+    .map(|(code, line, _)| (code, line))
+    .collect();
+    assert_eq!(codes, [("stairwell.overlap", 3), ("stairwell.step", 3)]);
+    // Each member of a step is checked.
+    let messages: Vec<_> = found(
+        "{\"id\": \"s\", \"steps\": [{}, {\"layer\": 1, \"at\": [1, 1], \"proto\": \"stairs_up\"}]}",
+    )
+    .into_iter()
+    .map(|(code, _, message)| (code, message))
+    .collect();
+    assert_eq!(
+        messages,
+        [
+            ("shape.missing_key", "missing key \"at\"".to_owned()),
+            ("shape.missing_key", "missing key \"layer\"".to_owned()),
+            ("shape.missing_key", "missing key \"proto\"".to_owned()),
+        ]
+    );
+}
+
+#[test]
 fn stairwell_entries_have_their_documented_shape() {
     const STEPS: &str = "[{\"layer\": 0, \"at\": [1, 1], \"proto\": \"stairs_up\"}, {\"layer\": 1, \"at\": [1, 1], \"proto\": \"stairs_down\"}]";
     let step = |extra: &str| {
@@ -1471,4 +1520,41 @@ fn list_and_object_specs_are_checked() {
         found[0].message,
         "field \"extra[].a\" references unknown definition type \"spell\""
     );
+}
+
+#[test]
+fn every_key_of_a_spec_is_checked() {
+    const FIELDS: &str = "profile/schema/object-fields.jsonc";
+    // One bad key hides no other.
+    for (spec, expected) in [
+        (
+            "{\"type\": \"list\", \"min_items\": 2, \"max_items\": 1, \"items\": 3}",
+            &["shape.range", "shape.type"][..],
+        ),
+        (
+            "{\"type\": \"list\", \"required\": 1, \"items\": 3}",
+            &["shape.type", "shape.type"],
+        ),
+        (
+            "{\"type\": \"integer\", \"min\": \"a\", \"max\": \"b\"}",
+            &["shape.type", "shape.type"],
+        ),
+        (
+            "{\"type\": \"string\", \"max_length\": 0, \"values\": [1, \"a\", \"a\"]}",
+            &["shape.range", "shape.type", "ref.duplicate"],
+        ),
+    ] {
+        let copy = workspace();
+        edit(
+            copy.path(),
+            FIELDS,
+            "\"fields\": {",
+            &format!("\"fields\": {{\"extra\": {spec}, "),
+        );
+        let found: Vec<_> = problems(copy.path())
+            .into_iter()
+            .map(|(code, _, _)| code)
+            .collect();
+        assert_eq!(found, expected, "{spec}");
+    }
 }
