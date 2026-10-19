@@ -24,7 +24,10 @@ pub use chunk::{
     encode_chunk, encode_record,
 };
 pub use compile::{COMPILER, Written, compile, write_pack};
-pub use read::{DEFAULT_MAXIMUM_DECODED_BYTES, Pack, StairwellTile, Summary, VerifyLimits};
+pub use read::{
+    DEFAULT_MAXIMUM_DECODED_BYTES, DEFAULT_MAXIMUM_PACK_BYTES, Pack, StairwellTile, Summary,
+    VerifyLimits,
+};
 
 use std::fmt;
 

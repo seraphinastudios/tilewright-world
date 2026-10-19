@@ -37,7 +37,8 @@ pub struct Schema {
     fields: Vec<(String, FieldSpec)>,
     /// Positions in `fields` by name, kept with the list.
     index: BTreeMap<String, usize>,
-    /// Positions in `fields` of the required fields, in declaration order.
+    /// Positions in `fields` of the required fields, in declaration order,
+    /// listed once so that checking an owner never walks the others.
     required: Vec<usize>,
 }
 
@@ -53,11 +54,18 @@ impl Schema {
 
     /// Adds a field; names come from one object's keys, so they are unique.
     fn push(&mut self, name: String, spec: FieldSpec) {
+        let position = self.fields.len();
         if spec.required {
-            self.required.push(self.fields.len());
+            self.required.push(position);
         }
-        self.index.insert(name.clone(), self.fields.len());
+        self.index.insert(name.clone(), position);
         self.fields.push((name, spec));
+    }
+
+    /// The position and spec of field `name`.
+    fn lookup(&self, name: &str) -> Option<(usize, &FieldSpec)> {
+        let position = *self.index.get(name)?;
+        self.fields.get(position).map(|(_, spec)| (position, spec))
     }
 
     /// The fields in declaration order.
@@ -68,16 +76,7 @@ impl Schema {
 
     #[must_use]
     pub fn field(&self, name: &str) -> Option<&FieldSpec> {
-        let position = *self.index.get(name)?;
-        self.fields.get(position).map(|(_, spec)| spec)
-    }
-
-    /// The names of the required fields, in declaration order.
-    pub fn required(&self) -> impl Iterator<Item = &str> {
-        self.required
-            .iter()
-            .filter_map(|position| self.fields.get(*position))
-            .map(|(name, _)| name.as_str())
+        self.lookup(name).map(|(_, spec)| spec)
     }
 }
 
@@ -520,6 +519,11 @@ pub(crate) fn read_fields<'a>(
 /// fields and each value has that field's type. Missing required fields are
 /// one diagnostic at `owner`. `accept` gets every member whose value is
 /// valid.
+///
+/// The work is proportional to the members the object has, however many
+/// fields the schema requires. An object with every required field is not
+/// checked for missing ones; naming the first few that another object lacks
+/// visits at most [`NAMED`] more required fields than it has.
 fn check_members<'a>(
     reader: &Reader<'a>,
     members: &'a [Member],
@@ -529,11 +533,11 @@ fn check_members<'a>(
     accept: &mut dyn FnMut(&'a Member, &FieldSpec),
 ) -> bool {
     let mut ok = true;
-    // Keys are unique, so counting the required ones present is enough to
-    // know whether any is missing.
-    let mut required = 0;
+    // Positions of the required fields present. Keys are unique, so the
+    // owner lacks exactly the other required fields.
+    let mut present = BTreeSet::new();
     for member in members {
-        let Some(spec) = schema.field(&member.key) else {
+        let Some((position, spec)) = schema.lookup(&member.key) else {
             reader.report(
                 member.key_span,
                 Code::UnknownKey,
@@ -542,44 +546,66 @@ fn check_members<'a>(
             ok = false;
             continue;
         };
-        required += usize::from(spec.required);
+        if spec.required {
+            present.insert(position);
+        }
         if check_value(reader, &member.value, &spec.field_type, references) {
             accept(member, spec);
         } else {
             ok = false;
         }
     }
-    let missing = schema.required.len().saturating_sub(required);
+    // One diagnostic per owner, however many fields it lacks.
+    let missing = schema.required.len() - present.len();
     if missing > 0 {
-        reader.report(
-            owner,
-            Code::MissingKey,
-            missing_message(schema, members, missing),
-        );
+        let named: Vec<&str> = schema
+            .required
+            .iter()
+            .inspect(|_| visited())
+            .filter(|position| !present.contains(position))
+            .take(NAMED)
+            .filter_map(|position| schema.fields.get(*position))
+            .map(|(name, _)| name.as_str())
+            .collect();
+        reader.report(owner, Code::MissingKey, missing_message(&named, missing));
         ok = false;
     }
     ok
 }
 
-/// Names the first few missing required fields and counts the rest. The
-/// walk stops at the last field it names, so it passes at most the
-/// object's own members and the fields it names.
-fn missing_message(schema: &Schema, members: &[Member], missing: usize) -> String {
-    const NAMED: usize = 3;
-    let present: BTreeSet<&str> = members.iter().map(|member| member.key.as_str()).collect();
-    let named = schema
-        .required()
-        .filter(|name| !present.contains(name))
-        .take(NAMED)
+/// Missing required fields named in one diagnostic; the rest are counted.
+const NAMED: usize = 3;
+
+#[cfg(test)]
+thread_local! {
+    /// Required fields visited on this thread while naming missing ones, so
+    /// tests can bound the work of a load.
+    pub(crate) static REQUIRED_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Counts a required field visited while naming missing ones.
+#[cfg(test)]
+fn visited() {
+    REQUIRED_VISITS.with(|visits| visits.set(visits.get() + 1));
+}
+
+#[cfg(not(test))]
+const fn visited() {}
+
+/// The diagnostic for an owner that lacks `count` required fields, the
+/// first of which are `named`.
+fn missing_message(named: &[&str], count: usize) -> String {
+    let list = named
+        .iter()
         .map(|name| format!("\"{name}\""))
         .collect::<Vec<_>>()
         .join(", ");
-    match missing {
-        1 => format!("required field {named} is missing"),
-        count if count <= NAMED => format!("required fields {named} are missing"),
+    match count {
+        1 => format!("required field {list} is missing"),
+        count if count <= named.len() => format!("required fields {list} are missing"),
         count => format!(
-            "required fields {named} and {} more are missing",
-            count - NAMED
+            "required fields {list} and {} more are missing",
+            count - named.len()
         ),
     }
 }
