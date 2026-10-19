@@ -9,8 +9,9 @@ open it directly.
 
 The compiler is deterministic: the same source tree and compiler version
 always produce byte-identical packs. It builds the database in memory in one
-transaction, inserting rows in primary-key order, runs `VACUUM`, verifies the
-result as section 3 describes, and writes the serialized database. The file uses `page_size = 4096`,
+transaction, inserting rows in primary-key order, runs `VACUUM`, which leaves
+no free pages, verifies the result as section 3 describes, and writes the
+serialized database. The file uses `page_size = 4096`,
 `application_id = 0x54575031` (`"TWP1"`) and `user_version = 1`.
 
 ## 1. Tables
@@ -105,9 +106,10 @@ loading it, and never load a whole table into memory. Readers:
   `application_id` is `"TWP1"`, its `user_version` is 1, and `meta` holds
   exactly the keys of section 1, as text of at most 64 MiB for `profile` and
   1 KiB for the others, names this format and encoding, and has a lowercase
-  hex `source_digest`, its pages are 4096 bytes, and the file is exactly its
-  pages: its length is `page_count × 4096`, with nothing, not even a sparse
-  hole, after the last page;
+  hex `source_digest`, its pages are 4096 bytes, it has no free pages
+  (`freelist_count = 0`), and the file is exactly its pages: its length is
+  `page_count × 4096`, with nothing, not even a sparse hole, after the last
+  page;
 - reject any chunk row whose `encoding` is not `twc1+zstd`, or whose `data` is
   not a blob within the bound of section 2, even when reading a single chunk;
 - reject a string that is not text of at most 1 MiB, the source format's
@@ -118,6 +120,21 @@ loading it, and never load a whole table into memory. Readers:
   (custom data is an object whose keys are domain-qualified namespaces), data
   that is not exactly one zstd frame, a decompressed size above 16 MiB, or
   trailing bytes.
+
+Readers also have a pack-size limit, which the caller sets and which is 8 GiB
+by default. A file longer than the limit is rejected before SQLite opens it,
+and again once it is open, by its `page_count × 4096`. A full verification
+checks the pages against it before its integrity check, and hashing the file
+fails as soon as it has read more than the limit, even if the file has grown
+since it was opened. Verification never uses a higher limit than the one the
+pack was opened with. The `tilewright inspect` command sets the limit with
+`--max-pack-bytes`.
+
+Free pages hold no data, so a sparse file could keep any number of them as
+holes that take no space on disk, which the integrity check skips but hashing
+reads. A pack has none, and its integrity check confirms that every page
+belongs to a table, an index or an overflow chain before the file is hashed,
+so hashing reads only pages that the integrity check has already read.
 
 Decoding is linear in a pack's decoded size, which compression can make
 thousands of times its file size. A full verification therefore has a
@@ -131,12 +148,12 @@ size, so its memory stays bounded by one record.
 
 A full verification also:
 
-- runs SQLite's integrity check, and compares the file's SHA-256 (hashed in
-  bounded blocks) with its name when the name is 64 hex digits, which must be
-  the lowercase digest. The digest is computed from the file at the pack's
-  path when the check runs, so it binds to the path, not to the file the
-  database connection opened; packs are content-addressed files opened from
-  directories the caller controls;
+- runs SQLite's integrity check, and then compares the file's SHA-256
+  (hashed in bounded blocks, within the pack-size limit) with its name when
+  the name is 64 hex digits, which must be the lowercase digest. The digest
+  is computed from the file at the pack's path when the check runs, so it
+  binds to the path, not to the file the database connection opened; packs
+  are content-addressed files opened from directories the caller controls;
 - checks that string IDs are exactly `1..=count` in byte order of their
   values, and every string is UTF-8 text of at most 1 MiB without NUL;
 - checks that plane, zone, anchor and definition keys are identifiers; plane

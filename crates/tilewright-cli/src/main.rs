@@ -14,11 +14,12 @@ use tilewright_source::Diagnostic;
 const USAGE: &str = "usage:
   tilewright validate [--json] ROOT
   tilewright compile ROOT OUTPUT_DIRECTORY
-  tilewright inspect [--max-decoded-bytes BYTES] PACK
+  tilewright inspect [--max-decoded-bytes BYTES] [--max-pack-bytes BYTES] PACK
   tilewright --version
 
-inspect verifies the pack and stops once its chunks decode to more than
-BYTES (default 8589934592, 8 GiB).";
+inspect verifies the pack. It stops once the chunks decode to more than
+--max-decoded-bytes, and rejects a pack file longer than --max-pack-bytes
+before opening or hashing it. Both default to 8589934592 (8 GiB).";
 
 fn main() -> ExitCode {
     // Paths need not be UTF-8, so arguments are read as OS strings.
@@ -134,23 +135,48 @@ fn run_command(arguments: &[&OsStr]) -> Result<String, Failure> {
         [command, root, output] if *command == "compile" => {
             compile(Path::new(root), Path::new(output))
         }
-        [command, pack] if *command == "inspect" => {
-            inspect(Path::new(pack), tilewright_pack::VerifyLimits::default())
-        }
-        [command, flag, bytes, pack] if *command == "inspect" && *flag == "--max-decoded-bytes" => {
-            let maximum_decoded_bytes = bytes
-                .to_str()
-                .and_then(|bytes| bytes.parse().ok())
-                .ok_or_else(|| Failure::message(USAGE))?;
-            inspect(
-                Path::new(pack),
-                tilewright_pack::VerifyLimits {
-                    maximum_decoded_bytes,
-                },
-            )
+        [command, options @ ..] if *command == "inspect" => {
+            let (pack, limits) = inspect_options(options)?;
+            inspect(Path::new(pack), limits)
         }
         _ => Err(Failure::message(USAGE)),
     }
+}
+
+/// The pack and limits of `inspect`: each limit flag at most once, in any
+/// order, then the pack.
+fn inspect_options<'a>(
+    arguments: &[&'a OsStr],
+) -> Result<(&'a OsStr, tilewright_pack::VerifyLimits), Failure> {
+    let usage = || Failure::message(USAGE);
+    let (pack, mut options) = arguments.split_last().ok_or_else(usage)?;
+    let (mut decoded, mut file) = (None, None);
+    while let [flag, value, rest @ ..] = options {
+        let slot = match flag.to_str() {
+            Some("--max-decoded-bytes") => &mut decoded,
+            Some("--max-pack-bytes") => &mut file,
+            _ => return Err(usage()),
+        };
+        let bytes = value
+            .to_str()
+            .and_then(|value| value.parse().ok())
+            .ok_or_else(usage)?;
+        if slot.replace(bytes).is_some() {
+            return Err(usage());
+        }
+        options = rest;
+    }
+    if !options.is_empty() {
+        return Err(usage());
+    }
+    let defaults = tilewright_pack::VerifyLimits::default();
+    Ok((
+        pack,
+        tilewright_pack::VerifyLimits {
+            maximum_decoded_bytes: decoded.unwrap_or(defaults.maximum_decoded_bytes),
+            maximum_pack_bytes: file.unwrap_or(defaults.maximum_pack_bytes),
+        },
+    ))
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -253,7 +279,7 @@ fn inspect(path: &Path, limits: tilewright_pack::VerifyLimits) -> Result<String,
             field(&error.to_string())
         ))
     };
-    let pack = tilewright_pack::Pack::open(path).map_err(fail)?;
+    let pack = tilewright_pack::Pack::open_with(path, &limits).map_err(fail)?;
     let summary = pack.verify_with(&limits).map_err(fail)?;
     let mut output = String::new();
     for key in [
@@ -336,6 +362,41 @@ mod tests {
         );
         let bad = run(&["inspect", "--max-decoded-bytes", "lots", &pack]).unwrap_err();
         assert!(bad.message.starts_with("usage:"));
+
+        assert!(
+            run(&[
+                "inspect",
+                "--max-pack-bytes",
+                "100000000",
+                "--max-decoded-bytes",
+                "100000000",
+                &pack
+            ])
+            .unwrap()
+            .contains("verified: yes")
+        );
+        let short = run(&["inspect", "--max-pack-bytes", "1000", &pack]).unwrap_err();
+        assert!(
+            short.message.contains("pack size limit"),
+            "{}",
+            short.message
+        );
+        for arguments in [
+            &[
+                "inspect",
+                "--max-pack-bytes",
+                "1",
+                "--max-pack-bytes",
+                "2",
+                &pack,
+            ][..],
+            &["inspect", "--max-pack-bytes", &pack],
+            &["inspect", "--max-bytes", "1", &pack],
+            &["inspect"],
+        ] {
+            let failure = run(arguments).unwrap_err();
+            assert!(failure.message.starts_with("usage:"), "{arguments:?}");
+        }
     }
 
     #[cfg(target_os = "linux")]

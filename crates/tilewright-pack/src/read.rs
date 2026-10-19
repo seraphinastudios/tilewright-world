@@ -40,21 +40,39 @@ const MAXIMUM_SCHEMA_BYTES: usize = 1024;
 /// The default [`VerifyLimits::maximum_decoded_bytes`]: 8 GiB.
 pub const DEFAULT_MAXIMUM_DECODED_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
-/// Bounds on the work a full verification may do.
+/// The default [`VerifyLimits::maximum_pack_bytes`]: 8 GiB.
+pub const DEFAULT_MAXIMUM_PACK_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+
+/// Bounds on the work opening and verifying a pack may do.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VerifyLimits {
     /// Most bytes of chunk records decoded, summed over every chunk.
     /// Verification fails once the chunks' recorded sizes pass it, before
     /// the chunk that would pass it is decompressed.
     pub maximum_decoded_bytes: u64,
+    /// Longest pack file opened or hashed. [`Pack::open_with`] checks the
+    /// file's length before SQLite opens it, verification checks the pages
+    /// again before its integrity check, and hashing fails once it has read
+    /// more, even from a file that has grown since it was opened.
+    /// Verification uses the lower of this and the limit the pack was
+    /// opened with.
+    pub maximum_pack_bytes: u64,
 }
 
 impl Default for VerifyLimits {
     fn default() -> Self {
         Self {
             maximum_decoded_bytes: DEFAULT_MAXIMUM_DECODED_BYTES,
+            maximum_pack_bytes: DEFAULT_MAXIMUM_PACK_BYTES,
         }
     }
+}
+
+/// The error for a pack longer than `maximum` bytes.
+fn too_long(maximum: u64) -> Error {
+    Error::Invalid(format!(
+        "the pack is more than {maximum} bytes, the pack size limit"
+    ))
 }
 
 /// Row counts of a pack.
@@ -75,6 +93,9 @@ pub struct Pack {
     connection: Connection,
     /// `None` for a pack the compiler is checking in memory.
     path: Option<PathBuf>,
+    /// The pack size limit it was opened with, which bounds
+    /// [`Pack::file_digest`].
+    maximum_bytes: u64,
 }
 
 /// Percent-encodes a path for an SQLite URI. On Unix the path's bytes are
@@ -246,16 +267,32 @@ fn text<'d>(document: &'d Document, key: &str) -> Option<&'d str> {
 }
 
 impl Pack {
-    /// Opens a pack and checks its identity and schema.
+    /// Opens a pack with [`VerifyLimits::default`]; see [`Pack::open_with`].
     ///
     /// # Errors
-    /// Returns an error if the file is not a pack of this format.
+    /// Returns an error if the file is not a pack of this format or is
+    /// longer than the default pack size limit.
     pub fn open(path: &Path) -> Result<Self, Error> {
+        Self::open_with(path, &VerifyLimits::default())
+    }
+
+    /// Opens a pack and checks its size, identity and schema. A file longer
+    /// than `limits.maximum_pack_bytes` is rejected before SQLite opens it,
+    /// and [`Pack::file_digest`] reads at most that many bytes.
+    ///
+    /// # Errors
+    /// Returns an error if the file is not a pack of this format or is
+    /// longer than the limit.
+    pub fn open_with(path: &Path, limits: &VerifyLimits) -> Result<Self, Error> {
         // The same absolute path opens the database and is hashed later, so
         // a change of working directory cannot point them at different files.
         let path = std::path::absolute(path)?;
-        if !std::fs::metadata(&path)?.is_file() {
+        let metadata = std::fs::metadata(&path)?;
+        if !metadata.is_file() {
             return Err(Error::Invalid(format!("{} is not a file", path.display())));
+        }
+        if metadata.len() > limits.maximum_pack_bytes {
+            return Err(too_long(limits.maximum_pack_bytes));
         }
         let connection = Connection::open_with_flags(
             uri(&path)?,
@@ -280,9 +317,15 @@ impl Pack {
                 "the file is {length} bytes, not its {pages} pages of {PAGE_SIZE} bytes"
             )));
         }
+        // The file SQLite opened may have replaced the one whose length was
+        // checked, so its pages are checked against the limit too.
+        if length > limits.maximum_pack_bytes {
+            return Err(too_long(limits.maximum_pack_bytes));
+        }
         Ok(Self {
             connection,
             path: Some(path),
+            maximum_bytes: limits.maximum_pack_bytes,
         })
     }
 
@@ -292,6 +335,8 @@ impl Pack {
         Ok(Self {
             connection,
             path: None,
+            // There is no file to hash, so the limit is never used.
+            maximum_bytes: u64::MAX,
         })
     }
 
@@ -394,35 +439,57 @@ impl Pack {
     /// This hashes whatever file is at the pack's path now, not necessarily
     /// the file SQLite opened: the digest binds to the path. Packs are
     /// content-addressed files opened from directories the caller controls;
-    /// a directory that others can write to is not supported.
+    /// a directory that others can write to is not supported. It reads at
+    /// most the pack size limit the pack was opened with, and fails for a
+    /// longer file.
     ///
     /// # Errors
-    /// Returns an error if the file cannot be read.
+    /// Returns an error if the file cannot be read or is longer than the
+    /// limit.
     pub fn file_digest(&self) -> Result<[u8; 32], Error> {
+        self.digest_within(self.maximum_bytes)
+    }
+
+    /// [`Pack::file_digest`], reading at most `maximum` bytes.
+    fn digest_within(&self, maximum: u64) -> Result<[u8; 32], Error> {
         let path = self
             .path
             .as_ref()
             .ok_or_else(|| Error::Invalid("the pack is not a file".into()))?;
-        let mut file = std::fs::File::open(path)?;
+        let file = std::fs::File::open(path)?;
+        if file.metadata()?.len() > maximum {
+            return Err(too_long(maximum));
+        }
+        // The length can change once checked, so the read stops one byte
+        // past the limit.
+        let mut file = file.take(maximum.saturating_add(1));
         let mut hasher = Sha256::new();
         let mut buffer = vec![0; 64 * 1024];
+        let mut total: u64 = 0;
         loop {
             let read = file.read(&mut buffer)?;
             if read == 0 {
                 break;
+            }
+            total = total.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+            if total > maximum {
+                return Err(too_long(maximum));
             }
             hasher.update(&buffer[..read]);
         }
         Ok(hasher.finalize().into())
     }
 
-    /// Checks the whole pack with [`VerifyLimits::default`]; see
-    /// [`Pack::verify_with`].
+    /// Checks the whole pack with the default decoded-byte budget and the
+    /// pack size limit the pack was opened with; see [`Pack::verify_with`].
     ///
     /// # Errors
     /// Returns the first problem found.
     pub fn verify(&self) -> Result<Summary, Error> {
-        self.verify_with(&VerifyLimits::default())
+        self.verify_with(&VerifyLimits {
+            maximum_pack_bytes: self.maximum_bytes,
+            ..VerifyLimits::default()
+        })
     }
 
     /// Checks the whole pack: SQLite integrity, the file name digest when the
@@ -432,13 +499,29 @@ impl Pack {
     ///
     /// Decoding every chunk is linear in the pack's decoded size, which
     /// compression can make far larger than the file, so it stops and fails
-    /// once `limits.maximum_decoded_bytes` would be passed. The file name
-    /// check hashes the file at the pack's path, so it binds to the path; see
+    /// once `limits.maximum_decoded_bytes` would be passed. The integrity
+    /// check and the hash are linear in the file's size, so the pages are
+    /// checked against the pack size limit before either runs, and the hash
+    /// reads at most that many bytes. The limit is the lower of
+    /// `limits.maximum_pack_bytes` and the one the pack was opened with, so
+    /// verifying never reads more than opening allowed. The file name check
+    /// hashes the file at the pack's path, so it binds to the path; see
     /// [`Pack::file_digest`].
     ///
     /// # Errors
     /// Returns the first problem found, including an exceeded limit.
     pub fn verify_with(&self, limits: &VerifyLimits) -> Result<Summary, Error> {
+        let maximum_bytes = limits.maximum_pack_bytes.min(self.maximum_bytes);
+        let pages: i64 = self
+            .connection
+            .query_row("PRAGMA page_count", [], |row| row.get(0))?;
+        if u64::try_from(pages)
+            .ok()
+            .and_then(|pages| pages.checked_mul(PAGE_SIZE.unsigned_abs()))
+            .is_none_or(|bytes| bytes > maximum_bytes)
+        {
+            return Err(too_long(maximum_bytes));
+        }
         let integrity: String = self
             .connection
             .query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
@@ -456,7 +539,7 @@ impl Pack {
             .filter(|stem| stem.len() == 64 && stem.bytes().all(|byte| byte.is_ascii_hexdigit()))
         {
             // The name must be the lowercase digest; other cases do not match.
-            let digest = crate::compile::hex(&self.file_digest()?);
+            let digest = crate::compile::hex(&self.digest_within(maximum_bytes)?);
             if digest != stem {
                 return Err(Error::Invalid(format!(
                     "file digest {digest} does not match its name"
@@ -822,6 +905,16 @@ fn check_identity(connection: &Connection) -> Result<(), Error> {
     if application != APPLICATION_ID || version != USER_VERSION || page_size != PAGE_SIZE {
         return Err(Error::Invalid(format!(
             "not a Tilewright pack of user_version {USER_VERSION} with {PAGE_SIZE}-byte pages"
+        )));
+    }
+    // `VACUUM` leaves a compiled pack no free pages. Free pages hold no
+    // data, so a sparse file could make them holes that cost nothing to
+    // store and much to hash; with none, the integrity check reads every
+    // page as table data before the file is hashed.
+    let free: i64 = connection.query_row("PRAGMA freelist_count", [], |row| row.get(0))?;
+    if free != 0 {
+        return Err(Error::Invalid(format!(
+            "the pack has {free} free pages; a pack has none"
         )));
     }
     let meta = read_meta(connection)?;
