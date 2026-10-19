@@ -1,0 +1,9 @@
+{
+  "format": "tilewright.def/1",
+  "type": "recipe",
+  "id": "chest",
+  "fields": {
+    "output": "chest",
+    "ingredients": [{"item": "wall", "count": 2}, {"item": "coin", "count": 5}]
+  }
+}

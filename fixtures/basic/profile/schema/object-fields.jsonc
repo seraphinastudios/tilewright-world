@@ -5,6 +5,7 @@
     "count": {"type": "integer", "min": 1, "max": 65535},
     "loot": {"type": "reference", "target": "loot"},
     "locked": {"type": "boolean"},
-    "script": {"type": "json"}
+    "script": {"type": "json"},
+    "tags": {"type": "list", "max_items": 8, "items": {"type": "string", "max_length": 32}}
   }
 }

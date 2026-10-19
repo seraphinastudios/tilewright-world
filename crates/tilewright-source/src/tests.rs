@@ -1,7 +1,10 @@
 // Copyright 2026 Seraphina Studios
 // SPDX-License-Identifier: MIT
 
-use super::{FieldValue, LoadOptions, PlaneKind, Portal, Projection, load, load_with};
+use super::{
+    FieldValue, LoadOptions, PlaneKind, Portal, Projection, StairwellDirection, StairwellStep,
+    load, load_with,
+};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -76,8 +79,22 @@ fn the_fixture_loads_with_every_feature() {
         }
     );
     assert_eq!(world.profile.ground_layers, ["floor", "mask"]);
+    assert_eq!(world.profile.layer_height, Some(50));
     assert_eq!(world.planes.len(), 2);
-    assert_eq!(world.definitions.len(), 11);
+    assert_eq!(world.definitions.len(), 12);
+    let recipe = &world.definitions[&("recipe".to_owned(), "chest".to_owned())];
+    assert_eq!(
+        recipe.fields,
+        [
+            ("output".to_owned(), FieldValue::String("chest".to_owned())),
+            (
+                "ingredients".to_owned(),
+                FieldValue::Json(
+                    "[{\"item\":\"wall\",\"count\":2},{\"item\":\"coin\",\"count\":5}]".to_owned()
+                )
+            )
+        ]
+    );
 
     let overworld = &world.planes["overworld"];
     assert_eq!(overworld.kind, PlaneKind::Shared);
@@ -86,7 +103,7 @@ fn the_fixture_loads_with_every_feature() {
     assert_eq!(overworld.anchors["cave.entrance"].layer, -1);
     assert_eq!(
         overworld.chunks.keys().copied().collect::<Vec<_>>(),
-        [(-1, 0, 0), (0, -1, 0), (0, 0, 0)]
+        [(-1, 0, 0), (0, -1, 0), (0, 0, 0), (1, 0, 0)]
     );
     assert_eq!(world.planes["vault"].kind, PlaneKind::Instanced);
 
@@ -98,6 +115,13 @@ fn the_fixture_loads_with_every_feature() {
     assert_eq!(chunk.heights[12 * 32 + 12], 32);
     assert_eq!(chunk.zones.value(9 * 32 + 9), Some("village"));
     assert_eq!(chunk.objects.len(), 6);
+    assert_eq!(
+        chunk.objects[1].fields[1],
+        (
+            "tags".to_owned(),
+            FieldValue::Json("[\"ruin\",\"north\"]".to_owned())
+        )
+    );
     let chest = &chunk.objects[4];
     assert_eq!(chest.at, Some([2, 2]));
     assert_eq!(chest.inventory.len(), 2);
@@ -119,6 +143,45 @@ fn the_fixture_loads_with_every_feature() {
     let cave = &overworld.chunks[&(-1, 0, 0)];
     assert!(cave.ground[0].cells.iter().all(|cell| *cell == 1));
     assert_eq!(cave.ground[0].palette, ["cave_floor"]);
+}
+
+#[test]
+fn the_fixture_has_straight_sloped_and_one_way_stairwells() {
+    let world = load(&fixture()).expect("the fixture is valid");
+    let overworld = &world.planes["overworld"];
+    let step = |layer, at: [i64; 2], proto: &str| StairwellStep {
+        layer,
+        at,
+        proto: proto.to_owned(),
+    };
+    assert_eq!(
+        overworld.stairwells.keys().collect::<Vec<_>>(),
+        ["cave.chute", "cliff.path", "tower.stairs"]
+    );
+    let tower = &overworld.stairwells["tower.stairs"];
+    assert_eq!(
+        tower.steps,
+        [
+            step(-1, [20, 20], "stairs_up"),
+            step(0, [20, 20], "stairs_up"),
+            step(1, [20, 20], "stairs_down")
+        ]
+    );
+    assert_eq!(tower.direction, StairwellDirection::Both);
+    assert!(tower.hidden_on_other_layers);
+    assert_eq!(tower.lower_end(), tower.steps.first());
+    assert_eq!(tower.upper_end(), tower.steps.last());
+    let cliff = &overworld.stairwells["cliff.path"];
+    assert_eq!(cliff.steps[2], step(-1, [26, 9], "stairs_up"));
+    assert!(!cliff.hidden_on_other_layers);
+    assert_eq!(cliff.upper_end(), cliff.steps.first());
+    let chute = &overworld.stairwells["cave.chute"];
+    assert_eq!(chute.direction, StairwellDirection::Down);
+    assert_eq!(
+        chute.custom.as_deref(),
+        Some("{\"example.org/notes\":{\"reviewed\":true}}")
+    );
+    assert!(world.planes["vault"].stairwells.is_empty());
 }
 
 #[test]
@@ -623,10 +686,10 @@ fn missing_required_fields_are_one_diagnostic_per_owner() {
 
 #[test]
 fn required_fields_cost_what_their_owner_has() {
-    // A schema with 251 required fields, as many as fit beside the fixture's
-    // five, and many objects with no fields at all.
+    // A schema with 250 required fields, as many as fit beside the fixture's
+    // six, and many objects with no fields at all.
     let copy = workspace();
-    let required: Vec<String> = (0..251)
+    let required: Vec<String> = (0..250)
         .map(|index| format!("\"r{index}\": {{\"type\": \"boolean\", \"required\": true}}"))
         .collect();
     edit(
@@ -660,11 +723,11 @@ fn required_fields_cost_what_their_owner_has() {
     for diagnostic in &missing {
         assert_eq!(
             diagnostic.message,
-            "required fields \"r0\", \"r1\", \"r2\" and 248 more are missing"
+            "required fields \"r0\", \"r1\", \"r2\" and 247 more are missing"
         );
     }
     // Every owner has none of the required fields, so naming three of them
-    // visits three, not all 251. Owners with every required field, the
+    // visits three, not all 250. Owners with every required field, the
     // definitions here, visit none.
     assert_eq!(visits, 3 * missing.len());
 }
@@ -932,4 +995,689 @@ fn portals_resolve_anchors_of_planes_read_later() {
             .count(),
         1
     );
+}
+
+/// The `(code, path)` of every diagnostic, for trees expected to fail.
+fn codes(root: &Path) -> Vec<(&'static str, String)> {
+    problems(root)
+        .into_iter()
+        .map(|(code, path, _)| (code, path))
+        .collect()
+}
+
+#[test]
+fn layer_height_has_its_documented_range() {
+    const PROFILE: &str = "profile/profile.jsonc";
+    for (value, expected) in [
+        ("1", None),
+        ("65535", None),
+        ("0", Some("shape.range")),
+        ("65536", Some("shape.range")),
+        ("-50", Some("shape.range")),
+        ("\"50\"", Some("shape.type")),
+        ("2.5", Some("shape.type")),
+    ] {
+        let copy = workspace();
+        edit(
+            copy.path(),
+            PROFILE,
+            "\"layer_height\": 50",
+            &format!("\"layer_height\": {value}"),
+        );
+        match expected {
+            None => {
+                let world = load(copy.path()).expect("in range");
+                assert_eq!(
+                    world.profile().layer_height.map(i64::from),
+                    value.parse().ok()
+                );
+            }
+            Some(code) => assert_eq!(codes(copy.path()), [(code, PROFILE.to_owned())], "{value}"),
+        }
+    }
+    let copy = workspace();
+    edit(copy.path(), PROFILE, "\"layer_height\": 50,", "");
+    assert_eq!(load(copy.path()).unwrap().profile().layer_height, None);
+
+    // A problem in an earlier member does not hide one in the layer height.
+    let copy = workspace();
+    edit(
+        copy.path(),
+        PROFILE,
+        "\"layer_height\": 50",
+        "\"layer_height\": 0",
+    );
+    edit(
+        copy.path(),
+        PROFILE,
+        "\"id\": \"example\"",
+        "\"id\": \"Example\"",
+    );
+    let found: Vec<_> = codes(copy.path())
+        .into_iter()
+        .map(|(code, _)| code)
+        .collect();
+    assert_eq!(found, ["shape.identifier", "shape.range"]);
+}
+
+const STAIRWELLS: &str = "planes/vault/stairwells.jsonc";
+
+/// A copy of the fixture whose vault has these stairwell entries.
+fn with_stairwells(entries: &str) -> tempfile::TempDir {
+    let copy = workspace();
+    fs::write(
+        copy.path().join(STAIRWELLS),
+        format!("{{\"format\": \"tilewright.stairwells/1\", \"stairwells\": [\n{entries}\n]}}\n"),
+    )
+    .unwrap();
+    copy
+}
+
+/// A stairwell entry with steps at `(layer, x, y)`.
+fn stairwell(id: &str, steps: &[(i64, i64, i64)]) -> String {
+    let steps: Vec<String> = steps
+        .iter()
+        .map(|(layer, x, y)| {
+            format!("{{\"layer\": {layer}, \"at\": [{x}, {y}], \"proto\": \"stairs_up\"}}")
+        })
+        .collect();
+    format!("{{\"id\": \"{id}\", \"steps\": [{}]}}", steps.join(", "))
+}
+
+#[test]
+fn stairwell_steps_connect_adjacent_layers_in_one_direction() {
+    const MAX: i64 = tilewright_jsonc::MAX_SAFE_INTEGER;
+    const TOP: i64 = i32::MAX as i64;
+    for steps in [
+        vec![(0, 1, 1), (1, 1, 1), (2, 1, 1)],
+        vec![(0, 1, 1), (-1, 2, 0), (-2, 3, -1)],
+        vec![(TOP - 1, MAX, -MAX), (TOP, MAX - 1, -MAX + 1)],
+    ] {
+        let copy = with_stairwells(&stairwell("s", &steps));
+        let world = load(copy.path()).unwrap_or_else(|found| panic!("{steps:?}: {found:?}"));
+        assert_eq!(
+            world.planes()["vault"].stairwells["s"].steps.len(),
+            steps.len()
+        );
+    }
+    for (case, steps) in [
+        ("a skipped layer", vec![(0, 1, 1), (2, 1, 1)]),
+        ("the same layer", vec![(0, 1, 1), (0, 2, 1)]),
+        ("a reversal", vec![(0, 1, 1), (1, 1, 1), (0, 2, 2)]),
+        ("two tiles on x", vec![(0, 1, 1), (1, 3, 1)]),
+        ("two tiles on y", vec![(0, 1, 1), (-1, 1, -1)]),
+    ] {
+        let copy = with_stairwells(&stairwell("s", &steps));
+        assert_eq!(
+            codes(copy.path()),
+            [("stairwell.step", STAIRWELLS.to_owned())],
+            "{case}"
+        );
+    }
+}
+
+#[test]
+fn stairwell_tiles_hold_one_step() {
+    let copy = with_stairwells(&format!(
+        "{},\n{}",
+        stairwell("a", &[(0, 1, 1), (1, 1, 1)]),
+        stairwell("b", &[(2, 2, 2), (1, 1, 1), (0, 0, 0)])
+    ));
+    let found = problems(copy.path());
+    assert_eq!(
+        found,
+        [("stairwell.overlap", STAIRWELLS.to_owned(), 3)],
+        "{found:?}"
+    );
+    assert_eq!(
+        load(copy.path()).unwrap_err()[0].message,
+        "layer 1 tile [1, 1] already holds a step of stairwell \"a\""
+    );
+
+    // A rejected entry still counts for duplicates and overlaps, so one
+    // problem never hides another: "a" overlaps nothing but has a bad
+    // direction, the second "a" is a duplicate whose steps overlap the
+    // first, and "c", with no steps, is a duplicate of nothing.
+    let copy = with_stairwells(&format!(
+        "{},\n{},\n{},\n{}",
+        stairwell("a", &[(0, 1, 1), (1, 1, 1)]).replace("]}", "], \"direction\": \"sideways\"}"),
+        stairwell("a", &[(1, 1, 1), (2, 1, 1)]),
+        "{\"id\": \"c\"}",
+        "{\"id\": \"c\", \"steps\": {}}"
+    ));
+    let found: Vec<_> = problems(copy.path())
+        .into_iter()
+        .map(|(code, _, line)| (code, line))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            ("shape.range", 2),
+            ("ref.duplicate", 3),
+            ("stairwell.overlap", 3),
+            ("shape.missing_key", 4),
+            ("ref.duplicate", 5),
+            ("shape.type", 5),
+        ]
+    );
+}
+
+#[test]
+fn every_stairwell_problem_is_reported() {
+    let found = |entries: &str| -> Vec<(&'static str, usize, String)> {
+        let copy = with_stairwells(entries);
+        load(copy.path())
+            .expect_err("invalid")
+            .into_iter()
+            .map(|diagnostic| (diagnostic.code, diagnostic.line, diagnostic.message))
+            .collect()
+    };
+    // An invalid ID is never copied into another entry's message.
+    let invalid = format!("I{}", "D".repeat(1000));
+    let messages = found(&format!(
+        "{},\n{}",
+        stairwell(&invalid, &[(0, 1, 1), (1, 1, 1)]),
+        stairwell("b", &[(1, 1, 1), (2, 1, 1)])
+    ));
+    assert_eq!(messages[1].0, "stairwell.overlap", "{messages:?}");
+    assert_eq!(
+        messages[1].2,
+        "layer 1 tile [1, 1] already holds a step of an earlier stairwell"
+    );
+    // A disconnected step does not hide an overlap in the same entry.
+    let codes: Vec<_> = found(&format!(
+        "{},\n{}",
+        stairwell("a", &[(0, 1, 1), (1, 1, 1)]),
+        stairwell("b", &[(2, 5, 5), (0, 1, 1)])
+    ))
+    .into_iter()
+    .map(|(code, line, _)| (code, line))
+    .collect();
+    assert_eq!(codes, [("stairwell.overlap", 3), ("stairwell.step", 3)]);
+    // A step with a bad prototype still has its tile checked for overlaps.
+    let codes: Vec<_> = found(&format!(
+        "{},\n{}",
+        stairwell("a", &[(0, 1, 1), (1, 1, 1)]),
+        "{\"id\": \"b\", \"steps\": [{\"layer\": 1, \"at\": [1, 1], \"proto\": \"Bad\"}, {\"layer\": 2, \"at\": [1, 1], \"proto\": \"stairs_up\"}]}"
+    ))
+    .into_iter()
+    .map(|(code, line, _)| (code, line))
+    .collect();
+    assert_eq!(codes, [("stairwell.overlap", 3), ("shape.identifier", 3)]);
+    // Both coordinates are checked.
+    let codes: Vec<_> = found(
+        "{\"id\": \"s\", \"steps\": [{\"layer\": 0, \"at\": [\"x\", \"y\"], \"proto\": \"stairs_up\"}, {\"layer\": 1, \"at\": [1, 1], \"proto\": \"stairs_up\"}]}",
+    )
+    .into_iter()
+    .map(|(code, _, _)| code)
+    .collect();
+    assert_eq!(codes, ["shape.type", "shape.type"]);
+    // Each member of a step is checked.
+    let messages: Vec<_> = found(
+        "{\"id\": \"s\", \"steps\": [{}, {\"layer\": 1, \"at\": [1, 1], \"proto\": \"stairs_up\"}]}",
+    )
+    .into_iter()
+    .map(|(code, _, message)| (code, message))
+    .collect();
+    assert_eq!(
+        messages,
+        [
+            ("shape.missing_key", "missing key \"at\"".to_owned()),
+            ("shape.missing_key", "missing key \"layer\"".to_owned()),
+            ("shape.missing_key", "missing key \"proto\"".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn stairwell_entries_have_their_documented_shape() {
+    const STEPS: &str = "[{\"layer\": 0, \"at\": [1, 1], \"proto\": \"stairs_up\"}, {\"layer\": 1, \"at\": [1, 1], \"proto\": \"stairs_down\"}]";
+    let step = |extra: &str| {
+        format!(
+            "{{\"id\": \"s\", \"steps\": [{{\"layer\": 0, \"at\": [1, 1], \"proto\": \"stairs_up\"}}, {{\"layer\": 1, {extra}}}]}}"
+        )
+    };
+    for (entry, code) in [
+        (
+            "{\"id\": \"s\", \"steps\": [{\"layer\": 0, \"at\": [1, 1], \"proto\": \"stairs_up\"}]}"
+                .to_owned(),
+            "shape.range",
+        ),
+        ("{\"id\": \"s\"}".to_owned(), "shape.missing_key"),
+        ("{\"id\": \"s\", \"steps\": {}}".to_owned(), "shape.type"),
+        (format!("{{\"id\": \"S\", \"steps\": {STEPS}}}"), "shape.identifier"),
+        (
+            format!("{{\"id\": \"s\", \"steps\": {STEPS}, \"color\": 1}}"),
+            "shape.unknown_key",
+        ),
+        (
+            format!("{{\"id\": \"s\", \"steps\": {STEPS}, \"direction\": \"sideways\"}}"),
+            "shape.range",
+        ),
+        (
+            format!("{{\"id\": \"s\", \"steps\": {STEPS}, \"direction\": 1}}"),
+            "shape.type",
+        ),
+        (
+            format!("{{\"id\": \"s\", \"steps\": {STEPS}, \"hidden_on_other_layers\": \"no\"}}"),
+            "shape.type",
+        ),
+        (
+            format!("{{\"id\": \"s\", \"steps\": {STEPS}, \"custom\": {{\"notes\": 1}}}}"),
+            "shape.identifier",
+        ),
+        (
+            format!("{{\"id\": \"s\", \"steps\": {STEPS}}},\n{{\"id\": \"s\", \"steps\": [{{\"layer\": 5, \"at\": [1, 1], \"proto\": \"stairs_up\"}}, {{\"layer\": 6, \"at\": [1, 1], \"proto\": \"stairs_up\"}}]}}"),
+            "ref.duplicate",
+        ),
+        (step("\"at\": [1, 1], \"proto\": \"ladder\""), "ref.unresolved"),
+        (step("\"at\": [1, 1], \"proto\": \"Ladder\""), "shape.identifier"),
+        (step("\"at\": [1, 1]"), "shape.missing_key"),
+        (
+            step("\"at\": [1, 1], \"proto\": \"stairs_up\", \"z\": 4"),
+            "shape.unknown_key",
+        ),
+        // Positions past the integer range do not even parse.
+        (
+            step("\"at\": [9007199254740992, 1], \"proto\": \"stairs_up\""),
+            "jsonc.integer_out_of_range",
+        ),
+        (step("\"at\": [1], \"proto\": \"stairs_up\""), "shape.type"),
+        (
+            "{\"id\": \"s\", \"steps\": [{\"layer\": 2147483648, \"at\": [1, 1], \"proto\": \"stairs_up\"}, {\"layer\": 2147483647, \"at\": [1, 1], \"proto\": \"stairs_up\"}]}"
+                .to_owned(),
+            "shape.range",
+        ),
+    ] {
+        let copy = with_stairwells(&entry);
+        assert_eq!(
+            codes(copy.path()),
+            [(code, STAIRWELLS.to_owned())],
+            "{entry}"
+        );
+    }
+
+    // A lone step is still checked.
+    let copy = with_stairwells(
+        "{\"id\": \"s\", \"steps\": [{\"layer\": 0, \"at\": [1, 1], \"proto\": \"ladder\"}]}",
+    );
+    assert_eq!(
+        codes(copy.path()),
+        [
+            ("shape.range", STAIRWELLS.to_owned()),
+            ("ref.unresolved", STAIRWELLS.to_owned())
+        ]
+    );
+
+    let copy = with_stairwells("");
+    edit(
+        copy.path(),
+        STAIRWELLS,
+        "tilewright.stairwells/1",
+        "tilewright.stairs/1",
+    );
+    assert_eq!(
+        codes(copy.path()),
+        [("shape.format", STAIRWELLS.to_owned())]
+    );
+
+    let copy = workspace();
+    fs::create_dir(copy.path().join(STAIRWELLS)).unwrap();
+    assert!(has(
+        &problems(copy.path()),
+        "source.unexpected_file",
+        STAIRWELLS
+    ));
+}
+
+const LOOT: &str = "defs/loot/chest_common.jsonc";
+
+/// A copy of the fixture whose loot table has these fields.
+fn with_loot(fields: &str) -> tempfile::TempDir {
+    let copy = workspace();
+    fs::write(
+        copy.path().join(LOOT),
+        format!("{{\"format\": \"tilewright.def/1\", \"type\": \"loot\", \"id\": \"chest_common\", \"fields\": {fields}}}\n"),
+    )
+    .unwrap();
+    copy
+}
+
+#[test]
+fn list_and_object_values_are_checked_at_every_level() {
+    let many = vec!["{\"item\": \"coin\", \"weight\": 1}"; 65].join(", ");
+    for (fields, code) in [
+        ("{\"entries\": []}".to_owned(), "shape.range"),
+        (format!("{{\"entries\": [{many}]}}"), "shape.range"),
+        ("{\"entries\": {}}".to_owned(), "shape.type"),
+        ("{\"entries\": [3]}".to_owned(), "shape.type"),
+        (
+            "{\"entries\": [{\"item\": \"coin\", \"weight\": 1, \"rarity\": 2}]}".to_owned(),
+            "shape.unknown_key",
+        ),
+        (
+            "{\"entries\": [{\"item\": \"coin\"}]}".to_owned(),
+            "shape.missing_key",
+        ),
+        (
+            "{\"entries\": [{\"item\": \"coin\", \"weight\": 0}]}".to_owned(),
+            "shape.range",
+        ),
+        (
+            "{\"entries\": [{\"item\": \"Coin\", \"weight\": 1}]}".to_owned(),
+            "shape.identifier",
+        ),
+        (
+            "{\"entries\": [{\"item\": \"gem\", \"weight\": 1}]}".to_owned(),
+            "ref.unresolved",
+        ),
+        (
+            "{\"entries\": [{\"item\": \"coin\", \"weight\": 1, \"count\": {\"min\": 1}}]}"
+                .to_owned(),
+            "shape.missing_key",
+        ),
+        (
+            "{\"entries\": [{\"item\": \"coin\", \"weight\": 1, \"count\": [1, 2]}]}".to_owned(),
+            "shape.type",
+        ),
+        ("{\"chance\": 0.5}".to_owned(), "shape.missing_key"),
+    ] {
+        let copy = with_loot(&fields);
+        assert_eq!(codes(copy.path()), [(code, LOOT.to_owned())], "{fields}");
+    }
+
+    // Every problem in a list is reported, not just the first.
+    let copy = with_loot(
+        "{\"entries\": [{\"item\": \"gem\", \"weight\": 1}, {\"item\": \"coin\", \"weight\": 0}, 3, {}]}",
+    );
+    let found = load(copy.path()).expect_err("four bad entries");
+    let found: Vec<(&str, &str)> = found
+        .iter()
+        .map(|diagnostic| (diagnostic.code, diagnostic.message.as_str()))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            ("ref.unresolved", "no proto definition \"gem\""),
+            ("shape.range", "0 is outside 1..=65535"),
+            ("shape.type", "expected an object, found integer"),
+            (
+                "shape.missing_key",
+                "required fields \"item\", \"weight\" are missing"
+            ),
+        ]
+    );
+
+    // Items are checked even when there are too many of them.
+    let copy = with_loot(&format!(
+        "{{\"entries\": [{many}, {{\"item\": \"gem\", \"weight\": 1}}, {{\"item\": \"opal\", \"weight\": 1}}]}}"
+    ));
+    let found: Vec<_> = load(copy.path())
+        .expect_err("too many entries, two unresolved")
+        .into_iter()
+        .map(|diagnostic| (diagnostic.code, diagnostic.message))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            ("shape.range", "67 items, outside 1..=64".to_owned()),
+            ("ref.unresolved", "no proto definition \"gem\"".to_owned()),
+            ("ref.unresolved", "no proto definition \"opal\"".to_owned()),
+        ]
+    );
+
+    // Object fields of chunk objects are checked the same way.
+    for (tags, code) in [
+        (["\"a\""; 9].join(", "), "shape.range"),
+        (format!("\"{}\"", "a".repeat(33)), "shape.range"),
+        ("1".to_owned(), "shape.type"),
+    ] {
+        let copy = workspace();
+        edit(
+            copy.path(),
+            CHUNK,
+            "\"tags\": [\"ruin\", \"north\"]",
+            &format!("\"tags\": [{tags}]"),
+        );
+        assert_eq!(codes(copy.path()), [(code, CHUNK.to_owned())], "{tags}");
+    }
+}
+
+#[test]
+fn nested_objects_name_their_missing_required_fields() {
+    let copy = workspace();
+    let required: Vec<String> = ["a", "b", "c", "d", "e"]
+        .iter()
+        .map(|name| format!("\"{name}\": {{\"type\": \"boolean\", \"required\": true}}"))
+        .collect();
+    edit(
+        copy.path(),
+        "profile/schema/object-fields.jsonc",
+        "\"fields\": {",
+        &format!(
+            "\"fields\": {{\"flags\": {{\"type\": \"object\", \"fields\": {{{}}}}}, ",
+            required.join(", ")
+        ),
+    );
+    edit(
+        copy.path(),
+        CHUNK,
+        "\"fields\": {\"name\": \"Old wall\"",
+        "\"fields\": {\"flags\": {\"c\": true}, \"name\": \"Old wall\"",
+    );
+    let found = load(copy.path()).expect_err("four flags are missing");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(
+        found[0].message,
+        "required fields \"a\", \"b\", \"d\" and 1 more are missing"
+    );
+}
+
+/// A field spec of `levels` nested list and object types around a boolean,
+/// and a value of it.
+fn nested(levels: usize) -> (String, String) {
+    let mut spec = "{\"type\": \"boolean\"}".to_owned();
+    let mut value = "true".to_owned();
+    for level in 0..levels {
+        if level % 2 == 0 {
+            spec = format!("{{\"type\": \"list\", \"items\": {spec}}}");
+            value = format!("[{value}]");
+        } else {
+            spec = format!("{{\"type\": \"object\", \"fields\": {{\"inner\": {spec}}}}}");
+            value = format!("{{\"inner\": {value}}}");
+        }
+    }
+    (spec, value)
+}
+
+#[test]
+fn list_and_object_types_nest_at_most_8_deep() {
+    const FIELDS: &str = "profile/schema/object-fields.jsonc";
+    assert_eq!(super::MAXIMUM_FIELD_DEPTH, 8);
+    for levels in [7, 8] {
+        let copy = workspace();
+        let (spec, value) = nested(levels);
+        edit(
+            copy.path(),
+            FIELDS,
+            "\"fields\": {",
+            &format!("\"fields\": {{\"deep\": {spec}, "),
+        );
+        edit(
+            copy.path(),
+            CHUNK,
+            "\"fields\": {\"name\": \"Old wall\"",
+            &format!("\"fields\": {{\"deep\": {value}, \"name\": \"Old wall\""),
+        );
+        let world = load(copy.path()).unwrap_or_else(|found| panic!("{levels}: {found:?}"));
+        let wall = &world.planes()["overworld"].chunks[&(0, 0, 0)].objects[1];
+        assert_eq!(
+            wall.fields[0],
+            ("deep".to_owned(), FieldValue::Json(value.replace(' ', "")))
+        );
+    }
+    // Each list or object past level 8 is reported.
+    for levels in [9, 12] {
+        let copy = workspace();
+        edit(
+            copy.path(),
+            FIELDS,
+            "\"fields\": {",
+            &format!("\"fields\": {{\"deep\": {}, ", nested(levels).0),
+        );
+        assert_eq!(
+            codes(copy.path()),
+            vec![("shape.range", FIELDS.to_owned()); levels - 8],
+            "{levels}"
+        );
+    }
+    // The rest of a spec that is too deep is still checked.
+    let copy = workspace();
+    let (spec, _) = nested(8);
+    edit(
+        copy.path(),
+        FIELDS,
+        "\"fields\": {",
+        &format!(
+            "\"fields\": {{\"deep\": {}, ",
+            spec.replace(
+                "{\"type\": \"boolean\"}",
+                "{\"type\": \"list\", \"min_items\": \"bad\", \"items\": 3}"
+            )
+        ),
+    );
+    let found: Vec<_> = problems(copy.path())
+        .into_iter()
+        .map(|(code, _, _)| code)
+        .collect();
+    assert_eq!(found, ["shape.range", "shape.type", "shape.type"]);
+}
+
+#[test]
+fn list_and_object_specs_are_checked() {
+    const FIELDS: &str = "profile/schema/object-fields.jsonc";
+    assert_eq!(
+        super::MAXIMUM_LIST_ITEMS,
+        tilewright_jsonc::Limits::default().max_array_items
+    );
+    for (spec, code) in [
+        ("{\"type\": \"list\"}", "shape.missing_key"),
+        ("{\"type\": \"list\", \"items\": 3}", "shape.type"),
+        (
+            "{\"type\": \"list\", \"items\": {\"type\": \"boolean\", \"required\": true}}",
+            "shape.unknown_key",
+        ),
+        (
+            "{\"type\": \"list\", \"items\": {\"type\": \"boolean\"}, \"values\": []}",
+            "shape.unknown_key",
+        ),
+        (
+            "{\"type\": \"list\", \"items\": {\"type\": \"boolean\"}, \"min_items\": 3, \"max_items\": 2}",
+            "shape.range",
+        ),
+        (
+            "{\"type\": \"list\", \"items\": {\"type\": \"boolean\"}, \"min_items\": -1}",
+            "shape.range",
+        ),
+        (
+            "{\"type\": \"list\", \"items\": {\"type\": \"boolean\"}, \"max_items\": 250001}",
+            "shape.range",
+        ),
+        (
+            "{\"type\": \"list\", \"items\": {\"type\": \"set\"}}",
+            "shape.range",
+        ),
+        ("{\"type\": \"object\"}", "shape.missing_key"),
+        ("{\"type\": \"object\", \"fields\": []}", "shape.type"),
+        (
+            "{\"type\": \"object\", \"fields\": {\"Bad\": {\"type\": \"boolean\"}}}",
+            "shape.identifier",
+        ),
+        (
+            "{\"type\": \"object\", \"fields\": {\"a\": {\"type\": \"boolean\", \"required\": 1}}}",
+            "shape.type",
+        ),
+        (
+            "{\"type\": \"object\", \"fields\": {\"a\": {\"type\": \"boolean\"}}, \"items\": {}}",
+            "shape.unknown_key",
+        ),
+        (
+            "{\"type\": \"list\", \"items\": {\"type\": \"object\", \"fields\": {\"a\": {\"type\": \"reference\", \"target\": \"spell\"}}}}",
+            "ref.unresolved",
+        ),
+    ] {
+        let copy = workspace();
+        edit(
+            copy.path(),
+            FIELDS,
+            "\"fields\": {",
+            &format!("\"fields\": {{\"extra\": {spec}, "),
+        );
+        assert_eq!(codes(copy.path()), [(code, FIELDS.to_owned())], "{spec}");
+    }
+    let copy = workspace();
+    edit(
+        copy.path(),
+        FIELDS,
+        "\"fields\": {",
+        "\"fields\": {\"extra\": {\"type\": \"list\", \"items\": {\"type\": \"object\", \"fields\": {\"a\": {\"type\": \"reference\", \"target\": \"spell\"}}}}, ",
+    );
+    let found = load(copy.path()).expect_err("unknown target");
+    assert_eq!(
+        found[0].message,
+        "field \"extra[].a\" references unknown definition type \"spell\""
+    );
+}
+
+#[test]
+fn every_key_of_a_spec_is_checked() {
+    const FIELDS: &str = "profile/schema/object-fields.jsonc";
+    // One bad key hides no other.
+    for (spec, expected) in [
+        (
+            "{\"type\": \"list\", \"min_items\": 2, \"max_items\": 1, \"items\": 3}",
+            &["shape.range", "shape.type"][..],
+        ),
+        (
+            "{\"type\": \"list\", \"required\": 1, \"items\": 3}",
+            &["shape.type", "shape.type"],
+        ),
+        (
+            "{\"type\": \"integer\", \"min\": \"a\", \"max\": \"b\"}",
+            &["shape.type", "shape.type"],
+        ),
+        (
+            "{\"type\": \"string\", \"max_length\": 0, \"values\": [1, \"a\", \"a\"]}",
+            &["shape.range", "shape.type", "ref.duplicate"],
+        ),
+        (
+            "{\"type\": \"list\", \"items\": {\"required\": true, \"extra\": 0}}",
+            &[
+                "shape.missing_key",
+                "shape.unknown_key",
+                "shape.unknown_key",
+            ],
+        ),
+        (
+            "{\"required\": 1, \"extra\": 0}",
+            &["shape.missing_key", "shape.type", "shape.unknown_key"],
+        ),
+        (
+            "{\"type\": \"object\", \"fields\": {\"Bad\": {\"type\": \"set\"}}}",
+            &["shape.identifier", "shape.range"],
+        ),
+    ] {
+        let copy = workspace();
+        edit(
+            copy.path(),
+            FIELDS,
+            "\"fields\": {",
+            &format!("\"fields\": {{\"extra\": {spec}, "),
+        );
+        let found: Vec<_> = problems(copy.path())
+            .into_iter()
+            .map(|(code, _, _)| code)
+            .collect();
+        assert_eq!(found, expected, "{spec}");
+    }
 }

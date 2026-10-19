@@ -5,10 +5,10 @@
 
 use crate::diagnostic::Diagnostics;
 use crate::{
-    Code, Diagnostic, MAXIMUM_GROUND_LAYERS, Movement, Profile, Projection,
+    Code, Diagnostic, MAXIMUM_GROUND_LAYERS, MAXIMUM_LAYER_HEIGHT, Movement, Profile, Projection,
     files::{Tree, is_jsonc_path},
     read::Reader,
-    schema::{FieldType, Schema, read_schema},
+    schema::{Schema, read_schema},
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -47,16 +47,16 @@ fn references_resolve(
 ) -> bool {
     let mut ok = true;
     for (name, spec) in schema.fields() {
-        if let FieldType::Reference { target } = &spec.field_type
-            && !type_names.contains(target)
-        {
-            diagnostics.push(Diagnostic::file(
-                &schema.path,
-                Code::Reference,
-                format!("field \"{name}\" references unknown definition type \"{target}\""),
-            ));
-            ok = false;
-        }
+        spec.field_type.targets(name, &mut |field, target| {
+            if !type_names.contains(target) {
+                diagnostics.push(Diagnostic::file(
+                    &schema.path,
+                    Code::Reference,
+                    format!("field \"{field}\" references unknown definition type \"{target}\""),
+                ));
+                ok = false;
+            }
+        });
     }
     ok
 }
@@ -99,11 +99,21 @@ pub(crate) fn read_profile(
             "definition_types",
             "object_fields",
             "zone_properties",
+            "layer_height",
             "movement",
             "custom",
         ],
     )?;
     let mut ok = reader.format(root, "tilewright.profile/1");
+    // The layer height is read first, so no other member's problem hides
+    // one in it, and a bad one does not stop the profile's other checks.
+    let layer_height = root.get("layer_height").and_then(|value| {
+        let height = reader
+            .integer(value, 1, i64::from(MAXIMUM_LAYER_HEIGHT))
+            .and_then(|height| u32::try_from(height).ok());
+        ok &= height.is_some();
+        height
+    });
     let id = reader.identifier(reader.required(root, "id")?)?;
     let version = reader.text(reader.required(root, "version")?, 64)?;
     let projection_value = reader.required(root, "projection")?;
@@ -303,6 +313,7 @@ pub(crate) fn read_profile(
         definition_types,
         object_fields,
         zone_properties,
+        layer_height,
         movement,
         canonical,
     })

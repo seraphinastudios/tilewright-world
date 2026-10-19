@@ -33,19 +33,25 @@ mod plane;
 mod profile;
 mod read;
 mod schema;
+mod stairwell;
 
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 use tilewright_jsonc::Limits;
 
 use diagnostic::Diagnostics;
 pub use diagnostic::{Code, Diagnostic};
-pub use schema::{FieldSpec, FieldType, Schema};
+pub use schema::{FieldSpec, FieldType, MAXIMUM_FIELD_DEPTH, MAXIMUM_LIST_ITEMS, Schema};
 
 /// Tiles along each side of a chunk in format 1.
 pub const CHUNK_SIZE: u16 = 32;
 
 /// Most ground layers a profile may declare.
 pub const MAXIMUM_GROUND_LAYERS: usize = 8;
+
+/// Largest `layer_height` a profile may declare. A stacked elevation,
+/// `layer × layer_height + height + z`, then stays within the format's
+/// integer range for every 32-bit layer, height and `z`.
+pub const MAXIMUM_LAYER_HEIGHT: u32 = 65_535;
 
 /// Bounds on what a load may read.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -135,6 +141,10 @@ pub struct Profile {
     pub definition_types: BTreeMap<String, Arc<Schema>>,
     pub object_fields: Arc<Schema>,
     pub zone_properties: Arc<Schema>,
+    /// Height units per layer: layer `L` sits at `L × layer_height`, and
+    /// tile heights stay relative to their layer. `None` when the profile
+    /// does not stack layers.
+    pub layer_height: Option<u32>,
     pub movement: Option<Movement>,
     /// Canonical JSON of the profile document.
     pub canonical: String,
@@ -179,7 +189,7 @@ impl PlaneKind {
     }
 }
 
-/// One plane with its zones, anchors and chunks.
+/// One plane with its zones, anchors, stairwells and chunks.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Plane {
     pub id: String,
@@ -191,6 +201,7 @@ pub struct Plane {
     pub canonical: String,
     pub zones: BTreeMap<String, Zone>,
     pub anchors: BTreeMap<String, Anchor>,
+    pub stairwells: BTreeMap<String, Stairwell>,
     /// Chunks keyed by `(layer, cx, cy)`.
     pub chunks: BTreeMap<(i32, i64, i64), Chunk>,
 }
@@ -208,6 +219,114 @@ pub struct Zone {
 pub struct Anchor {
     pub layer: i32,
     pub at: [i64; 2],
+}
+
+/// One exit spanning several layers: steps on adjacent layers, used end to
+/// end in one move.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Stairwell {
+    pub id: String,
+    /// Steps in source order, at least two, each on the layer next to the
+    /// one before it, in one direction, and at most one tile away on each
+    /// axis.
+    pub steps: Vec<StairwellStep>,
+    pub direction: StairwellDirection,
+    /// Whether consumers draw only the step on the viewer's layer.
+    pub hidden_on_other_layers: bool,
+    /// Canonical JSON of the `custom` object.
+    pub custom: Option<String>,
+    /// Canonical JSON of the stairwell entry.
+    pub canonical: String,
+}
+
+impl Stairwell {
+    /// Whether `steps` form a stairwell: at least two, each on the layer
+    /// next to the one before it, all going up or all going down, and at
+    /// most one tile away from the step before it on each axis.
+    #[must_use]
+    pub fn connects(steps: &[StairwellStep]) -> bool {
+        let [first, second, ..] = steps else {
+            return false;
+        };
+        let up = second.layer > first.layer;
+        steps.windows(2).all(|pair| pair[0].leads_to(&pair[1], up))
+    }
+
+    /// The step on the lowest layer.
+    #[must_use]
+    pub fn lower_end(&self) -> Option<&StairwellStep> {
+        self.steps.iter().min_by_key(|step| step.layer)
+    }
+
+    /// The step on the highest layer.
+    #[must_use]
+    pub fn upper_end(&self) -> Option<&StairwellStep> {
+        self.steps.iter().max_by_key(|step| step.layer)
+    }
+}
+
+/// One step of a stairwell, in plane coordinates.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StairwellStep {
+    pub layer: i32,
+    pub at: [i64; 2],
+    pub proto: String,
+}
+
+impl StairwellStep {
+    /// Whether `next` may follow this step in a stairwell that goes `up`
+    /// (or down): it is on the next layer that way and at most one tile
+    /// away on each axis.
+    #[must_use]
+    pub fn leads_to(&self, next: &Self, up: bool) -> bool {
+        adjacent((self.layer, self.at), (next.layer, next.at), up)
+    }
+}
+
+/// Whether a step at position `next` (layer and plane coordinates) may
+/// follow one at `before` in a stairwell that goes `up` (or down).
+pub(crate) fn adjacent(before: (i32, [i64; 2]), next: (i32, [i64; 2]), up: bool) -> bool {
+    let change = if up { 1 } else { -1 };
+    i64::from(next.0) - i64::from(before.0) == change
+        && before
+            .1
+            .iter()
+            .zip(next.1)
+            .all(|(before, after)| (i128::from(*before) - i128::from(after)).abs() <= 1)
+}
+
+/// Which way a stairwell may be used.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum StairwellDirection {
+    /// From either end to the other.
+    #[default]
+    Both,
+    /// Only from the upper end to the lower end.
+    Down,
+    /// Only from the lower end to the upper end.
+    Up,
+}
+
+impl StairwellDirection {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Both => "both",
+            Self::Down => "down",
+            Self::Up => "up",
+        }
+    }
+
+    /// The direction a source or pack spells `text`.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "both" => Some(Self::Both),
+            "down" => Some(Self::Down),
+            "up" => Some(Self::Up),
+            _ => None,
+        }
+    }
 }
 
 /// A character grid: one palette value per tile.
@@ -261,7 +380,8 @@ pub struct Object {
     pub custom: Option<String>,
 }
 
-/// A field value. Arrays and objects are kept as canonical JSON.
+/// A field value. Arrays and objects, the values of `json`, `list` and
+/// `object` fields, are kept as canonical JSON.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FieldValue {
     Null,

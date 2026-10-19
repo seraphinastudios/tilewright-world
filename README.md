@@ -14,8 +14,10 @@ game-specific code.
 
 ## Specifications
 
-- [World format](docs/spec/FORMAT.md): planes, layers, chunks, terrain grids,
-  objects, zones, portals, anchors, definitions and the strict JSONC dialect.
+- [World format](docs/spec/FORMAT.md): planes, stacked layers, chunks,
+  terrain grids, objects, zones, portals, anchors, stairwells, definitions,
+  typed field schemas with nested lists and objects, and the strict JSONC
+  dialect.
 - [Content pack](docs/spec/PACK.md): the SQLite pack and the binary chunk
   encoding.
 
@@ -42,7 +44,8 @@ cargo run --locked --package tilewright-cli -- inspect dist/<sha256>.twpack
 ```
 
 `validate` prints one line per problem (`path:line:column: code: message`), or
-a JSON array with `--json`. `compile` writes `<sha256>.twpack` atomically and
+a JSON array with `--json`, and a summary of planes, chunks, stairwells and
+definitions when the tree is valid. `compile` writes `<sha256>.twpack` atomically and
 never replaces a different file. `inspect` verifies a pack and prints its
 metadata and counts. `fixtures/basic` is a small synthetic world that uses
 every feature of the format.

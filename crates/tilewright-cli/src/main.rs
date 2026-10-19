@@ -246,8 +246,13 @@ fn validate(root: &Path, json: bool) -> Result<String, Failure> {
         .values()
         .map(|plane| plane.chunks.len())
         .sum();
+    let stairwells: usize = world
+        .planes()
+        .values()
+        .map(|plane| plane.stairwells.len())
+        .sum();
     Ok(format!(
-        "valid: {} plane(s), {chunks} chunk(s), {} definition(s), source {}\n",
+        "valid: {} plane(s), {chunks} chunk(s), {stairwells} stairwell(s), {} definition(s), source {}\n",
         world.planes().len(),
         world.definitions().len(),
         hex(&world.source_digest())
@@ -299,10 +304,11 @@ fn inspect(path: &Path, limits: tilewright_pack::VerifyLimits) -> Result<String,
     );
     let _ = writeln!(
         output,
-        "planes: {}\nzones: {}\nanchors: {}\nchunks: {}\nobjects: {}\ndefinitions: {}\nstrings: {}\nverified: yes",
+        "planes: {}\nzones: {}\nanchors: {}\nstairwells: {}\nchunks: {}\nobjects: {}\ndefinitions: {}\nstrings: {}\nverified: yes",
         summary.planes,
         summary.zones,
         summary.anchors,
+        summary.stairwells,
         summary.chunks,
         summary.objects,
         summary.definitions,
@@ -332,7 +338,10 @@ mod tests {
     fn validate_compile_and_inspect_the_fixture() {
         let root = fixture();
         let summary = run(&["validate", &root]).unwrap();
-        assert!(summary.starts_with("valid: 2 plane(s), 4 chunk(s), 11 definition(s)"));
+        assert!(
+            summary.starts_with("valid: 2 plane(s), 5 chunk(s), 3 stairwell(s), 12 definition(s)"),
+            "{summary}"
+        );
         assert_eq!(run(&["validate", "--json", &root]).unwrap(), "[]\n");
 
         let output = tempfile::tempdir().unwrap();
@@ -348,6 +357,7 @@ mod tests {
         let inspected = run(&["inspect", &pack]).unwrap();
         assert!(inspected.contains("format: tilewright.pack/1"));
         assert!(inspected.contains("objects: 11"));
+        assert!(inspected.contains("stairwells: 3"));
         assert!(inspected.contains("verified: yes"));
         assert!(
             run(&["inspect", "--max-decoded-bytes", "100000000", &pack])

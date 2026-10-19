@@ -26,7 +26,10 @@ use std::{
     path::{Path, PathBuf},
 };
 use tilewright_jsonc::{Document, Limits, MAX_SAFE_INTEGER, Value};
-use tilewright_source::{CHUNK_SIZE, MAXIMUM_GROUND_LAYERS};
+use tilewright_source::{
+    CHUNK_SIZE, MAXIMUM_GROUND_LAYERS, MAXIMUM_LAYER_HEIGHT, Stairwell, StairwellDirection,
+    StairwellStep,
+};
 
 /// The page size of every pack.
 const PAGE_SIZE: i64 = 4096;
@@ -82,11 +85,22 @@ pub struct Summary {
     pub planes: u64,
     pub zones: u64,
     pub anchors: u64,
+    pub stairwells: u64,
     pub chunks: u64,
     pub definitions: u64,
     /// Objects in every chunk, inventories included; counted by
     /// [`Pack::verify`] only.
     pub objects: u64,
+}
+
+/// The stairwell step on a tile.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StairwellTile {
+    /// The stairwell's ID.
+    pub stairwell: String,
+    /// The step's position in the stairwell's steps.
+    pub step: usize,
+    pub proto: String,
 }
 
 pub struct Pack {
@@ -201,6 +215,23 @@ fn chunk_data_with(value: types::Value, visit: Option<Visit<'_>>) -> Result<Chun
     }
 }
 
+/// SQL for `column` when it is text the length of an identifier, at most
+/// 128 bytes, else NULL; callers then check the pattern.
+fn bounded_identifier(column: &str) -> String {
+    format!(
+        "CASE WHEN typeof({column}) = 'text' AND octet_length({column}) BETWEEN 1 AND 128 THEN {column} END"
+    )
+}
+
+/// SQL for `column` when it is an index a source array can have, from 0 to
+/// one less than the array limit, else NULL.
+fn step_index(column: &str) -> String {
+    format!(
+        "CASE WHEN typeof({column}) = 'integer' AND {column} BETWEEN 0 AND {} THEN {column} END",
+        Limits::default().max_array_items - 1
+    )
+}
+
 /// SQL for `column` when it is text of at most `?1` bytes, else NULL.
 fn bounded_text(column: &str) -> String {
     format!(
@@ -261,9 +292,136 @@ fn projection_ok(profile: &Document) -> bool {
         })
 }
 
+/// The `layer_height` of a stored profile: `Ok(None)` when it has none, and
+/// an error unless it is an integer from 1 to [`MAXIMUM_LAYER_HEIGHT`].
+fn stored_layer_height(profile: &Document) -> Result<Option<u32>, Error> {
+    profile
+        .root()
+        .get("layer_height")
+        .map(|value| {
+            value
+                .as_i64()
+                .filter(|height| (1..=i64::from(MAXIMUM_LAYER_HEIGHT)).contains(height))
+                .and_then(|height| u32::try_from(height).ok())
+                .ok_or_else(|| {
+                    Error::Invalid(format!(
+                        "the stored profile's layer_height is not an integer from 1 to {MAXIMUM_LAYER_HEIGHT}"
+                    ))
+                })
+        })
+        .transpose()
+}
+
+/// Reads a stored stairwell document, already checked to be canonical JSON
+/// of an object with namespaced custom data, into a stairwell with the
+/// source format's shape: an identifier, at least two connected steps,
+/// each a 32-bit layer, a position within the integer range and a
+/// prototype identifier, and a valid direction and flag.
+fn stored_stairwell(document: &Document) -> Result<Stairwell, Error> {
+    let invalid =
+        || Error::Invalid("a stairwell document does not have the source format's shape".into());
+    let closed = |value: &Value, keys: &[&str]| {
+        value.as_object().is_some_and(|members| {
+            members
+                .iter()
+                .all(|member| keys.contains(&member.key.as_str()))
+        })
+    };
+    let root = document.root();
+    if !closed(
+        root,
+        &[
+            "id",
+            "steps",
+            "direction",
+            "hidden_on_other_layers",
+            "custom",
+        ],
+    ) {
+        return Err(invalid());
+    }
+    let id = text(document, "id")
+        .filter(|id| is_identifier(id))
+        .ok_or_else(invalid)?;
+    let direction = match root.get("direction") {
+        None => StairwellDirection::Both,
+        Some(value) => value
+            .as_str()
+            .and_then(StairwellDirection::parse)
+            .ok_or_else(invalid)?,
+    };
+    let hidden_on_other_layers = match root.get("hidden_on_other_layers") {
+        None => true,
+        Some(value) => value.as_bool().ok_or_else(invalid)?,
+    };
+    let in_range = |value: &Value| {
+        value
+            .as_i64()
+            .filter(|number| (-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER).contains(number))
+    };
+    let mut steps = Vec::new();
+    for step in root
+        .get("steps")
+        .and_then(Value::as_array)
+        .ok_or_else(invalid)?
+    {
+        if !closed(step, &["layer", "at", "proto"]) {
+            return Err(invalid());
+        }
+        let layer = step
+            .get("layer")
+            .and_then(Value::as_i64)
+            .and_then(|layer| i32::try_from(layer).ok());
+        let at = match step.get("at").and_then(Value::as_array) {
+            Some([x, y]) => in_range(x).zip(in_range(y)).map(|(x, y)| [x, y]),
+            _ => None,
+        };
+        let proto = step
+            .get("proto")
+            .and_then(Value::as_str)
+            .filter(|proto| is_identifier(proto));
+        let (Some(layer), Some(at), Some(proto)) = (layer, at, proto) else {
+            return Err(invalid());
+        };
+        steps.push(StairwellStep {
+            layer,
+            at,
+            proto: proto.to_owned(),
+        });
+    }
+    if !Stairwell::connects(&steps) {
+        return Err(Error::Invalid(format!(
+            "the steps of stairwell {id} are not on adjacent layers in one direction, at most one tile apart"
+        )));
+    }
+    Ok(Stairwell {
+        id: id.to_owned(),
+        steps,
+        direction,
+        hidden_on_other_layers,
+        custom: root.get("custom").map(|custom| document.canonical(custom)),
+        canonical: document.source().to_owned(),
+    })
+}
+
 /// A string member of a document's root object.
 fn text<'d>(document: &'d Document, key: &str) -> Option<&'d str> {
     document.root().get(key).and_then(Value::as_str)
+}
+
+/// A stairwell from a row of `id, document`, bounded in SQL by
+/// [`bounded_identifier`] and [`bounded_text`] (NULL when out of bounds),
+/// after checking that the document has the row's ID.
+fn stairwell_row(row: &rusqlite::Row<'_>) -> Result<Stairwell, Error> {
+    let id: Option<String> = row.get(0)?;
+    let stairwell = stored_stairwell(&stored_document(row.get(1)?, "a stairwell document")?)?;
+    if id.as_deref() != Some(stairwell.id.as_str()) {
+        return Err(Error::Invalid(format!(
+            "the document of stairwell {} disagrees with its row",
+            stairwell.id
+        )));
+    }
+    Ok(stairwell)
 }
 
 impl Pack {
@@ -410,6 +568,105 @@ impl Pack {
         value.map(chunk_data).transpose()
     }
 
+    /// The profile's `layer_height`: height units per layer, or `None` when
+    /// the profile does not stack layers. The stored profile is checked as a
+    /// full verification checks it.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite fails or the stored profile is invalid.
+    pub fn layer_height(&self) -> Result<Option<u32>, Error> {
+        Ok(self.profile_layers()?.2)
+    }
+
+    /// One stairwell of a plane, read from its stored document. Like
+    /// [`Pack::chunk`], it checks the shape and bounds of what it loads;
+    /// whether the plane and the steps' prototypes exist is checked by
+    /// [`Pack::verify`].
+    ///
+    /// # Errors
+    /// Returns an error if SQLite fails, or the stored stairwell does not
+    /// have the source format's shape or disagrees with its row.
+    pub fn stairwell(&self, plane: &str, id: &str) -> Result<Option<Stairwell>, Error> {
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT {}, {} FROM stairwells WHERE plane = ?2 AND id = ?3",
+            bounded_identifier("id"),
+            bounded_text("document"),
+        ))?;
+        let mut rows = statement.query(params![maximum_document_bytes(), plane, id])?;
+        rows.next()?.map(stairwell_row).transpose()
+    }
+
+    /// Calls `visit` with each stairwell of a plane, in ID order. One
+    /// stored document is held at a time.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite fails, a stored stairwell is invalid, or
+    /// `visit` fails.
+    pub fn visit_stairwells(
+        &self,
+        plane: &str,
+        visit: &mut dyn FnMut(Stairwell) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT {}, {} FROM stairwells WHERE plane = ?2 ORDER BY id",
+            bounded_identifier("id"),
+            bounded_text("document"),
+        ))?;
+        let mut rows = statement.query(params![maximum_document_bytes(), plane])?;
+        while let Some(row) = rows.next()? {
+            visit(stairwell_row(row)?)?;
+        }
+        Ok(())
+    }
+
+    /// The stairwell step on a tile of a plane, if any. It checks the shape
+    /// and bounds of what it loads; whether the stairwell and prototype
+    /// exist is checked by [`Pack::verify`].
+    ///
+    /// # Errors
+    /// Returns an error if SQLite fails or the stored step is invalid.
+    pub fn stairwell_step(
+        &self,
+        plane: &str,
+        layer: i32,
+        x: i64,
+        y: i64,
+    ) -> Result<Option<StairwellTile>, Error> {
+        let found: Option<(Option<String>, Option<i64>, Option<String>)> = self
+            .connection
+            .query_row(
+                &format!(
+                    "SELECT {}, {}, {} FROM stairwell_steps \
+                     WHERE plane = ?1 AND layer = ?2 AND x = ?3 AND y = ?4",
+                    bounded_identifier("stairwell"),
+                    step_index("step"),
+                    bounded_identifier("proto"),
+                ),
+                params![plane, layer, x, y],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some(found) = found else {
+            return Ok(None);
+        };
+        match found {
+            (Some(stairwell), Some(step), Some(proto))
+                if is_identifier(&stairwell) && is_identifier(&proto) =>
+            {
+                Ok(Some(StairwellTile {
+                    stairwell,
+                    step: usize::try_from(step).map_err(|_| {
+                        Error::Invalid("a stairwell step has a negative index".into())
+                    })?,
+                    proto,
+                }))
+            }
+            _ => Err(Error::Invalid(
+                "a stairwell step's stairwell or proto is not an identifier, or its index is not one a source array can have".into(),
+            )),
+        }
+    }
+
     /// Row counts.
     ///
     /// # Errors
@@ -428,6 +685,7 @@ impl Pack {
             planes: count("planes")?,
             zones: count("zones")?,
             anchors: count("anchors")?,
+            stairwells: count("stairwells")?,
             chunks: count("chunks")?,
             definitions: count("definitions")?,
             objects: 0,
@@ -569,7 +827,8 @@ impl Pack {
         self.check_rows()?;
         self.check_string_encoding()?;
         self.check_documents()?;
-        let (render_layers, ground_layers) = self.profile_layers()?;
+        self.check_stairwells()?;
+        let (render_layers, ground_layers, _) = self.profile_layers()?;
         let mut targets = Targets {
             strings: u32::try_from(summary.strings)
                 .map_err(|_| Error::Invalid("too many strings".into()))?,
@@ -694,6 +953,28 @@ impl Pack {
                 "an anchor has an invalid ID, layer or position, or names an unknown plane",
             ),
             (
+                format!(
+                    "SELECT count(*) FROM stairwells s WHERE {} OR NOT EXISTS (SELECT 1 FROM planes p WHERE p.id = s.plane)",
+                    not_identifier("s.id")
+                ),
+                "a stairwell has an invalid ID or names an unknown plane",
+            ),
+            (
+                // A step's stairwell is a stairwell of its plane, so the plane
+                // exists too.
+                format!(
+                    "SELECT count(*) FROM stairwell_steps t WHERE NOT EXISTS (SELECT 1 FROM stairwells s WHERE s.plane = t.plane AND s.id = t.stairwell) \
+                     OR typeof(t.layer) != 'integer' OR t.layer NOT BETWEEN -2147483648 AND 2147483647 \
+                     OR typeof(t.x) != 'integer' OR t.x NOT BETWEEN -{MAX_SAFE_INTEGER} AND {MAX_SAFE_INTEGER} \
+                     OR typeof(t.y) != 'integer' OR t.y NOT BETWEEN -{MAX_SAFE_INTEGER} AND {MAX_SAFE_INTEGER} \
+                     OR {} IS NULL \
+                     OR {} OR NOT EXISTS (SELECT 1 FROM definitions d WHERE d.type = 'proto' AND d.id = t.proto)",
+                    step_index("t.step"),
+                    not_identifier("t.proto")
+                ),
+                "a stairwell step names an unknown stairwell or proto, or has an invalid layer, position or index",
+            ),
+            (
                 // Chunk `c` covers tiles `c * size ..= c * size + size - 1`.
                 format!(
                     "SELECT count(*) FROM chunks c LEFT JOIN planes p ON p.id = c.plane WHERE p.id IS NULL \
@@ -807,9 +1088,82 @@ impl Pack {
         Ok(())
     }
 
+    /// Checks every stored stairwell document against its row and the
+    /// `stairwell_steps` table: each step is the row at its tile, naming its
+    /// stairwell, its index and its prototype, and the table holds no other
+    /// rows. One document is held at a time, and each step is one lookup.
+    /// [`Pack::check_rows`] has already checked the rows' columns.
+    fn check_stairwells(&self) -> Result<(), Error> {
+        let mut stairwells = self.connection.prepare(&format!(
+            "SELECT plane, id, {} FROM stairwells ORDER BY plane, id",
+            bounded_text("document")
+        ))?;
+        let mut step_at = self.connection.prepare(
+            "SELECT stairwell, step, proto FROM stairwell_steps WHERE plane = ?1 AND layer = ?2 AND x = ?3 AND y = ?4",
+        )?;
+        let mut listed: u64 = 0;
+        // Stairwells and steps of the plane being checked: one source
+        // document holds at most the array limit of stairwells and the value
+        // limit of steps.
+        let limits = Limits::default();
+        let (mut current, mut count, mut steps) = (String::new(), 0_usize, 0_usize);
+        let mut rows = stairwells.query([maximum_document_bytes()])?;
+        while let Some(row) = rows.next()? {
+            let (plane, id): (String, String) = (row.get(0)?, row.get(1)?);
+            if plane != current {
+                current.clone_from(&plane);
+                (count, steps) = (0, 0);
+            }
+            count += 1;
+            if count > limits.max_array_items {
+                return Err(Error::Invalid(format!(
+                    "plane {plane} has more stairwells than a source document holds"
+                )));
+            }
+            let stored = stored_stairwell(&stored_document(row.get(2)?, "a stairwell document")?)?;
+            steps = steps.saturating_add(stored.steps.len());
+            if steps > limits.max_values {
+                return Err(Error::Invalid(format!(
+                    "plane {plane} has more stairwell steps than a source document holds"
+                )));
+            }
+            let disagrees = || {
+                Error::Invalid(format!(
+                    "the document of stairwell {plane}/{id} disagrees with its rows"
+                ))
+            };
+            if stored.id != id {
+                return Err(disagrees());
+            }
+            for (index, step) in stored.steps.iter().enumerate() {
+                let found: Option<(String, i64, String)> = step_at
+                    .query_row(params![plane, step.layer, step.at[0], step.at[1]], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                    })
+                    .optional()?;
+                let expected = i64::try_from(index).map_err(|_| disagrees())?;
+                if found.as_ref().is_none_or(|(stairwell, step_index, proto)| {
+                    *stairwell != id || *step_index != expected || *proto != step.proto
+                }) {
+                    return Err(disagrees());
+                }
+            }
+            listed = listed.saturating_add(u64::try_from(stored.steps.len()).unwrap_or(u64::MAX));
+        }
+        let rows: i64 =
+            self.connection
+                .query_row("SELECT count(*) FROM stairwell_steps", [], |row| row.get(0))?;
+        if u64::try_from(rows).ok() != Some(listed) {
+            return Err(Error::Invalid(
+                "stairwell_steps holds a step that no stairwell lists".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Render and ground layer counts from the stored profile, which must be
     /// canonical and agree with `profile_id` and `profile_version`.
-    fn profile_layers(&self) -> Result<(usize, usize), Error> {
+    fn profile_layers(&self) -> Result<(usize, usize, Option<u32>), Error> {
         let profile = stored_document(self.meta("profile")?, "the stored profile")?;
         // The identity must be one a source profile can have: an identifier
         // and a version of at most 64 characters.
@@ -829,6 +1183,7 @@ impl Pack {
                 "the stored profile's projection is not one a source profile can have".into(),
             ));
         }
+        let layer_height = stored_layer_height(&profile)?;
         // Each list holds unique identifiers within its count, and every
         // ground layer is a render layer other than `height` or `zone`.
         let layers = |key: &str, range: std::ops::RangeInclusive<usize>| {
@@ -862,7 +1217,7 @@ impl Pack {
                 "a stored ground layer is not a render layer other than height or zone".into(),
             ));
         }
-        Ok((render.len(), ground.len()))
+        Ok((render.len(), ground.len(), layer_height))
     }
 }
 
