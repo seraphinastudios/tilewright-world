@@ -167,11 +167,10 @@ The pipeline changes no settings. It relies on:
   assets cannot change. The release job checks `immutable: true` after
   publishing and fails loudly if it is not.
 - **The organization ruleset "Tilewright 04 - Immutable release tags"**. It
-  forbids deleting or moving `refs/tags/v[0-9]*`. It does not cover the Go
-  tags `go/v*`, which have no GitHub release of their own, so an
-  administrator could still move or delete one. Adding `refs/tags/go/v[0-9]*`
-  to that ruleset would protect them too. The Go checksum database already
-  rejects changed content for any version that was fetched once.
+  forbids deleting or moving `refs/tags/v[0-9]*` and `refs/tags/go/v[0-9]*`,
+  so it also protects the Go tags, which have no GitHub release of their
+  own. The Go checksum database also rejects changed content for any
+  version that was fetched once.
 - **The Actions allowlist**, for checkout, setup-node, upload-artifact,
   download-artifact and attest-build-provenance.
 
