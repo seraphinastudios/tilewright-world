@@ -1144,3 +1144,29 @@ mod windows_tests {
         assert!(matches!(base.access("plain.jsonc"), Err(Refused::Io(_))));
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod selinux_tests {
+    use super::beneath::selinux::{request, trimmed};
+
+    #[test]
+    fn label_questions_are_one_line_with_the_name_encoded() {
+        let query = request(
+            b"unconfined_u:unconfined_r:unconfined_t:s0-s0:c0.c1023\0",
+            b"unconfined_u:object_r:user_home_t:s0\0",
+            7,
+            "0_0.jsonc",
+        )
+        .unwrap();
+        assert_eq!(
+            query,
+            b"unconfined_u:unconfined_r:unconfined_t:s0-s0:c0.c1023 unconfined_u:object_r:user_home_t:s0 7 0_0.jsonc"
+        );
+        let odd = request(b"a", b"b", 1, "x y%+\u{e9}").unwrap();
+        assert_eq!(odd, b"a b 1 x%20y%25%2b%c3%a9");
+        assert!(request(b"a b", b"c", 1, "x").is_err());
+        assert!(request(b"", b"c", 1, "x").is_err());
+        assert_eq!(trimmed(b"label\0\n"), b"label");
+        assert_eq!(trimmed(b"\0"), b"");
+    }
+}

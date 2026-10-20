@@ -335,10 +335,14 @@ creates, must be given that same label by the policy, which is checked
 before a byte is written or the directory used; otherwise publishing fails
 and nothing is published. A tree whose files and directories carry one
 label, as a user's files commonly do under SELinux, can be published. A
-new file is staged under another name, so it gets the label the policy
-gives that name, which must be the tree's; a type transition the policy
-keys on the final file name is not applied, and relabelling the tree
-afterwards (`restorecon -R`) applies it.
+new file is staged under another name, and renaming does not relabel it,
+so where SELinux is enabled publishing also asks it (through
+`/sys/fs/selinux/create`) which label the policy gives a new file of the
+final name, which may differ by a rule keyed on the name, and refuses
+unless it is the label the staged file got. Smack's execution, mapping and
+transmuting labels (`SMACK64EXEC`, `SMACK64MMAP`, `SMACK64TRANSMUTE`) are
+refused, since a replacement, or a directory made again, would not get
+them.
 
 On Windows a new entry gets the access control list its directory gives
 it, by inheritance, and publishing never changes a list. So the changed
@@ -352,8 +356,9 @@ are checked before a byte is written, and a directory publishing makes
 must be given the list of the directory above it. Whether an entry of a
 list is marked inherited is not compared: a system marks the entries it
 copies from a directory's list only where that list is marked so. A list
-protected from inheritance, a mandatory integrity label or central access
-policy, encryption, and the read-only attribute on a file are refused. The
+protected from inheritance, a mandatory integrity label, a central access
+policy, a resource attribute (which conditional entries can test), a trust
+label, encryption, and the read-only attribute on a file are refused. The
 owner of every file written is the user applying.
 
 A file whose bytes end as they began is not written. Restoring after a

@@ -241,6 +241,12 @@ impl Directory {
         written
     }
 
+    /// There are no labels a file's name decides here.
+    #[allow(clippy::unnecessary_wraps, clippy::unused_self, dead_code)]
+    pub(crate) fn check_final_name(&self, _: &str, _: &str) -> Result<(), Refused> {
+        Ok(())
+    }
+
     pub(crate) fn rename(&self, from: &str, to: &str) -> Result<(), Refused> {
         fs::rename(self.0.join(from), self.0.join(to)).map_err(Refused::Io)
     }

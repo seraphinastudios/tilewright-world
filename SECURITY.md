@@ -38,9 +38,10 @@ replaces did not have.
 - On Linux, their mandatory access control labels (SELinux, Smack) must be
   the same too. Publishing never sets a label: the system's policy must
   give every file it writes, and directory it creates, that label, which is
-  checked before a byte is written. A type transition the policy keys on a
-  new file's final name is not applied, since the file is staged under
-  another name; relabelling the tree applies it.
+  checked before a byte is written. For a new file, which is staged under
+  another name, SELinux is also asked which label the policy gives its
+  final name, and publishing refuses if that differs. Smack's execution,
+  mapping and transmuting labels are refused.
 - On Windows, the changed files must share one access control list, and
   the directories above them one, and every file publishing writes, every
   deleted file (through an empty file staged beside it) and every directory
@@ -48,8 +49,8 @@ replaces did not have.
   before a byte is written; so a file with entries of its own, which a
   replacement or an inverse would not get, is refused. Publishing never
   changes a list. A list protected from inheritance, a mandatory integrity
-  label, a central access policy, encryption or a read-only file is
-  refused. The lock is a file in the root, `.tilewright.lock`, that is
+  label, a central access policy, a resource attribute, a trust label,
+  encryption or a read-only file is refused. The lock is a file in the root, `.tilewright.lock`, that is
   shared with no one and deleted when released.
 
 Other platforms, the BSDs other than macOS among them, are not checked for

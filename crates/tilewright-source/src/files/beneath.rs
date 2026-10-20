@@ -402,6 +402,40 @@ impl Directory {
         }
     }
 
+    /// Checks that a file made here as `name` would get the `SELinux` label
+    /// that the file `staged` here got. A rule of the system's policy that
+    /// keys a new file's label on its name applies when a file is made, not
+    /// when it is renamed, so a file staged under another name and renamed
+    /// to `name` would keep a label the policy does not give `name`. Where
+    /// `SELinux` labels nothing here, there is nothing to check.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn check_final_name(&self, staged: &str, name: &str) -> Result<(), Refused> {
+        let Some(directory) = label(&self.0, "security.selinux")? else {
+            return Ok(());
+        };
+        let flags =
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC | OFlags::NOCTTY;
+        let fd = openat(&self.0, staged, flags, Mode::empty())
+            .map_err(|errno| classify(self.0.as_fd(), staged, errno, &[staged]))?;
+        let given = label(&fd, "security.selinux")?;
+        let Some(expected) = selinux::compute_create(&directory, name).map_err(Refused::Io)? else {
+            return Ok(());
+        };
+        if given.as_deref().map(selinux::trimmed) == Some(selinux::trimmed(&expected)) {
+            Ok(())
+        } else {
+            Err(unkept(
+                "the system's policy labels a new file of its name otherwise than the file staged for it, and renaming does not relabel",
+            ))
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[allow(clippy::unnecessary_wraps, clippy::unused_self)]
+    pub(crate) fn check_final_name(&self, _: &str, _: &str) -> Result<(), Refused> {
+        Ok(())
+    }
+
     /// Syncs the directory, so renames and removals in it are durable.
     pub(crate) fn sync(&self) -> Result<bool, Refused> {
         fsync(&self.0)
@@ -470,6 +504,14 @@ const ACCESS_CONTROL_LISTS: [&str; 3] = [
 #[cfg(target_os = "linux")]
 const LABELS: [&str; 2] = ["security.selinux", "security.SMACK64"];
 
+/// Labels that publishing refuses, since it could not keep them.
+#[cfg(target_os = "linux")]
+const UNKEPT_LABELS: [&str; 3] = [
+    "security.SMACK64EXEC",
+    "security.SMACK64MMAP",
+    "security.SMACK64TRANSMUTE",
+];
+
 /// An error for access control that publishing could not keep.
 fn unkept(what: &str) -> Refused {
     Refused::Io(std::io::Error::new(
@@ -522,6 +564,14 @@ const LABEL_LIMIT: usize = 4096;
 #[cfg(target_os = "linux")]
 fn labels(fd: impl AsFd) -> Result<[u8; 32], Refused> {
     use sha2::{Digest as _, Sha256};
+    // Smack's other labels say how a file is executed or mapped, or how a
+    // directory labels what is made in it; a replacement, or an entry made
+    // again, would not get them.
+    if has_any(&fd, &UNKEPT_LABELS)? {
+        return Err(unkept(
+            "it has a Smack execution, mapping or transmuting label",
+        ));
+    }
     let mut values = Vec::with_capacity(LABELS.len());
     for name in LABELS {
         values.push((name, label(&fd, name)?));
@@ -616,4 +666,90 @@ fn strip_access_control_list(fd: impl AsFd) -> Result<(), Refused> {
         )));
     }
     Ok(())
+}
+
+/// `SELinux`'s own answer to which label a new file gets.
+#[cfg(target_os = "linux")]
+pub(crate) mod selinux {
+    use std::{
+        fs,
+        io::{self, Read as _, Write as _},
+    };
+
+    /// Where the kernel's `SELinux` file system is mounted.
+    const FILE_SYSTEM: &str = "/sys/fs/selinux";
+
+    /// The largest label read back.
+    const LIMIT: u64 = 4096;
+
+    /// A label without the NUL or newline that ends it.
+    pub(crate) fn trimmed(label: &[u8]) -> &[u8] {
+        let end = label
+            .iter()
+            .rposition(|byte| !matches!(byte, b'\0' | b'\n'))
+            .map_or(0, |last| last + 1);
+        &label[..end]
+    }
+
+    /// The label the policy gives a regular file this thread makes as
+    /// `name` in a directory labelled `directory`; `None` when `SELinux` is
+    /// not enabled.
+    pub(super) fn compute_create(directory: &[u8], name: &str) -> io::Result<Option<Vec<u8>>> {
+        let class = match fs::read_to_string(format!("{FILE_SYSTEM}/class/file/index")) {
+            Ok(index) => index
+                .trim()
+                .parse::<u16>()
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let thread = fs::read("/proc/thread-self/attr/current")?;
+        let query = request(&thread, directory, class, name)?;
+        let mut answer = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(format!("{FILE_SYSTEM}/create"))?;
+        // The kernel takes the question in one write.
+        if answer.write(&query)? != query.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "the label question was not taken whole",
+            ));
+        }
+        let mut label = Vec::new();
+        answer.take(LIMIT).read_to_end(&mut label)?;
+        Ok(Some(trimmed(&label).to_vec()))
+    }
+
+    /// The question `SELinux`'s `create` file answers: the labels of who
+    /// makes the file and of where, the class of file, and its name,
+    /// percent-encoded so that no byte of it ends the question.
+    pub(crate) fn request(
+        source: &[u8],
+        target: &[u8],
+        class: u16,
+        name: &str,
+    ) -> io::Result<Vec<u8>> {
+        let (source, target) = (trimmed(source), trimmed(target));
+        let plain = |label: &[u8]| !label.is_empty() && label.iter().all(u8::is_ascii_graphic);
+        if !plain(source) || !plain(target) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "a label is not plain text",
+            ));
+        }
+        let mut query = Vec::with_capacity(source.len() + target.len() + name.len() * 3 + 16);
+        query.extend_from_slice(source);
+        query.push(b' ');
+        query.extend_from_slice(target);
+        query.extend_from_slice(format!(" {class} ").as_bytes());
+        for byte in name.bytes() {
+            if byte.is_ascii_alphanumeric() || b"-_.".contains(&byte) {
+                query.push(byte);
+            } else {
+                query.extend_from_slice(format!("%{byte:02x}").as_bytes());
+            }
+        }
+        Ok(query)
+    }
 }

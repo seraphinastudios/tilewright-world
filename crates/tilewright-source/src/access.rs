@@ -317,8 +317,8 @@ impl SourceDirectory {
     /// file there. A file whose access publishing could not keep is
     /// refused: on Linux and macOS one with an access control list; on
     /// Windows one with a list protected from inheritance, a mandatory
-    /// integrity label or central access policy, encryption, or the
-    /// read-only attribute.
+    /// integrity label, a central access policy, a resource attribute, a
+    /// trust label, encryption, or the read-only attribute.
     pub fn access(&self, name: &str) -> Result<Option<Access>, AccessError> {
         self.directory
             .access(checked_name(name)?)
@@ -342,6 +342,17 @@ impl SourceDirectory {
         self.directory
             .set_own_access(access)
             .map_err(|error| refused(&self.path, error))
+    }
+
+    /// Checks that a file made here as `name` would get the access control
+    /// beside the mode bits that the file `staged` here got: on Linux with
+    /// `SELinux`, the label its policy gives a new file of that name, which
+    /// may depend on the name and is not given again on renaming. Elsewhere
+    /// there is nothing to check.
+    pub fn check_final_name(&self, staged: &str, name: &str) -> Result<(), AccessError> {
+        self.directory
+            .check_final_name(checked_name(staged)?, checked_name(name)?)
+            .map_err(|error| refused(&self.entry(name), error))
     }
 
     /// Renames `from` to `to`, replacing `to`, atomically.

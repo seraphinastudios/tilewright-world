@@ -40,9 +40,9 @@ use windows_sys::{
             STATUS_OBJECT_PATH_NOT_FOUND, STATUS_SHARING_VIOLATION,
         },
         Security::{
-            DACL_SECURITY_INFORMATION, INHERITED_ACE, LABEL_SECURITY_INFORMATION,
-            SCOPE_SECURITY_INFORMATION, SE_DACL_PRESENT, SE_DACL_PROTECTED, SE_SACL_PRESENT,
-            SE_SELF_RELATIVE,
+            ATTRIBUTE_SECURITY_INFORMATION, DACL_SECURITY_INFORMATION, INHERITED_ACE,
+            LABEL_SECURITY_INFORMATION, SCOPE_SECURITY_INFORMATION, SE_DACL_PRESENT,
+            SE_DACL_PROTECTED, SE_SACL_PRESENT, SE_SELF_RELATIVE,
         },
         Storage::FileSystem::{
             DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_ENCRYPTED, FILE_ATTRIBUTE_READONLY,
@@ -57,6 +57,10 @@ use windows_sys::{
 /// entries and read its attributes and security.
 const DIRECTORY_ACCESS: u32 =
     FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | READ_CONTROL;
+/// The part of a security descriptor that holds trust labels, which
+/// restrict access to protected processes.
+const PROCESS_TRUST_LABEL_SECURITY_INFORMATION: u32 = 0x80;
+
 /// The name of the lock file in the root, reserved.
 pub(crate) const LOCK_NAME: &str = ".tilewright.lock";
 
@@ -528,6 +532,12 @@ impl Directory {
         written
     }
 
+    /// There are no labels a file's name decides here.
+    #[allow(clippy::unnecessary_wraps, clippy::unused_self)]
+    pub(crate) fn check_final_name(&self, _: &str, _: &str) -> Result<(), Refused> {
+        Ok(())
+    }
+
     /// Renames the regular file `from` to `to` in this directory, replacing
     /// `to`.
     pub(crate) fn rename(&self, from: &str, to: &str) -> Result<(), Refused> {
@@ -624,7 +634,8 @@ fn unkept(what: &str) -> Refused {
 /// copies of its directory's entries, marked inherited only where the
 /// directory's list is. Refused: an entry that is encrypted, a file that is
 /// read-only, and a list protected from inheritance, a mandatory integrity
-/// label or a central access policy.
+/// label, a central access policy, a resource attribute (which conditional
+/// entries can test) or a trust label.
 fn access_of(
     handle: BorrowedHandle<'_>,
     attributes: u32,
@@ -638,7 +649,11 @@ fn access_of(
     }
     let descriptor = os::security(
         handle,
-        DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION | SCOPE_SECURITY_INFORMATION,
+        DACL_SECURITY_INFORMATION
+            | LABEL_SECURITY_INFORMATION
+            | SCOPE_SECURITY_INFORMATION
+            | ATTRIBUTE_SECURITY_INFORMATION
+            | PROCESS_TRUST_LABEL_SECURITY_INFORMATION,
     )
     .map_err(Refused::Io)?;
     Ok(Access {
@@ -719,8 +734,9 @@ fn control(descriptor: &[u8]) -> Result<[u8; 32], Refused> {
             "its access control list is protected from inheritance",
         ));
     }
-    // Asked for labels and policies only, the system list holds no other
-    // entries.
+    // Asked for labels, policies, resource attributes and trust labels
+    // only, the system list holds no other entries; each can change who
+    // may use the entry, and a replacement would not get them.
     let system = acl(
         descriptor,
         flags & SE_SACL_PRESENT != 0,
@@ -728,7 +744,7 @@ fn control(descriptor: &[u8]) -> Result<[u8; 32], Refused> {
     )?;
     if system.is_some_and(|(_, entries)| !entries.is_empty()) {
         return Err(unkept(
-            "it has a mandatory integrity label or a central access policy",
+            "it has a mandatory integrity label, a central access policy, a resource attribute or a trust label",
         ));
     }
     let mut hasher = Sha256::new();

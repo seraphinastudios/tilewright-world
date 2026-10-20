@@ -527,6 +527,9 @@ fn stage_all<'f>(
             (None, Some(Some(access))) if known.inherits(&file.path) => (Some(*access), &b""[..]),
             (None, _) => continue,
         };
+        // A file where there was none gets the label the system's policy
+        // gives its name, which renaming would not give it.
+        let new = file.after.is_some() && !matches!(known.files.get(&file.path), Some(Some(_)));
         staged.push(file.path.as_str());
         // Writing removes whatever was at the staging name first, so the
         // directory may change even if the write fails.
@@ -538,9 +541,13 @@ fn stage_all<'f>(
                 let directory =
                     directory.ok_or_else(|| AccessError::Unexpected(file.path.clone()))?;
                 directory.write(&staging_name(name), access.as_ref(), text)?;
-                // The new inode must have no access beyond its mode bits,
-                // such as a label the system's policy gave it.
-                directory.access(&staging_name(name)).map(|_| ())
+                // The new inode must have no access publishing could not
+                // keep, such as a list or label the system gave it.
+                directory.access(&staging_name(name))?;
+                if new {
+                    directory.check_final_name(&staging_name(name), name)?;
+                }
+                Ok(())
             });
         if let Err(error) = result {
             discard(directories, &staged);
