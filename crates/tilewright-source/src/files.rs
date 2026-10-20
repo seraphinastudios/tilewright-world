@@ -679,7 +679,7 @@ mod tests {
                 ));
 
                 // A write replaces a link or hard link instead of writing
-                // through it, and takes the permissions of `like`.
+                // through it, and takes the access it is given.
                 let dir = root.directory(&["dir"], false).unwrap();
                 let outside = tempfile::tempdir().unwrap();
                 let target = outside.path().join("target");
@@ -694,14 +694,19 @@ mod tests {
                     use std::os::unix::fs::PermissionsExt as _;
                     let file = directory.path().join("dir/file.jsonc");
                     fs::set_permissions(&file, fs::Permissions::from_mode(0o640)).unwrap();
-                    let like = dir.permissions("file.jsonc").unwrap();
-                    assert!(dir.permissions("nope").unwrap().is_none());
+                    let like = dir.access("file.jsonc").unwrap();
+                    assert!(dir.access("nope").unwrap().is_none());
                     dir.write("moded", like.as_ref(), b"x").unwrap();
                     let mode = fs::metadata(directory.path().join("dir/moded"))
                         .unwrap()
                         .permissions()
                         .mode();
                     assert_eq!(mode & 0o777, 0o640);
+                    // A directory's own access can be read and set.
+                    let mut own = dir.own_access().unwrap();
+                    own.mode = 0o750;
+                    dir.set_own_access(&own).unwrap();
+                    assert_eq!(dir.own_access().unwrap(), own);
                 }
 
                 dir.rename("staged", "file.jsonc").unwrap();
@@ -741,6 +746,65 @@ mod tests {
 
     write_tests!(beneath_writes_beneath_the_root, beneath);
     write_tests!(portable_writes_beneath_the_root, portable);
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_written_file_with_access_has_no_inherited_access_control_list() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tree();
+        // A default list for new files: user::rwx, user:nobody:r--,
+        // group::r-x, mask::r-x, other::---.
+        let mut acl = 2_u32.to_le_bytes().to_vec();
+        for (tag, permissions, id) in [
+            (0x01_u16, 7_u16, u32::MAX),
+            (0x02, 4, 65534),
+            (0x04, 5, u32::MAX),
+            (0x10, 5, u32::MAX),
+            (0x20, 0, u32::MAX),
+        ] {
+            acl.extend(tag.to_le_bytes());
+            acl.extend(permissions.to_le_bytes());
+            acl.extend(id.to_le_bytes());
+        }
+        let dir_path = directory.path().join("dir");
+        if rustix::fs::setxattr(
+            &dir_path,
+            "system.posix_acl_default",
+            &acl,
+            rustix::fs::XattrFlags::empty(),
+        )
+        .is_err()
+        {
+            // No ACL support here.
+            return;
+        }
+        let root = super::beneath::Root::new(directory.path());
+        let dir = root.directory(&["dir"], false).unwrap();
+        // The directory's own list is refused.
+        assert!(dir.own_access().is_err());
+        let mut access = dir.access("file.jsonc").unwrap().unwrap();
+        access.mode = 0o640;
+        dir.write("new", Some(&access), b"x").unwrap();
+        let written = dir_path.join("new");
+        assert_eq!(
+            rustix::fs::getxattr(&written, "system.posix_acl_access", &mut [0_u8; 0][..]),
+            Err(rustix::io::Errno::NODATA)
+        );
+        assert_eq!(
+            fs::metadata(&written).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        // Without access, the file has what the directory gives it.
+        dir.write("default", None, b"x").unwrap();
+        assert!(
+            rustix::fs::getxattr(
+                dir_path.join("default"),
+                "system.posix_acl_access",
+                &mut [0_u8; 0][..]
+            )
+            .is_ok()
+        );
+    }
 
     #[test]
     fn the_lock_excludes_a_second_holder() {

@@ -6,14 +6,12 @@
 //! staged files into place and remove deleted ones. A failure while
 //! publishing restores the files already published from the plan's copies.
 
-use crate::{
-    Code, FileChange, Plan, diagnostic, digest, lineage::Lineage, staging_name, staging_path,
-};
+use crate::{Code, FileChange, Plan, diagnostic, digest, staging_name, staging_path};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
 };
-use tilewright_source::{AccessError, Diagnostic, SourceDirectory, SourceRoot};
+use tilewright_source::{Access, AccessError, Diagnostic, SourceDirectory, SourceRoot};
 
 #[cfg(test)]
 thread_local! {
@@ -135,19 +133,21 @@ struct Directories<'r> {
     created: Vec<String>,
     /// Directories whose entries changed, to sync.
     changed: BTreeSet<String>,
-    /// The permissions each changed file had before publishing, to
-    /// restore it with.
-    original: BTreeMap<String, std::fs::Permissions>,
     /// Cleanup that could not be done, and how many more past the limit.
     leftovers: Vec<Diagnostic>,
     dropped: usize,
 }
 
 impl Directories<'_> {
-    /// The directory `path`, created with its missing parents if `create`.
-    fn get(&mut self, path: &str, create: bool) -> Result<Option<&SourceDirectory>, AccessError> {
+    /// The directory `path`. With `create`, its missing parents and itself
+    /// are made, each with that access.
+    fn get(
+        &mut self,
+        path: &str,
+        create: Option<&Access>,
+    ) -> Result<Option<&SourceDirectory>, AccessError> {
         if !self.open.contains_key(path) {
-            if create {
+            if let Some(access) = create {
                 let mut prefix = String::new();
                 for component in path.split('/').filter(|component| !component.is_empty()) {
                     if !prefix.is_empty() {
@@ -161,6 +161,9 @@ impl Directories<'_> {
                     {
                         self.created.push(prefix.clone());
                         self.changed.insert(split(&prefix).0.to_owned());
+                        if let Some(made) = self.root.directory(&prefix, false)? {
+                            made.set_own_access(access)?;
+                        }
                     }
                 }
             }
@@ -182,7 +185,7 @@ impl Directories<'_> {
     /// parent as changed, to sync.
     fn remove(&mut self, path: &str, directory: bool) -> Result<bool, AccessError> {
         let (parent, name) = split(path);
-        let removed = match self.get(parent, false)? {
+        let removed = match self.get(parent, None)? {
             Some(handle) if directory => handle.remove_directory(name)?,
             Some(handle) => handle.remove_file(name)?,
             None => false,
@@ -322,7 +325,7 @@ impl Directories<'_> {
         if FAIL_SYNC.with(std::cell::Cell::get) {
             return Some(problem(path, Code::Io, "injected sync failure"));
         }
-        match self.get(path, false) {
+        match self.get(path, None) {
             Ok(Some(directory)) => match directory.sync() {
                 Ok(synced) => {
                     *durable &= synced;
@@ -336,167 +339,195 @@ impl Directories<'_> {
     }
 }
 
-/// The permissions found so far: of each path on disk, and of each step of
-/// the lineage, so that each is looked up once per publish.
+/// What publishing read of the files it changes and of the directories
+/// that hold them, checked again just before anything is renamed.
 #[derive(Default)]
 struct Known {
-    paths: BTreeMap<String, Option<std::fs::Permissions>>,
-    steps: BTreeMap<usize, Option<std::fs::Permissions>>,
+    /// Each changed file as it was, `None` where there was none: a file
+    /// written there keeps this access, and a failed publish restores it.
+    files: BTreeMap<String, Option<Access>>,
+    /// Every directory there was above each changed file, up to the root.
+    /// A new file takes the mode of the nearest, without the execute bits,
+    /// and its group, and a new directory its mode and group.
+    directories: BTreeMap<String, Access>,
 }
 
-/// The permissions of the file at `path` on disk, if there is one.
-fn on_disk(
-    directories: &mut Directories<'_>,
-    known: &mut Known,
-    path: &str,
-) -> Result<Option<std::fs::Permissions>, AccessError> {
-    if let Some(found) = known.paths.get(path) {
-        return Ok(found.clone());
+impl Known {
+    /// The access a new file at `path` gets, from the nearest directory
+    /// above it that was there.
+    fn new_file(&self, path: &str) -> Option<Access> {
+        let mut directory = split(path).0;
+        loop {
+            if let Some(access) = self.directories.get(directory) {
+                return Some(Access {
+                    mode: access.mode & 0o666,
+                    ..*access
+                });
+            }
+            if directory.is_empty() {
+                return None;
+            }
+            directory = split(directory).0;
+        }
     }
-    let (parent, name) = split(path);
-    let found = match directories.get(parent, false)? {
-        Some(directory) => directory.permissions(name)?,
-        None => None,
-    };
-    known.paths.insert(path.to_owned(), found.clone());
-    Ok(found)
+
+    /// The access the directories made for a file at `path` get.
+    fn new_directory(&self, path: &str) -> Option<&Access> {
+        let mut directory = split(path).0;
+        loop {
+            if let Some(access) = self.directories.get(directory) {
+                return Some(access);
+            }
+            if directory.is_empty() {
+                return None;
+            }
+            directory = split(directory).0;
+        }
+    }
 }
 
-/// Checks that the permissions staging read are still those on disk, so
-/// that no file is published with permissions that were narrowed since.
-fn check_permissions(
+/// Who may read, by an access: the read bits, and the group where it says
+/// who may.
+fn readers(access: &Access) -> (u32, Option<u32>) {
+    (
+        access.mode & 0o444,
+        access.group_reads_alone().then_some(access.group),
+    )
+}
+
+fn shown(path: &str) -> &str {
+    if path.is_empty() { "." } else { path }
+}
+
+/// Reads the access of every file the plan changes and of every directory
+/// above each, up to the root, and checks that they all have the same
+/// readers. A transaction moves content between the files it changes, a
+/// renamed file's or a moved object's, and its inverse recreates deleted
+/// files, and directories pruned since, with the access of the directory
+/// above them; so no file may be readable by anyone another is not.
+fn survey(
     directories: &mut Directories<'_>,
-    known: &Known,
-) -> Result<(), Vec<Diagnostic>> {
-    for (path, before) in &known.paths {
+    changed: &[&FileChange],
+) -> Result<Known, Vec<Diagnostic>> {
+    let mut known = Known::default();
+    for file in changed {
+        let (parent, name) = split(&file.path);
+        let existing = match directories.get(parent, None) {
+            Ok(Some(directory)) => directory.access(name),
+            Ok(None) => Ok(None),
+            Err(error) => Err(error),
+        }
+        .map_err(|error| io(&file.path, &error))?;
+        known.files.insert(file.path.clone(), existing);
+        // Each directory above, up to the root or one already read.
+        let mut directory = parent;
+        while !known.directories.contains_key(directory) {
+            let found = match directories.get(directory, None) {
+                Ok(Some(handle)) => handle.own_access().map(Some),
+                Ok(None) => Ok(None),
+                Err(error) => Err(error),
+            }
+            .map_err(|error| io(shown(directory), &error))?;
+            if let Some(access) = found {
+                known.directories.insert(directory.to_owned(), access);
+            }
+            if directory.is_empty() {
+                break;
+            }
+            directory = split(directory).0;
+        }
+    }
+    let mut accesses = known
+        .files
+        .iter()
+        .filter_map(|(path, access)| Some((path.as_str(), access.as_ref()?)))
+        .chain(
+            known
+                .directories
+                .iter()
+                .map(|(path, access)| (shown(path), access)),
+        );
+    if let Some((first, access)) = accesses.next() {
+        let expected = readers(access);
+        if let Some((other, _)) = accesses.find(|(_, access)| readers(access) != expected) {
+            return Err(problem(
+                other,
+                Code::Io,
+                format!(
+                    "{other} and {first} can be read by different users; the files a transaction changes, and their directories, must have the same read permissions and, where the group may read, the same group"
+                ),
+            ));
+        }
+    }
+    Ok(known)
+}
+
+/// Checks that the access publishing read is still what is on disk, so
+/// that no file is published with access that changed since.
+fn check_access(directories: &mut Directories<'_>, known: &Known) -> Result<(), Vec<Diagnostic>> {
+    let changed = |path: &str| {
+        problem(
+            shown(path),
+            Code::Conflict,
+            "its permissions or owner changed while the transaction was being applied; nothing was written",
+        )
+    };
+    for (path, before) in &known.files {
         let (parent, name) = split(path);
-        let now = match directories.get(parent, false) {
-            Ok(Some(directory)) => directory.permissions(name),
+        let now = match directories.get(parent, None) {
+            Ok(Some(directory)) => directory.access(name),
             Ok(None) => Ok(None),
             Err(error) => Err(error),
         }
         .map_err(|error| io(path, &error))?;
         if now != *before {
-            return Err(problem(
-                path,
-                Code::Conflict,
-                "its permissions changed while the transaction was being applied; nothing was written",
-            ));
+            return Err(changed(path));
+        }
+    }
+    for (path, before) in &known.directories {
+        let now = match directories.get(path, None) {
+            Ok(Some(directory)) => directory.own_access().map(Some),
+            Ok(None) => Ok(None),
+            Err(error) => Err(error),
+        }
+        .map_err(|error| io(shown(path), &error))?;
+        if now.as_ref() != Some(before) {
+            return Err(changed(path));
         }
     }
     Ok(())
 }
 
-/// The permissions of the file at `path` on disk, noted to restore it with
-/// if publishing fails.
-fn original(
-    directories: &mut Directories<'_>,
-    known: &mut Known,
-    path: &str,
-) -> Result<Option<std::fs::Permissions>, AccessError> {
-    let existing = on_disk(directories, known, path)?;
-    if let Some(existing) = &existing {
-        directories
-            .original
-            .insert(path.to_owned(), existing.clone());
-    }
-    Ok(existing)
-}
-
-/// What both allow, where either may be unknown.
-fn both(
-    left: Option<std::fs::Permissions>,
-    right: Option<std::fs::Permissions>,
-) -> Option<std::fs::Permissions> {
-    match (left, right) {
-        (Some(left), Some(right)) => Some(narrowest(&left, &right)),
-        (left, right) => left.or(right),
-    }
-}
-
-/// The permissions a written file gets, and keeps a note of the ones it had
-/// for rollback. A file written where a file is keeps what that file
-/// allows. One renamed or created like another is also restricted to what
-/// each file of its chain allows on disk, so that access is never broader
-/// than any of theirs. With none of these on disk, a new file gets the
-/// platform's default (`None`).
-fn permissions_for(
-    directories: &mut Directories<'_>,
-    known: &mut Known,
-    path: &str,
-    lineage: &Lineage,
-) -> Result<Option<std::fs::Permissions>, AccessError> {
-    let existing = original(directories, known, path)?;
-    // Walk back to a step already known, then work forward: each step
-    // allows what its file on disk and the steps before it allow.
-    let mut pending = Vec::new();
-    let mut next = lineage.step(path);
-    let mut inherited = None;
-    while let Some(step) = next {
-        if let Some(found) = known.steps.get(&step) {
-            inherited.clone_from(found);
-            break;
-        }
-        pending.push(step);
-        next = lineage.at(step).1;
-    }
-    for step in pending.into_iter().rev() {
-        let own = on_disk(directories, known, lineage.at(step).0)?;
-        inherited = both(own, inherited);
-        known.steps.insert(step, inherited.clone());
-    }
-    Ok(both(existing, inherited))
-}
-
-/// Permissions that allow only what both allow.
-fn narrowest(left: &std::fs::Permissions, right: &std::fs::Permissions) -> std::fs::Permissions {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::Permissions::from_mode(left.mode() & right.mode())
-    }
-    #[cfg(not(unix))]
-    {
-        let mut narrowest = left.clone();
-        narrowest.set_readonly(left.readonly() || right.readonly());
-        narrowest
-    }
-}
-
-/// Writes `text` to the staging file of `path` in `directory`.
-fn stage(directory: &SourceDirectory, path: &str, text: &str) -> Result<(), AccessError> {
-    let name = split(path).1;
-    directory.write(&staging_name(name), name, text.as_bytes())
-}
-
-/// Stages every new file. On failure removes every staging file it wrote,
-/// the failed one included, and the directories it created.
+/// Stages every new file: one written where a file is with that file's
+/// access, a new one with its directory's. On failure removes every
+/// staging file it wrote, the failed one included, and the directories it
+/// created.
 fn stage_all<'f>(
     directories: &mut Directories<'_>,
-    known: &mut Known,
+    known: &Known,
     changed: &[&'f FileChange],
-    lineage: &Lineage,
 ) -> Result<Vec<&'f str>, PublishError> {
     let mut staged = Vec::new();
     for file in changed {
-        let result = match &file.after {
-            // A deleted file's permissions are read now, and checked again
-            // with the others, to restore it with if publishing fails.
-            None => original(directories, known, &file.path).map(|_| ()),
-            Some(text) => {
-                staged.push(file.path.as_str());
-                // Writing removes whatever was at the staging name first,
-                // so the directory may change even if the write fails.
-                directories.changed.insert(split(&file.path).0.to_owned());
-                let (parent, name) = split(&file.path);
-                permissions_for(directories, known, &file.path, lineage).and_then(|permissions| {
-                    let directory = directories
-                        .get(parent, true)?
-                        .ok_or_else(|| AccessError::Unexpected(file.path.clone()))?;
-                    directory.write_with(&staging_name(name), permissions.as_ref(), text.as_bytes())
-                })
-            }
+        let Some(text) = &file.after else {
+            continue;
         };
+        staged.push(file.path.as_str());
+        // Writing removes whatever was at the staging name first, so the
+        // directory may change even if the write fails.
+        directories.changed.insert(split(&file.path).0.to_owned());
+        let (parent, name) = split(&file.path);
+        let access = match known.files.get(&file.path) {
+            Some(Some(access)) => Some(*access),
+            _ => known.new_file(&file.path),
+        };
+        let result = directories
+            .get(parent, known.new_directory(&file.path))
+            .and_then(|directory| {
+                directory
+                    .ok_or_else(|| AccessError::Unexpected(file.path.clone()))?
+                    .write(&staging_name(name), access.as_ref(), text.as_bytes())
+            });
         if let Err(error) = result {
             discard(directories, &staged);
             directories.remove_created();
@@ -571,7 +602,6 @@ impl Plan {
             open: BTreeMap::new(),
             created: Vec::new(),
             changed: BTreeSet::new(),
-            original: BTreeMap::new(),
             leftovers: Vec::new(),
             dropped: 0,
         };
@@ -580,8 +610,11 @@ impl Plan {
         let mut changed: Vec<&FileChange> =
             self.files.iter().filter(|file| file.is_changed()).collect();
         changed.sort_by_key(|file| file.after.is_none());
-        let mut known = Known::default();
-        let staged = stage_all(&mut directories, &mut known, &changed, &self.lineage)?;
+        let known = match survey(&mut directories, &changed) {
+            Ok(known) => known,
+            Err(problems) => return directories.outcome(false, problems),
+        };
+        let staged = stage_all(&mut directories, &known, &changed)?;
 
         #[cfg(test)]
         if let Some(hook) = BEFORE_CHECK.with(|hook| hook.borrow_mut().take()) {
@@ -607,9 +640,9 @@ impl Plan {
                 Err(problems)
             }
         });
-        // Last, as close to publishing as can be: the permissions the
-        // staged files were given must still be what they came from.
-        let checked = checked.and_then(|()| check_permissions(&mut directories, &known));
+        // Last, as close to publishing as can be: the access the staged
+        // files were given must still be what it came from.
+        let checked = checked.and_then(|()| check_access(&mut directories, &known));
         if let Err(problems) = checked {
             discard(&mut directories, &staged);
             directories.remove_created();
@@ -628,7 +661,7 @@ impl Plan {
                 file,
             );
             if let Err(error) = result {
-                let unrestored = roll_back(&mut directories, &published);
+                let unrestored = roll_back(&mut directories, &known, &published);
                 discard(&mut directories, &staged);
                 directories.remove_created();
                 let message = if unrestored.is_empty() {
@@ -681,15 +714,15 @@ fn publish_one<'f>(
     }
     let _ = step;
     if write {
-        let Some(directory) = directories.get(parent, false)? else {
+        let Some(directory) = directories.get(parent, None)? else {
             return Err(AccessError::Unexpected(parent.to_owned()));
         };
         directory.rename(&staging_name(name), name)?;
     } else {
         // A staging file left by an interrupted apply goes first, so that
         // failing to remove it leaves the target untouched; its removal is
-        // recorded to sync whatever happens next. The target's permissions
-        // were noted, and checked, before publishing began.
+        // recorded to sync whatever happens next. The target's access was
+        // noted, and checked, before publishing began.
         if let Err(error) = directories.remove(&staging_path(&file.path), false) {
             directories.leftover(diagnostic::file(
                 &staging_path(&file.path),
@@ -698,7 +731,7 @@ fn publish_one<'f>(
             ));
             return Err(error);
         }
-        let Some(directory) = directories.get(parent, false)? else {
+        let Some(directory) = directories.get(parent, None)? else {
             return Err(AccessError::Unexpected(parent.to_owned()));
         };
         directory.remove_file(name)?;
@@ -715,31 +748,29 @@ fn discard(directories: &mut Directories<'_>, staged: &[&str]) {
     }
 }
 
-/// Restores published files from their text before; returns the paths
-/// that could not be restored.
-fn roll_back<'f>(directories: &mut Directories<'_>, published: &[&'f FileChange]) -> Vec<&'f str> {
+/// Restores published files from their text before, each with the access
+/// it had; returns the paths that could not be restored.
+fn roll_back<'f>(
+    directories: &mut Directories<'_>,
+    known: &Known,
+    published: &[&'f FileChange],
+) -> Vec<&'f str> {
     let mut unrestored = Vec::new();
     for file in published.iter().rev() {
         let (parent, name) = split(&file.path);
         let restored = match &file.before {
             Some(text) => {
-                // A file comes back with the permissions it had.
-                let permissions = directories.original.get(&file.path).cloned();
-                directories.get(parent, true).and_then(|directory| {
-                    let directory =
-                        directory.ok_or_else(|| AccessError::Unexpected(parent.to_owned()))?;
-                    match permissions {
-                        Some(permissions) => directory.write_with(
-                            &staging_name(name),
-                            Some(&permissions),
-                            text.as_bytes(),
-                        )?,
-                        None => stage(directory, &file.path, text)?,
-                    }
-                    directory.rename(&staging_name(name), name)
-                })
+                let access = known.files.get(&file.path).copied().flatten();
+                directories
+                    .get(parent, known.new_directory(&file.path))
+                    .and_then(|directory| {
+                        let directory =
+                            directory.ok_or_else(|| AccessError::Unexpected(parent.to_owned()))?;
+                        directory.write(&staging_name(name), access.as_ref(), text.as_bytes())?;
+                        directory.rename(&staging_name(name), name)
+                    })
             }
-            None => directories.get(parent, false).and_then(|directory| {
+            None => directories.get(parent, None).and_then(|directory| {
                 directory
                     .ok_or_else(|| AccessError::Unexpected(parent.to_owned()))?
                     .remove_file(name)

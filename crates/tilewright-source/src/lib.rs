@@ -39,7 +39,7 @@ mod stairwell;
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 use tilewright_jsonc::Limits;
 
-pub use access::{AccessError, SourceDirectory, SourceLock, SourceRoot};
+pub use access::{Access, AccessError, SourceDirectory, SourceLock, SourceRoot};
 use diagnostic::Diagnostics;
 pub use diagnostic::{Code, Diagnostic};
 pub use files::is_jsonc_path;

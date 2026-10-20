@@ -39,7 +39,6 @@
 
 mod diagnostic;
 mod engine;
-mod lineage;
 mod operations;
 mod publish;
 mod render;
@@ -55,7 +54,7 @@ use render::json_string;
 use sha2::{Digest as _, Sha256};
 use splice::Step;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     path::{Path, PathBuf},
 };
 use tilewright_jsonc::{Document, Limits, write_json_string};
@@ -159,9 +158,6 @@ pub struct Plan {
     /// The plane and grid of each terrain operation, checked again when
     /// publishing, with a conflict at the operation to report.
     terrain: Vec<(String, String, Diagnostic)>,
-    /// Where the files renamed or created like another came from, whose
-    /// permissions bound theirs.
-    lineage: lineage::Lineage,
     /// The root opened while planning; publishing and validating again
     /// use it, not the path.
     source: SourceRoot,
@@ -506,15 +502,11 @@ fn run_operations(
     }
 }
 
-/// What publishing needs besides the files: the terrain addresses to check
-/// again, and where the files renamed or created like another came from.
-fn publish_inputs(
-    transaction: &Transaction,
-    workspace: &Workspace<'_>,
-    files: &[FileChange],
-) -> (Vec<(String, String, Diagnostic)>, lineage::Lineage) {
+/// The terrain addresses publishing checks again, each with a conflict at
+/// its operation to report.
+fn terrain_addresses(transaction: &Transaction) -> Vec<(String, String, Diagnostic)> {
     let lines = diagnostic::Lines::new(transaction.text());
-    let terrain = transaction
+    transaction
         .operations
         .iter()
         .filter_map(|operation| match &operation.action {
@@ -532,17 +524,7 @@ fn publish_inputs(
             )),
             _ => None,
         })
-        .collect();
-    // A file made by a rename, or created like another, keeps that
-    // provenance while it exists, even where an older file was deleted.
-    let present: BTreeSet<&str> = files
-        .iter()
-        .filter(|file| file.after.is_some())
-        .map(|file| file.path.as_str())
-        .collect();
-    let mut lineage = workspace.lineage.clone();
-    lineage.retain(|path| present.contains(path));
-    (terrain, lineage)
+        .collect()
 }
 
 /// Carries out `transaction` on the tree at `root` in memory and validates
@@ -630,13 +612,12 @@ pub fn plan(
             return Err(too_large(what, &detail));
         }
     }
-    let (terrain, lineage) = publish_inputs(transaction, &workspace, &files);
+    let terrain = terrain_addresses(transaction);
     // The plan keeps the very root it was carried out on.
     drop(workspace);
     Ok(Plan {
         root: root.to_path_buf(),
         terrain,
-        lineage,
         source,
         load: options.load,
         files,
@@ -858,23 +839,6 @@ fn write_operation(
     output.push("}")
 }
 
-/// A file each file was renamed or copied to, by the file it first came
-/// from, for the files that exist at the end and are written, so that
-/// their permissions are no broader than the file's.
-fn renamed_to<'w>(workspace: &'w Workspace<'_>) -> BTreeMap<&'w str, &'w str> {
-    workspace
-        .lineage
-        .origins()
-        .filter(|(to, _)| {
-            workspace
-                .entries
-                .get(*to)
-                .is_some_and(|entry| entry.current.text().is_some() && entry.is_changed())
-        })
-        .map(|(to, from)| (from, to))
-        .collect()
-}
-
 /// The exact inverse of the workspace's edits: per changed file, in path
 /// order, its edits undone last to first. A file the transaction created is
 /// deleted, and one it deleted is created again with its text. Building it
@@ -897,7 +861,6 @@ fn inverse(workspace: &Workspace<'_>) -> Result<String, TooLarge> {
             .map(|(path, entry)| (path.as_str(), digest(entry.base.as_deref()))),
         "  ",
     );
-    let renamed = renamed_to(workspace);
     let mut output = Bounded {
         text: String::new(),
         limit: Limits::default().max_input_bytes,
@@ -920,16 +883,10 @@ fn inverse(workspace: &Workspace<'_>) -> Result<String, TooLarge> {
             (None, _) => write(&Primitive::Delete)?,
             (Some(text), None) => {
                 // The text is written straight from the entry, not copied.
-                // A file renamed away comes back with the permissions of
-                // the file it became.
                 output.push(if first { "\n    " } else { ",\n    " })?;
                 first = false;
                 output.push("{\"op\": \"document.create\", \"path\": ")?;
                 output.push_json(path)?;
-                if let Some(like) = renamed.get(path.as_str()) {
-                    output.push(", \"like\": ")?;
-                    output.push_json(like)?;
-                }
                 output.push(", \"text\": ")?;
                 output.push_text(text)?;
                 output.push("}")?;

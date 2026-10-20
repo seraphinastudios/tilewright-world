@@ -6,7 +6,6 @@
 
 use crate::{
     Code, limits,
-    lineage::Lineage,
     splice::{self, Insertion, Layout, Step},
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -202,8 +201,6 @@ pub(crate) struct Workspace<'r> {
     journal_inverse_operations: usize,
     /// Files that were read but cannot be edited, with why.
     unreadable: BTreeMap<String, String>,
-    /// Where the files renamed or created like another came from.
-    pub lineage: Lineage,
 }
 
 fn limits() -> Limits {
@@ -225,7 +222,6 @@ impl<'r> Workspace<'r> {
             journal_inverse_bytes: 0,
             journal_inverse_operations: 0,
             unreadable: BTreeMap::new(),
-            lineage: Lineage::default(),
         }
     }
 
@@ -332,13 +328,6 @@ impl<'r> Workspace<'r> {
     /// the operation that exceeded it; nothing more can be carried out.
     pub fn exhausted(&self) -> bool {
         self.spent
-    }
-
-    /// Whether `path` has a file now, or had one before the transaction,
-    /// which publishing finds on disk until it removes it.
-    pub fn has_or_had(&mut self, path: &str) -> Outcome<bool> {
-        let entry = self.entry(path)?;
-        Ok(entry.current.text().is_some() || entry.base.is_some())
     }
 
     pub fn exists(&mut self, path: &str) -> Outcome<bool> {

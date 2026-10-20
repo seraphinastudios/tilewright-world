@@ -103,9 +103,9 @@ an error.
 | `object.remove` | tile, `index`, `expect` | Removes an object. |
 | `object.move` | tile, `index`, `expect`, `to` | Moves an object to `to`: `{"plane"?, "layer"?, "at"?, "index"?}`, each defaulting to the object's own (and `index` to after the destination's objects). `to.index` counts the destination's objects without the moved one, so a move on one tile reorders it, and a move to where the object already is changes nothing. |
 | `terrain.set` | `plane`, `layer`, `grid`, `cells` | Sets terrain cells of one grid (section 5). |
-| `document.create` | `path`, `document` or `text`, `like`? | Creates a document: `document` is written in canonical layout (section 10), `text` exactly; `text` is a string or an array of strings joined, for a file longer than a string or a line may be. Either must be valid JSONC. `like` names a file that is there at that point of the transaction, or was before it, and the new file takes its permissions (section 9). |
+| `document.create` | `path`, `document` or `text` | Creates a document: `document` is written in canonical layout (section 10), `text` exactly; `text` is a string or an array of strings joined, for a file longer than a string or a line may be. Either must be valid JSONC. |
 | `document.delete` | `path` | Deletes a document. |
-| `document.rename` | `path`, `to` | Moves a document to a path that is free, unchanged, with its permissions (section 9). A rename that changes identity also sets it, such as a definition's `id` or a chunk's `chunk`, in the same transaction; references to it are updated by operations of their own. |
+| `document.rename` | `path`, `to` | Moves a document to a path that is free, unchanged. A rename that changes identity also sets it, such as a definition's `id` or a chunk's `chunk`, in the same transaction; references to it are updated by operations of their own. |
 
 Target is `"path"` or `"object"` (section 2). An object operation's `expect`
 is an object that names at least `proto` and not `at`; each member it names
@@ -233,18 +233,16 @@ the transaction changed, in path order:
 
 - `document.delete` for a file it created;
 - `document.create` with the exact `text` for a file it deleted, in pieces
-  of at most 128 KiB, one a line, and `like` naming a file renamed from it
-  or created like it, if one is left;
+  of at most 128 KiB, one a line;
 - otherwise the exact inverse of each edit, last first: `set` with the old
   value's text, `insert` with the old item, key, colon and regions, `remove`
   with the old region. An old value or key, and each step of a pointer, is
   written on a line of its own, so no line of the inverse is longer than a
   line of the file.
 
-An inverse holds text, not permissions. A file it creates again `like`
-another allows no more than that file, which allows no more than the file
-did (section 9); any other file it creates again has the platform's
-default permissions.
+An inverse holds text, not permissions: a file it creates again takes the
+permissions of the directory it is in, which were the file's own as far
+as reading goes (section 9).
 
 Its `base` is the changed files after the transaction, and its `result` the
 files before. Every operation of an inverse names one file by path, so its
@@ -268,24 +266,25 @@ Publishing a carried-out transaction works on the root it was carried out
 on: the directory opened then, whatever its path names later. It:
 
 1. takes the source root's exclusive lock (an advisory `flock` of the root
-   directory), so two applies cannot interleave;
+   directory), so two applies cannot interleave, and reads the permissions
+   of the files it changes and of the directories above them (below);
 2. writes each new file beside its target as `.<name>.tilewright-tmp`,
    created fresh (whatever was at that name is removed first, so a link or
-   hard link there is never written through), with the permissions given
-   below, set after it is written (a file with permissions of its own is
-   only its owner's until then), and synced; a
-   failure removes every staging file it wrote and the directories it
-   created, and reports one it created that is no longer empty;
+   hard link there is never written through), only its owner's until it is
+   written, then with the mode and group given below and without an access
+   control list its directory would give it, and synced; a failure removes
+   every staging file it wrote and the directories it created, and reports
+   one it created that is no longer empty;
 3. reads every file the transaction touched or consulted again and compares
    it with the files it was carried out on, then validates the tree with
    the transaction's files again, and its terrain addresses against that
    tree, since files it did not touch may have changed since it was carried
    out: two transactions that are valid alone can be invalid together. A
    difference is a `tx.conflict`, and a result that no longer validates is
-   reported with the loader's diagnostics. Last, the permissions that step
-   2 read must still be those on disk. A file grown past what can be read
-   is a difference too. On any of these the staged files are removed and
-   nothing is written;
+   reported with the loader's diagnostics. Last, the permissions and owners
+   that step 1 read must still be those on disk. A file grown past what can
+   be read is a difference too. On any of these the staged files are
+   removed and nothing is written;
 4. renames each staged file over its target, in path order, and then
    removes each deleted file, in path order, so that a renamed file is
    never only removed. Before a deleted file is removed, any staging file
@@ -296,26 +295,28 @@ on: the directory opened then, whatever its path names later. It:
    directory that cannot be removed is reported, the former since the tree
    does not validate while it is there.
 
-A file written where a file is keeps that file's permissions. A file a
-rename made, or one created `like` another, is also restricted to what the
-file it came from allows, as it is on disk when publishing, and, when the
-transaction made that file from another too, to what each file before it
-allows: to the mode bits all of them have. So no file allows more than the
-files it came from did. Any other new file has the platform's default. A
-file whose bytes end as they began is not written, and keeps its
-permissions. Restoring after a failure gives every file back the
-permissions it had. Permissions here are the mode bits. Since a file's
-access control list could not be kept, publishing refuses to replace,
-remove or take permissions from a file that has one (POSIX, NFS version 4
-or rich), with `tx.io`. A file written with permissions of its own drops
-the access control list its directory gives new files, so that its mode
-bits alone say who may read it. Other extended attributes and the owner are
-not carried to the file that replaces a file, which has the directory's
-defaults for them.
+A transaction moves content between files: a renamed file's, a moved
+object's, a deleted file's that its inverse creates again. So the files it
+changes and every directory above them, up to the root, must have the same
+readers, which publishing checks before it writes anything and again just
+before it renames: the same read bits of their modes and, where the group
+may read and others may not, the same group, and no access control list (POSIX, NFS version 4
+or rich, or a default one a directory gives new files), whose entries the
+mode bits do not show. Otherwise publishing is refused with `tx.io`, naming
+two that differ, and nothing is written. A file written where a file is
+keeps that file's mode and group. A new file takes the mode of the
+directory above it without the execute bits, and its group, and a new
+directory the mode and group of the directory above it. A group the user
+may not give is an error where the group's members alone may read, and
+otherwise is left as the new file got it, which changes no reader. The owner of
+every file written is the user applying, who could read them all. A file
+whose bytes end as they began is not written. Restoring after a failure
+gives every file back the mode and group it had. Other extended
+attributes are not kept.
 
 Each rename and removal is atomic, but there is no atomic publication of
 several files. If a step of 4 fails, the files already published are
-restored from the transaction's copy of them, each with the permissions
+restored from the transaction's copy of them, each with the mode and group
 it had, the staged files and created directories are removed, the
 directories involved are synced, and the error names any file that could
 not be restored. Whenever nothing is published, the cleanup is synced too.
@@ -330,7 +331,10 @@ it, apply the inverse, which the command line writes before step 1: the
 files the interrupted apply published are restored, the others already
 match and are left alone, and the staging files beside every file it names
 are removed. There is no journal: the inverse, written before anything is
-published, is the recovery record, and applying it is a manual step. The
+published, is the recovery record, and applying it is a manual step. If
+the recovery is interrupted in turn, apply the inverse again; a directory
+the interrupted cleanup emptied may be left, which validation names where
+it matters, to remove by hand. The
 source tree's version control is the other way back.
 Carrying out ignores whatever is at the staging name beside every file a
 transaction touches or consults, a link or special file included.

@@ -1188,7 +1188,7 @@ fn names_cannot_carry_other_separators() {
     for name in ["..\\outside", "C:\\outside", "a/b", "stream:x"] {
         assert!(
             matches!(
-                directory.write(name, "x", b"x"),
+                directory.write(name, None, b"x"),
                 Err(tilewright_source::AccessError::Path(_))
             ),
             "{name}"
@@ -1344,8 +1344,9 @@ fn a_rolled_back_deletion_keeps_its_permissions() {
     use std::os::unix::fs::PermissionsExt as _;
     let tree = copy();
     let root = tree.path();
+    // Readable by all, like its directory, but writable by its group too.
     let recipe = root.join("defs/recipe/chest.jsonc");
-    fs::set_permissions(&recipe, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::set_permissions(&recipe, fs::Permissions::from_mode(0o664)).unwrap();
     let tx = transaction(
         r#"{"op": "document.delete", "path": "defs/recipe/chest.jsonc"},
     {"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["title"], "value": "Changed"}"#,
@@ -1356,7 +1357,7 @@ fn a_rolled_back_deletion_keeps_its_permissions() {
     publish::FAIL_STEP.with(|fail| fail.set(None));
     assert!(!failure.applied);
     let mode = fs::metadata(&recipe).unwrap().permissions().mode();
-    assert_eq!(mode & 0o777, 0o600);
+    assert_eq!(mode & 0o777, 0o664);
     assert_eq!(snapshot(root), snapshot(&fixture()));
 }
 
@@ -1655,32 +1656,6 @@ fn a_long_string_gets_a_line_of_its_own() {
     );
 }
 
-#[cfg(unix)]
-#[test]
-fn a_renamed_document_keeps_its_permissions() {
-    use std::os::unix::fs::PermissionsExt as _;
-    let tree = copy();
-    let root = tree.path();
-    fs::set_permissions(
-        root.join("defs/proto/edge_n.jsonc"),
-        fs::Permissions::from_mode(0o600),
-    )
-    .unwrap();
-    apply(
-        root,
-        &transaction(
-            r#"{"op": "document.rename", "path": "defs/proto/edge_n.jsonc", "to": "defs/proto/edge_north.jsonc"},
-    {"op": "set", "path": "defs/proto/edge_north.jsonc", "pointer": ["id"], "value": "edge_north"},
-    {"op": "set", "path": "planes/overworld/layers/0/0_0.jsonc", "pointer": ["terrain", "mask", "palette", "n"], "value": "edge_north"}"#,
-        ),
-    );
-    let mode = fs::metadata(root.join("defs/proto/edge_north.jsonc"))
-        .unwrap()
-        .permissions()
-        .mode();
-    assert_eq!(mode & 0o777, 0o600);
-}
-
 #[test]
 fn terrain_addresses_are_checked_again_when_publishing() {
     let tree = copy();
@@ -1726,32 +1701,6 @@ fn an_absent_id_test_needs_its_array() {
         ),
     );
     assert!(has(&found, "tx.conflict", "has no array at"), "{found:#?}");
-}
-
-#[cfg(unix)]
-#[test]
-fn a_chain_of_renames_keeps_the_first_file_permissions() {
-    use std::os::unix::fs::PermissionsExt as _;
-    let tree = copy();
-    let root = tree.path();
-    fs::set_permissions(
-        root.join("defs/recipe/chest.jsonc"),
-        fs::Permissions::from_mode(0o600),
-    )
-    .unwrap();
-    apply(
-        root,
-        &transaction(
-            r#"{"op": "document.rename", "path": "defs/recipe/chest.jsonc", "to": "defs/recipe/box.jsonc"},
-    {"op": "document.rename", "path": "defs/recipe/box.jsonc", "to": "defs/recipe/crate.jsonc"},
-    {"op": "set", "path": "defs/recipe/crate.jsonc", "pointer": ["id"], "value": "crate"}"#,
-        ),
-    );
-    let mode = fs::metadata(root.join("defs/recipe/crate.jsonc"))
-        .unwrap()
-        .permissions()
-        .mode();
-    assert_eq!(mode & 0o777, 0o600);
 }
 
 #[test]
@@ -1833,42 +1782,6 @@ fn a_long_key_gets_a_line_of_its_own() {
     assert!(created.lines().all(|line| line.len() < 1 << 20));
 }
 
-#[cfg(unix)]
-#[test]
-fn permissions_follow_renames_and_their_inverses_only() {
-    use std::os::unix::fs::PermissionsExt as _;
-    let tree = copy();
-    let root = tree.path();
-    let mode = |path: &str| fs::metadata(root.join(path)).unwrap().permissions().mode() & 0o777;
-    fs::write(root.join("profile/probe"), "").unwrap();
-    let default = mode("profile/probe");
-    fs::remove_file(root.join("profile/probe")).unwrap();
-    let private = if default == 0o600 { 0o640 } else { 0o600 };
-    fs::set_permissions(
-        root.join("defs/recipe/chest.jsonc"),
-        fs::Permissions::from_mode(private),
-    )
-    .unwrap();
-    // Undoing a rename brings the file back with its permissions.
-    let rename = transaction(
-        r#"{"op": "document.rename", "path": "defs/recipe/chest.jsonc", "to": "defs/recipe/box.jsonc"},
-    {"op": "set", "path": "defs/recipe/box.jsonc", "pointer": ["id"], "value": "box"}"#,
-    );
-    let plan = apply(root, &rename);
-    assert_eq!(mode("defs/recipe/box.jsonc"), private);
-    let inverse = Transaction::parse("inverse.jsonc", plan.inverse()).unwrap();
-    apply(root, &inverse);
-    assert_eq!(mode("defs/recipe/chest.jsonc"), private);
-    // A file created where a renamed one was deleted is new.
-    let replace = transaction(
-        r#"{"op": "document.rename", "path": "defs/recipe/chest.jsonc", "to": "defs/recipe/box.jsonc"},
-    {"op": "document.delete", "path": "defs/recipe/box.jsonc"},
-    {"op": "document.create", "path": "defs/recipe/box.jsonc", "document": {"format": "tilewright.def/1", "type": "recipe", "id": "box", "fields": {"output": "chest", "ingredients": [{"item": "coin", "count": 1}]}}}"#,
-    );
-    apply(root, &replace);
-    assert_eq!(mode("defs/recipe/box.jsonc"), default);
-}
-
 #[test]
 fn a_file_and_a_directory_of_one_name_are_refused_when_planning() {
     let tree = copy();
@@ -1901,40 +1814,6 @@ fn an_operation_reports_every_field_problem() {
         has(&found, "tx.shape", "missing key \"value\""),
         "{found:#?}"
     );
-}
-
-#[cfg(unix)]
-#[test]
-fn a_rename_over_a_deleted_file_keeps_the_renamed_permissions() {
-    use std::os::unix::fs::PermissionsExt as _;
-    let tree = copy();
-    let root = tree.path();
-    fs::set_permissions(
-        root.join("defs/proto/edge_n.jsonc"),
-        fs::Permissions::from_mode(0o600),
-    )
-    .unwrap();
-    fs::set_permissions(
-        root.join("defs/proto/coin.jsonc"),
-        fs::Permissions::from_mode(0o644),
-    )
-    .unwrap();
-    // coin.jsonc is replaced by a renamed edge_n.jsonc, given coin's id,
-    // and the old edge reference moves to the new name.
-    apply(
-        root,
-        &transaction(
-            r#"{"op": "document.delete", "path": "defs/proto/coin.jsonc"},
-    {"op": "document.rename", "path": "defs/proto/edge_n.jsonc", "to": "defs/proto/coin.jsonc"},
-    {"op": "set", "path": "defs/proto/coin.jsonc", "pointer": ["id"], "value": "coin"},
-    {"op": "set", "path": "planes/overworld/layers/0/0_0.jsonc", "pointer": ["terrain", "mask", "palette", "n"], "value": "coin"}"#,
-        ),
-    );
-    let mode = fs::metadata(root.join("defs/proto/coin.jsonc"))
-        .unwrap()
-        .permissions()
-        .mode();
-    assert_eq!(mode & 0o777, 0o600);
 }
 
 #[test]
@@ -1988,43 +1867,10 @@ fn a_create_reports_every_field_problem() {
         has(&found, "tx.shape", "give exactly one of document or text"),
         "{found:#?}"
     );
-    assert!(has(&found, "tx.shape", "expected a string"), "{found:#?}");
-}
-
-#[cfg(unix)]
-#[test]
-fn rollback_restores_the_permissions_a_file_had() {
-    use std::os::unix::fs::PermissionsExt as _;
-    let tree = copy();
-    let root = tree.path();
-    let mode = |path: &str| fs::metadata(root.join(path)).unwrap().permissions().mode() & 0o777;
-    fs::set_permissions(
-        root.join("defs/proto/coin.jsonc"),
-        fs::Permissions::from_mode(0o640),
-    )
-    .unwrap();
-    fs::set_permissions(
-        root.join("defs/proto/edge_n.jsonc"),
-        fs::Permissions::from_mode(0o604),
-    )
-    .unwrap();
-    let tx = transaction(
-        r#"{"op": "document.delete", "path": "defs/proto/coin.jsonc"},
-    {"op": "document.rename", "path": "defs/proto/edge_n.jsonc", "to": "defs/proto/coin.jsonc"},
-    {"op": "set", "path": "defs/proto/coin.jsonc", "pointer": ["id"], "value": "coin"},
-    {"op": "set", "path": "planes/overworld/layers/0/0_0.jsonc", "pointer": ["terrain", "mask", "palette", "n"], "value": "coin"}"#,
+    assert!(
+        has(&found, "tx.shape", "unknown key \"like\""),
+        "{found:#?}"
     );
-    let plan = planned(root, &tx);
-    // Writes come first; failing at the deletion rolls the writes back.
-    publish::FAIL_STEP.with(|fail| fail.set(Some(2)));
-    let failure = plan.publish().unwrap_err();
-    publish::FAIL_STEP.with(|fail| fail.set(None));
-    assert!(!failure.applied, "{failure:#?}");
-    assert_eq!(mode("defs/proto/coin.jsonc"), 0o640);
-    assert_eq!(mode("defs/proto/edge_n.jsonc"), 0o604);
-    // Published, the replaced file allows no more than either file did.
-    plan.publish().unwrap();
-    assert_eq!(mode("defs/proto/coin.jsonc"), 0o600);
 }
 
 #[test]
@@ -2055,52 +1901,6 @@ fn a_differing_result_names_ten_files_and_counts_the_rest() {
         result[0].message.contains("defs/proto/coin.jsonc"),
         "{found:#?}"
     );
-}
-
-#[cfg(unix)]
-#[test]
-fn permissions_follow_chains_through_files_the_transaction_made() {
-    use std::os::unix::fs::PermissionsExt as _;
-    let tree = copy();
-    let root = tree.path();
-    let mode = |path: &str| fs::metadata(root.join(path)).unwrap().permissions().mode() & 0o777;
-    let recipe = |id: &str| {
-        format!(
-            "{{\"format\": \"tilewright.def/1\", \"type\": \"recipe\", \"id\": \"{id}\", \"fields\": {{\"output\": \"chest\", \"ingredients\": [{{\"item\": \"coin\", \"count\": 1}}]}}}}"
-        )
-    };
-    fs::set_permissions(
-        root.join("defs/recipe/chest.jsonc"),
-        fs::Permissions::from_mode(0o640),
-    )
-    .unwrap();
-    // A file like one the transaction creates is like what that one is like.
-    apply(
-        root,
-        &transaction(&format!(
-            "{{\"op\": \"document.create\", \"path\": \"defs/recipe/a.jsonc\", \"document\": {}, \"like\": \"defs/recipe/chest.jsonc\"}},\n    {{\"op\": \"document.create\", \"path\": \"defs/recipe/b.jsonc\", \"document\": {}, \"like\": \"defs/recipe/a.jsonc\"}}",
-            recipe("a"),
-            recipe("b")
-        )),
-    );
-    assert_eq!(mode("defs/recipe/a.jsonc"), 0o640);
-    assert_eq!(mode("defs/recipe/b.jsonc"), 0o640);
-    // A file made from one that replaced another allows no more than either.
-    fs::set_permissions(
-        root.join("defs/proto/coin.jsonc"),
-        fs::Permissions::from_mode(0o604),
-    )
-    .unwrap();
-    apply(
-        root,
-        &transaction(&format!(
-            "{{\"op\": \"document.delete\", \"path\": \"defs/recipe/chest.jsonc\"}},\n    {{\"op\": \"document.create\", \"path\": \"defs/recipe/chest.jsonc\", \"document\": {}, \"like\": \"defs/proto/coin.jsonc\"}},\n    {{\"op\": \"document.create\", \"path\": \"defs/recipe/c.jsonc\", \"document\": {}, \"like\": \"defs/recipe/chest.jsonc\"}}",
-            recipe("chest"),
-            recipe("c")
-        )),
-    );
-    assert_eq!(mode("defs/recipe/chest.jsonc"), 0o600);
-    assert_eq!(mode("defs/recipe/c.jsonc"), 0o600);
 }
 
 #[test]
@@ -2229,7 +2029,11 @@ fn permissions_narrowed_while_publishing_are_a_conflict() {
         fs::set_permissions(&hook_target, fs::Permissions::from_mode(0o600)).unwrap();
     });
     assert!(
-        has(&failure.problems, "tx.conflict", "its permissions changed"),
+        has(
+            &failure.problems,
+            "tx.conflict",
+            "changed while the transaction"
+        ),
         "{failure:#?}"
     );
     assert_eq!(
@@ -2245,9 +2049,9 @@ fn special_mode_bits_are_kept() {
     let tree = copy();
     let root = tree.path();
     let target = root.join("planes/overworld/plane.jsonc");
-    fs::set_permissions(&target, fs::Permissions::from_mode(0o4640)).unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o4664)).unwrap();
     let mode = || fs::metadata(&target).unwrap().permissions().mode() & 0o7777;
-    if mode() != 0o4640 {
+    if mode() != 0o4664 {
         // The file system does not keep the bit for this user.
         return;
     }
@@ -2257,7 +2061,7 @@ fn special_mode_bits_are_kept() {
             r#"{"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["title"], "value": "Changed"}"#,
         ),
     );
-    assert_eq!(mode(), 0o4640);
+    assert_eq!(mode(), 0o4664);
 }
 
 #[test]
@@ -2279,26 +2083,6 @@ fn cells_at_a_bad_terrain_address_fail_validation() {
     );
 }
 
-#[test]
-fn an_inverse_names_no_unwritten_file_like_another() {
-    let tree = copy();
-    let root = tree.path();
-    let coin = read(root, "defs/proto/coin.jsonc");
-    let mut pieces = String::new();
-    tilewright_jsonc::write_json_string(&coin, &mut pieces);
-    // The recreated file keeps its bytes, so it is not written and does not
-    // take the deleted file's permissions; the inverse cannot rely on it.
-    let plan = planned(
-        root,
-        &transaction(&format!(
-            r#"{{"op": "document.delete", "path": "defs/recipe/chest.jsonc"}},
-    {{"op": "document.delete", "path": "defs/proto/coin.jsonc"}},
-    {{"op": "document.create", "path": "defs/proto/coin.jsonc", "text": {pieces}, "like": "defs/recipe/chest.jsonc"}}"#
-        )),
-    );
-    assert!(!plan.inverse().contains("\"like\""), "{}", plan.inverse());
-}
-
 #[cfg(unix)]
 #[test]
 fn a_deleted_file_permissions_are_checked_before_publishing() {
@@ -2306,7 +2090,6 @@ fn a_deleted_file_permissions_are_checked_before_publishing() {
     let tree = copy();
     let root = tree.path().to_path_buf();
     let target = root.join("defs/recipe/chest.jsonc");
-    fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
     let plan = planned(
         &root,
         &transaction(r#"{"op": "document.delete", "path": "defs/recipe/chest.jsonc"}"#),
@@ -2315,10 +2098,14 @@ fn a_deleted_file_permissions_are_checked_before_publishing() {
     // publishing is caught rather than restored with on failure.
     let hook_target = target.clone();
     let failure = publish_with(&plan, move || {
-        fs::set_permissions(&hook_target, fs::Permissions::from_mode(0o666)).unwrap();
+        fs::set_permissions(&hook_target, fs::Permissions::from_mode(0o600)).unwrap();
     });
     assert!(
-        has(&failure.problems, "tx.conflict", "its permissions changed"),
+        has(
+            &failure.problems,
+            "tx.conflict",
+            "changed while the transaction"
+        ),
         "{failure:#?}"
     );
     assert!(target.exists());
@@ -2459,26 +2246,6 @@ fn unreadable_files_count_toward_the_file_limit() {
 }
 
 #[test]
-fn a_file_is_like_one_that_is_there() {
-    let tree = copy();
-    let found = problems(
-        tree.path(),
-        &transaction(
-            r#"{"op": "document.create", "path": "defs/recipe/a.jsonc", "text": "{}", "like": "defs/recipe/b.jsonc"},
-    {"op": "document.create", "path": "defs/recipe/b.jsonc", "text": "{}", "like": "defs/recipe/chest.jsonc"}"#,
-        ),
-    );
-    assert!(
-        has(
-            &found,
-            "tx.conflict",
-            "has no file for defs/recipe/a.jsonc to be like"
-        ),
-        "{found:#?}"
-    );
-}
-
-#[test]
 fn recovery_removes_directories_an_interrupted_stage_made() {
     let tree = copy();
     let root = tree.path();
@@ -2542,8 +2309,7 @@ fn a_file_with_an_access_control_list_is_not_replaced() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn a_replaced_file_does_not_keep_an_access_control_list_its_directory_gives() {
-    use std::os::unix::fs::PermissionsExt as _;
+fn a_directory_that_gives_new_files_an_access_control_list_is_refused() {
     let tree = copy();
     let root = tree.path();
     let directory = root.join("planes/overworld");
@@ -2560,22 +2326,19 @@ fn a_replaced_file_does_not_keep_an_access_control_list_its_directory_gives() {
         // No ACL support here.
         return;
     }
-    let target = directory.join("plane.jsonc");
-    fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
-    apply(
+    let plan = planned(
         root,
         &transaction(
             r#"{"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["title"], "value": "Changed"}"#,
         ),
     );
-    assert_eq!(
-        rustix::fs::getxattr(&target, "system.posix_acl_access", &mut [0_u8; 0][..]),
-        Err(rustix::io::Errno::NODATA)
+    let failure = plan.publish().unwrap_err();
+    assert!(!failure.applied);
+    assert!(
+        has(&failure.problems, "tx.io", "access control list"),
+        "{failure:#?}"
     );
-    assert_eq!(
-        fs::metadata(&target).unwrap().permissions().mode() & 0o777,
-        0o640
-    );
+    assert_eq!(snapshot(root), snapshot(&fixture()));
 }
 
 /// No user or group: the id of an entry that names neither.
@@ -2600,4 +2363,87 @@ fn posix_acl(entries: &[(u16, u16, u32)]) -> Vec<u8> {
 #[cfg(target_os = "linux")]
 fn set_acl(path: &Path, name: &str, value: &[u8]) -> bool {
     rustix::fs::setxattr(path, name, value, rustix::fs::XattrFlags::empty()).is_ok()
+}
+
+#[cfg(unix)]
+#[test]
+fn files_a_transaction_changes_must_have_the_same_readers() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let tree = copy();
+    let root = tree.path();
+    // An object moves from a chunk only its owner may read to one all may.
+    let private = root.join("planes/overworld/layers/0/0_0.jsonc");
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o600)).unwrap();
+    let plan = planned(
+        root,
+        &transaction(
+            r#"{"op": "object.move", "plane": "overworld", "layer": 0, "at": [15, 0], "index": 0, "expect": {"proto": "wall"}, "to": {"at": [-31, 1]}}"#,
+        ),
+    );
+    let failure = plan.publish().unwrap_err();
+    assert!(!failure.applied);
+    assert!(
+        has(&failure.problems, "tx.io", "can be read by different users"),
+        "{failure:#?}"
+    );
+    assert_eq!(snapshot(root), snapshot(&fixture()));
+}
+
+#[cfg(unix)]
+#[test]
+fn new_files_and_directories_take_their_directory_access() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let tree = copy();
+    let root = tree.path();
+    let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+    let layers = root.join("planes/overworld/layers");
+    readable_by_group(root);
+    apply(
+        root,
+        &transaction(
+            r#"{"op": "object.insert", "plane": "overworld", "layer": 9, "at": [1, 1], "object": {"proto": "tree"}}"#,
+        ),
+    );
+    let created = layers.join("9");
+    assert_eq!(mode(&created), 0o750);
+    assert_eq!(mode(&created.join("0_0.jsonc")), 0o640);
+}
+
+#[cfg(unix)]
+#[test]
+fn an_inverse_recreates_a_deleted_file_with_its_directory_access() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let tree = copy();
+    let root = tree.path();
+    let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+    let recipe = root.join("defs/recipe/chest.jsonc");
+    readable_by_group(root);
+    let plan = apply(
+        root,
+        &transaction(r#"{"op": "document.delete", "path": "defs/recipe/chest.jsonc"}"#),
+    );
+    assert!(!recipe.exists());
+    apply(
+        root,
+        &Transaction::parse("inverse.jsonc", plan.inverse()).unwrap(),
+    );
+    assert_eq!(mode(&recipe), 0o640);
+}
+
+/// Makes every directory of the tree 0750 and every file 0640: readable by
+/// its owner and group only.
+#[cfg(unix)]
+fn readable_by_group(root: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    fn walk(path: &Path) {
+        let directory = fs::symlink_metadata(path).unwrap().is_dir();
+        let mode = if directory { 0o750 } else { 0o640 };
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+        if directory {
+            for entry in fs::read_dir(path).unwrap() {
+                walk(&entry.unwrap().path());
+            }
+        }
+    }
+    walk(root);
 }

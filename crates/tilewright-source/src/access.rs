@@ -86,6 +86,27 @@ fn checked_name(name: &str) -> Result<&str, AccessError> {
     }
 }
 
+/// Who may use a file or directory, as publishing keeps it: where there are
+/// no modes, a read-only file has none of the write bits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Access {
+    /// The permission bits, with the set-user, set-group and sticky bits.
+    pub mode: u32,
+    /// The owning user.
+    pub user: u32,
+    /// The owning group.
+    pub group: u32,
+}
+
+impl Access {
+    /// Whether the group may read and others may not, so that the group
+    /// says who may.
+    #[must_use]
+    pub const fn group_reads_alone(&self) -> bool {
+        self.mode & 0o040 != 0 && self.mode & 0o004 == 0
+    }
+}
+
 /// A source tree root. The root itself may be a link; nothing beneath it is
 /// followed.
 pub struct SourceRoot {
@@ -197,35 +218,45 @@ impl SourceDirectory {
     }
 
     /// Writes a new file `name` with `bytes` and syncs it. Whatever was at
-    /// `name` is removed first, so a link or hard link there is never written
-    /// through. The file takes the permissions of the regular file `like`,
-    /// if there is one.
-    pub fn write(&self, name: &str, like: &str, bytes: &[u8]) -> Result<(), AccessError> {
-        let permissions = self.permissions(like)?;
-        self.write_with(name, permissions.as_ref(), bytes)
-    }
-
-    /// Writes a new file `name` like [`SourceDirectory::write`], with the
-    /// given permissions, or the platform's default.
-    pub fn write_with(
+    /// `name` is removed first, so a link or hard link there is never
+    /// written through. With `access`, the file is its owner's alone until
+    /// written, then takes that mode and group, and on Linux no access
+    /// control list it would get from the directory; without, it has the
+    /// platform's default.
+    pub fn write(
         &self,
         name: &str,
-        permissions: Option<&std::fs::Permissions>,
+        access: Option<&Access>,
         bytes: &[u8],
     ) -> Result<(), AccessError> {
         self.directory
-            .write(checked_name(name)?, permissions, bytes)
+            .write(checked_name(name)?, access, bytes)
             .map_err(|error| refused(&self.entry(name), error))
     }
 
-    /// The permissions of the regular file `name`; `None` when there is no
-    /// regular file there. On Linux, a file with an access control list is
-    /// refused, since its mode bits do not say who may read it and a file
-    /// replacing it could not keep the list.
-    pub fn permissions(&self, name: &str) -> Result<Option<std::fs::Permissions>, AccessError> {
+    /// Who may use the regular file `name`; `None` when there is no regular
+    /// file there. On Linux, a file with an access control list is refused,
+    /// since its mode bits do not say who may read it and a file replacing
+    /// it could not keep the list.
+    pub fn access(&self, name: &str) -> Result<Option<Access>, AccessError> {
         self.directory
-            .permissions(checked_name(name)?)
+            .access(checked_name(name)?)
             .map_err(|error| refused(&self.entry(name), error))
+    }
+
+    /// Who may use this directory. On Linux, a directory with an access
+    /// control list, its own or one it gives new files, is refused.
+    pub fn own_access(&self) -> Result<Access, AccessError> {
+        self.directory
+            .own_access()
+            .map_err(|error| refused(&self.path, error))
+    }
+
+    /// Gives this directory the mode and group of `access`.
+    pub fn set_own_access(&self, access: &Access) -> Result<(), AccessError> {
+        self.directory
+            .set_own_access(access)
+            .map_err(|error| refused(&self.path, error))
     }
 
     /// Renames `from` to `to`, replacing `to`, atomically.

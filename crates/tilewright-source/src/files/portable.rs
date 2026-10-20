@@ -7,6 +7,7 @@
 //! no lock.
 
 use super::{Found, RawEntry, RawKind, Refused};
+use crate::access::Access;
 use std::{
     fs,
     io::ErrorKind,
@@ -184,17 +185,30 @@ impl Directory {
         }
     }
 
-    pub(crate) fn permissions(&self, name: &str) -> Result<Option<fs::Permissions>, Refused> {
+    pub(crate) fn access(&self, name: &str) -> Result<Option<Access>, Refused> {
         Ok(self
             .entry(name)?
             .filter(fs::Metadata::is_file)
-            .map(|metadata| metadata.permissions()))
+            .map(|metadata| access_of(&metadata)))
     }
 
+    pub(crate) fn own_access(&self) -> Result<Access, Refused> {
+        fs::metadata(&self.0)
+            .map(|metadata| access_of(&metadata))
+            .map_err(Refused::Io)
+    }
+
+    pub(crate) fn set_own_access(&self, access: &Access) -> Result<(), Refused> {
+        let current = fs::metadata(&self.0).map_err(Refused::Io)?.permissions();
+        fs::set_permissions(&self.0, permissions_of(access, &current)).map_err(Refused::Io)
+    }
+
+    /// Writes a new file; with `access`, it gets that mode after writing.
+    /// Groups are not kept here.
     pub(crate) fn write(
         &self,
         name: &str,
-        permissions: Option<&fs::Permissions>,
+        access: Option<&Access>,
         bytes: &[u8],
     ) -> Result<(), Refused> {
         use std::io::Write as _;
@@ -205,15 +219,16 @@ impl Directory {
         // A file with permissions of its own is only its owner's until it
         // has them, where the platform allows; they are set after writing.
         #[cfg(unix)]
-        if permissions.is_some() {
+        if access.is_some() {
             use std::os::unix::fs::OpenOptionsExt as _;
             options.mode(0o600);
         }
         let mut file = options.open(&path).map_err(Refused::Io)?;
         let written = (|| {
             file.write_all(bytes).map_err(Refused::Io)?;
-            if let Some(permissions) = permissions {
-                file.set_permissions(permissions.clone())
+            if let Some(access) = access {
+                let current = file.metadata().map_err(Refused::Io)?.permissions();
+                file.set_permissions(permissions_of(access, &current))
                     .map_err(Refused::Io)?;
             }
             file.sync_all().map_err(Refused::Io)
@@ -266,5 +281,49 @@ impl Directory {
         }
         #[cfg(not(unix))]
         Ok(false)
+    }
+}
+
+/// Who may use a file or directory: its mode where there is one, and
+/// elsewhere read-only or not.
+fn access_of(metadata: &fs::Metadata) -> Access {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        Access {
+            mode: metadata.mode() & 0o7777,
+            user: metadata.uid(),
+            group: metadata.gid(),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let all = if metadata.is_dir() { 0o777 } else { 0o666 };
+        Access {
+            mode: if metadata.permissions().readonly() {
+                all & 0o555
+            } else {
+                all
+            },
+            user: 0,
+            group: 0,
+        }
+    }
+}
+
+/// The permissions of `access`: its mode where there is one, and
+/// elsewhere `current` made read-only when `access` allows no writing.
+fn permissions_of(access: &Access, current: &fs::Permissions) -> fs::Permissions {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = current;
+        fs::Permissions::from_mode(access.mode)
+    }
+    #[cfg(not(unix))]
+    {
+        let mut permissions = current.clone();
+        permissions.set_readonly(access.mode & 0o222 == 0);
+        permissions
     }
 }

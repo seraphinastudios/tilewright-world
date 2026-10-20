@@ -620,48 +620,22 @@ fn document_operation(
             pointer,
             expected,
         } => test_value(workspace, transaction, target, pointer, expected),
-        Action::Create {
-            path,
-            content,
-            like,
-        } => {
-            // The file it is like must be there, now or before the
-            // transaction, so its permissions are known when publishing.
-            if let Some(like) = like
-                && !workspace.has_or_had(like)?
-            {
-                return Err(Failure::conflict(format!(
-                    "{like} has no file for {path} to be like"
-                )));
-            }
+        Action::Create { path, content } => {
             let text = match content {
                 Content::Document(span) => {
                     Node::from_value(&transaction.document, transaction.value(*span)).file()
                 }
                 Content::Text(text) => text.clone(),
             };
-            workspace.create(path, text)?;
-            // A created file comes from the file it is like, or from none.
-            match like {
-                Some(like) => workspace.lineage.derive(path, like),
-                None => workspace.lineage.forget(path),
-            }
-            Ok(())
+            workspace.create(path, text)
         }
-        Action::Delete { path } => {
-            workspace.delete(path)?;
-            workspace.lineage.forget(path);
-            Ok(())
-        }
+        Action::Delete { path } => workspace.delete(path).map(|_| ()),
         Action::Rename { path, to } => {
             if workspace.exists(to)? {
                 return Err(Failure::conflict(format!("{to} already exists")));
             }
             let text = workspace.delete(path)?;
-            workspace.create(to, text)?;
-            workspace.lineage.derive(to, path);
-            workspace.lineage.forget(path);
-            Ok(())
+            workspace.create(to, text)
         }
         Action::ObjectInsert { .. } | Action::ObjectRemove { .. } | Action::ObjectMove { .. } => {
             object_operation(workspace, transaction, action)

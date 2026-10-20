@@ -8,10 +8,11 @@
 //! way, so they never follow a link either.
 
 use super::{Found, RawEntry, RawKind, Refused};
+use crate::access::Access;
 use rustix::{
     fs::{
-        AtFlags, CWD, Dir, FileType, FlockOperation, Mode, OFlags, fchmod, flock, fstat, fsync,
-        mkdirat, openat, renameat, statat, unlinkat,
+        AtFlags, CWD, Dir, FileType, FlockOperation, Gid, Mode, OFlags, Stat, fchmod, fchown,
+        flock, fstat, fsync, mkdirat, openat, renameat, statat, unlinkat,
     },
     io::Errno,
 };
@@ -265,49 +266,58 @@ pub(crate) struct Lock(#[allow(dead_code)] OwnedFd);
 pub(crate) struct Directory(OwnedFd);
 
 impl Directory {
-    /// Writes a new file `name` holding `bytes` and syncs it. Whatever was at
-    /// `name` is removed first, so a link or a second hard link there is
-    /// never written through. The file takes the permissions of the regular
-    /// file `like`, if there is one.
-    /// The permissions of the regular file `name`, if there is one.
-    pub(crate) fn permissions(&self, name: &str) -> Result<Option<std::fs::Permissions>, Refused> {
-        use std::os::unix::fs::PermissionsExt as _;
+    /// Who may use the regular file `name`, if there is one. On Linux, a
+    /// file with an access control list is refused, since its mode bits do
+    /// not say who may read it and a file replacing it could not keep it.
+    pub(crate) fn access(&self, name: &str) -> Result<Option<Access>, Refused> {
         match statat(&self.0, name, AtFlags::SYMLINK_NOFOLLOW) {
             Ok(stat) if kind_of(FileType::from_raw_mode(stat.st_mode)) == RawKind::File => {
                 #[cfg(target_os = "linux")]
-                if self.has_access_control_list(name)? {
-                    return Err(Refused::Io(std::io::Error::new(
-                        std::io::ErrorKind::Unsupported,
-                        "it has an access control list, which a file replacing it could not keep",
-                    )));
+                {
+                    let flags = OFlags::RDONLY
+                        | OFlags::NOFOLLOW
+                        | OFlags::NONBLOCK
+                        | OFlags::CLOEXEC
+                        | OFlags::NOCTTY;
+                    let fd = openat(&self.0, name, flags, Mode::empty())
+                        .map_err(|errno| classify(self.0.as_fd(), name, errno, &[name]))?;
+                    refuse_access_control_lists(&fd, &ACCESS_CONTROL_LISTS)?;
                 }
-                Ok(Some(std::fs::Permissions::from_mode(
-                    Mode::from_raw_mode(stat.st_mode).as_raw_mode(),
-                )))
+                Ok(Some(access_of(&stat)))
             }
             Ok(_) | Err(Errno::NOENT) => Ok(None),
             Err(errno) => Err(Refused::Io(errno.into())),
         }
     }
 
-    /// Whether the file `name` has an access control list beyond its mode
-    /// bits.
-    #[cfg(target_os = "linux")]
-    fn has_access_control_list(&self, name: &str) -> Result<bool, Refused> {
-        let flags =
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC | OFlags::NOCTTY;
-        let fd = openat(&self.0, name, flags, Mode::empty())
-            .map_err(|errno| classify(self.0.as_fd(), name, errno, &[name]))?;
-        access_control_list(&fd)
+    /// Who may use this directory. On Linux, a directory with an access
+    /// control list, its own or one it gives new files, is refused.
+    pub(crate) fn own_access(&self) -> Result<Access, Refused> {
+        let stat = fstat(&self.0).map_err(|errno| Refused::Io(errno.into()))?;
+        #[cfg(target_os = "linux")]
+        {
+            refuse_access_control_lists(&self.0, &ACCESS_CONTROL_LISTS)?;
+            refuse_access_control_lists(&self.0, &["system.posix_acl_default"])?;
+        }
+        Ok(access_of(&stat))
     }
 
+    /// Gives this directory the mode and group of `access`.
+    pub(crate) fn set_own_access(&self, access: &Access) -> Result<(), Refused> {
+        set_access(&self.0, access)
+    }
+
+    /// Writes a new file `name` holding `bytes` and syncs it. Whatever was
+    /// at `name` is removed first, so a link or a second hard link there is
+    /// never written through. With `access`, the file is its owner's alone
+    /// until written, then gets that mode and group; without, the
+    /// platform's default.
     pub(crate) fn write(
         &self,
         name: &str,
-        permissions: Option<&std::fs::Permissions>,
+        access: Option<&Access>,
         bytes: &[u8],
     ) -> Result<(), Refused> {
-        use std::os::unix::fs::PermissionsExt as _;
         self.remove_file(name)?;
         let flags = OFlags::WRONLY
             | OFlags::CREATE
@@ -318,19 +328,18 @@ impl Directory {
         // A file with permissions of its own is only its owner's until it
         // has them: they are set after writing, which would clear set-user
         // and set-group bits set before.
-        let mode = if permissions.is_some() { 0o600 } else { 0o666 };
+        let mode = if access.is_some() { 0o600 } else { 0o666 };
         let fd = openat(&self.0, name, flags, Mode::from_raw_mode(mode))
             .map_err(|errno| classify(self.0.as_fd(), name, errno, &[name]))?;
         let written = (|| {
             let mut file = std::fs::File::from(fd);
             file.write_all(bytes).map_err(Refused::Io)?;
-            if let Some(permissions) = permissions {
+            if let Some(access) = access {
                 // An access control list the directory gives new files
                 // would let others read what the mode bits do not.
                 #[cfg(target_os = "linux")]
                 strip_access_control_list(&file)?;
-                fchmod(&file, Mode::from_raw_mode(permissions.mode()))
-                    .map_err(|errno| Refused::Io(errno.into()))?;
+                set_access(&file, access)?;
             }
             file.sync_all().map_err(Refused::Io)
         })();
@@ -373,6 +382,31 @@ impl Directory {
     }
 }
 
+/// Who may use a file or directory, from its status.
+fn access_of(stat: &Stat) -> Access {
+    Access {
+        mode: stat.st_mode & 0o7777,
+        user: stat.st_uid,
+        group: stat.st_gid,
+    }
+}
+
+/// Gives an open file or directory the mode and group of `access`: the
+/// group first, since changing it may clear the set-group bit. A group the
+/// user may not give is an error only where the group's members alone,
+/// besides the owner, may read; elsewhere it does not change who may.
+fn set_access(fd: impl AsFd, access: &Access) -> Result<(), Refused> {
+    let stat = fstat(&fd).map_err(|errno| Refused::Io(errno.into()))?;
+    if stat.st_gid != access.group {
+        match fchown(&fd, None, Some(Gid::from_raw(access.group))) {
+            Ok(()) => {}
+            Err(Errno::PERM) if !access.group_reads_alone() => {}
+            Err(errno) => return Err(Refused::Io(errno.into())),
+        }
+    }
+    fchmod(&fd, Mode::from_raw_mode(access.mode)).map_err(|errno| Refused::Io(errno.into()))
+}
+
 /// The access control lists Linux file systems keep beside the mode bits.
 #[cfg(target_os = "linux")]
 const ACCESS_CONTROL_LISTS: [&str; 3] = [
@@ -381,14 +415,26 @@ const ACCESS_CONTROL_LISTS: [&str; 3] = [
     "system.richacl",
 ];
 
-/// Whether the open file has an access control list beyond its mode bits:
-/// a POSIX, NFS version 4 or rich one.
+/// Refuses an open file or directory that has any of the access control
+/// lists `names`.
 #[cfg(target_os = "linux")]
-fn access_control_list(fd: impl AsFd) -> Result<bool, Refused> {
-    for attribute in ACCESS_CONTROL_LISTS {
+fn refuse_access_control_lists(fd: impl AsFd, names: &[&str]) -> Result<(), Refused> {
+    if has_any(&fd, names)? {
+        return Err(Refused::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "it has an access control list, which publishing could not keep",
+        )));
+    }
+    Ok(())
+}
+
+/// Whether the open file has any of the extended attributes `names`.
+#[cfg(target_os = "linux")]
+fn has_any(fd: impl AsFd, names: &[&str]) -> Result<bool, Refused> {
+    for name in names {
         // Asked with no room, the call gives the size of a value that is
         // there, or says there is none.
-        match rustix::fs::fgetxattr(&fd, attribute, &mut [0_u8; 0][..]) {
+        match rustix::fs::fgetxattr(&fd, *name, &mut [0_u8; 0][..]) {
             Ok(_) | Err(Errno::RANGE) => return Ok(true),
             Err(Errno::NODATA | Errno::NOTSUP) => {}
             Err(errno) => return Err(Refused::Io(errno.into())),
@@ -406,7 +452,7 @@ fn strip_access_control_list(fd: impl AsFd) -> Result<(), Refused> {
         Ok(()) | Err(Errno::NODATA | Errno::NOTSUP) => {}
         Err(errno) => return Err(Refused::Io(errno.into())),
     }
-    if access_control_list(&fd)? {
+    if has_any(&fd, &ACCESS_CONTROL_LISTS)? {
         return Err(Refused::Io(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "the directory gives new files an access control list that cannot be removed",

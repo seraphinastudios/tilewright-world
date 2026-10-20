@@ -135,9 +135,6 @@ pub(crate) enum Action {
     Create {
         path: String,
         content: Content,
-        /// A file whose permissions the new one takes, if it is there when
-        /// publishing: the file a rename's inverse renames back from.
-        like: Option<String>,
     },
     Delete {
         path: String,
@@ -703,7 +700,7 @@ impl<'a> Shape<'a> {
             "object.remove" => &["op", "plane", "layer", "at", "index", "expect"],
             "object.move" => &["op", "plane", "layer", "at", "index", "expect", "to"],
             "terrain.set" => &["op", "plane", "layer", "grid", "cells"],
-            "document.create" => &["op", "path", "document", "text", "like"],
+            "document.create" => &["op", "path", "document", "text"],
             "document.delete" => &["op", "path"],
             "document.rename" => &["op", "path", "to"],
             _ => {
@@ -770,14 +767,9 @@ impl<'a> Shape<'a> {
                 None
             }
         };
-        let like = match item.get("like") {
-            Some(value) => self.path(value).map(Some),
-            None => Some(None),
-        };
         Some(Action::Create {
             path: path?,
             content: content?,
-            like: like?,
         })
     }
 
@@ -1231,6 +1223,5 @@ const ANY_OPERATION_KEYS: &[&str] = &[
     "cells",
     "document",
     "text",
-    "like",
     "to",
 ];
