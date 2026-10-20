@@ -201,8 +201,9 @@ To turn it on:
 
 From then on, each release dispatches `publish-npm.yml`. To publish an
 earlier release, run it by hand with that release's tag. The newest release
-gets npm's `latest` dist-tag, and older ones get `maintenance-MAJOR.MINOR`.
-To turn publishing off again, delete the variable or set it to anything else.
+gets npm's `latest` dist-tag, and an older one, such as a maintenance
+release, gets `release-MAJOR.MINOR`. To turn publishing off again, delete
+the variable or set it to anything else.
 
 ## Turning on crates.io publication
 

@@ -84,11 +84,12 @@ jobs:
             exit 1
           fi
           # The newest release is npm's latest; an older one, such as a
-          # maintenance release, gets a dist-tag for its line.
+          # maintenance release, gets a dist-tag for its line. (A dist-tag
+          # must not parse as a semver range, so "0.4" alone would not do.)
           if [[ $(gh api "repos/${GH_REPO}/releases/latest" --jq .tag_name) == "${TAG}" ]]; then
             dist_tag=latest
           else
-            dist_tag="maintenance-$(cut -d. -f1-2 <<<"${version}")"
+            dist_tag="release-$(cut -d. -f1-2 <<<"${version}")"
           fi
           {
             echo "path=dist/${tarball}"
