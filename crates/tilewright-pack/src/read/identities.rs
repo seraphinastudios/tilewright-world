@@ -11,7 +11,7 @@ use super::{
 };
 use crate::{Error, Pack, is_identifier};
 use rusqlite::Row;
-use tilewright_jsonc::{MAX_SAFE_INTEGER, Value};
+use tilewright_jsonc::{Document, MAX_SAFE_INTEGER, Value};
 use tilewright_source::CHUNK_SIZE;
 
 /// One identity of a pack, as [`Pack::visit_identities`] lists it.
@@ -109,6 +109,58 @@ fn chunk_coordinate(row: &Row<'_>, index: usize) -> Result<i64, Error> {
     })
 }
 
+/// The error for a stored document that disagrees with its row.
+fn disagrees(what: &str) -> Error {
+    Error::Invalid(format!("the document of {what} disagrees with its row"))
+}
+
+/// A row of `planes` selected as `id, kind, chunk_size, document`, and its
+/// stored document. As verification checks, the kind is one format 1
+/// defines, the chunk size is [`CHUNK_SIZE`], and the document agrees with
+/// the row on its format, ID, kind and chunk size.
+fn plane_row(row: &Row<'_>) -> Result<(String, Document), Error> {
+    let id = identifier(row, 0, "plane")?;
+    let kind: Option<String> = row.get(1)?;
+    let chunk_size: Option<i64> = row.get(2)?;
+    let stored = stored_document(row.get(3)?, "a plane document")?;
+    if !kind
+        .as_deref()
+        .is_some_and(|kind| ["shared", "instanced", "per_player"].contains(&kind))
+        || chunk_size != Some(i64::from(CHUNK_SIZE))
+    {
+        return Err(Error::Invalid(format!(
+            "plane {id} has an invalid kind or a chunk size other than {CHUNK_SIZE}"
+        )));
+    }
+    if text(&stored, "format") != Some("tilewright.plane/1")
+        || text(&stored, "id") != Some(&id)
+        || text(&stored, "kind") != kind.as_deref()
+        || stored.root().get("chunk_size").and_then(Value::as_i64) != chunk_size
+    {
+        return Err(disagrees(&format!("plane {id}")));
+    }
+    Ok((id, stored))
+}
+
+/// A row of `zones` selected as `plane, id, parent IS NULL, parent,
+/// document`, and its stored document, which agrees with the row on its ID
+/// and parent, as verification checks.
+fn zone_row(row: &Row<'_>) -> Result<(String, String, Document), Error> {
+    let (plane, id) = (identifier(row, 0, "zone")?, identifier(row, 1, "zone")?);
+    let parent = if row.get::<_, bool>(2)? {
+        None
+    } else {
+        Some(identifier(row, 3, "zone parent")?)
+    };
+    let stored = stored_document(row.get(4)?, "a zone document")?;
+    if text(&stored, "id") != Some(&id)
+        || stored.root().get("parent").map(Value::as_str) != parent.as_deref().map(Some)
+    {
+        return Err(disagrees(&format!("zone {plane}/{id}")));
+    }
+    Ok((plane, id, stored))
+}
+
 impl Pack {
     /// Calls `each` with every row of `sql`, whose `?1`, if any, is the
     /// largest stored document.
@@ -151,8 +203,6 @@ impl Pack {
         visit: &mut dyn FnMut(Identity<'_>) -> Result<(), Error>,
     ) -> Result<(), Error> {
         let document = bounded_text("document");
-        let disagrees =
-            |what: String| Error::Invalid(format!("the document of {what} disagrees with its row"));
         let key = bounded_identifier;
 
         // The whole profile is checked, so its render layers are 1 to
@@ -173,13 +223,14 @@ impl Pack {
         drop(profile);
 
         self.each_row(
-            &format!("SELECT {}, {document} FROM planes ORDER BY id", key("id")),
+            &format!(
+                "SELECT {}, {}, {}, {document} FROM planes ORDER BY id",
+                key("id"),
+                key("kind"),
+                integer("chunk_size")
+            ),
             &mut |row| {
-                let id = identifier(row, 0, "plane")?;
-                let stored = stored_document(row.get(1)?, "a plane document")?;
-                if text(&stored, "id") != Some(&id) {
-                    return Err(disagrees(format!("plane {id}")));
-                }
+                let (id, stored) = plane_row(row)?;
                 visit(Identity::Plane {
                     id: &id,
                     document: stored.source(),
@@ -188,16 +239,13 @@ impl Pack {
         )?;
         self.each_row(
             &format!(
-                "SELECT {}, {}, {document} FROM zones ORDER BY plane, id",
+                "SELECT {}, {}, parent IS NULL, {}, {document} FROM zones ORDER BY plane, id",
                 key("plane"),
-                key("id")
+                key("id"),
+                key("parent")
             ),
             &mut |row| {
-                let (plane, id) = (identifier(row, 0, "zone")?, identifier(row, 1, "zone")?);
-                let stored = stored_document(row.get(2)?, "a zone document")?;
-                if text(&stored, "id") != Some(&id) {
-                    return Err(disagrees(format!("zone {plane}/{id}")));
-                }
+                let (plane, id, stored) = zone_row(row)?;
                 visit(Identity::Zone {
                     plane: &plane,
                     id: &id,
@@ -219,7 +267,7 @@ impl Pack {
                 let stairwell =
                     stored_stairwell(&stored_document(row.get(2)?, "a stairwell document")?)?;
                 if stairwell.id != id {
-                    return Err(disagrees(format!("stairwell {plane}/{id}")));
+                    return Err(disagrees(&format!("stairwell {plane}/{id}")));
                 }
                 visit(Identity::Stairwell {
                     plane: &plane,
@@ -244,7 +292,7 @@ impl Pack {
                     || text(&stored, "type") != Some(&kind)
                     || text(&stored, "id") != Some(&id)
                 {
-                    return Err(disagrees(format!("definition {kind}/{id}")));
+                    return Err(disagrees(&format!("definition {kind}/{id}")));
                 }
                 visit(Identity::Definition {
                     kind: &kind,
@@ -425,79 +473,110 @@ mod tests {
         assert_eq!((seen, error.to_string()), (1, "stop".to_owned()));
     }
 
+    /// Changes to a pack, each with what the error for it says.
+    const MALFORMED: &[(&str, &str)] = &[
+        (
+            "UPDATE planes SET document = replace(document, '\"vault\"', '\"other\"') WHERE id = 'vault'",
+            "disagrees",
+        ),
+        (
+            "UPDATE zones SET document = '{\"id\":\"elsewhere\"}' WHERE id = 'village'",
+            "disagrees",
+        ),
+        (
+            "UPDATE zones SET document = ' {}' WHERE id = 'village'",
+            "canonical",
+        ),
+        (
+            "UPDATE zones SET id = 'Village' WHERE id = 'village'",
+            "identifier",
+        ),
+        (
+            "UPDATE zones SET parent = 'wilderness' WHERE id = 'village'",
+            "disagrees",
+        ),
+        (
+            "UPDATE zones SET parent = NULL WHERE id = 'village'",
+            "disagrees",
+        ),
+        (
+            "UPDATE zones SET parent = 'x' || char(10) WHERE id = 'village'",
+            "identifier",
+        ),
+        (
+            "UPDATE planes SET kind = 'shared' WHERE id = 'vault'",
+            "disagrees",
+        ),
+        (
+            "UPDATE planes SET kind = 'odd', document = replace(document, '\"instanced\"', '\"odd\"') WHERE id = 'vault'",
+            "invalid kind",
+        ),
+        (
+            "UPDATE planes SET chunk_size = 16 WHERE id = 'vault'",
+            "chunk size",
+        ),
+        (
+            "UPDATE planes SET document = replace(document, 'plane/1', 'plane/2') WHERE id = 'vault'",
+            "disagrees",
+        ),
+        (
+            "UPDATE anchors SET layer = 4294967296 WHERE id = 'village.well'",
+            "32-bit",
+        ),
+        (
+            "UPDATE anchors SET x = 'one' WHERE id = 'village.well'",
+            "position",
+        ),
+        (
+            "UPDATE anchors SET y = 9007199254740992 WHERE id = 'village.well'",
+            "position",
+        ),
+        (
+            "UPDATE stairwells SET document = replace(document, '\"down\"', '\"sideways\"') WHERE id = 'cave.chute'",
+            "shape",
+        ),
+        (
+            "UPDATE stairwells SET id = 'cave.slide' WHERE id = 'cave.chute'",
+            "disagrees",
+        ),
+        (
+            "UPDATE definitions SET type = 'loot' WHERE type = 'recipe'",
+            "disagrees",
+        ),
+        (
+            "UPDATE definitions SET document = zeroblob(10) WHERE id = 'coin'",
+            "canonical",
+        ),
+        ("UPDATE chunks SET layer = 'x' WHERE layer = 1", "32-bit"),
+        (
+            "UPDATE meta SET value = '{\"render_layers\":[]}' WHERE key = 'profile'",
+            "profile",
+        ),
+        (
+            "UPDATE meta SET value = replace(value, '\"effect\"]', '\"effect\",\"floor\"]') WHERE key = 'profile'",
+            "render_layers",
+        ),
+        (
+            "UPDATE meta SET value = '2.0.0' WHERE key = 'profile_version'",
+            "profile_version",
+        ),
+        (
+            "UPDATE chunks SET cx = 281474976710656 WHERE plane = 'vault'",
+            "chunk coordinate",
+        ),
+        (
+            "UPDATE chunks SET cy = -281474976710656 WHERE plane = 'vault'",
+            "chunk coordinate",
+        ),
+        (
+            "UPDATE chunks SET plane = x'00' WHERE plane = 'vault'",
+            "identifier",
+        ),
+    ];
+
     #[test]
     fn identities_reject_rows_of_the_wrong_shape() {
-        for (sql, problem) in [
-            (
-                "UPDATE planes SET document = replace(document, '\"vault\"', '\"other\"') WHERE id = 'vault'",
-                "disagrees",
-            ),
-            (
-                "UPDATE zones SET document = '{\"id\":\"elsewhere\"}' WHERE id = 'village'",
-                "disagrees",
-            ),
-            (
-                "UPDATE zones SET document = ' {}' WHERE id = 'village'",
-                "canonical",
-            ),
-            (
-                "UPDATE zones SET id = 'Village' WHERE id = 'village'",
-                "identifier",
-            ),
-            (
-                "UPDATE anchors SET layer = 4294967296 WHERE id = 'village.well'",
-                "32-bit",
-            ),
-            (
-                "UPDATE anchors SET x = 'one' WHERE id = 'village.well'",
-                "position",
-            ),
-            (
-                "UPDATE anchors SET y = 9007199254740992 WHERE id = 'village.well'",
-                "position",
-            ),
-            (
-                "UPDATE stairwells SET document = replace(document, '\"down\"', '\"sideways\"') WHERE id = 'cave.chute'",
-                "shape",
-            ),
-            (
-                "UPDATE stairwells SET id = 'cave.slide' WHERE id = 'cave.chute'",
-                "disagrees",
-            ),
-            (
-                "UPDATE definitions SET type = 'loot' WHERE type = 'recipe'",
-                "disagrees",
-            ),
-            (
-                "UPDATE definitions SET document = zeroblob(10) WHERE id = 'coin'",
-                "canonical",
-            ),
-            ("UPDATE chunks SET layer = 'x' WHERE layer = 1", "32-bit"),
-            (
-                "UPDATE meta SET value = '{\"render_layers\":[]}' WHERE key = 'profile'",
-                "profile",
-            ),
-            (
-                "UPDATE meta SET value = replace(value, '\"effect\"]', '\"effect\",\"floor\"]') WHERE key = 'profile'",
-                "render_layers",
-            ),
-            (
-                "UPDATE meta SET value = '2.0.0' WHERE key = 'profile_version'",
-                "profile_version",
-            ),
-            (
-                "UPDATE chunks SET cx = 281474976710656 WHERE plane = 'vault'",
-                "chunk coordinate",
-            ),
-            (
-                "UPDATE chunks SET cy = -281474976710656 WHERE plane = 'vault'",
-                "chunk coordinate",
-            ),
-            (
-                "UPDATE chunks SET plane = x'00' WHERE plane = 'vault'",
-                "identifier",
-            ),
-        ] {
+        for (sql, problem) in MALFORMED {
             let (_directory, path) = pack(sql);
             let error = visit(&path).expect_err(sql).to_string();
             assert!(error.contains(problem), "{sql}: {error}");
