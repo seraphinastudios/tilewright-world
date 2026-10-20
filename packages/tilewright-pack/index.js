@@ -84,6 +84,10 @@ function branded(value, type) {
 }
 
 function fetchable(source) {
+  // A promise, of any realm, is normalized once it settles.
+  if (typeof source === "object" && source !== null && typeof source.then === "function") {
+    return Promise.resolve(source).then(fetchable);
+  }
   if (branded(source, globalThis.Response)) {
     return source.arrayBuffer();
   }
