@@ -282,6 +282,7 @@ impl Directory {
                     let fd = openat(&self.0, name, flags, Mode::empty())
                         .map_err(|errno| classify(self.0.as_fd(), name, errno, &[name]))?;
                     refuse_access_control_lists(&fd, &ACCESS_CONTROL_LISTS)?;
+                    refuse_labels(&fd)?;
                 }
                 Ok(Some(access_of(&stat)))
             }
@@ -298,6 +299,7 @@ impl Directory {
         {
             refuse_access_control_lists(&self.0, &ACCESS_CONTROL_LISTS)?;
             refuse_access_control_lists(&self.0, &["system.posix_acl_default"])?;
+            refuse_labels(&self.0)?;
         }
         Ok(access_of(&stat))
     }
@@ -305,37 +307,6 @@ impl Directory {
     /// Gives this directory the mode and group of `access`.
     pub(crate) fn set_own_access(&self, access: &Access) -> Result<(), Refused> {
         set_access(&self.0, access)
-    }
-
-    /// The mandatory access control labels of the file `name`, its
-    /// `security.selinux` and `security.SMACK64` attributes; `None` when
-    /// there is no file.
-    pub(crate) fn labels(&self, name: &str) -> Result<Option<Vec<u8>>, Refused> {
-        let flags =
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC | OFlags::NOCTTY;
-        let fd = match openat(&self.0, name, flags, Mode::empty()) {
-            Ok(fd) => fd,
-            Err(Errno::NOENT) => return Ok(None),
-            Err(errno) => return Err(classify(self.0.as_fd(), name, errno, &[name])),
-        };
-        #[cfg(target_os = "linux")]
-        {
-            let mut labels = Vec::new();
-            for attribute in ["security.selinux", "security.SMACK64"] {
-                labels.extend(attribute.as_bytes());
-                labels.push(b'=');
-                if let Some(value) = attribute_value(&fd, attribute)? {
-                    labels.extend(value);
-                }
-                labels.push(b'\n');
-            }
-            Ok(Some(labels))
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            drop(fd);
-            Ok(Some(Vec::new()))
-        }
     }
 
     /// Writes a new file `name` holding `bytes` and syncs it. Whatever was
@@ -472,6 +443,20 @@ fn refuse_access_control_lists(fd: impl AsFd, names: &[&str]) -> Result<(), Refu
     Ok(())
 }
 
+/// Refuses an open file or directory with a mandatory access control
+/// label, `SELinux` or Smack: who may read under one is up to a policy that
+/// can label a file it replaces, or one created again, otherwise.
+#[cfg(target_os = "linux")]
+fn refuse_labels(fd: impl AsFd) -> Result<(), Refused> {
+    if has_any(&fd, &["security.selinux", "security.SMACK64"])? {
+        return Err(Refused::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "it has a mandatory access control label (SELinux or Smack), which publishing could not keep",
+        )));
+    }
+    Ok(())
+}
+
 /// Whether the open file has any of the extended attributes `names`.
 #[cfg(target_os = "linux")]
 fn has_any(fd: impl AsFd, names: &[&str]) -> Result<bool, Refused> {
@@ -485,21 +470,6 @@ fn has_any(fd: impl AsFd, names: &[&str]) -> Result<bool, Refused> {
         }
     }
     Ok(false)
-}
-
-/// The value of the extended attribute `name`, if the file has it, of at
-/// most 4 KiB.
-#[cfg(target_os = "linux")]
-fn attribute_value(fd: impl AsFd, name: &str) -> Result<Option<Vec<u8>>, Refused> {
-    let mut value = vec![0_u8; 4096];
-    match rustix::fs::fgetxattr(&fd, name, &mut value[..]) {
-        Ok(length) => {
-            value.truncate(length);
-            Ok(Some(value))
-        }
-        Err(Errno::NODATA | Errno::NOTSUP) => Ok(None),
-        Err(errno) => Err(Refused::Io(errno.into())),
-    }
 }
 
 /// Removes the POSIX access control list a new file got from its

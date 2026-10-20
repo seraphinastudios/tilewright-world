@@ -2386,7 +2386,11 @@ fn files_a_transaction_changes_must_have_the_same_readers() {
     let failure = plan.publish().unwrap_err();
     assert!(!failure.applied);
     assert!(
-        has(&failure.problems, "tx.io", "can be read by different users"),
+        has(
+            &failure.problems,
+            "tx.io",
+            "can be reached by different users"
+        ),
         "{failure:#?}"
     );
     assert_eq!(snapshot(root), snapshot(&fixture()));
@@ -2629,4 +2633,58 @@ fn publish_time_terrain_conflicts_past_the_limit_say_so() {
         "{:#?}",
         &failure.problems[..2]
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn directories_that_others_cannot_search_are_part_of_the_audience() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let tree = copy();
+    let root = tree.path();
+    // Others may read the chunk, but not reach it.
+    fs::set_permissions(
+        root.join("planes/overworld/layers/0"),
+        fs::Permissions::from_mode(0o744),
+    )
+    .unwrap();
+    let plan = planned(
+        root,
+        &transaction(
+            r#"{"op": "object.move", "plane": "overworld", "layer": 0, "at": [15, 0], "index": 0, "expect": {"proto": "wall"}, "to": {"layer": 1}}"#,
+        ),
+    );
+    let failure = plan.publish().unwrap_err();
+    assert!(
+        has(
+            &failure.problems,
+            "tx.io",
+            "can be reached by different users"
+        ),
+        "{failure:#?}"
+    );
+    assert_eq!(snapshot(root), snapshot(&fixture()));
+}
+
+#[test]
+fn a_file_at_its_result_is_skipped_only_when_nothing_is_checked_first() {
+    let tree = copy();
+    let root = tree.path();
+    let plan = planned(
+        root,
+        &transaction(
+            r#"{"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["title"], "value": "Changed", "expect": "Overworld"},
+    {"op": "document.create", "path": "defs/proto/new.jsonc", "text": "{\"format\": \"tilewright.def/1\", \"type\": \"proto\", \"id\": \"new\", \"fields\": {\"face\": \"n.png\", \"layer\": \"floor\"}}"}"#,
+        ),
+    );
+    // Another writer gives the file the bytes the transaction would.
+    let changed = plan
+        .files()
+        .iter()
+        .find(|file| file.path == "planes/overworld/plane.jsonc")
+        .and_then(|file| file.after.clone())
+        .unwrap();
+    fs::write(root.join("planes/overworld/plane.jsonc"), changed).unwrap();
+    let sealed = Transaction::parse("sealed.jsonc", plan.sealed()).unwrap();
+    let found = problems(root, &sealed);
+    assert!(has(&found, "tx.conflict", ""), "{found:#?}");
 }

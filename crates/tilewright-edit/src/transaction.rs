@@ -252,12 +252,26 @@ impl Transaction {
         self.result.as_ref()
     }
 
-    /// Whether every operation names one document by path, so the
-    /// operations of different files are independent.
+    /// Whether every operation names one document by path and none checks
+    /// anything first (no `test`, no `expect`), as in an inverse: then the
+    /// operations of different files are independent, and skipping those
+    /// of a file already at its result gates nothing else.
     pub(crate) fn documents_only(&self) -> bool {
-        self.operations
-            .iter()
-            .all(|operation| operation.action.document_path().is_some())
+        self.operations.iter().all(|operation| {
+            operation.action.document_path().is_some()
+                && !matches!(
+                    operation.action,
+                    Action::Test { .. }
+                        | Action::Set {
+                            expect: Some(_),
+                            ..
+                        }
+                        | Action::Remove {
+                            expect: Some(_),
+                            ..
+                        }
+                )
+        })
     }
 
     pub(crate) fn value(&self, span: Span) -> &Value {

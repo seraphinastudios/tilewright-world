@@ -350,9 +350,6 @@ struct Known {
     /// A new file takes the mode of the nearest, without the execute bits,
     /// and its group, and a new directory its mode and group.
     directories: BTreeMap<String, Access>,
-    /// The mandatory access control labels the changed files that were
-    /// there share, which every file written must get too.
-    labels: Option<Vec<u8>>,
 }
 
 impl Known {
@@ -389,12 +386,18 @@ impl Known {
     }
 }
 
-/// Who may read, by an access: the read bits, and the group where it says
-/// who may.
-fn readers(access: &Access) -> (u32, Option<u32>) {
+/// Who may reach content, by an access: for a file the classes that may
+/// read it, for a directory those that may search it, as read bits, and the
+/// group where it says who may.
+fn readers(access: &Access, directory: bool) -> (u32, Option<u32>) {
+    let reach = if directory {
+        (access.mode & 0o111) << 2
+    } else {
+        access.mode & 0o444
+    };
     (
-        access.mode & 0o444,
-        access.group_reads_alone().then_some(access.group),
+        reach,
+        (reach & 0o040 != 0 && reach & 0o004 == 0).then_some(access.group),
     )
 }
 
@@ -421,28 +424,6 @@ fn survey(
             Err(error) => Err(error),
         }
         .map_err(|error| io(&file.path, &error))?;
-        if existing.is_some() {
-            let labels = match directories.get(parent, None) {
-                Ok(Some(directory)) => directory.labels(name),
-                Ok(None) => Ok(None),
-                Err(error) => Err(error),
-            }
-            .map_err(|error| io(&file.path, &error))?;
-            match (&known.labels, labels) {
-                (None, labels) => known.labels = labels,
-                (Some(expected), Some(found)) if *expected != found => {
-                    return Err(problem(
-                        &file.path,
-                        Code::Io,
-                        format!(
-                            "{} has other security labels than another file the transaction changes; they must have the same",
-                            file.path
-                        ),
-                    ));
-                }
-                _ => {}
-            }
-        }
         known.files.insert(file.path.clone(), existing);
         // Each directory above, up to the root or one already read.
         let mut directory = parent;
@@ -462,27 +443,26 @@ fn survey(
             directory = split(directory).0;
         }
     }
-    let mut accesses = known
+    let mut audiences = known
         .files
         .iter()
-        .filter_map(|(path, access)| Some((path.as_str(), access.as_ref()?)))
+        .filter_map(|(path, access)| Some((path.as_str(), readers(access.as_ref()?, false))))
         .chain(
             known
                 .directories
                 .iter()
-                .map(|(path, access)| (shown(path), access)),
+                .map(|(path, access)| (shown(path), readers(access, true))),
         );
-    if let Some((first, access)) = accesses.next() {
-        let expected = readers(access);
-        if let Some((other, _)) = accesses.find(|(_, access)| readers(access) != expected) {
-            return Err(problem(
-                other,
-                Code::Io,
-                format!(
-                    "{other} and {first} can be read by different users; the files a transaction changes, and their directories, must have the same read permissions and, where the group may read, the same group"
-                ),
-            ));
-        }
+    if let Some((first, expected)) = audiences.next()
+        && let Some((other, _)) = audiences.find(|(_, found)| *found != expected)
+    {
+        return Err(problem(
+            other,
+            Code::Io,
+            format!(
+                "{other} and {first} can be reached by different users; the files a transaction changes must be readable, and the directories above them searchable, by the same classes and, where the group alone may, the same group"
+            ),
+        ));
     }
     Ok(known)
 }
@@ -494,7 +474,7 @@ fn check_access(directories: &mut Directories<'_>, known: &Known) -> Result<(), 
         problem(
             shown(path),
             Code::Conflict,
-            "its permissions, owner or labels changed while the transaction was being applied; nothing was written",
+            "its permissions or owner changed while the transaction was being applied; nothing was written",
         )
     };
     for (path, before) in &known.files {
@@ -507,18 +487,6 @@ fn check_access(directories: &mut Directories<'_>, known: &Known) -> Result<(), 
         .map_err(|error| io(path, &error))?;
         if now != *before {
             return Err(changed(path));
-        }
-        // A file's labels must still be the ones the others share.
-        if before.is_some() {
-            let labels = match directories.get(parent, None) {
-                Ok(Some(directory)) => directory.labels(name),
-                Ok(None) => Ok(None),
-                Err(error) => Err(error),
-            }
-            .map_err(|error| io(path, &error))?;
-            if labels != known.labels {
-                return Err(changed(path));
-            }
         }
     }
     for (path, before) in &known.directories {
@@ -564,19 +532,9 @@ fn stage_all<'f>(
                 let directory =
                     directory.ok_or_else(|| AccessError::Unexpected(file.path.clone()))?;
                 directory.write(&staging_name(name), access.as_ref(), text.as_bytes())?;
-                // The new inode's labels come from the system's policy; a
-                // file may not end up with others than the files it joins.
-                match (&known.labels, directory.labels(&staging_name(name))?) {
-                    (Some(expected), Some(found)) if *expected != found => {
-                        Err(AccessError::Io(
-                            file.path.clone(),
-                            std::io::Error::other(
-                                "it would get other security labels than the files the transaction changes have",
-                            ),
-                        ))
-                    }
-                    _ => Ok(()),
-                }
+                // The new inode must have no access beyond its mode bits,
+                // such as a label the system's policy gave it.
+                directory.access(&staging_name(name)).map(|_| ())
             });
         if let Err(error) = result {
             discard(directories, &staged);
@@ -839,6 +797,8 @@ fn roll_back<'f>(
                         let directory =
                             directory.ok_or_else(|| AccessError::Unexpected(parent.to_owned()))?;
                         directory.write(&staging_name(name), access.as_ref(), text.as_bytes())?;
+                        // Restored only with no access beyond its mode bits.
+                        directory.access(&staging_name(name))?;
                         directory.rename(&staging_name(name), name)
                     })
             }

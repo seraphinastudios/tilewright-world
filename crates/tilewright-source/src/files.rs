@@ -704,9 +704,6 @@ mod tests {
                         .permissions()
                         .mode();
                     assert_eq!(mode & 0o777, 0o640);
-                    // Labels can be read, to compare.
-                    assert!(dir.labels("file.jsonc").unwrap().is_some());
-                    assert!(dir.labels("nope").unwrap().is_none());
                     // A directory's own access can be read and set.
                     let mut own = dir.own_access().unwrap();
                     own.mode = 0o750;

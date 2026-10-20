@@ -245,10 +245,10 @@ permissions of the directory it is in, which were the file's own as far
 as reading goes (section 9).
 
 Its `base` is the changed files after the transaction, and its `result` the
-files before. Every operation of an inverse names one file by path, so its
-files are independent: when a transaction of that kind has a `result`, a
-file that already has its result digest is left alone instead of being a
-conflict. Applying an inverse therefore undoes an interrupted apply, and
+files before. Every operation of an inverse names one file by path and
+checks nothing first, so its files are independent: when a transaction of
+that kind, with no `test` and no `expect`, has a `result`, a file that
+already has its result digest is left alone instead of being a conflict. Applying an inverse therefore undoes an interrupted apply, and
 applying it twice does nothing the second time. An inverse is applied like
 any transaction, so its result must validate: the inverse of a transaction
 that made an invalid tree valid recreates the invalid tree, is refused, and
@@ -297,10 +297,12 @@ on: the directory opened then, whatever its path names later. It:
 
 A transaction moves content between files: a renamed file's, a moved
 object's, a deleted file's that its inverse creates again. So the files it
-changes and every directory above them, up to the root, must have the same
-readers, which publishing checks before it writes anything and again just
-before it renames: the same read bits of their modes and, where the group
-may read and others may not, the same group, and no access control list (POSIX, NFS version 4
+changes and every directory above them, up to the root, must be reachable
+by the same users, which publishing checks before it writes anything and
+again just before it renames: the classes that may read each file, and
+search each directory, must be the same, and where the group may and
+others may not, the group must be the same; and none may have an access
+control list (POSIX, NFS version 4
 or rich, or a default one a directory gives new files), whose entries the
 mode bits do not show. Otherwise publishing is refused with `tx.io`, naming
 two that differ, and nothing is written. A file written where a file is
@@ -308,10 +310,11 @@ keeps that file's mode and group. A new file takes the mode of the
 directory above it without the execute bits, and its group, and a new
 directory the mode and group of the directory above it. A group the user
 may not give is an error, since the group bits would otherwise apply to
-another group. The changed files that are there must also have the same
-mandatory access control labels (on Linux, their `security.selinux` and
-`security.SMACK64` attributes), and every file written must get those
-labels from the system's policy; otherwise publishing is refused. The owner of
+another group. A mandatory access control label (SELinux or Smack) on a
+changed file, a directory above it, a staged file or a restored one is
+refused like an access control list: who may read under one is up to a
+policy that may label a replacement, or a file created again, otherwise.
+So publishing is refused on systems that label every file. The owner of
 every file written is the user applying, who could read them all. A file
 whose bytes end as they began is not written. Restoring after a failure
 gives every file back the mode and group it had. Other extended

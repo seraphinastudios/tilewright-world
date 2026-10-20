@@ -235,9 +235,10 @@ impl SourceDirectory {
     }
 
     /// Who may use the regular file `name`; `None` when there is no regular
-    /// file there. On Linux, a file with an access control list is refused,
-    /// since its mode bits do not say who may read it and a file replacing
-    /// it could not keep the list.
+    /// file there. On Linux, a file with an access control list or a
+    /// mandatory access control label (`SELinux`, Smack) is refused, since its
+    /// mode bits do not say who may read it and a file replacing it could
+    /// not keep them.
     pub fn access(&self, name: &str) -> Result<Option<Access>, AccessError> {
         self.directory
             .access(checked_name(name)?)
@@ -245,20 +246,12 @@ impl SourceDirectory {
     }
 
     /// Who may use this directory. On Linux, a directory with an access
-    /// control list, its own or one it gives new files, is refused.
+    /// control list, its own or one it gives new files, or a mandatory
+    /// access control label is refused.
     pub fn own_access(&self) -> Result<Access, AccessError> {
         self.directory
             .own_access()
             .map_err(|error| refused(&self.path, error))
-    }
-
-    /// The mandatory access control labels of the file `name` (on Linux,
-    /// its `security.selinux` and `security.SMACK64` attributes), to compare
-    /// with another file's; `None` when there is no file there.
-    pub fn labels(&self, name: &str) -> Result<Option<Vec<u8>>, AccessError> {
-        self.directory
-            .labels(checked_name(name)?)
-            .map_err(|error| refused(&self.entry(name), error))
     }
 
     /// Gives this directory the mode and group of `access`.
