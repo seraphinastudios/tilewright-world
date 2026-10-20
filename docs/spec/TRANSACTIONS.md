@@ -103,7 +103,7 @@ an error.
 | `terrain.set` | `plane`, `layer`, `grid`, `cells` | Sets terrain cells of one grid (section 5). |
 | `document.create` | `path`, `document` or `text` | Creates a document: `document` is written in canonical layout (section 10), `text` exactly; `text` is a string or an array of strings joined, for a file longer than a string or a line may be. Either must be valid JSONC. |
 | `document.delete` | `path` | Deletes a document. |
-| `document.rename` | `path`, `to` | Moves a document to a path that is free, unchanged. A rename that changes identity also sets it, such as a definition's `id` or a chunk's `chunk`, in the same transaction; references to it are updated by operations of their own. |
+| `document.rename` | `path`, `to` | Moves a document to a path that is free, unchanged, with its permissions. A rename that changes identity also sets it, such as a definition's `id` or a chunk's `chunk`, in the same transaction; references to it are updated by operations of their own. |
 
 Target is `"path"` or `"object"` (section 2). An object operation's `expect`
 is an object that names at least `proto` and not `at`; each member it names
@@ -209,7 +209,9 @@ Applying checks, in this order:
 A failed check is a `tx.conflict` diagnostic at the operation, or at the
 cell, it concerns, with a message that names the file and the value, such as
 `planes/overworld/layers/0/0_0.jsonc: floor cell (0, 0) is "grass", expected
-"sand"`. Every failing operation is reported, not only the first.
+"sand"`. A failing operation changes nothing, and the operations after it
+are still carried out on the files without it, so every failing operation
+is reported, not only the first.
 
 Rebasing replays the operations on the tree as it is, ignoring `base` and
 `result`, with every other check. When it succeeds, the sealed transaction
@@ -253,9 +255,9 @@ elsewhere the absolute path it resolved to then. It:
    and the directories it created;
 3. reads every file the transaction touched or consulted again and compares
    it with the files it was carried out on, then validates the tree with
-   the transaction's files again, since files it did not touch may have
-   changed since it was carried out: two transactions that are valid alone
-   can be invalid together. A difference is a `tx.conflict`, and a result
+   the transaction's files again, and its terrain addresses against that
+   tree, since files it did not touch may have changed since it was carried
+   out: two transactions that are valid alone can be invalid together. A difference is a `tx.conflict`, and a result
    that no longer validates is reported with the loader's diagnostics; in
    both cases the staged files are removed and nothing is written;
 4. renames each staged file over its target and removes each deleted file,
@@ -303,8 +305,9 @@ indentation and `"key": value` members with minimal string escaping. A
 container is written on one line when it is empty, when it is an array of
 numbers, booleans and nulls only whose one-line form is at most 4,096
 bytes, or when its one-line form is at most 80 bytes; otherwise each item
-is on its own line one level deeper. A file's root is always on several
-lines and the file ends with a newline.
+is on its own line one level deeper; a member whose string value is longer
+than 4,096 bytes has the value on a line of its own. A file's root is
+always on several lines and the file ends with a newline.
 
 ## 11. Limits
 

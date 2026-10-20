@@ -255,14 +255,16 @@ impl<'o> Tree<'o> {
         // holds an overlay file is listed. Names are looked up in sets, so
         // merging costs a logarithm per entry.
         let mut added: BTreeMap<&str, EntryKind> = BTreeMap::new();
-        let mut removed = BTreeSet::new();
+        // The names an overlay file replaces or removes.
+        let mut masked = BTreeSet::new();
         for (rest, value) in overlay_beneath(self.overlay, path) {
             match (rest.split_once('/'), value) {
                 (None, Some(_)) => {
                     added.insert(rest, EntryKind::File);
+                    masked.insert(rest);
                 }
                 (None, None) => {
-                    removed.insert(rest);
+                    masked.insert(rest);
                 }
                 (Some((directory, _)), Some(_)) => {
                     added.entry(directory).or_insert(EntryKind::Directory);
@@ -270,9 +272,10 @@ impl<'o> Tree<'o> {
                 (Some(_), None) => {}
             }
         }
-        // An entry the overlay removes is not looked at at all, so what
-        // is there on disk, a link or a special file, is not reported.
-        let mut entries = self.list_disk(path, &removed);
+        // An entry the overlay replaces or removes is not looked at at
+        // all, so what is there on disk, a link, a special file or a
+        // directory, is not reported.
+        let mut entries = self.list_disk(path, &masked);
         let present: BTreeSet<String> = entries.iter().map(|entry| entry.name.clone()).collect();
         for (name, kind) in added {
             if !present.contains(name) {

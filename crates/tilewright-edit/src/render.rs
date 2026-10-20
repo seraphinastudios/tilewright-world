@@ -186,7 +186,16 @@ impl Node {
                     }
                     output.push_str(&inner);
                     write_json_string(key, output);
-                    output.push_str(": ");
+                    // A long string goes on a line of its own.
+                    if matches!(value, Self::String(_))
+                        && !value.fits(&mut SCALAR_LINE_WIDTH.clone())
+                    {
+                        output.push_str(":\n");
+                        output.push_str(&inner);
+                        output.push_str("  ");
+                    } else {
+                        output.push_str(": ");
+                    }
                     value.write(&inner, false, output);
                 }
                 output.push('\n');

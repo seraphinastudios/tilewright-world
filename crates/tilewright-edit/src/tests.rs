@@ -1581,3 +1581,119 @@ fn long_keys_and_scalar_arrays_keep_lines_short() {
         .unwrap();
     assert!(created.lines().all(|line| line.len() < 1 << 20));
 }
+
+#[test]
+fn a_failed_operation_changes_nothing_for_the_ones_after_it() {
+    let tree = copy();
+    let root = tree.path();
+    let found = problems(
+        root,
+        &transaction(
+            r#"{"op": "object.insert", "plane": "overworld", "layer": 4, "at": [0, 0], "index": 1, "object": {"proto": "tree"}},
+    {"op": "test", "path": "planes/overworld/layers/4/0_0.jsonc", "pointer": [], "absent": true},
+    {"op": "object.move", "plane": "overworld", "layer": 0, "at": [7, 0], "index": 0, "expect": {"proto": "tree"}, "to": {"at": [8, 0], "index": 3}},
+    {"op": "test", "object": {"plane": "overworld", "layer": 0, "at": [7, 0], "index": 0}, "pointer": ["proto"], "value": "tree"},
+    {"op": "terrain.set", "plane": "overworld", "layer": 0, "grid": "floor", "cells": [
+      {"at": [-32, 0], "value": "sand"},
+      {"at": [0, 0], "value": "grass", "expect": "grass"}]},
+    {"op": "test", "path": "planes/overworld/layers/0/-1_0.jsonc", "pointer": ["terrain", "floor", "fill"], "value": "g"}"#,
+        ),
+    );
+    // Only the three failing operations are reported: the tests after them
+    // see the files without their partial edits.
+    assert_eq!(found.len(), 3, "{found:#?}");
+    assert!(has(&found, "tx.conflict", "index 1 is past the end"));
+    assert!(has(&found, "tx.conflict", "index 3 is past the end"));
+    assert!(has(&found, "tx.conflict", "floor cell (0, 0) is \"sand\""));
+}
+
+#[test]
+fn a_file_that_is_not_utf8_is_read_once() {
+    let tree = copy();
+    let root = tree.path();
+    fs::write(root.join("defs/proto/bad.jsonc"), [0xff_u8; 1024]).unwrap();
+    let found = problems(
+        root,
+        &transaction(
+            r#"{"op": "document.delete", "path": "defs/proto/bad.jsonc"},
+    {"op": "document.delete", "path": "defs/proto/bad.jsonc"}"#,
+        ),
+    );
+    assert_eq!(found.len(), 2, "{found:#?}");
+    assert!(
+        found
+            .iter()
+            .all(|problem| problem.message.contains("is not UTF-8"))
+    );
+}
+
+#[test]
+fn a_long_string_gets_a_line_of_its_own() {
+    let tree = copy();
+    let root = tree.path();
+    let long = "s".repeat(900 << 10);
+    let tx = transaction(&format!(
+        r#"{{"op": "document.create", "path": "defs/proto/long.jsonc", "document": {{"format": "tilewright.def/1", "type": "proto", "id": "long",
+      "fields": {{"face": "l.png", "layer": "item"}}, "custom": {{"example.org/s":
+"{long}"
+}}}}}}"#
+    ));
+    let plan = planned(root, &tx);
+    let created = plan.files()[0].after.clone().unwrap();
+    assert!(created.lines().all(|line| line.len() < 1 << 20));
+    assert!(created.contains("\"example.org/s\":\n"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_renamed_document_keeps_its_permissions() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let tree = copy();
+    let root = tree.path();
+    fs::set_permissions(
+        root.join("defs/proto/edge_n.jsonc"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    apply(
+        root,
+        &transaction(
+            r#"{"op": "document.rename", "path": "defs/proto/edge_n.jsonc", "to": "defs/proto/edge_north.jsonc"},
+    {"op": "set", "path": "defs/proto/edge_north.jsonc", "pointer": ["id"], "value": "edge_north"},
+    {"op": "set", "path": "planes/overworld/layers/0/0_0.jsonc", "pointer": ["terrain", "mask", "palette", "n"], "value": "edge_north"}"#,
+        ),
+    );
+    let mode = fs::metadata(root.join("defs/proto/edge_north.jsonc"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
+}
+
+#[test]
+fn terrain_addresses_are_checked_again_when_publishing() {
+    let tree = copy();
+    let root = tree.path();
+    let profile = root.join("profile/profile.jsonc");
+    let original = fs::read_to_string(&profile).unwrap();
+    let wider = original.replace(
+        "\"ground_layers\": [\"floor\", \"mask\"]",
+        "\"ground_layers\": [\"floor\", \"mask\", \"effect\"]",
+    );
+    assert_ne!(wider, original);
+    fs::write(&profile, &wider).unwrap();
+    let plan = planned(
+        root,
+        &transaction(
+            r#"{"op": "terrain.set", "plane": "overworld", "layer": 0, "grid": "effect", "cells": [{"at": [0, 0], "value": null}]}"#,
+        ),
+    );
+    // The profile, which the operation does not read, loses the grid.
+    fs::write(&profile, &original).unwrap();
+    let failure = plan.publish().unwrap_err();
+    assert!(!failure.applied);
+    assert!(
+        has(&failure.problems, "tx.conflict", "\"effect\" is not a grid"),
+        "{failure:#?}"
+    );
+}

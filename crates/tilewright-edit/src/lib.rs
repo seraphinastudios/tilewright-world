@@ -49,7 +49,7 @@ use render::json_string;
 use sha2::{Digest as _, Sha256};
 use splice::Step;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
 use tilewright_jsonc::{Document, Limits, write_json_string};
@@ -152,6 +152,14 @@ pub fn digest(text: Option<&str>) -> Option<[u8; 32]> {
 #[derive(Debug)]
 pub struct Plan {
     root: PathBuf,
+    /// The transaction's name, for diagnostics.
+    name: String,
+    /// The plane and grid of each terrain operation, checked again when
+    /// publishing.
+    terrain: Vec<(String, String)>,
+    /// Files created by renaming another, with the file each came from,
+    /// whose permissions it takes.
+    renames: BTreeMap<String, String>,
     /// The root opened while planning; publishing and validating again
     /// use it, not the path.
     source: SourceRoot,
@@ -397,22 +405,11 @@ fn check_terrain_addresses(
         lines: diagnostic::Lines::new(transaction.text()),
         found: Vec::new(),
     };
-    let grids = &world.profile().ground_layers;
     for operation in &transaction.operations {
-        if let transaction::Action::TerrainSet { plane, grid, .. } = &operation.action {
-            if !world.planes().contains_key(plane) {
-                problems.report(
-                    operation.span,
-                    Failure::conflict(format!("plane \"{plane}\" does not exist")),
-                );
-            } else if grid != "height" && grid != "zone" && !grids.contains(grid) {
-                problems.report(
-                    operation.span,
-                    Failure::conflict(format!(
-                        "\"{grid}\" is not a grid: name a ground layer of the profile, height or zone"
-                    )),
-                );
-            }
+        if let transaction::Action::TerrainSet { plane, grid, .. } = &operation.action
+            && let Some(message) = terrain_problem(world, plane, grid)
+        {
+            problems.report(operation.span, Failure::conflict(message));
         }
     }
     if problems.found.is_empty() {
@@ -420,6 +417,95 @@ fn check_terrain_addresses(
     } else {
         Err(problems.found)
     }
+}
+
+/// Why a terrain address does not name a grid of `world`, if it does not.
+pub(crate) fn terrain_problem(world: &World, plane: &str, grid: &str) -> Option<String> {
+    if !world.planes().contains_key(plane) {
+        Some(format!("plane \"{plane}\" does not exist"))
+    } else if grid != "height"
+        && grid != "zone"
+        && !world
+            .profile()
+            .ground_layers
+            .iter()
+            .any(|layer| layer == grid)
+    {
+        Some(format!(
+            "\"{grid}\" is not a grid: name a ground layer of the profile, height or zone"
+        ))
+    } else {
+        None
+    }
+}
+
+/// Carries out the operations in order. A failed one changes nothing and
+/// is reported, and the rest are still carried out, until a budget is
+/// spent or the diagnostic limit reached.
+fn run_operations(
+    workspace: &mut Workspace<'_>,
+    transaction: &Transaction,
+    done: &BTreeSet<String>,
+    chunks: &mut BTreeSet<String>,
+    problems: &mut Problems<'_>,
+) {
+    for operation in &transaction.operations {
+        // Past a budget or the diagnostic limit, carrying on could only
+        // cost more; what is reported already rejects the transaction.
+        if workspace.exhausted() || problems.found.len() >= limits::DIAGNOSTICS {
+            break;
+        }
+        let finished = operation
+            .action
+            .document_path()
+            .is_some_and(|path| done.contains(path));
+        if finished {
+            continue;
+        }
+        if let Err(failure) = workspace.begin(operation.span.len()) {
+            problems.report(operation.span, failure);
+            break;
+        }
+        if let Err(failures) = operations::run(workspace, transaction, operation, chunks) {
+            workspace.roll_back();
+            for (span, failure) in failures {
+                problems.report(span, failure);
+            }
+        }
+    }
+}
+
+/// What publishing needs besides the files: the terrain addresses to check
+/// again, and the files created by renaming, with where each came from.
+fn publish_inputs(
+    transaction: &Transaction,
+    workspace: &Workspace<'_>,
+    files: &[FileChange],
+) -> (Vec<(String, String)>, BTreeMap<String, String>) {
+    let terrain = transaction
+        .operations
+        .iter()
+        .filter_map(|operation| match &operation.action {
+            transaction::Action::TerrainSet { plane, grid, .. } => {
+                Some((plane.clone(), grid.clone()))
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let created = |path: &str| {
+        files
+            .iter()
+            .any(|file| file.path == path && file.before.is_none() && file.after.is_some())
+    };
+    let renames = workspace
+        .renames
+        .iter()
+        .filter(|(to, _)| created(to))
+        .map(|(to, from)| (to.clone(), from.clone()))
+        .collect();
+    (terrain, renames)
 }
 
 /// Carries out `transaction` on the tree at `root` in memory and validates
@@ -455,31 +541,13 @@ pub fn plan(
     };
     let mut chunks = BTreeSet::new();
     if problems.found.is_empty() {
-        for operation in &transaction.operations {
-            // Past the work budget or the diagnostic limit, carrying on
-            // could only cost more; what is reported already rejects it.
-            if workspace.exhausted() || problems.found.len() >= limits::DIAGNOSTICS {
-                break;
-            }
-            let finished = operation
-                .action
-                .document_path()
-                .is_some_and(|path| done.contains(path));
-            if finished {
-                continue;
-            }
-            if let Err(failure) = workspace.begin(operation.span.len()) {
-                problems.report(operation.span, failure);
-                break;
-            }
-            if let Err(failures) =
-                operations::run(&mut workspace, transaction, operation, &mut chunks)
-            {
-                for (span, failure) in failures {
-                    problems.report(span, failure);
-                }
-            }
-        }
+        run_operations(
+            &mut workspace,
+            transaction,
+            &done,
+            &mut chunks,
+            &mut problems,
+        );
     }
     if problems.found.is_empty()
         && let Err(failure) = remove_empty_chunks(&mut workspace, &chunks)
@@ -526,8 +594,12 @@ pub fn plan(
             return Err(too_large(what, &detail));
         }
     }
+    let (terrain, renames) = publish_inputs(transaction, &workspace, &files);
     Ok(Plan {
         root: root.to_path_buf(),
+        name: transaction.name.clone(),
+        terrain,
+        renames,
         source: source.try_clone(),
         load: options.load,
         files,

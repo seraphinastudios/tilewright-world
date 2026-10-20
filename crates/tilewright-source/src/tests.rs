@@ -1754,3 +1754,21 @@ fn an_overlay_edits_the_tree_in_memory() {
     let found = load_edited(root.path(), &small, &Overlay::new()).unwrap_err();
     assert!(found.iter().any(|problem| problem.code == "source.budget"));
 }
+
+#[cfg(unix)]
+#[test]
+fn an_overlay_file_replaces_whatever_has_its_name() {
+    let root = workspace();
+    let chunk = "planes/overworld/layers/0/5_5.jsonc";
+    std::os::unix::fs::symlink(root.path().join(CHUNK), root.path().join(chunk)).unwrap();
+    let mut overlay = Overlay::new();
+    overlay.insert(
+        chunk.to_owned(),
+        Some(
+            "{\"format\": \"tilewright.chunk/1\", \"plane\": \"overworld\", \"layer\": 0, \"chunk\": [5, 5]}\n"
+                .to_owned(),
+        ),
+    );
+    let world = load_edited(root.path(), &LoadOptions::default(), &overlay).unwrap();
+    assert!(world.planes()["overworld"].chunks.contains_key(&(0, 5, 5)));
+}

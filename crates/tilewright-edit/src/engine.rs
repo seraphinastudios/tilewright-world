@@ -169,6 +169,15 @@ pub(crate) struct Workspace<'r> {
     /// A budget was exceeded, and the failure reported; nothing more is
     /// carried out.
     spent: bool,
+    /// The state of each file before the current operation first changed
+    /// it, and its inverse's length then, to undo a failed operation.
+    journal: BTreeMap<String, (Current, usize)>,
+    /// The inverse's size before the current operation.
+    journal_inverse_bytes: u64,
+    /// Files that were read but cannot be edited, with why.
+    unreadable: BTreeMap<String, String>,
+    /// Files created by renaming another, with the file each came from.
+    pub renames: BTreeMap<String, String>,
 }
 
 fn limits() -> Limits {
@@ -185,18 +194,48 @@ impl<'r> Workspace<'r> {
             charged: BTreeSet::new(),
             inverse_bytes: 0,
             spent: false,
+            journal: BTreeMap::new(),
+            journal_inverse_bytes: 0,
+            unreadable: BTreeMap::new(),
+            renames: BTreeMap::new(),
         }
     }
 
     /// Starts an operation of `size` bytes: it is charged its size, and
-    /// each document it reads is charged again.
+    /// each document it reads is charged again. What earlier operations
+    /// did is kept.
     pub fn begin(&mut self, size: usize) -> Outcome<()> {
         self.charged.clear();
+        self.journal.clear();
+        self.journal_inverse_bytes = self.inverse_bytes;
         self.charge(size)
+    }
+
+    /// Undoes everything the current operation did, so that a failed
+    /// operation changes nothing and later ones see the files without it.
+    pub fn roll_back(&mut self) {
+        for (path, (before, length)) in std::mem::take(&mut self.journal) {
+            if let Some(entry) = self.entries.get_mut(&path) {
+                entry.current = before;
+                entry.inverse.truncate(length);
+            }
+        }
+        self.inverse_bytes = self.journal_inverse_bytes;
+    }
+
+    /// Keeps a file's state from before the current operation's first
+    /// change to it.
+    fn keep(&mut self, path: &str, before: Current, inverse_length: usize) {
+        self.journal
+            .entry(path.to_owned())
+            .or_insert((before, inverse_length));
     }
 
     /// The entry of `path`, reading the file the first time.
     fn entry(&mut self, path: &str) -> Outcome<&mut Entry> {
+        if let Some(reason) = self.unreadable.get(path) {
+            return Err(Failure::conflict(reason.clone()));
+        }
         let count = self.entries.len();
         let root = self.root;
         match self.entries.entry(path.to_owned()) {
@@ -229,9 +268,14 @@ impl<'r> Workspace<'r> {
                 let base = match bytes {
                     Some(bytes) => {
                         self.read_bytes += u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-                        Some(String::from_utf8(bytes).map_err(|_| {
-                            Failure::conflict(format!("{path} is not UTF-8 and cannot be edited"))
-                        })?)
+                        let Ok(text) = String::from_utf8(bytes) else {
+                            // Read once: later operations get the same
+                            // answer without reading it again.
+                            let reason = format!("{path} is not UTF-8 and cannot be edited");
+                            self.unreadable.insert(path.to_owned(), reason.clone());
+                            return Err(Failure::conflict(reason));
+                        };
+                        Some(text)
                     }
                     None => None,
                 };
@@ -326,8 +370,10 @@ impl<'r> Workspace<'r> {
             Failure::conflict(format!("the edit leaves {path} invalid ({error})"))
         })?;
         let entry = self.entry(path)?;
-        entry.current = Current::Parsed(document);
+        let before = std::mem::replace(&mut entry.current, Current::Parsed(document));
+        let length = entry.inverse.len();
         entry.inverse.extend(inverse);
+        self.keep(path, before, length);
         Ok(())
     }
 
@@ -342,13 +388,16 @@ impl<'r> Workspace<'r> {
     /// Deletes `path` and returns its text.
     pub fn delete(&mut self, path: &str) -> Outcome<String> {
         let entry = self.entry(path)?;
-        let text = match std::mem::replace(&mut entry.current, Current::Absent) {
+        let before = std::mem::replace(&mut entry.current, Current::Absent);
+        let text = match &before {
             Current::Absent => return Err(Failure::conflict(format!("{path} does not exist"))),
-            Current::Text(text) => text,
+            Current::Text(text) => text.clone(),
             Current::Parsed(document) => document.source().to_owned(),
         };
+        let length = entry.inverse.len();
         let inverse = Primitive::Create { text: text.clone() };
         entry.inverse.push(inverse.clone());
+        self.keep(path, before, length);
         self.record(std::slice::from_ref(&inverse))?;
         Ok(text)
     }

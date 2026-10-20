@@ -623,7 +623,9 @@ fn document_operation(
                 return Err(Failure::conflict(format!("{to} already exists")));
             }
             let text = workspace.delete(path)?;
-            workspace.create(to, text)
+            workspace.create(to, text)?;
+            workspace.renames.insert(to.clone(), path.clone());
+            Ok(())
         }
         Action::ObjectInsert { .. } | Action::ObjectRemove { .. } | Action::ObjectMove { .. } => {
             object_operation(workspace, transaction, action)

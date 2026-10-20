@@ -269,6 +269,7 @@ fn stage(directory: &SourceDirectory, path: &str, text: &str) -> Result<(), Acce
 fn stage_all<'f>(
     directories: &mut Directories<'_>,
     changed: &[&'f FileChange],
+    renames: &BTreeMap<String, String>,
 ) -> Result<Vec<&'f str>, PublishError> {
     let mut staged = Vec::new();
     for file in changed {
@@ -279,13 +280,31 @@ fn stage_all<'f>(
         // Writing removes whatever was at the staging name first, so the
         // directory may change even if the write fails.
         directories.changed.insert(split(&file.path).0.to_owned());
-        let result =
-            directories
-                .get(split(&file.path).0, true)
-                .and_then(|directory| match directory {
-                    Some(directory) => stage(directory, &file.path, text),
-                    None => Err(AccessError::Unexpected(file.path.clone())),
-                });
+        // A renamed file keeps the permissions of the file it came from,
+        // which is still there while staging.
+        let inherited = match renames.get(&file.path) {
+            Some(from) => {
+                let (parent, name) = split(from);
+                directories
+                    .get(parent, false)
+                    .and_then(|directory| match directory {
+                        Some(directory) => directory.permissions(name),
+                        None => Ok(None),
+                    })
+            }
+            None => Ok(None),
+        };
+        let result = inherited.and_then(|permissions| {
+            match (directories.get(split(&file.path).0, true)?, permissions) {
+                (Some(directory), Some(permissions)) => directory.write_with(
+                    &staging_name(split(&file.path).1),
+                    Some(&permissions),
+                    text.as_bytes(),
+                ),
+                (Some(directory), None) => stage(directory, &file.path, text),
+                (None, _) => Err(AccessError::Unexpected(file.path.clone())),
+            }
+        });
         if let Err(error) = result {
             discard(directories, &staged);
             directories.remove_created();
@@ -354,7 +373,7 @@ impl Plan {
         };
         let changed: Vec<&FileChange> =
             self.files.iter().filter(|file| file.is_changed()).collect();
-        let staged = stage_all(&mut directories, &changed)?;
+        let staged = stage_all(&mut directories, &changed, &self.renames)?;
 
         #[cfg(test)]
         if let Some(hook) = BEFORE_CHECK.with(|hook| hook.borrow_mut().take()) {
@@ -362,7 +381,18 @@ impl Plan {
         }
 
         let checked = check_again(root, &self.files).and_then(|()| {
-            tilewright_source::load_edited_in(root, &self.load, &self.overlay()).map(|_| ())
+            let world = tilewright_source::load_edited_in(root, &self.load, &self.overlay())?;
+            let problems: Vec<Diagnostic> = self
+                .terrain
+                .iter()
+                .filter_map(|(plane, grid)| crate::terrain_problem(&world, plane, grid))
+                .map(|message| diagnostic::file(&self.name, Code::Conflict.as_str(), message))
+                .collect();
+            if problems.is_empty() {
+                Ok(())
+            } else {
+                Err(problems)
+            }
         });
         if let Err(problems) = checked {
             discard(&mut directories, &staged);

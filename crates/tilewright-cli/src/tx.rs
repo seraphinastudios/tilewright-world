@@ -200,10 +200,13 @@ fn apply(transaction: &Path, root: &Path, inverse: &Path) -> Result<String, Fail
             error.problems.len()
         ),
     })?;
-    let durable = if published.durable && inverse_durable {
-        ""
-    } else {
-        " (the inverse's name and the renames could not be synced, so they may not be durable yet)"
+    let durable = match (inverse_durable, published.durable) {
+        (true, true) => "",
+        (false, true) => " (the inverse's name could not be synced, so it may not be durable yet)",
+        (true, false) => " (the renames could not be synced, so they may not be durable yet)",
+        (false, false) => {
+            " (the inverse's name and the renames could not be synced, so they may not be durable yet)"
+        }
     };
     Ok(format!(
         "{}applied; the inverse is in {}{durable}\n",
