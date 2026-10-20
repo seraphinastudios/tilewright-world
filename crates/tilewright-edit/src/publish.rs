@@ -218,7 +218,7 @@ impl Directories<'_> {
         let cleaned = self.leftovers.is_empty();
         problems.append(&mut self.leftovers);
         let (failures, platform) = self.sync();
-        let durable = failures.is_empty();
+        let durable = failures.is_empty() && platform;
         problems.extend(failures);
         if applied && problems.is_empty() {
             Ok(Published { durable: platform })
@@ -274,6 +274,9 @@ fn stage_all<'f>(
             continue;
         };
         staged.push(file.path.as_str());
+        // Writing removes whatever was at the staging name first, so the
+        // directory may change even if the write fails.
+        directories.changed.insert(split(&file.path).0.to_owned());
         let result =
             directories
                 .get(split(&file.path).0, true)
@@ -332,7 +335,7 @@ impl Plan {
     /// synced are reported too, with `cleaned` or `durable` unset, whether
     /// or not every file was published.
     pub fn publish(&self) -> Result<Published, PublishError> {
-        let root = SourceRoot::new(&self.root);
+        let root = &self.source;
         let _lock = root.lock().map_err(|error| {
             not_applied(match error {
                 AccessError::Locked => problem(".", Code::Conflict, error.to_string()),
@@ -340,7 +343,7 @@ impl Plan {
             })
         })?;
         let mut directories = Directories {
-            root: &root,
+            root,
             open: BTreeMap::new(),
             created: Vec::new(),
             changed: BTreeSet::new(),
@@ -356,8 +359,8 @@ impl Plan {
             hook();
         }
 
-        let checked = check_again(&root, &self.files).and_then(|()| {
-            tilewright_source::load_edited(&self.root, &self.load, &self.overlay()).map(|_| ())
+        let checked = check_again(root, &self.files).and_then(|()| {
+            tilewright_source::load_edited_in(root, &self.load, &self.overlay()).map(|_| ())
         });
         if let Err(problems) = checked {
             discard(&mut directories, &staged);

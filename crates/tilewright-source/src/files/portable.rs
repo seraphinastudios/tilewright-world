@@ -28,8 +28,14 @@ fn kind_of(file_type: fs::FileType) -> RawKind {
 }
 
 impl Root {
+    /// The root, resolved to an absolute path once, so that a later change
+    /// of the working directory does not move it.
     pub(crate) fn new(path: &Path) -> Self {
-        Self(path.to_path_buf())
+        Self(fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
+    }
+
+    pub(crate) fn try_clone(&self) -> Self {
+        Self(self.0.clone())
     }
 
     /// The path of `components` and its metadata, after checking that no

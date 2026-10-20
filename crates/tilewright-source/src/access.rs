@@ -93,11 +93,27 @@ pub struct SourceRoot {
 }
 
 impl SourceRoot {
+    /// Opens the root. On Unix the directory is opened here, and every
+    /// later access goes through that handle, so moving or replacing what
+    /// the path names afterwards does not move the root; elsewhere the path
+    /// is resolved to an absolute one here.
     #[must_use]
     pub fn new(root: &Path) -> Self {
         Self {
             root: platform::Root::new(root),
         }
+    }
+
+    /// A second handle on the same root directory.
+    #[must_use]
+    pub fn try_clone(&self) -> Self {
+        Self {
+            root: self.root.try_clone(),
+        }
+    }
+
+    pub(crate) fn platform(&self) -> platform::Root {
+        self.root.try_clone()
     }
 
     /// Reads a regular file of at most `limit` bytes. `Ok(None)` means the
@@ -230,5 +246,11 @@ impl SourceDirectory {
         self.directory
             .sync()
             .map_err(|error| refused(&self.path, error))
+    }
+}
+
+impl fmt::Debug for SourceRoot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SourceRoot")
     }
 }

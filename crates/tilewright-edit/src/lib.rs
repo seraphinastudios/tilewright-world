@@ -152,6 +152,9 @@ pub fn digest(text: Option<&str>) -> Option<[u8; 32]> {
 #[derive(Debug)]
 pub struct Plan {
     root: PathBuf,
+    /// The root opened while planning; publishing and validating again
+    /// use it, not the path.
+    source: SourceRoot,
     load: LoadOptions,
     files: Vec<FileChange>,
     world: World,
@@ -494,7 +497,7 @@ pub fn plan(
             after: entry.current.text().map(str::to_owned),
         })
         .collect();
-    let world = tilewright_source::load_edited(root, &options.load, &overlay(&files))?;
+    let world = tilewright_source::load_edited_in(&source, &options.load, &overlay(&files))?;
     check_terrain_addresses(transaction, &world)?;
     let sealed = seal(transaction, &files);
     let too_large = |what: &str, detail: &str| {
@@ -517,6 +520,7 @@ pub fn plan(
     }
     Ok(Plan {
         root: root.to_path_buf(),
+        source: source.try_clone(),
         load: options.load,
         files,
         world,
@@ -596,6 +600,10 @@ fn seal(transaction: &Transaction, files: &[FileChange]) -> String {
     text
 }
 
+/// Most bytes of file text in one string of an inverse: escaped, even a
+/// piece of control characters stays within the JSONC line limit.
+const TEXT_PIECE: usize = 128 << 10;
+
 /// Text built up to a limit, so that output an untrusted transaction makes
 /// can never grow past the size of a transaction.
 struct Bounded {
@@ -625,6 +633,34 @@ impl Bounded {
             self.push(&escaped[1..escaped.len() - 1])?;
         }
         self.push("\"")
+    }
+
+    /// Appends a value's exact text on lines of its own, so that the
+    /// operation's own text never lengthens one of the value's lines.
+    fn push_value(&mut self, value: &str) -> Result<(), TooLarge> {
+        self.push("\n")?;
+        self.push(value)?;
+        self.push("\n")
+    }
+
+    /// Appends exact file text as an array of strings, each at most
+    /// [`TEXT_PIECE`] bytes of the text and on its own line, so that no
+    /// string or line passes the limits of a transaction.
+    fn push_text(&mut self, text: &str) -> Result<(), TooLarge> {
+        self.push("[")?;
+        let mut rest = text;
+        let mut first = true;
+        while !rest.is_empty() || first {
+            let mut end = rest.len().min(TEXT_PIECE);
+            while !rest.is_char_boundary(end) {
+                end -= 1;
+            }
+            self.push(if first { "\n" } else { ",\n" })?;
+            first = false;
+            self.push_json(&rest[..end])?;
+            rest = &rest[end..];
+        }
+        self.push("\n]")
     }
 
     fn pointer(&mut self, pointer: &[Step]) -> Result<(), TooLarge> {
@@ -664,7 +700,7 @@ fn write_operation(
             output.push(", \"pointer\": ")?;
             output.pointer(pointer)?;
             output.push(", \"value\": ")?;
-            output.push(value)?;
+            output.push_value(value)?;
         }
         Primitive::Insert {
             pointer,
@@ -684,7 +720,7 @@ fn write_operation(
                 output.push_json(colon)?;
             }
             output.push(", \"value\": ")?;
-            output.push(value)?;
+            output.push_value(value)?;
             output.push(", \"before\": ")?;
             output.push_json(&layout.before)?;
             output.push(", \"after\": ")?;
@@ -698,7 +734,7 @@ fn write_operation(
         }
         Primitive::Create { text } => {
             output.push(", \"text\": ")?;
-            output.push_json(text)?;
+            output.push_text(text)?;
         }
         Primitive::Delete => {}
     }
@@ -754,7 +790,7 @@ fn inverse(workspace: &Workspace<'_>) -> Result<String, TooLarge> {
                 output.push("{\"op\": \"document.create\", \"path\": ")?;
                 output.push_json(path)?;
                 output.push(", \"text\": ")?;
-                output.push_json(text)?;
+                output.push_text(text)?;
                 output.push("}")?;
             }
             (Some(_), Some(_)) => {

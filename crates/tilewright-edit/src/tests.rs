@@ -1448,3 +1448,69 @@ fn cleanup_that_cannot_be_done_is_reported_with_the_outcome() {
         read(&fixture(), "planes/overworld/plane.jsonc")
     );
 }
+
+#[test]
+fn a_plan_publishes_into_the_root_it_was_made_on() {
+    let directory = tempfile::tempdir().unwrap();
+    let planned_root = directory.path().join("source");
+    for (path, bytes) in snapshot(&fixture()) {
+        let target = planned_root.join(&path);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(target, bytes).unwrap();
+    }
+    let tx = transaction(
+        r#"{"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["title"], "value": "Changed"}"#,
+    );
+    let plan = planned(&planned_root, &tx);
+    // The path now names another, identical tree.
+    let moved = directory.path().join("moved");
+    fs::rename(&planned_root, &moved).unwrap();
+    for (path, bytes) in snapshot(&fixture()) {
+        let target = planned_root.join(&path);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(target, bytes).unwrap();
+    }
+    plan.publish().unwrap();
+    if cfg!(unix) {
+        assert!(read(&moved, "planes/overworld/plane.jsonc").contains("\"Changed\""));
+        assert_eq!(snapshot(&planned_root), snapshot(&fixture()));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_at_a_staging_name_does_not_stop_its_file_being_edited() {
+    let tree = copy();
+    let root = tree.path();
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(
+        outside.path(),
+        root.join("planes/overworld/.plane.jsonc.tilewright-tmp"),
+    )
+    .unwrap();
+    let tx = transaction(
+        r#"{"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["title"], "value": "Changed"}"#,
+    );
+    apply(root, &tx);
+    assert!(read(root, "planes/overworld/plane.jsonc").contains("\"Changed\""));
+    assert!(
+        fs::symlink_metadata(root.join("planes/overworld/.plane.jsonc.tilewright-tmp")).is_err()
+    );
+    assert!(outside.path().exists());
+}
+
+#[test]
+fn a_large_document_can_be_deleted_and_restored() {
+    let tree = copy();
+    let root = tree.path();
+    // A definition of several megabytes, every line within the limits.
+    let line = format!("    \"{}\"", "x".repeat(512 << 10));
+    let lines = [line.as_str(); 6].join(",\n");
+    let text = format!(
+        "{{\n  \"format\": \"tilewright.def/1\", \"type\": \"proto\", \"id\": \"big\",\n  \"fields\": {{\"face\": \"big.png\", \"layer\": \"item\"}},\n  \"custom\": {{\"example.org/big\": [\n{lines}\n  ]}}\n}}\n"
+    );
+    fs::write(root.join("defs/proto/big.jsonc"), &text).unwrap();
+    let tx = transaction(r#"{"op": "document.delete", "path": "defs/proto/big.jsonc"}"#);
+    round_trip(root, &tx);
+    assert_eq!(read(root, "defs/proto/big.jsonc"), text);
+}

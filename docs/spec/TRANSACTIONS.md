@@ -101,7 +101,7 @@ an error.
 | `object.remove` | tile, `index`, `expect` | Removes an object. |
 | `object.move` | tile, `index`, `expect`, `to` | Moves an object to `to`: `{"plane"?, "layer"?, "at"?, "index"?}`, each defaulting to the object's own (and `index` to after the destination's objects). `to.index` counts the destination's objects without the moved one, so a move on one tile reorders it. |
 | `terrain.set` | `plane`, `layer`, `grid`, `cells` | Sets terrain cells of one grid (section 5). |
-| `document.create` | `path`, `document` or `text` | Creates a document: `document` is written in canonical layout (section 9), `text` exactly. Either must be valid JSONC. |
+| `document.create` | `path`, `document` or `text` | Creates a document: `document` is written in canonical layout (section 10), `text` exactly; `text` is a string or an array of strings joined, for a file longer than a string or a line may be. Either must be valid JSONC. |
 | `document.delete` | `path` | Deletes a document. |
 | `document.rename` | `path`, `to` | Moves a document to a path that is free, unchanged. A rename that changes identity also sets it, such as a definition's `id` or a chunk's `chunk`, in the same transaction; references to it are updated by operations of their own. |
 
@@ -223,10 +223,12 @@ applied after it, restores every file byte for byte. It holds, for each file
 the transaction changed, in path order:
 
 - `document.delete` for a file it created;
-- `document.create` with the exact `text` for a file it deleted;
+- `document.create` with the exact `text` for a file it deleted, in pieces
+  of at most 128 KiB, one a line;
 - otherwise the exact inverse of each edit, last first: `set` with the old
   value's text, `insert` with the old item, key, colon and regions, `remove`
-  with the old region.
+  with the old region. An old value is written on lines of its own, so no
+  line of the inverse is longer than a line of the file.
 
 Its `base` is the changed files after the transaction, and its `result` the
 files before. Every operation of an inverse names one file by path, so its
@@ -237,7 +239,9 @@ applying it twice does nothing the second time.
 
 ## 9. Applying
 
-Publishing a carried-out transaction:
+Publishing a carried-out transaction works on the root it was carried out
+on: on Unix the directory opened then, whatever its path names later, and
+elsewhere the absolute path it resolved to then. It:
 
 1. takes the source root's exclusive lock (an advisory `flock` of the root
    directory on Unix), so two applies cannot interleave;
@@ -281,8 +285,8 @@ match and are left alone, and the staging files beside every file it names
 are removed. There is no journal: the inverse, written before anything is
 published, is the recovery record, and applying it is a manual step. The
 source tree's version control is the other way back.
-Carrying out ignores the staging files beside every file a transaction
-touches or consults.
+Carrying out ignores whatever is at the staging name beside every file a
+transaction touches or consults, a link or special file included.
 
 Staging names, `.<name>.tilewright-tmp`, are reserved beside source files.
 Other platforms than Unix check each path component for links before use,

@@ -504,6 +504,23 @@ impl<'a> Shape<'a> {
 
     /// A digest list: `[{"path", "sha256"}, ...]`, each path once, with
     /// `null` for a file that is absent.
+    /// Exact file text: a string, or an array of strings joined, so that a
+    /// file longer than a string or a line may be given in pieces.
+    fn text_pieces(&mut self, value: &'a Value) -> Option<String> {
+        if let Some(text) = value.as_str() {
+            return Some(text.to_owned());
+        }
+        let Some(pieces) = value.as_array() else {
+            self.shape(value.span(), "text is a string or an array of strings");
+            return None;
+        };
+        let mut text = String::new();
+        for piece in pieces {
+            text.push_str(self.string(piece)?);
+        }
+        Some(text)
+    }
+
     fn digests(&mut self, value: &'a Value) -> Option<Digests> {
         let Some(items) = value.as_array() else {
             self.shape(
@@ -718,7 +735,7 @@ impl<'a> Shape<'a> {
                         }
                         Content::Document(value.span())
                     }
-                    (None, Some(value)) => Content::Text(self.string(value)?.to_owned()),
+                    (None, Some(value)) => Content::Text(self.text_pieces(value)?),
                     _ => {
                         self.shape(item.span(), "give exactly one of document or text");
                         return None;

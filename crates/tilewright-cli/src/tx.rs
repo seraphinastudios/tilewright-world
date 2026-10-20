@@ -183,9 +183,18 @@ fn apply(transaction: &Path, root: &Path, inverse: &Path) -> Result<String, Fail
     // The inverse is durable before any file changes, so an interrupted
     // apply can be undone with it, where the platform can make it so.
     let inverse_durable = write(inverse, plan.inverse())?;
+    let unsynced_inverse = if inverse_durable {
+        ""
+    } else {
+        "; the inverse's name could not be synced, so it may not be durable yet"
+    };
     let published = plan.publish().map_err(|error| Failure {
         output: diagnostics_text(&error.problems, false),
-        message: format!("{}; {} problem(s)", error.summary(), error.problems.len()),
+        message: format!(
+            "{}; {} problem(s){unsynced_inverse}",
+            error.summary(),
+            error.problems.len()
+        ),
     })?;
     let durable = if published.durable && inverse_durable {
         ""

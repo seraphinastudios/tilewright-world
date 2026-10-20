@@ -61,6 +61,18 @@ impl Root {
         ))
     }
 
+    /// A second handle on the same directory.
+    pub(crate) fn try_clone(&self) -> Self {
+        Self(match &self.0 {
+            Ok(fd) => fd.try_clone().map_err(|error| {
+                error
+                    .raw_os_error()
+                    .map_or(Errno::IO, Errno::from_raw_os_error)
+            }),
+            Err(errno) => Err(*errno),
+        })
+    }
+
     fn root(&self) -> Result<BorrowedFd<'_>, Refused> {
         match &self.0 {
             Ok(fd) => Ok(fd.as_fd()),

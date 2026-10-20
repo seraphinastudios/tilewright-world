@@ -22,10 +22,11 @@ use crate::{
     diagnostic::{Diagnostics, Positions},
 };
 use sha2::{Digest, Sha256};
+#[cfg(test)]
+use std::path::Path;
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Read as _,
-    path::Path,
 };
 use tilewright_jsonc::{Document, ErrorCode};
 
@@ -134,15 +135,16 @@ static NO_OVERLAY: Overlay = BTreeMap::new();
 impl<'o> Tree<'o> {
     #[cfg(test)]
     pub fn new(root: &Path, options: &'o LoadOptions) -> Self {
-        Self::with_overlay(root, options, &NO_OVERLAY)
+        Self::in_root(platform::Root::new(root), options, &NO_OVERLAY)
     }
 
-    /// A tree whose files are those on disk with `overlay` applied: an
-    /// entry's text replaces or creates the file at its path, and an entry
-    /// of `None` removes it. Directories that hold an overlay file exist.
-    pub fn with_overlay(root: &Path, options: &'o LoadOptions, overlay: &'o Overlay) -> Self {
+    /// A tree over an opened root whose files are those on disk with
+    /// `overlay` applied: an entry's text replaces or creates the file at
+    /// its path, and an entry of `None` removes it. Directories that hold
+    /// an overlay file exist.
+    pub fn in_root(root: platform::Root, options: &'o LoadOptions, overlay: &'o Overlay) -> Self {
         Self {
-            root: platform::Root::new(root),
+            root,
             options,
             overlay,
             files: 0,
@@ -249,7 +251,6 @@ impl<'o> Tree<'o> {
     /// Lists a directory, sorted by name. Symbolic links, special files and
     /// non-UTF-8 names are reported and skipped.
     pub fn list(&mut self, path: &str) -> Vec<Entry> {
-        let mut entries = self.list_disk(path);
         // Overlay files replace, add or remove entries; a directory that
         // holds an overlay file is listed. Names are looked up in sets, so
         // merging costs a logarithm per entry.
@@ -269,7 +270,9 @@ impl<'o> Tree<'o> {
                 (Some(_), None) => {}
             }
         }
-        entries.retain(|entry| !removed.contains(entry.name.as_str()));
+        // An entry the overlay removes is not looked at at all, so what
+        // is there on disk, a link or a special file, is not reported.
+        let mut entries = self.list_disk(path, &removed);
         let present: BTreeSet<String> = entries.iter().map(|entry| entry.name.clone()).collect();
         for (name, kind) in added {
             if !present.contains(name) {
@@ -290,7 +293,7 @@ impl<'o> Tree<'o> {
 
     /// Lists a directory on disk. A directory that is missing on disk but
     /// holds overlay files is empty there.
-    fn list_disk(&mut self, path: &str) -> Vec<Entry> {
+    fn list_disk(&mut self, path: &str, removed: &BTreeSet<&str>) -> Vec<Entry> {
         let directory = match self.root.list(&components(path)) {
             Ok(directory) => directory,
             Err(Refused::Link(link)) => {
@@ -341,6 +344,9 @@ impl<'o> Tree<'o> {
                 ));
                 continue;
             };
+            if removed.contains(name.as_str()) {
+                continue;
+            }
             let child = join(path, &name);
             match entry.kind {
                 RawKind::Link => self.link(&child),
@@ -685,8 +691,10 @@ mod tests {
                 assert!(top.remove_directory("deeper").unwrap());
                 assert!(!top.remove_directory("deeper").unwrap());
 
-                let lock = root.lock().unwrap();
-                assert!(lock.is_some());
+                assert!(root.lock().unwrap().is_some());
+                // A clone is a handle on the same directory.
+                let clone = root.try_clone();
+                assert_eq!(clone.kind(&["dir"]).unwrap(), Found::Directory);
             }
         };
     }

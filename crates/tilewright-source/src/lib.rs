@@ -448,11 +448,25 @@ pub fn load_edited(
     options: &LoadOptions,
     overlay: &Overlay,
 ) -> Result<World, Vec<Diagnostic>> {
+    load_edited_in(&SourceRoot::new(root), options, overlay)
+}
+
+/// Loads the tree of an opened root as [`load_edited`] does, through the
+/// handle rather than its path, so that what is validated is the directory
+/// the caller opened.
+///
+/// # Errors
+/// Returns every diagnostic found, sorted by path and position.
+pub fn load_edited_in(
+    root: &SourceRoot,
+    options: &LoadOptions,
+    overlay: &Overlay,
+) -> Result<World, Vec<Diagnostic>> {
     let options = &LoadOptions {
         limits: within_format(options.limits),
         ..*options
     };
-    let mut tree = files::Tree::with_overlay(root, options, overlay);
+    let mut tree = files::Tree::in_root(root.platform(), options, overlay);
     let mut diagnostics = Diagnostics::new(options.maximum_diagnostics);
     let world = load_tree(&mut tree, &mut diagnostics);
     diagnostics.append(tree.take_diagnostics());
