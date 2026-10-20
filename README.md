@@ -39,6 +39,14 @@ All are drafts until format 1.0 is frozen.
 | `tilewright-edit` | Transactions: lossless structural edits, preview, rebase, staged apply with rollback, and inverses |
 | `tilewright-cli` | The `tilewright` command |
 
+## Go pack reader
+
+[`go/`](go/README.md) is a pure-Go module,
+`github.com/seraphinastudios/tilewright-world/go`, whose package `twpack`
+reads and verifies packs for Go servers and tools. Its versions are tags of
+the form `go/vX.Y.Z`. It and the Rust reader run the same conformance
+fixtures, [`fixtures/packs`](fixtures/packs/README.md).
+
 ## Command line
 
 ```sh
@@ -66,7 +74,7 @@ synthetic world that uses every feature of the format.
 
 ## Development
 
-Rust 1.97.1 is pinned.
+Rust 1.97.1 and Go 1.27.2 are pinned.
 
 ```sh
 tools/validate.sh

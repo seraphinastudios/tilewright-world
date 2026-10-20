@@ -35,4 +35,21 @@ cargo run --locked --quiet --package tilewright-cli -- validate "${first}/source
 cargo run --locked --quiet --package tilewright-cli -- tx apply "${first}/undo.jsonc" "${first}/source" "${first}/redo.jsonc"
 diff -r fixtures/basic "${first}/source"
 
+# The Go pack reader, whose tests run the shared fixtures in fixtures/packs.
+if ! command -v go >/dev/null 2>&1; then
+  echo "tools/validate.sh: go is not on PATH; install the Go toolchain go/go.mod names" >&2
+  exit 1
+fi
+(
+  cd go
+  go mod tidy -diff
+  go vet ./...
+  go test ./...
+  unformatted=$(gofmt -l .)
+  if [[ -n ${unformatted} ]]; then
+    echo "gofmt would change: ${unformatted}" >&2
+    exit 1
+  fi
+)
+
 git diff --check
