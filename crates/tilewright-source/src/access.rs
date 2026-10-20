@@ -103,13 +103,14 @@ fn checked_name(name: &str) -> Result<&str, AccessError> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Access {
     /// The permission bits, with the set-user, set-group and sticky bits.
-    pub(crate) mode: u32,
+    pub mode: u32,
     /// The owning user.
-    pub(crate) user: u32,
+    pub user: u32,
     /// The owning group.
-    pub(crate) group: u32,
-    /// A digest of the labels, all zero where there are none.
-    pub(crate) control: [u8; 32],
+    pub group: u32,
+    /// A digest of the mandatory access control labels (Linux), all zero
+    /// where there are none.
+    pub control: [u8; 32],
 }
 
 /// Who may reach content through a file or directory: for a file who may
@@ -126,6 +127,13 @@ pub struct Audience {
 }
 
 impl Access {
+    /// Whether the group may read and others may not, so that the group
+    /// says who may.
+    #[must_use]
+    pub const fn group_reads_alone(&self) -> bool {
+        self.mode & 0o040 != 0 && self.mode & 0o004 == 0
+    }
+
     /// Who may reach content through an entry with this access, a
     /// directory if `directory`.
     #[must_use]
@@ -183,6 +191,17 @@ impl SourceRoot {
         self.root.try_clone()
     }
 
+    /// What is at `path`, not following it, if anything: as the file
+    /// system finds it by that name, which on one that ignores case, or as
+    /// on Windows drops trailing dots, can be an entry named otherwise.
+    pub fn exists(&self, path: &str) -> Result<bool, AccessError> {
+        match self.root.kind(&checked(path)?) {
+            Ok(crate::files::Found::Missing) | Err(Refused::Missing) => Ok(false),
+            Ok(_) | Err(Refused::Link(_) | Refused::Unexpected) => Ok(true),
+            Err(other) => Err(refused(path, other)),
+        }
+    }
+
     /// Reads a regular file of at most `limit` bytes. `Ok(None)` means the
     /// file, or a directory on its way, is missing.
     pub fn read(&self, path: &str, limit: u64) -> Result<Option<Vec<u8>>, AccessError> {
@@ -237,27 +256,30 @@ impl SourceRoot {
     }
 
     /// The UTF-8 names of the entries of the directory `path`, links
-    /// included; `None` when it is missing. A directory with more than
-    /// `limit` entries is an error, [`AccessError::TooLarge`].
+    /// included, and how many entries it has, those whose names are not
+    /// UTF-8 included; `None` when it is missing. A directory with more
+    /// than `limit` entries is an error, [`AccessError::TooLarge`].
     pub fn names(
         &self,
         path: &str,
         limit: usize,
-    ) -> Result<Option<std::collections::BTreeSet<String>>, AccessError> {
+    ) -> Result<Option<(std::collections::BTreeSet<String>, usize)>, AccessError> {
         let listing = match self.root.list(&checked(path)?) {
             Ok(listing) => listing,
             Err(Refused::Missing) => return Ok(None),
             Err(other) => return Err(refused(path, other)),
         };
         let mut names = std::collections::BTreeSet::new();
-        for (count, entry) in listing.enumerate() {
+        let mut count = 0;
+        for entry in listing {
             if count >= limit {
                 return Err(AccessError::TooLarge(path.to_owned()));
             }
+            count += 1;
             let entry = entry.map_err(|error| AccessError::Io(path.to_owned(), error))?;
             names.extend(entry.name);
         }
-        Ok(Some(names))
+        Ok(Some((names, count)))
     }
 
     /// Takes the root's exclusive lock, held until the returned value is

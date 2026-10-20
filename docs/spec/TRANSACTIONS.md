@@ -421,9 +421,10 @@ transaction that touches or consults two paths that differ only in case
 is refused with `tx.path`, since macOS and Windows, and some other file
 systems, take them for one file; so is one with a path a component of
 which ends in a dot or a space, which Windows drops from a name; and so is
-one that names a file, or a directory on its way, that is on disk under a
-name differing only in case (`TREE.jsonc` for `tree.jsonc`), which
-validation would take for another file.
+one that names a file, or a directory on its way, that the file system
+finds by that name although it is named otherwise on disk (`TREE.jsonc`
+for `tree.jsonc` where case is not told apart), which validation would
+take for another file.
 
 Each rename and removal is atomic, but there is no atomic publication of
 several files. If a step of 4 fails, the files already published are

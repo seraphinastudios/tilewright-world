@@ -761,13 +761,21 @@ fn a_path_windows_would_read_otherwise_is_not_published() {
 fn a_path_named_otherwise_on_disk_is_not_published() {
     let tree = copy();
     let root = tree.path();
-    let tx = transaction(
+    // Where case is told apart, TREE.jsonc is another file, missing: the
+    // first test holds and the second fails. Where it is not, the file
+    // system finds tree.jsonc by that name: the first fails, and the second
+    // holds when planning but is refused when publishing.
+    let absent = transaction(
         r#"{"op": "test", "path": "defs/proto/TREE.jsonc", "pointer": [], "absent": true}"#,
     );
-    match plan(root, &tx, &Options::default()) {
-        // A file system that ignores case finds tree.jsonc there.
-        Err(problems) => assert!(!problems.is_empty()),
+    let present = transaction(
+        r#"{"op": "test", "path": "defs/proto/TREE.jsonc", "pointer": ["id"], "value": "tree"}"#,
+    );
+    let distinct = plan(root, &absent, &Options::default()).is_ok();
+    match plan(root, &present, &Options::default()) {
+        Err(problems) => assert!(distinct, "{problems:#?}"),
         Ok(plan) => {
+            assert!(!distinct);
             let failure = plan.publish().unwrap_err();
             assert!(!failure.applied);
             assert!(

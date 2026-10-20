@@ -645,8 +645,10 @@ impl Plan {
     /// that is on disk has there exactly the name the plan gives it. A file
     /// system that ignores case, as macOS and Windows do by default, finds
     /// `TREE.jsonc` for `tree.jsonc`, which validation, keyed by name, would
-    /// take for another file. Each directory is listed once, and all of
-    /// them within the load's entry budget.
+    /// take for another file. Where no entry has the exact name, the file
+    /// system is asked whether it finds one by it, by its own rules of case
+    /// and spelling. Each directory is listed once, and all of them within
+    /// the load's entry budget.
     fn named_exactly(&self, root: &SourceRoot) -> Result<(), Vec<Diagnostic>> {
         let mut listed: BTreeMap<String, Option<BTreeSet<String>>> = BTreeMap::new();
         let mut remaining = self.load.maximum_entries;
@@ -662,30 +664,36 @@ impl Plan {
                         ),
                         other => io(shown(&directory), &other),
                     })?;
-                    remaining -= names.as_ref().map_or(0, BTreeSet::len);
+                    let names = names.map(|(names, count)| {
+                        remaining -= count;
+                        names
+                    });
                     listed.insert(directory.clone(), names);
                 }
                 // Nothing is on disk from a missing directory on.
                 let Some(Some(names)) = listed.get(&directory) else {
                     break;
                 };
+                let path = joined(&directory, component);
                 if !names.contains(component) {
-                    if let Some(other) = names
-                        .iter()
-                        .find(|name| name.eq_ignore_ascii_case(component))
-                    {
+                    // No entry has the name, but the file system may still
+                    // find one by it, by its own rules of case and spelling.
+                    if root.exists(&path).map_err(|error| io(&path, &error))? {
+                        let other = names
+                            .iter()
+                            .find(|name| name.eq_ignore_ascii_case(component))
+                            .map_or_else(|| "another name".to_owned(), Clone::clone);
                         return Err(problem(
                             &file.path,
                             Code::Path,
                             format!(
-                                "{} is named {other} on disk; paths that differ only in case may name one file, so nothing was written",
-                                joined(&directory, component)
+                                "{path} is named {other} on disk; paths that the file system takes for one may name one file, so nothing was written"
                             ),
                         ));
                     }
                     break;
                 }
-                directory = joined(&directory, component);
+                directory = path;
             }
         }
         Ok(())
