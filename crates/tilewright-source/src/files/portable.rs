@@ -206,11 +206,19 @@ impl Directory {
         }
     }
 
-    pub(crate) fn sync(&self) -> Result<(), Refused> {
+    /// Syncs the directory where the platform can; `false` where it
+    /// cannot, so a caller knows the directory's entries may not be
+    /// durable yet.
+    #[allow(clippy::unnecessary_wraps, clippy::unused_self)]
+    pub(crate) fn sync(&self) -> Result<bool, Refused> {
         #[cfg(unix)]
-        fs::File::open(&self.0)
-            .and_then(|directory| directory.sync_all())
-            .map_err(Refused::Io)?;
-        Ok(())
+        {
+            fs::File::open(&self.0)
+                .and_then(|directory| directory.sync_all())
+                .map_err(Refused::Io)?;
+            Ok(true)
+        }
+        #[cfg(not(unix))]
+        Ok(false)
     }
 }

@@ -524,7 +524,13 @@ fn a_replay_must_give_the_recorded_result() {
     let sealed = planned(root, &tx).sealed().to_owned();
     let digest = transaction::hex(&super::digest(Some("other")).unwrap());
     let path = "planes/overworld/plane.jsonc";
-    let at = sealed.rfind(&format!("\"{path}\": \"")).unwrap() + path.len() + 5;
+    // The path's entry in the result.
+    let result = sealed.find("\"result\": [").unwrap();
+    let entry = result
+        + sealed[result..]
+            .find(&format!("\"path\": \"{path}\""))
+            .unwrap();
+    let at = entry + sealed[entry..].find("\"sha256\": \"").unwrap() + 11;
     let mut tampered = sealed.clone();
     tampered.replace_range(at..at + 64, &digest);
     let found = problems(root, &Transaction::parse("t.jsonc", tampered).unwrap());
@@ -833,7 +839,7 @@ fn malformed_transactions_are_rejected() {
             "unknown key",
         ),
         (
-            "{\"format\": \"tilewright.transaction/1\", \"base\": {\"world.jsonc\": \"abc\"}, \"operations\": []}".to_owned(),
+            "{\"format\": \"tilewright.transaction/1\", \"base\": [{\"path\": \"world.jsonc\", \"sha256\": \"abc\"}], \"operations\": []}".to_owned(),
             "tx.shape",
             "64 lowercase hexadecimal",
         ),
@@ -871,6 +877,16 @@ fn malformed_transactions_are_rejected() {
             wrap(r#"{"op": "insert", "path": "world.jsonc", "pointer": ["planes"], "value": 1}"#),
             "tx.shape",
             "ends with an index",
+        ),
+        (
+            wrap(r#"{"op": "insert", "path": "world.jsonc", "pointer": ["planes", 0], "value": "x", "colon": "garbage"}"#),
+            "tx.shape",
+            "colon goes with key",
+        ),
+        (
+            "{\"format\": \"tilewright.transaction/1\", \"base\": [{\"path\": \"world.jsonc\", \"sha256\": null}, {\"path\": \"world.jsonc\", \"sha256\": null}], \"operations\": []}".to_owned(),
+            "tx.shape",
+            "listed twice",
         ),
     ];
     for path in [
@@ -1171,4 +1187,76 @@ fn names_cannot_carry_other_separators() {
             "{name}"
         );
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn reading_stops_at_the_read_budget() {
+    let tree = copy();
+    let root = tree.path();
+    // Many chunks, each a hard link to one large file.
+    let layer = root.join("planes/overworld/layers/4");
+    fs::create_dir_all(&layer).unwrap();
+    let large = tree.path().join("large");
+    fs::write(&large, " ".repeat(40 << 20)).unwrap();
+    let mut cells = String::new();
+    for cx in 0..100 {
+        fs::hard_link(&large, layer.join(format!("{cx}_0.jsonc"))).unwrap();
+        let _ = write!(
+            cells,
+            "{}{{\"at\": [{}, 0], \"value\": 1}}",
+            if cells.is_empty() { "" } else { ", " },
+            cx * 32
+        );
+    }
+    let tx = transaction(&format!(
+        r#"{{"op": "terrain.set", "plane": "overworld", "layer": 4, "grid": "height", "cells": [{cells}]}}"#
+    ));
+    let found = problems(root, &tx);
+    assert!(
+        has(&found, "tx.limit", "hold more than"),
+        "{:#?}",
+        &found[..3.min(found.len())]
+    );
+    // Seven files fit the 256 MiB budget; nothing past the eighth is read.
+    assert!(found.len() <= 8, "{found:#?}");
+}
+
+#[test]
+fn a_transaction_may_touch_more_files_than_an_object_has_keys() {
+    let tree = copy();
+    let root = tree.path();
+    // Three hundred missing chunks, consulted and left empty.
+    let cells: Vec<String> = (0..300)
+        .map(|cx| format!("{{\"at\": [{}, 0], \"value\": 0}}", cx * 32 + 64))
+        .collect();
+    let tx = transaction(&format!(
+        r#"{{"op": "terrain.set", "plane": "overworld", "layer": 0, "grid": "height", "cells": [{}]}}"#,
+        cells.join(", ")
+    ));
+    let plan = planned(root, &tx);
+    let sealed = Transaction::parse("sealed.jsonc", plan.sealed()).unwrap();
+    assert_eq!(sealed.base().unwrap().len(), 300);
+    assert!(sealed.base().unwrap().values().all(Option::is_none));
+    planned(root, &sealed);
+}
+
+#[test]
+fn a_stale_staging_entry_that_cannot_go_is_reported() {
+    let tree = copy();
+    let root = tree.path();
+    let tx = transaction(
+        r#"{"op": "test", "path": "planes/overworld/plane.jsonc", "pointer": ["id"], "value": "overworld"},
+    {"op": "set", "path": "planes/overworld/zones.jsonc", "pointer": ["zones", 0, "name"], "value": "Wilds"}"#,
+    );
+    fs::create_dir(root.join("planes/overworld/.plane.jsonc.tilewright-tmp")).unwrap();
+    let plan = planned(root, &tx);
+    let failure = plan.publish().unwrap_err();
+    assert!(failure.applied, "{failure:#?}");
+    assert!(
+        failure.problems[0]
+            .path
+            .ends_with(".plane.jsonc.tilewright-tmp")
+    );
+    assert!(read(root, "planes/overworld/zones.jsonc").contains("\"Wilds\""));
 }

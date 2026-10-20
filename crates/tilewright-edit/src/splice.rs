@@ -112,6 +112,7 @@ fn line_style(region: &str) -> String {
         let indent: String = region[last + 1..]
             .chars()
             .take_while(|character| matches!(character, ' ' | '\t'))
+            .take(MAXIMUM_INDENTATION)
             .collect();
         format!("{newline}{indent}")
     } else if region.ends_with([' ', '\t']) {
@@ -121,12 +122,18 @@ fn line_style(region: &str) -> String {
     }
 }
 
-/// The indentation of the line that holds `offset`.
+/// Longest indentation new text copies, so that a document indented
+/// without bound cannot multiply the size of what is written into it.
+const MAXIMUM_INDENTATION: usize = 64;
+
+/// The indentation of the line that holds `offset`, at most
+/// [`MAXIMUM_INDENTATION`] characters.
 fn indentation(source: &str, offset: usize) -> String {
     let start = source[..offset].rfind('\n').map_or(0, |index| index + 1);
     source[start..]
         .chars()
         .take_while(|character| matches!(character, ' ' | '\t'))
+        .take(MAXIMUM_INDENTATION)
         .collect()
 }
 

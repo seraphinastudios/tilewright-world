@@ -258,11 +258,19 @@ fn steps(document: &Document, path: &str, pointer: &[Segment]) -> Outcome<(Vec<S
             )));
         };
         let step = match segment {
-            Segment::Key(key) => Step::Key(key.clone()),
+            Segment::Key(key) => {
+                // A member lookup compares the key with each member's.
+                let members = current.as_object().map_or(0, <[_]>::len);
+                scanned += members.saturating_mul(key.len() + 1);
+                Step::Key(key.clone())
+            }
             Segment::Index(index) => Step::Index(*index),
             Segment::Id(id) => {
                 let items = current.as_array().unwrap_or_default();
-                scanned += items.len();
+                scanned += items
+                    .iter()
+                    .map(|item| item.as_object().map_or(0, <[_]>::len) + id.len() + 1)
+                    .sum::<usize>();
                 let mut matches = items.iter().enumerate().filter(|(_, item)| {
                     item.get("id").and_then(Value::as_str) == Some(id.as_str())
                 });
@@ -345,6 +353,10 @@ fn check_value(
     }
 }
 
+/// How many times an operation follows its pointer, at most: to resolve
+/// it, to check `expect`, and to edit.
+const LOOKUPS: usize = 5;
+
 /// The file of a target, and its steps with `pointer` after the target's
 /// own prefix.
 fn resolved(
@@ -356,7 +368,8 @@ fn resolved(
     full.extend(pointer.iter().cloned());
     let document = workspace.document(&path)?;
     let (steps, scanned) = steps(document, &path, &full)?;
-    workspace.charge(scanned)?;
+    // An operation follows its pointer at most this many times.
+    workspace.charge(scanned.saturating_mul(LOOKUPS))?;
     Ok((path, steps))
 }
 
@@ -490,9 +503,21 @@ fn expected_object(
 ) -> Outcome<(String, [Step; 2], String)> {
     let (path, position) = locate(workspace, address)?;
     let pointer = [Step::Key("objects".to_owned()), Step::Index(position)];
+    // Comparing walks both objects, and each expected member is looked up
+    // among the object's members.
     let size = {
         let document = workspace.document(&path)?;
-        splice::find(document.root(), &pointer).map_or(0, |object| object.span().len())
+        splice::find(document.root(), &pointer).map_or(0, |object| {
+            let members = object.as_object().map_or(0, <[_]>::len);
+            let lookups: usize = transaction
+                .value(expect)
+                .as_object()
+                .unwrap_or_default()
+                .iter()
+                .map(|member| members.saturating_mul(member.key.len() + 1))
+                .sum();
+            object.span().len().saturating_add(lookups)
+        })
     };
     workspace.charge(transaction.value(expect).span().len().saturating_add(size))?;
     let document = workspace.document(&path)?;

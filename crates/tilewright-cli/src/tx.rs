@@ -182,7 +182,7 @@ fn apply(transaction: &Path, root: &Path, inverse: &Path) -> Result<String, Fail
     // The inverse is durable before any file changes, so an interrupted
     // apply can be undone with it.
     write(inverse, plan.inverse())?;
-    plan.publish().map_err(|error| Failure {
+    let published = plan.publish().map_err(|error| Failure {
         output: diagnostics_text(&error.problems, false),
         message: if error.applied {
             format!(
@@ -196,8 +196,13 @@ fn apply(transaction: &Path, root: &Path, inverse: &Path) -> Result<String, Fail
             )
         },
     })?;
+    let durable = if published.durable {
+        ""
+    } else {
+        " (this platform cannot sync directories, so the renames may not be durable yet)"
+    };
     Ok(format!(
-        "{}applied; the inverse is in {}\n",
+        "{}applied; the inverse is in {}{durable}\n",
         changes(&plan),
         shown(inverse)
     ))
@@ -286,7 +291,10 @@ mod tests {
         );
         let sealed = fs::read_to_string(path("sealed.jsonc")).unwrap();
         assert!(sealed.contains("// Chunks are found from the tile."));
-        assert!(sealed.contains("\"planes/overworld/layers/0/1_0.jsonc\": null"));
+        assert!(
+            sealed
+                .contains("{\"path\": \"planes/overworld/layers/0/1_0.jsonc\", \"sha256\": null}")
+        );
         let again = run(&[
             "tx",
             "rebase",

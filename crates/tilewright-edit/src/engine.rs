@@ -143,19 +143,30 @@ impl<'r> Workspace<'r> {
                         limits::FILES
                     )));
                 }
-                let limit = u64::try_from(limits().max_input_bytes).unwrap_or(u64::MAX);
-                let bytes = root
-                    .read(path, limit)
-                    .map_err(|error| Failure::access(&error))?;
+                // A file is read only as far as the allowance left, and
+                // once that is spent nothing more is read.
+                let spent = || {
+                    Failure::limit(format!(
+                        "the touched files hold more than {} bytes",
+                        limits::READ_BYTES
+                    ))
+                };
+                if self.read_bytes >= limits::READ_BYTES {
+                    return Err(spent());
+                }
+                let file_limit = u64::try_from(limits().max_input_bytes).unwrap_or(u64::MAX);
+                let left = limits::READ_BYTES - self.read_bytes;
+                let bytes = match root.read(path, file_limit.min(left)) {
+                    Ok(bytes) => bytes,
+                    Err(AccessError::TooLarge(_)) if left < file_limit => {
+                        self.read_bytes = limits::READ_BYTES;
+                        return Err(spent());
+                    }
+                    Err(error) => return Err(Failure::access(&error)),
+                };
                 let base = match bytes {
                     Some(bytes) => {
                         self.read_bytes += u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-                        if self.read_bytes > limits::READ_BYTES {
-                            return Err(Failure::limit(format!(
-                                "the touched files hold more than {} bytes",
-                                limits::READ_BYTES
-                            )));
-                        }
                         Some(String::from_utf8(bytes).map_err(|_| {
                             Failure::conflict(format!("{path} is not UTF-8 and cannot be edited"))
                         })?)
@@ -172,9 +183,10 @@ impl<'r> Workspace<'r> {
         }
     }
 
-    /// Whether the work budget is spent; nothing more can be carried out.
+    /// Whether the work or read budget is spent; nothing more can be
+    /// carried out.
     pub fn exhausted(&self) -> bool {
-        self.work > limits::WORK
+        self.work > limits::WORK || self.read_bytes >= limits::READ_BYTES
     }
 
     pub fn exists(&mut self, path: &str) -> Outcome<bool> {

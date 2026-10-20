@@ -28,11 +28,11 @@ A transaction is a strict JSONC document (FORMAT.md section 3):
   "format": "tilewright.transaction/1",
   "title": "Plant the village orchard",          // optional, at most 256 characters
   "actor": "agent:orchard-planner",              // optional, at most 256 characters
-  "base": {                                      // optional
-    "planes/overworld/layers/0/0_0.jsonc": "6d878f09d3eeec75575831cb2f284693750bd05b30c3935be943038a204908ca",
-    "planes/overworld/layers/0/1_0.jsonc": null
-  },
-  "result": { ... },                             // optional, the same shape
+  "base": [                                      // optional
+    {"path": "planes/overworld/layers/0/0_0.jsonc", "sha256": "6d878f09d3eeec75575831cb2f284693750bd05b30c3935be943038a204908ca"},
+    {"path": "planes/overworld/layers/0/1_0.jsonc", "sha256": null}
+  ],
+  "result": [ ... ],                             // optional, the same shape
   "operations": [
     {"op": "object.insert", "plane": "overworld", "layer": 0, "at": [40, 6], "object": {"proto": "tree"}},
     {"op": "terrain.set", "plane": "overworld", "layer": 0, "grid": "floor",
@@ -46,7 +46,7 @@ A transaction is a strict JSONC document (FORMAT.md section 3):
 | --- | --- |
 | `format` | `tilewright.transaction/1`. |
 | `title`, `actor` | What the change is and who or what made it, for review and provenance. |
-| `base` | The files the transaction touches or consults, each with the lowercase hex SHA-256 of its bytes, or `null` for a file that must be absent. |
+| `base` | The files the transaction touches or consults: one `{"path", "sha256"}` entry each, with the lowercase hex SHA-256 of the file's bytes, or `null` for a file that must be absent. A path appears once. |
 | `result` | The same files after the transaction. |
 | `operations` | The operations, carried out in order. |
 | `custom` | Namespaced extension data, as in FORMAT.md section 7, such as the editor command, its parameters and its seed. |
@@ -69,7 +69,11 @@ transaction out records every file it read, created or checked for absence
   (FORMAT.md section 2).
 - **Objects** are a tile and an `"index"`: the object's place among the
   objects on that tile, in list order, which is their stacking order. Edits
-  elsewhere in the chunk do not move it.
+  elsewhere in the chunk do not move it. Operations that remove or move an
+  object name what they expect it to be, so that an object that moved or
+  changed is a conflict, not an edit of another object. An object address
+  with any other key is an error; a later version may add stable object
+  identities as a second form.
 - **Values** are a document and a `"pointer"`: an array of steps, each a key
   (a string), an array index (an integer from 0 to 250,000) or
   `{"id": "<identifier>"}`, the one array item that is an object whose `id`
@@ -118,7 +122,8 @@ change:
   `after`. Given, `before` holds the comma unless the item is first and
   `after` holds it unless the item is last; both are otherwise whitespace and
   complete comments, at most 4,096 bytes. A member's key and value are joined
-  by `colon` (whitespace and comments around one `:`).
+  by `colon` (whitespace and comments around one `:`), which only an
+  insertion with `key` may give.
 - Without them, the new item takes its neighbours' line style: in a
   container that puts items on their own lines it gets its own line at their
   indentation, in one that does not it follows a comma and a space, and
@@ -250,30 +255,34 @@ Publishing a carried-out transaction:
    it goes, so that a failure there leaves the file;
 5. removes the staging files left beside any file the transaction touched or
    consulted, removes the directories deleting files emptied, and syncs
-   every directory whose entries changed.
+   every directory whose entries changed. A staging entry that cannot be
+   removed is reported, since the tree does not validate while it is there.
 
 Each rename and removal is atomic, but there is no atomic publication of
 several files. If a step of 4 fails, the files already published are
 restored from the transaction's copy of them and the directories involved
 are synced, the staged files and created directories are removed, and the
-error names any file that could not be restored. If only syncing in step 5
-fails, every file was published: the error says the transaction was applied
-but may not be durable. If the process stops during step 4 (a crash or power
+error names any file that could not be restored. If only step 5 fails,
+every file was published: the error says the transaction was applied, and
+what was left undone. If the process stops during step 4 (a crash or power
 loss), some files have the new bytes and the others the old ones, and
 staging files may remain; the loader rejects a staging file below `planes/`
 or `defs/`, so the tree fails validation until it is repaired. To repair
 it, apply the inverse, which the command line writes before step 1: the
 files the interrupted apply published are restored, the others already
 match and are left alone, and the staging files beside every file it names
-are removed. The source tree's version control is the other way back.
+are removed. There is no journal: the inverse, written before anything is
+published, is the recovery record, and applying it is a manual step. The
+source tree's version control is the other way back.
 Carrying out ignores the staging files beside every file a transaction
 touches or consults.
 
 Staging names, `.<name>.tilewright-tmp`, are reserved beside source files.
-Other platforms than Unix check each path component for links before use and
-have no lock; a process changing the tree at the same moment can race them,
-as can a program other than the toolkit on any platform: the lock only
-orders applies.
+Other platforms than Unix check each path component for links before use,
+have no lock and cannot sync a directory: a publish there says that its
+renames may not be durable yet. A process changing the tree at the same
+moment can race them, as can a program other than the toolkit on any
+platform: the lock only orders applies.
 
 ## 10. Canonical layout
 
@@ -298,12 +307,13 @@ FORMAT.md section 3 and these, while they are read and carried out:
 | `before`, `after`, `separator` or `colon` | 4,096 bytes |
 | Terrain cells | 1,000,000 |
 | Bytes read from touched files | 256 MiB |
-| Work: bytes parsed or compared and items scanned | 4 GiB |
+| Work: bytes parsed or compared, and items and keys scanned | 4 GiB |
 | Diagnostics reported | 1,000 |
 
-Carrying out stops at the first operation past the work budget or the
-diagnostic limit, and messages describe a value over 4 KiB by its kind and
-size rather than render it.
+A file is read only as far as the read allowance left, and carrying out
+stops as soon as the read or work budget is spent or the diagnostic limit
+is reached. Messages describe a value over 4 KiB by its kind and size
+rather than render it.
 
 Each touched file must be within the 64 MiB document limit after every edit.
 The sealed transaction and the inverse must themselves be valid transactions

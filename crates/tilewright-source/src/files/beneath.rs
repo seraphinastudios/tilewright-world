@@ -299,7 +299,9 @@ impl Directory {
     }
 
     /// Syncs the directory, so renames and removals in it are durable.
-    pub(crate) fn sync(&self) -> Result<(), Refused> {
-        fsync(&self.0).map_err(|errno| Refused::Io(errno.into()))
+    pub(crate) fn sync(&self) -> Result<bool, Refused> {
+        fsync(&self.0)
+            .map(|()| true)
+            .map_err(|errno| Refused::Io(errno.into()))
     }
 }

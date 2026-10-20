@@ -204,7 +204,9 @@ impl SourceDirectory {
     }
 
     /// Syncs the directory, making renames and removals in it durable.
-    pub fn sync(&self) -> Result<(), AccessError> {
+    /// Returns `false` on platforms that cannot sync a directory, where
+    /// they may not be durable yet.
+    pub fn sync(&self) -> Result<bool, AccessError> {
         self.directory
             .sync()
             .map_err(|error| refused(&self.path, error))

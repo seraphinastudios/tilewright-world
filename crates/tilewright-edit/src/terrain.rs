@@ -8,6 +8,7 @@
 
 use crate::{
     engine::{Failure, Outcome, Primitive, Workspace},
+    limits,
     operations::{Site, ensure_chunk, site},
     render::{Node, json_string},
     splice::{self, Insertion, Step},
@@ -633,6 +634,9 @@ pub(crate) fn set_cells(
     }
     let mut failures = Vec::new();
     for (path, (site, cells)) in by_chunk {
+        if workspace.exhausted() || failures.len() >= limits::DIAGNOSTICS {
+            break;
+        }
         chunks.insert(path.clone());
         if let Err(mut found) = set_chunk_cells(workspace, plane, layer, grid, &path, &site, &cells)
         {
@@ -680,6 +684,9 @@ fn set_chunk_cells(
         };
         let mut after = before.clone().unwrap_or_else(Heights::empty);
         for (index, cell) in cells {
+            if problems.len() >= limits::DIAGNOSTICS {
+                break;
+            }
             let found = CellValue::Height(after.cells[*index]);
             if let Some(expect) = &cell.expect
                 && *expect != found
@@ -706,6 +713,9 @@ fn set_chunk_cells(
         let mut after = before.clone().unwrap_or_else(Characters::empty);
         let mut overflow = false;
         for (index, cell) in cells {
+            if problems.len() >= limits::DIAGNOSTICS {
+                break;
+            }
             let found = after.value(after.cells[*index]);
             if let Some(expect) = &cell.expect
                 && *expect != found

@@ -41,11 +41,11 @@ mod splice;
 mod terrain;
 mod transaction;
 
-pub use publish::PublishError;
+pub use publish::{PublishError, Published};
 pub use transaction::{Digests, FORMAT, Transaction};
 
 use engine::{Failure, Primitive, Workspace};
-use render::{Node, json_string};
+use render::json_string;
 use sha2::{Digest as _, Sha256};
 use splice::Step;
 use std::{
@@ -241,7 +241,7 @@ impl Plan {
 }
 
 /// The staging path of `path`.
-fn staging_path(path: &str) -> String {
+pub(crate) fn staging_path(path: &str) -> String {
     match path.rsplit_once('/') {
         Some((directory, name)) => format!("{directory}/{}", staging_name(name)),
         None => staging_name(path),
@@ -479,44 +479,36 @@ pub fn plan(
     })
 }
 
-fn digests_node<'a>(entries: impl Iterator<Item = (&'a str, Option<[u8; 32]>)>) -> Node {
-    Node::Object(
-        entries
-            .map(|(path, digest)| {
-                (
-                    path.to_owned(),
-                    digest.map_or_else(
-                        || Node::Scalar("null".to_owned()),
-                        |digest| Node::String(transaction::hex(&digest)),
-                    ),
-                )
-            })
-            .collect(),
-    )
+/// A digest list: one `{"path", "sha256"}` entry per line, in path order,
+/// with continuation lines at `indent`.
+fn digests_text<'a>(
+    entries: impl Iterator<Item = (&'a str, Option<[u8; 32]>)>,
+    indent: &str,
+) -> String {
+    let lines: Vec<String> = entries
+        .map(|(path, digest)| {
+            let digest = digest.map_or_else(
+                || "null".to_owned(),
+                |digest| format!("\"{}\"", transaction::hex(&digest)),
+            );
+            format!(
+                "{indent}  {{\"path\": {}, \"sha256\": {digest}}}",
+                json_string(path)
+            )
+        })
+        .collect();
+    if lines.is_empty() {
+        "[]".to_owned()
+    } else {
+        format!("[\n{}\n{indent}]", lines.join(",\n"))
+    }
 }
 
 /// The transaction's text with `base` and `result` set to the digests of
 /// `files` before and after; every other byte is kept.
 fn seal(transaction: &Transaction, files: &[FileChange]) -> String {
     let mut text = transaction.text().to_owned();
-    for (key, node) in [
-        (
-            "base",
-            digests_node(
-                files
-                    .iter()
-                    .map(|file| (file.path.as_str(), digest(file.before.as_deref()))),
-            ),
-        ),
-        (
-            "result",
-            digests_node(
-                files
-                    .iter()
-                    .map(|file| (file.path.as_str(), digest(file.after.as_deref()))),
-            ),
-        ),
-    ] {
+    for key in ["base", "result"] {
         let Ok(document) = Document::parse(text.as_str(), &Limits::default()) else {
             break;
         };
@@ -527,7 +519,18 @@ fn seal(transaction: &Transaction, files: &[FileChange]) -> String {
             .position(|member| member.key == key)
             .or_else(|| members.iter().position(|member| member.key == "operations"))
             .unwrap_or(members.len());
-        let value = node.layout(&splice::item_indentation(document.source(), root, position));
+        let indent = splice::item_indentation(document.source(), root, position);
+        let value = digests_text(
+            files.iter().map(|file| {
+                let text = if key == "base" {
+                    &file.before
+                } else {
+                    &file.after
+                };
+                (file.path.as_str(), digest(text.as_deref()))
+            }),
+            &indent,
+        );
         text = if let Some(current) = root.get(key) {
             splice::splice(document.source(), current.span(), &value)
         } else {
@@ -545,17 +548,6 @@ fn seal(transaction: &Transaction, files: &[FileChange]) -> String {
         };
     }
     text
-}
-
-fn pointer_text(pointer: &[Step]) -> String {
-    let steps: Vec<String> = pointer
-        .iter()
-        .map(|step| match step {
-            Step::Key(key) => json_string(key),
-            Step::Index(index) => index.to_string(),
-        })
-        .collect();
-    format!("[{}]", steps.join(", "))
 }
 
 /// Text built up to a limit, so that output an untrusted transaction makes
@@ -590,7 +582,17 @@ impl Bounded {
     }
 
     fn pointer(&mut self, pointer: &[Step]) -> Result<(), TooLarge> {
-        self.push(&pointer_text(pointer))
+        self.push("[")?;
+        for (index, step) in pointer.iter().enumerate() {
+            if index > 0 {
+                self.push(", ")?;
+            }
+            match step {
+                Step::Key(key) => self.push_json(key)?,
+                Step::Index(index) => self.push(&index.to_string())?,
+            }
+        }
+        self.push("]")
     }
 }
 
@@ -667,15 +669,17 @@ fn inverse(workspace: &Workspace<'_>) -> Result<String, TooLarge> {
         .iter()
         .filter(|(_, entry)| entry.is_changed())
         .collect();
-    let base = digests_node(
+    let base = digests_text(
         changed
             .iter()
             .map(|(path, entry)| (path.as_str(), digest(entry.current.text()))),
+        "  ",
     );
-    let result = digests_node(
+    let result = digests_text(
         changed
             .iter()
             .map(|(path, entry)| (path.as_str(), digest(entry.base.as_deref()))),
+        "  ",
     );
     let mut output = Bounded {
         text: String::new(),
@@ -684,9 +688,9 @@ fn inverse(workspace: &Workspace<'_>) -> Result<String, TooLarge> {
     output.push("{\n  \"format\": ")?;
     output.push_json(FORMAT)?;
     output.push(",\n  \"base\": ")?;
-    output.push(&base.layout("  "))?;
+    output.push(&base)?;
     output.push(",\n  \"result\": ")?;
-    output.push(&result.layout("  "))?;
+    output.push(&result)?;
     output.push(",\n  \"operations\": [")?;
     let mut first = true;
     for (path, entry) in &changed {

@@ -499,13 +499,17 @@ impl<'a> Shape<'a> {
         Some(text.to_owned())
     }
 
+    /// A digest list: `[{"path", "sha256"}, ...]`, each path once, with
+    /// `null` for a file that is absent.
     fn digests(&mut self, value: &'a Value) -> Option<Digests> {
-        let members = value.as_object();
-        let Some(members) = members else {
-            self.shape(value.span(), "expected an object of path digests");
+        let Some(items) = value.as_array() else {
+            self.shape(
+                value.span(),
+                "expected an array of {\"path\", \"sha256\"} entries",
+            );
             return None;
         };
-        if members.len() > limits::FILES {
+        if items.len() > limits::FILES {
             self.report(
                 value.span(),
                 Code::Limit,
@@ -515,37 +519,37 @@ impl<'a> Shape<'a> {
         }
         let mut digests = BTreeMap::new();
         let mut ok = true;
-        for member in members {
-            if !is_document_path(&member.key) {
-                self.report(
-                    member.key_span,
-                    Code::Path,
-                    format!("\"{}\" is not a source document path", member.key),
-                );
+        for item in items {
+            let Some(entry) = self.object(item, &["path", "sha256"]) else {
                 ok = false;
                 continue;
-            }
-            let digest = match &member.value {
-                Value::Null { .. } => None,
-                Value::String { value: text, .. } => {
-                    if let Some(digest) = parse_digest(text) {
-                        Some(digest)
-                    } else {
-                        self.shape(
-                            member.value.span(),
-                            "a digest is 64 lowercase hexadecimal digits",
-                        );
-                        ok = false;
-                        continue;
-                    }
-                }
-                other => {
-                    self.shape(other.span(), "expected a digest or null");
-                    ok = false;
-                    continue;
-                }
             };
-            digests.insert(member.key.clone(), digest);
+            let path = self
+                .required(entry, "path")
+                .and_then(|path| self.path(path));
+            let digest = match self.required(entry, "sha256") {
+                Some(Value::Null { .. }) => Some(None),
+                Some(Value::String { value: text, span }) => {
+                    let digest = parse_digest(text);
+                    if digest.is_none() {
+                        self.shape(*span, "a digest is 64 lowercase hexadecimal digits");
+                    }
+                    digest.map(Some)
+                }
+                Some(other) => {
+                    self.shape(other.span(), "expected a digest or null");
+                    None
+                }
+                None => None,
+            };
+            let (Some(path), Some(digest)) = (path, digest) else {
+                ok = false;
+                continue;
+            };
+            if digests.insert(path, digest).is_some() {
+                self.shape(entry.span(), "this path is listed twice");
+                ok = false;
+            }
         }
         ok.then_some(digests)
     }
@@ -911,9 +915,13 @@ impl<'a> Shape<'a> {
                 return None;
             }
         };
-        let colon = match item.get("colon") {
-            Some(value) => Some(self.separator(value)?),
-            None => None,
+        let colon = match (item.get("colon"), key) {
+            (Some(value), Some(_)) => Some(self.separator(value)?),
+            (Some(value), None) => {
+                self.shape(value.span(), "colon goes with key, for an object member");
+                return None;
+            }
+            (None, _) => None,
         };
         Some(Action::Insert {
             target,

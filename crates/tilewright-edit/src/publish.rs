@@ -6,7 +6,7 @@
 //! staged files into place and remove deleted ones. A failure while
 //! publishing restores the files already published from the plan's copies.
 
-use crate::{Code, FileChange, Plan, diagnostic, digest, staging_name};
+use crate::{Code, FileChange, Plan, diagnostic, digest, staging_name, staging_path};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -28,7 +28,8 @@ thread_local! {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublishError {
     /// Whether every file was published. When it was, only making the
-    /// result durable failed: the tree holds the transaction's result.
+    /// result durable, or removing a stale staging file beside it, failed:
+    /// the tree holds the transaction's result.
     /// When it was not, the tree holds the files as they were, except any
     /// that the problems name as not restored.
     pub applied: bool,
@@ -51,6 +52,15 @@ impl fmt::Display for PublishError {
 }
 
 impl std::error::Error for PublishError {}
+
+/// A finished publish.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Published {
+    /// Whether every changed directory was synced. It is `false` only on
+    /// platforms that cannot sync a directory: the files are synced, but
+    /// their renames and removals may not be durable yet.
+    pub durable: bool,
+}
 
 fn split(path: &str) -> (&str, &str) {
     path.rsplit_once('/').unwrap_or(("", path))
@@ -129,8 +139,6 @@ impl Directories<'_> {
     fn prune(&mut self, path: &str) {
         let mut current = split(path).0.to_owned();
         while current.contains('/') {
-            self.open.remove(&current);
-            self.changed.remove(&current);
             let (parent, name) = split(&current);
             let removed = matches!(
                 self.root.directory(parent, false),
@@ -139,14 +147,19 @@ impl Directories<'_> {
             if !removed {
                 break;
             }
+            // Only a directory that is gone leaves the set to sync.
+            self.open.remove(&current);
+            self.changed.remove(&current);
             self.changed.insert(parent.to_owned());
             current = parent.to_owned();
         }
     }
 
-    /// Syncs every directory whose entries changed.
-    fn sync(&mut self) -> Vec<Diagnostic> {
+    /// Syncs every directory whose entries changed. Returns the failures,
+    /// and whether the platform could sync every one.
+    fn sync(&mut self) -> (Vec<Diagnostic>, bool) {
         let mut failures = Vec::new();
+        let mut durable = true;
         for path in std::mem::take(&mut self.changed) {
             #[cfg(test)]
             if FAIL_SYNC.with(std::cell::Cell::get) {
@@ -154,16 +167,15 @@ impl Directories<'_> {
                 continue;
             }
             match self.get(&path, false) {
-                Ok(Some(directory)) => {
-                    if let Err(error) = directory.sync() {
-                        failures.extend(io(&path, &error));
-                    }
-                }
+                Ok(Some(directory)) => match directory.sync() {
+                    Ok(synced) => durable &= synced,
+                    Err(error) => failures.extend(io(&path, &error)),
+                },
                 Ok(None) => {}
                 Err(error) => failures.extend(io(&path, &error)),
             }
         }
-        failures
+        (failures, durable)
     }
 }
 
@@ -238,7 +250,7 @@ impl Plan {
     /// restores the files already published and names any it could not.
     /// A failure to sync after every file was published is reported with
     /// `applied` set.
-    pub fn publish(&self) -> Result<(), PublishError> {
+    pub fn publish(&self) -> Result<Published, PublishError> {
         let root = SourceRoot::new(&self.root);
         let _lock = root.lock().map_err(|error| {
             not_applied(match error {
@@ -288,6 +300,7 @@ impl Plan {
                 unrestored.extend(
                     directories
                         .sync()
+                        .0
                         .into_iter()
                         .map(|failure| failure.to_string()),
                 );
@@ -303,13 +316,23 @@ impl Plan {
             }
         }
         // Staging files left beside the files of this plan by an earlier,
-        // interrupted apply go too.
+        // interrupted apply go too; one that cannot go is reported, since
+        // the tree does not validate while it is there.
+        let mut failures = Vec::new();
         for file in &self.files {
             let (parent, name) = split(&file.path);
-            if let Ok(Some(directory)) = directories.get(parent, false)
-                && directory.remove_file(&staging_name(name)).unwrap_or(false)
-            {
-                directories.changed.insert(parent.to_owned());
+            let removed = directories
+                .get(parent, false)
+                .and_then(|directory| match directory {
+                    Some(directory) => directory.remove_file(&staging_name(name)),
+                    None => Ok(false),
+                });
+            match removed {
+                Ok(true) => {
+                    directories.changed.insert(parent.to_owned());
+                }
+                Ok(false) => {}
+                Err(error) => failures.extend(io(&staging_path(&file.path), &error)),
             }
         }
         for file in &changed {
@@ -317,9 +340,10 @@ impl Plan {
                 directories.prune(&file.path);
             }
         }
-        let failures = directories.sync();
+        let (synced, durable) = directories.sync();
+        failures.extend(synced);
         if failures.is_empty() {
-            Ok(())
+            Ok(Published { durable })
         } else {
             Err(PublishError {
                 applied: true,
