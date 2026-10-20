@@ -48,10 +48,16 @@ pub const DEFAULT_MAXIMUM_IDS: usize = 1_000_000;
 
 /// Bounds on what a snapshot may hold. A snapshot keeps every ID of its
 /// world with a fingerprint, so its memory grows with its IDs.
+///
+/// These bound the snapshot, not loading: a pack's rows are counted as
+/// they are read, so a pack with too many IDs stops at the first one past
+/// the limit, but a source tree is loaded whole first, within the bounds of
+/// [`tilewright_source::LoadOptions`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Limits {
-    /// Most IDs of all kinds one snapshot holds. Reading a world with more
-    /// stops at the first ID past the limit, before it is kept.
+    /// Most IDs of all kinds one snapshot holds. Building a snapshot of a
+    /// world with more stops at the first ID past the limit, before it is
+    /// kept.
     pub maximum_ids: usize,
 }
 
@@ -191,7 +197,8 @@ impl std::error::Error for Error {}
 /// Reads one side of a comparison: a content pack when `path` is a file,
 /// which is opened and fully verified with the default bounds first, and
 /// otherwise a source tree, which is loaded and validated with the default
-/// bounds. The snapshot holds at most `limits.maximum_ids` IDs.
+/// bounds. The snapshot holds at most `limits.maximum_ids` IDs; see
+/// [`Limits`] for what that bounds.
 ///
 /// # Errors
 /// Returns the source diagnostics, the pack's first problem, or

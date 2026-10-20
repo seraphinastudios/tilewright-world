@@ -23,9 +23,13 @@ pack is opened and fully verified, as `tilewright inspect` does, before any
 of its IDs is read. A side that does not load is a load error (section 7).
 
 A comparison keeps every ID of both sides in memory, so each side may hold
-at most `--max-ids` IDs of all kinds, 1,000,000 by default. Reading stops at
-the first ID past the limit, before it is kept, and the side is a load
-error.
+at most `--max-ids` IDs of all kinds, 1,000,000 by default; a side with more
+is a load error. A pack's IDs are counted as its rows are read, and reading
+stops at the first ID past the limit, before it is kept. A source tree is
+loaded and validated whole first, within the reference loader's own bounds
+on files, directory entries, bytes and diagnostics, as `tilewright validate`
+loads it; its IDs are then counted the same way. The ID limit bounds what
+the comparison keeps, not what loading a source tree does.
 
 A reference that no longer resolves, such as a chunk that still names a
 removed prototype, makes the new world invalid: the loader reports it as

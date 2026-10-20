@@ -56,7 +56,8 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
-    /// The snapshot of a loaded source tree.
+    /// The snapshot of a loaded source tree. The world is already in
+    /// memory, so `limits` bound the snapshot built from it.
     ///
     /// # Errors
     /// Returns [`Error::TooManyIds`] if the world has more IDs than
