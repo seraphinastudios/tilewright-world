@@ -143,6 +143,17 @@ function isBuffer(value) {
   });
 }
 
+// A chunk read builds an object for each object of the chunk, so it fails
+// with pack.decode_budget past this many, inventories included, unless the
+// caller sets another budget. A record of at most 16 MiB can hold about a
+// million.
+const DEFAULT_MAX_OBJECTS = 65536n;
+
+function objectBudget(limits) {
+  const { maxObjects } = options(limits, "limits");
+  return maxObjects === undefined ? DEFAULT_MAX_OBJECTS : big(maxObjects, "limits.maxObjects", U64);
+}
+
 function bytesOf(bytes) {
   if (ArrayBuffer.isView(bytes)) {
     return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -155,36 +166,28 @@ function bytesOf(bytes) {
 // a call, so its state is no longer known: it is not used again.
 let stopped;
 
-// The readers of packs not yet closed, held weakly. wasm-bindgen frees a
-// reader that is collected by calling into the module, so once the module
-// has stopped, each is detached from that first.
-const open = new Set();
-const collected =
-  typeof FinalizationRegistry === "function" ? new FinalizationRegistry((ref) => open.delete(ref)) : undefined;
+// Frees the reader of a pack that is collected without being closed. The
+// registry holds each reader until its pack is collected, so this, and not
+// wasm-bindgen's own finalizer for the reader, always runs first; and once
+// the module has stopped, it detaches the reader instead of calling in.
+const unclosed =
+  typeof FinalizationRegistry === "function" ? new FinalizationRegistry((reader) => release(reader)) : undefined;
 
-function track(reader) {
-  if (typeof WeakRef !== "function") {
-    return undefined;
+function release(reader) {
+  if (stopped !== undefined) {
+    // Unregisters wasm-bindgen's finalizer without calling into the module.
+    reader.__destroy_into_raw();
+    return;
   }
-  const ref = new WeakRef(reader);
-  open.add(ref);
-  collected?.register(reader, ref, ref);
-  return ref;
-}
-
-function untrack(ref) {
-  if (ref !== undefined) {
-    open.delete(ref);
-    collected?.unregister(ref);
+  try {
+    reader.free();
+  } catch (error) {
+    rethrown(error);
   }
 }
 
 function stop(error) {
   stopped = error;
-  for (const ref of open) {
-    ref.deref()?.__destroy_into_raw();
-  }
-  open.clear();
 }
 
 function usable() {
@@ -248,12 +251,11 @@ export function openPack(bytes, settings) {
 /** An open pack. Reads are synchronous and each checks what it loads. */
 export class Pack {
   #reader;
-  #tracked;
 
   constructor(reader) {
     argument(reader instanceof Reader, "open a pack with openPack()");
     this.#reader = reader;
-    this.#tracked = track(reader);
+    unclosed?.register(this, reader, this);
   }
 
   /**
@@ -295,14 +297,9 @@ export class Pack {
   close() {
     const reader = this.#reader;
     this.#reader = undefined;
-    untrack(this.#tracked);
     if (reader !== undefined) {
-      if (stopped === undefined) {
-        reader.free();
-      } else {
-        // Detaches it without calling into the stopped module.
-        reader.__destroy_into_raw();
-      }
+      unclosed?.unregister(this);
+      release(reader);
     }
   }
 
@@ -422,11 +419,12 @@ export class Pack {
     );
   }
 
-  chunk(plane, layer, cx, cy) {
+  chunk(plane, layer, cx, cy, limits) {
     text(plane, "plane");
     int(layer, "layer", I32);
     const [bigX, bigY] = [big(cx, "cx", I64), big(cy, "cy", I64)];
-    return this.#call((reader) => reader.chunk(plane, layer, bigX, bigY));
+    const maxObjects = objectBudget(limits);
+    return this.#call((reader) => reader.chunk(plane, layer, bigX, bigY, maxObjects));
   }
 
   objectLocation(uid) {
@@ -434,9 +432,10 @@ export class Pack {
     return this.#call((reader) => reader.objectLocation(uid));
   }
 
-  object(uid) {
+  object(uid, limits) {
     text(uid, "uid");
-    return this.#call((reader) => reader.object(uid));
+    const maxObjects = objectBudget(limits);
+    return this.#call((reader) => reader.object(uid, maxObjects));
   }
 
   verify(limits) {

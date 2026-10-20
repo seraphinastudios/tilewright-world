@@ -209,7 +209,8 @@ pub enum ErrorCode {
     /// The file's SHA-256 does not match its name, or the SHA-256 of a pack
     /// opened from bytes is not the digest its caller expects.
     Digest,
-    /// The chunks decode to more than the verification budget.
+    /// The chunks decode to more than the verification budget, or a chunk
+    /// read holds more objects than its budget.
     DecodeBudget,
     /// The compiler cannot encode a world.
     Invalid,

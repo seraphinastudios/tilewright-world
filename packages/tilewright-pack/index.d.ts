@@ -86,6 +86,15 @@ export interface OpenOptions {
   maxPackBytes?: IntegerArgument;
 }
 
+export interface ReadLimits {
+  /**
+   * The most objects, inventories included, a read builds from a chunk; a
+   * chunk with more fails with `pack.decode_budget` before any is built.
+   * 65,536 by default: a record of at most 16 MiB can hold about a million.
+   */
+  maxObjects?: IntegerArgument;
+}
+
 export interface VerifyLimits {
   /** At most the limit the pack was opened with, which is the default. */
   maxPackBytes?: IntegerArgument;
@@ -302,11 +311,20 @@ export class Pack {
   layers(plane: string): IterableIterator<number>;
   /** The positions of a layer's chunks, by cx and then cy. */
   chunkKeys(plane: string, layer: number): IterableIterator<ChunkKey>;
-  chunk(plane: string, layer: number, cx: IntegerArgument, cy: IntegerArgument): Chunk | undefined;
+  chunk(
+    plane: string,
+    layer: number,
+    cx: IntegerArgument,
+    cy: IntegerArgument,
+    limits?: ReadLimits,
+  ): Chunk | undefined;
 
   objectLocation(uid: string): ObjectLocation | undefined;
-  /** The object with a uid, after checking that the object at its location has it. */
-  object(uid: string): { location: ObjectLocation; object: ChunkObject } | undefined;
+  /**
+   * The object with a uid, after checking that the object at its location
+   * has it. Its chunk is read within `limits`, as `chunk` reads one.
+   */
+  object(uid: string, limits?: ReadLimits): { location: ObjectLocation; object: ChunkObject } | undefined;
 
   /**
    * Checks the whole pack: SQLite integrity, the expected digest, every

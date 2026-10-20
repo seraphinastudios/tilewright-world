@@ -234,14 +234,14 @@ fn recorded_size(value: &types::Value) -> u64 {
 }
 
 /// Decodes the value of [`chunk_data_sql`].
-fn chunk_data(value: types::Value) -> Result<ChunkData, Error> {
+fn chunk_data(value: &types::Value) -> Result<ChunkData, Error> {
     chunk_data_with(value, None)
 }
 
 /// [`chunk_data`], streaming objects to `visit` when it is given.
-fn chunk_data_with(value: types::Value, visit: Option<Visit<'_>>) -> Result<ChunkData, Error> {
+fn chunk_data_with(value: &types::Value, visit: Option<Visit<'_>>) -> Result<ChunkData, Error> {
     match value {
-        types::Value::Blob(data) => decode_chunk_with(&data, visit).map_err(Error::Chunk),
+        types::Value::Blob(data) => decode_chunk_with(data, visit).map_err(Error::Chunk),
         types::Value::Integer(0) => Err(Error::Rejected(
             ErrorCode::ChunkEncoding,
             format!("a chunk's encoding is not {CHUNK_ENCODING}"),
@@ -730,6 +730,28 @@ impl Pack {
         cx: i64,
         cy: i64,
     ) -> Result<Option<ChunkData>, Error> {
+        self.chunk_within(plane, layer, cx, cy, u64::MAX)
+    }
+
+    /// [`Pack::chunk`], with a budget of `maximum_objects` objects,
+    /// inventories included. A record of at most 16 MiB can hold about a
+    /// million small objects, so a caller that builds an object for each,
+    /// such as a browser, can bound them. Under a budget the record is first
+    /// decoded keeping one object at a time, and the read fails with
+    /// [`ErrorCode::DecodeBudget`] once it counts more, before any chunk is
+    /// built.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite fails, the stored record is invalid, or it
+    /// holds more objects than the budget.
+    pub fn chunk_within(
+        &self,
+        plane: &str,
+        layer: i32,
+        cx: i64,
+        cy: i64,
+        maximum_objects: u64,
+    ) -> Result<Option<ChunkData>, Error> {
         let value: Option<types::Value> = self
             .connection
             .query_row(
@@ -741,7 +763,35 @@ impl Pack {
                 |row| row.get(0),
             )
             .optional()?;
-        value.map(chunk_data).transpose()
+        let Some(value) = value else {
+            return Ok(None);
+        };
+        if maximum_objects < u64::MAX {
+            let mut objects: u64 = 0;
+            let mut over = false;
+            let mut count = |_: &ObjectRecord| {
+                objects += 1;
+                over = objects > maximum_objects;
+                if over {
+                    Err(DecodeError(
+                        "the chunk holds more objects than the budget".into(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            };
+            let counted = chunk_data_with(&value, Some(&mut count));
+            if over {
+                return Err(Error::Rejected(
+                    ErrorCode::DecodeBudget,
+                    format!(
+                        "the chunk holds more than {maximum_objects} objects, the read's budget"
+                    ),
+                ));
+            }
+            counted?;
+        }
+        chunk_data(&value).map(Some)
     }
 
     /// The profile's `layer_height`: height units per layer, or `None` when
@@ -880,11 +930,31 @@ impl Pack {
     /// Returns an error if SQLite fails, the stored row or chunk is invalid,
     /// or they disagree.
     pub fn object(&self, uid: &str) -> Result<Option<(UidLocation, ObjectRecord)>, Error> {
+        self.object_within(uid, u64::MAX)
+    }
+
+    /// [`Pack::object`], decoding the object's chunk with a budget of
+    /// `maximum_objects` objects; see [`Pack::chunk_within`].
+    ///
+    /// # Errors
+    /// Returns an error if SQLite fails, the stored row or chunk is invalid,
+    /// they disagree, or the chunk holds more objects than the budget.
+    pub fn object_within(
+        &self,
+        uid: &str,
+        maximum_objects: u64,
+    ) -> Result<Option<(UidLocation, ObjectRecord)>, Error> {
         let Some(location) = self.object_location(uid)? else {
             return Ok(None);
         };
         let object = self
-            .chunk(&location.plane, location.layer, location.cx, location.cy)?
+            .chunk_within(
+                &location.plane,
+                location.layer,
+                location.cx,
+                location.cy,
+                maximum_objects,
+            )?
             .and_then(|chunk| {
                 chunk
                     .object(location.index)
@@ -1133,7 +1203,7 @@ impl Pack {
                     DecodeError("an object failed verification".into())
                 })
             };
-            let decoded_chunk = chunk_data_with(data, Some(&mut visit));
+            let decoded_chunk = chunk_data_with(&data, Some(&mut visit));
             if let Some(error) = failure {
                 return Err(error);
             }
@@ -2104,6 +2174,50 @@ mod tests {
             pack.file_digest().unwrap(),
             <[u8; 32]>::from(sha2::Sha256::digest(&bytes))
         );
+    }
+
+    /// Objects at any depth.
+    fn count(objects: &[crate::ObjectRecord]) -> u64 {
+        objects
+            .iter()
+            .map(|object| 1 + count(&object.inventory))
+            .sum()
+    }
+
+    #[test]
+    fn chunk_reads_keep_to_their_object_budget() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../fixtures/packs/5830e26e449a1f0d0c786b32801b7ed68e351777db5f586532478cb4384844b2.twpack",
+        );
+        let pack = Pack::open(&path).unwrap();
+        let chunk = pack.chunk("overworld", 0, 0, 0).unwrap().unwrap();
+        let objects = count(&chunk.objects);
+        assert!(objects > 1);
+        assert_eq!(
+            pack.chunk_within("overworld", 0, 0, 0, objects).unwrap(),
+            Some(chunk)
+        );
+        let error = pack
+            .chunk_within("overworld", 0, 0, 0, objects - 1)
+            .unwrap_err();
+        assert_eq!(error.code(), crate::ErrorCode::DecodeBudget);
+        // A chunk without objects fits any budget, and a missing chunk is
+        // none.
+        assert!(
+            pack.chunk_within("overworld", 1, 0, 0, 0)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            pack.chunk_within("overworld", 0, 9, 9, 0)
+                .unwrap()
+                .is_none()
+        );
+        // A read of an object decodes its chunk within the budget too.
+        let uid = "o.k3vq7zr2mxa5d6wfh4pnyt2cgu";
+        assert!(pack.object_within(uid, objects).unwrap().is_some());
+        let error = pack.object_within(uid, objects - 1).unwrap_err();
+        assert_eq!(error.code(), crate::ErrorCode::DecodeBudget);
     }
 
     #[test]

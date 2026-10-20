@@ -98,14 +98,21 @@ uid's row names) is what `verify()` checks.
 | `string(id)` | An interned string: chunks reference strings by ID |
 | `plane(id)`, `planes()` | Planes, with their documents as canonical JSON |
 | `layers(plane)`, `chunkKeys(plane, layer)` | The layers of a plane that have chunks, and their chunk positions |
-| `chunk(plane, layer, cx, cy)` | A decoded chunk: palette, ground, height and zone grids as typed arrays, and objects |
+| `chunk(plane, layer, cx, cy, limits?)` | A decoded chunk: palette, ground, height and zone grids as typed arrays, and objects |
 | `zone(plane, id)`, `zones(plane)` | Zones |
 | `anchor(plane, id)`, `anchors(plane)` | Anchors |
 | `stairwell(plane, id)`, `stairwells(plane)`, `stairwellStep(plane, layer, x, y)` | Stairwells and the step on a tile |
 | `definition(type, id)`, `definitions(type?)` | Definitions, with their documents as canonical JSON |
-| `objectLocation(uid)`, `object(uid)` | Where the object with a uid is, and the object itself |
+| `objectLocation(uid)`, `object(uid, limits?)` | Where the object with a uid is, and the object itself |
 | `verify(limits?)` | Checks the whole pack and returns its row counts; `limits` has `maxPackBytes` and `maxDecodedBytes`, the decoded-byte budget, 8 GiB by default |
 | `digest()` | The SHA-256 of the pack's bytes |
+
+A record holds at most 16 MiB, which can encode about a million small
+objects, and a chunk read builds a JavaScript object for each. So `chunk`,
+and `object`, which reads the object's chunk, fail with `pack.decode_budget`
+when the chunk holds more than `limits.maxObjects` objects, inventories
+included: 65,536 by default. The count is taken in a first pass that holds
+one object at a time, before anything is built.
 
 `index.d.ts` describes every value. Numeric arguments are integers, and
 checked: a layer is a 32-bit integer, a position a safe integer or a bigint.
@@ -125,6 +132,8 @@ verifies has none.
 Running out of memory in the middle of a read traps the module: that call
 throws a `WebAssembly.RuntimeError`, and since the module's state is then
 unknown, every later call throws until the page or process loads it again.
+Packs are not freed into the stopped module either, whether closed or
+collected.
 
 ## Building
 

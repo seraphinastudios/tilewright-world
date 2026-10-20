@@ -7,6 +7,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
+import v8 from "node:v8";
 import vm from "node:vm";
 import { initialize, initializeSync, openPack, Pack, PackError } from "../index.js";
 import { Reader } from "../wasm/tilewright_pack.js";
@@ -15,6 +16,35 @@ const fixtures = new URL("../../../fixtures/packs/", import.meta.url);
 const validName = "5830e26e449a1f0d0c786b32801b7ed68e351777db5f586532478cb4384844b2";
 const valid = await readFile(new URL(`${validName}.twpack`, fixtures));
 const module = await readFile(new URL("../wasm/tilewright_pack_bg.wasm", import.meta.url));
+
+// Garbage collection on demand, to see what a collected pack does.
+v8.setFlagsFromString("--expose-gc");
+const collect = vm.runInNewContext("gc");
+
+/** Collects garbage until `done` holds, letting finalizers run. */
+async function collectUntil(done) {
+  for (let attempt = 0; attempt < 50 && !done(); attempt += 1) {
+    collect();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return done();
+}
+
+/** Counts calls of `name` on readers while `run` runs. */
+async function counting(name, run) {
+  const original = Reader.prototype[name];
+  let calls = 0;
+  Reader.prototype[name] = function (...args) {
+    calls += 1;
+    return original.apply(this, args);
+  };
+  try {
+    await run(() => calls);
+  } finally {
+    Reader.prototype[name] = original;
+  }
+  return calls;
+}
 
 function fixture(name) {
   return readFile(new URL(name, fixtures));
@@ -246,6 +276,35 @@ test("listings read a page at a time from the last key", async () => {
   assert.throws(() => planes.next(), /closed/);
 });
 
+test("chunk reads keep to their object budget", async () => {
+  await initialize(module);
+  const pack = openPack(valid);
+  const all = (objects) => objects.reduce((total, object) => total + 1 + all(object.inventory), 0);
+  const objects = all(pack.chunk("overworld", 0, 0, 0).objects);
+  assert.ok(objects > 1);
+  assert.equal(all(pack.chunk("overworld", 0, 0, 0, { maxObjects: objects }).objects), objects);
+  rejects(() => pack.chunk("overworld", 0, 0, 0, { maxObjects: objects - 1 }), "pack.decode_budget");
+  assert.ok(pack.chunk("overworld", 1, 0, 0, { maxObjects: 0n }));
+  const uid = "o.k3vq7zr2mxa5d6wfh4pnyt2cgu";
+  assert.equal(pack.object(uid, { maxObjects: objects }).object.uid, uid);
+  rejects(() => pack.object(uid, { maxObjects: 0 }), "pack.decode_budget");
+  for (const limits of [1, null, { maxObjects: -1 }, { maxObjects: 1.5 }, { maxObjects: "1" }]) {
+    assert.throws(() => pack.chunk("overworld", 0, 0, 0, limits), TypeError);
+    assert.throws(() => pack.object(uid, limits), TypeError);
+  }
+});
+
+test("a pack collected without being closed is freed", async () => {
+  await initialize(module);
+  const freed = await counting("free", async (calls) => {
+    (() => {
+      openPack(valid).summary();
+    })();
+    assert.ok(await collectUntil(() => calls() > 0), "the collected pack was freed");
+  });
+  assert.ok(freed > 0);
+});
+
 test("a closed pack refuses reads", async () => {
   await initialize(module);
   const pack = openPack(valid);
@@ -295,7 +354,6 @@ test("results and errors are own properties, whatever a page adds to prototypes"
 test("a trap stops the module for good", async () => {
   await initialize(module);
   const pack = openPack(valid);
-  const other = openPack(valid);
   const { summary, free, __destroy_into_raw: detach } = Reader.prototype;
   let freed = 0;
   let detached = 0;
@@ -311,20 +369,20 @@ test("a trap stops the module for good", async () => {
     return detach.call(this);
   };
   try {
+    // A pack still open when the module stops, then dropped.
+    let dropped = openPack(valid);
     assert.throws(() => pack.summary(), WebAssembly.RuntimeError);
-    // Every open reader, these two and those earlier tests left open, was
-    // detached from wasm-bindgen's finalizer.
-    assert.ok(detached >= 2, `${detached}`);
-    const before = detached;
     assert.throws(() => pack.meta("format"), /stopped/);
-    assert.throws(() => other.meta("format"), /stopped/);
+    assert.throws(() => dropped.meta("format"), /stopped/);
     assert.throws(() => openPack(valid), /stopped/);
+    dropped = undefined;
+    // Neither closing a pack nor collecting one calls into the stopped
+    // module: each reader is detached from wasm-bindgen's finalizer.
     pack.close();
-    other.close();
     assert.equal(pack.closed, true);
-    // Closing does not call into the stopped module.
+    assert.equal(detached, 1);
+    assert.ok(await collectUntil(() => detached >= 2), "the dropped pack was detached");
     assert.equal(freed, 0);
-    assert.equal(detached, before + 2);
   } finally {
     Object.assign(Reader.prototype, { summary, free, __destroy_into_raw: detach });
   }
