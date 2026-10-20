@@ -457,13 +457,17 @@ fn access_of(metadata: &fs::Metadata) -> Access {
     }
     #[cfg(not(unix))]
     {
-        let all = if metadata.is_dir() { 0o777 } else { 0o666 };
+        // Windows does not honour the read-only attribute on a directory,
+        // so it says nothing of the files made in one.
+        let mode = if metadata.is_dir() {
+            0o777
+        } else if metadata.permissions().readonly() {
+            0o444
+        } else {
+            0o666
+        };
         Access {
-            mode: if metadata.permissions().readonly() {
-                all & 0o555
-            } else {
-                all
-            },
+            mode,
             user: 0,
             group: 0,
             control: [0; 32],

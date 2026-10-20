@@ -736,6 +736,28 @@ fn a_link_swapped_in_after_planning_is_never_followed() {
 }
 
 #[test]
+fn a_path_windows_would_read_otherwise_is_not_published() {
+    let tree = copy();
+    let root = tree.path();
+    let tx = transaction(
+        r#"{"op": "test", "path": "defs/proto./tree.jsonc", "pointer": [], "absent": true}"#,
+    );
+    match plan(root, &tx, &Options::default()) {
+        // Windows drops the dot and finds defs/proto/tree.jsonc there.
+        Err(problems) => assert!(!problems.is_empty()),
+        Ok(plan) => {
+            let failure = plan.publish().unwrap_err();
+            assert!(!failure.applied);
+            assert!(
+                has(&failure.problems, "tx.path", "ends in a dot or a space"),
+                "{failure:#?}"
+            );
+        }
+    }
+    assert_eq!(snapshot(root), snapshot(&fixture()));
+}
+
+#[test]
 fn a_path_named_otherwise_on_disk_is_not_published() {
     let tree = copy();
     let root = tree.path();

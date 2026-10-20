@@ -400,11 +400,11 @@ written or the directory used; otherwise publishing fails and nothing is
 published. A tree whose files and directories carry one label, as a user's
 files commonly do under SELinux, can be published. A new file is staged
 under another name, and renaming does not relabel it, so for a new file,
-and for the empty file staged beside a deleted one, publishing also asks
-SELinux (through `/sys/fs/selinux/create`) which label the policy gives a
-new file of the final name, which may differ by a rule keyed on the name,
-and refuses unless it is the label the staged file got, or if the policy
-cannot be asked. Smack's execution, mapping and transmuting labels
+and for the empty file staged beside a deleted one, publishing first asks
+SELinux (through `/sys/fs/selinux/create`) which labels the policy gives a
+new file of the final name and one of the staging name, which may differ
+by a rule keyed on the name, and refuses, before anything is staged,
+unless they are the same, or if the policy cannot be asked. Smack's execution, mapping and transmuting labels
 (`SMACK64EXEC`, `SMACK64MMAP`, `SMACK64TRANSMUTE`) are refused, since a
 replacement, or a directory made again, would not get them.
 
@@ -419,10 +419,11 @@ filter, is refused as a link when it is checked. (A file NTFS compresses
 is not a reparse point; its compression, an attribute, is not kept.) A
 transaction that touches or consults two paths that differ only in case
 is refused with `tx.path`, since macOS and Windows, and some other file
-systems, take them for one file; so is one that names a file, or a
-directory on its way, that is on disk under a name differing only in case
-(`TREE.jsonc` for `tree.jsonc`), which validation would take for another
-file.
+systems, take them for one file; so is one with a path a component of
+which ends in a dot or a space, which Windows drops from a name; and so is
+one that names a file, or a directory on its way, that is on disk under a
+name differing only in case (`TREE.jsonc` for `tree.jsonc`), which
+validation would take for another file.
 
 Each rename and removal is atomic, but there is no atomic publication of
 several files. If a step of 4 fails, the files already published are

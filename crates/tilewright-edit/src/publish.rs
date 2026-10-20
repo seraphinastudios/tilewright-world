@@ -541,6 +541,9 @@ fn stage_all<'f>(
             .and_then(|directory| {
                 let directory =
                     directory.ok_or_else(|| AccessError::Unexpected(file.path.clone()))?;
+                if new {
+                    directory.check_final_name(&staging_name(name), name)?;
+                }
                 directory.write(&staging_name(name), access.as_ref(), text)?;
                 // The new inode must have no access publishing could not
                 // keep, such as a list or label the system gave it.
@@ -558,9 +561,6 @@ fn stage_all<'f>(
                             "a file made here again, as its inverse would make it, could be read by other users than this one",
                         ),
                     ));
-                }
-                if new {
-                    directory.check_final_name(&staging_name(name), name)?;
                 }
                 Ok(())
             });
@@ -609,12 +609,24 @@ fn check_again(root: &SourceRoot, files: &[FileChange]) -> Result<(), Vec<Diagno
 }
 
 impl Plan {
-    /// Two files of the plan whose paths differ only in the case of their
-    /// letters, which a file system that ignores case, as macOS and Windows
-    /// do by default, would take for one file.
-    fn case_aliases(&self) -> Option<Vec<Diagnostic>> {
+    /// A file of the plan whose path another file system could take for
+    /// another's: two that differ only in the case of their letters, which
+    /// macOS and Windows by default take for one file, or one with a
+    /// component that ends in a dot or a space, which Windows drops.
+    fn path_aliases(&self) -> Option<Vec<Diagnostic>> {
         let mut seen: BTreeMap<String, &str> = BTreeMap::new();
         for file in &self.files {
+            if file
+                .path
+                .split('/')
+                .any(|component| component.ends_with(['.', ' ']))
+            {
+                return Some(problem(
+                    &file.path,
+                    Code::Path,
+                    "a component of the path ends in a dot or a space, which Windows drops from a name; nothing was written",
+                ));
+            }
             if let Some(other) = seen.insert(file.path.to_ascii_lowercase(), &file.path) {
                 return Some(problem(
                     &file.path,
@@ -633,24 +645,24 @@ impl Plan {
     /// that is on disk has there exactly the name the plan gives it. A file
     /// system that ignores case, as macOS and Windows do by default, finds
     /// `TREE.jsonc` for `tree.jsonc`, which validation, keyed by name, would
-    /// take for another file. Each directory is listed once, within the
-    /// load's entry budget.
+    /// take for another file. Each directory is listed once, and all of
+    /// them within the load's entry budget.
     fn named_exactly(&self, root: &SourceRoot) -> Result<(), Vec<Diagnostic>> {
         let mut listed: BTreeMap<String, Option<BTreeSet<String>>> = BTreeMap::new();
+        let mut remaining = self.load.maximum_entries;
         for file in &self.files {
             let mut directory = String::new();
             for component in file.path.split('/') {
                 if !listed.contains_key(&directory) {
-                    let names =
-                        root.names(&directory, self.load.maximum_entries)
-                            .map_err(|error| match error {
-                                AccessError::TooLarge(_) => problem(
-                                    shown(&directory),
-                                    Code::Limit,
-                                    "the directory has more entries than a load reads",
-                                ),
-                                other => io(shown(&directory), &other),
-                            })?;
+                    let names = root.names(&directory, remaining).map_err(|error| match error {
+                        AccessError::TooLarge(_) => problem(
+                            shown(&directory),
+                            Code::Limit,
+                            "the directories on the way to the files have more entries than a load reads",
+                        ),
+                        other => io(shown(&directory), &other),
+                    })?;
+                    remaining -= names.as_ref().map_or(0, BTreeSet::len);
                     listed.insert(directory.clone(), names);
                 }
                 // Nothing is on disk from a missing directory on.
@@ -737,7 +749,7 @@ impl Plan {
         if !PUBLISH_SUPPORTED {
             return Err(not_applied(problem(".", Code::Io, UNSUPPORTED)));
         }
-        if let Some(problems) = self.case_aliases() {
+        if let Some(problems) = self.path_aliases() {
             return Err(not_applied(problems));
         }
         let root = &self.source;

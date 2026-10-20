@@ -136,10 +136,17 @@ fn outside(root: &Path, path: &Path) -> Result<(), Failure> {
     else {
         return Ok(());
     };
-    // Compared without case, as macOS and Windows compare names by default.
+    // Compared as macOS and Windows compare names by default: without
+    // case, and, on Windows, without trailing dots and spaces.
     let folded = |path: &Path| -> Vec<String> {
         path.components()
-            .map(|component| component.as_os_str().to_string_lossy().to_lowercase())
+            .map(|component| {
+                component
+                    .as_os_str()
+                    .to_string_lossy()
+                    .trim_end_matches(['.', ' '])
+                    .to_lowercase()
+            })
             .collect()
     };
     let (root, target) = (folded(&root), folded(&parent.join(name)));
@@ -197,7 +204,7 @@ fn rebase(transaction: &Path, root: &Path, output: &Path) -> Result<String, Fail
 fn apply(transaction: &Path, root: &Path, inverse: &Path) -> Result<String, Failure> {
     if !tilewright_edit::PUBLISH_SUPPORTED {
         return Err(Failure::message(
-            "tx apply is supported only on Linux, macOS and Windows, where files are reached through directory handles and checked for access control a replacement could not keep; tx preview and tx rebase work here",
+            "tx apply is supported only on Linux, macOS and Windows (SECURITY.md says what it guarantees on each); tx preview and tx rebase work here",
         ));
     }
     outside(root, inverse)?;
@@ -399,6 +406,7 @@ mod tests {
             "planes/overworld/undo.jsonc",
             ".world.jsonc.tilewright-tmp",
             ".WORLD.JSONC.tilewright-tmp",
+            ".world.jsonc.tilewright-tmp.",
             ".tilewright.lock",
         ] {
             let inside = Path::new(&root).join(inside);

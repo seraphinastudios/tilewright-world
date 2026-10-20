@@ -238,7 +238,7 @@ impl SourceRoot {
 
     /// The UTF-8 names of the entries of the directory `path`, links
     /// included; `None` when it is missing. A directory with more than
-    /// `limit` entries is an error.
+    /// `limit` entries is an error, [`AccessError::TooLarge`].
     pub fn names(
         &self,
         path: &str,
@@ -337,11 +337,11 @@ impl SourceDirectory {
             .map_err(|error| refused(&self.path, error))
     }
 
-    /// Checks that a file made here as `name` would get the access control
-    /// beside the mode bits that the file `staged` here got: on Linux with
-    /// `SELinux`, the label its policy gives a new file of that name, which
-    /// may depend on the name and is not given again on renaming. Elsewhere
-    /// there is nothing to check.
+    /// Checks, before either is made, that a file made here as `name` would
+    /// get the access control beside the mode bits that one made as
+    /// `staged` would: on Linux with `SELinux`, the label its policy gives a
+    /// new file of that name, which may depend on the name and is not given
+    /// again on renaming. Elsewhere there is nothing to check.
     pub fn check_final_name(&self, staged: &str, name: &str) -> Result<(), AccessError> {
         self.directory
             .check_final_name(checked_name(staged)?, checked_name(name)?)

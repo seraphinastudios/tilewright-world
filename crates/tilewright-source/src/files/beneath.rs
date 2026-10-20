@@ -400,27 +400,25 @@ impl Directory {
         }
     }
 
-    /// Checks that a file made here as `name` would get the `SELinux` label
-    /// that the file `staged` here got. A rule of the system's policy that
-    /// keys a new file's label on its name applies when a file is made, not
-    /// when it is renamed, so a file staged under another name and renamed
-    /// to `name` would keep a label the policy does not give `name`. Where
-    /// `SELinux` labels nothing here, there is nothing to check; where it
-    /// labels the directory but cannot be asked, the check fails.
+    /// Checks, before anything is made, that the `SELinux` policy gives a
+    /// file made here as `name` the label it gives one made as `staged`. A
+    /// rule of the policy that keys a new file's label on its name applies
+    /// when a file is made, not when it is renamed, so a file staged under
+    /// another name and renamed to `name` would keep a label the policy
+    /// does not give `name`. The staged file's own label is checked when it
+    /// is written. Where `SELinux` labels nothing here, there is nothing to
+    /// check; where it labels the directory but cannot be asked, the check
+    /// fails.
     #[cfg(target_os = "linux")]
     pub(crate) fn check_final_name(&self, staged: &str, name: &str) -> Result<(), Refused> {
         let Some(directory) = label(&self.0, "security.selinux")? else {
             return Ok(());
         };
-        let flags =
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC | OFlags::NOCTTY;
-        let fd = openat(&self.0, staged, flags, Mode::empty())
-            .map_err(|errno| classify(self.0.as_fd(), staged, errno, &[staged]))?;
-        let given = label(&fd, "security.selinux")?;
         // A labelled tree whose policy cannot be asked, as in a container
         // that hides the SELinux file system, is refused, not guessed at.
+        let given = selinux::compute_create(&directory, staged).map_err(Refused::Io)?;
         let expected = selinux::compute_create(&directory, name).map_err(Refused::Io)?;
-        if given.as_deref().map(selinux::trimmed) == Some(selinux::trimmed(&expected)) {
+        if given == expected {
             Ok(())
         } else {
             Err(unkept(
