@@ -185,22 +185,12 @@ fn apply(transaction: &Path, root: &Path, inverse: &Path) -> Result<String, Fail
     let inverse_durable = write(inverse, plan.inverse())?;
     let published = plan.publish().map_err(|error| Failure {
         output: diagnostics_text(&error.problems, false),
-        message: if error.applied {
-            format!(
-                "the transaction was applied, but not made durable; {} problem(s)",
-                error.problems.len()
-            )
-        } else {
-            format!(
-                "the transaction was not applied; {} problem(s)",
-                error.problems.len()
-            )
-        },
+        message: format!("{}; {} problem(s)", error.summary(), error.problems.len()),
     })?;
     let durable = if published.durable && inverse_durable {
         ""
     } else {
-        " (this platform cannot sync directories, so the inverse's name and the renames may not be durable yet)"
+        " (the inverse's name and the renames could not be synced, so they may not be durable yet)"
     };
     Ok(format!(
         "{}applied; the inverse is in {}{durable}\n",

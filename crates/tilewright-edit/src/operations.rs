@@ -354,6 +354,7 @@ fn set_value(
     transaction: &Transaction,
     aim: &Target,
     pointer: &[Segment],
+    key_text: Option<Span>,
     value: Span,
     expect: Option<Span>,
 ) -> Outcome<()> {
@@ -376,7 +377,11 @@ fn set_value(
         .and_then(Value::as_object)
         .ok_or_else(|| Failure::conflict(format!("{path} has no object at {}", describe(parent))))?
         .len();
-    let key_text = json_string(key);
+    // The key is written as the transaction spells it.
+    let key_text = key_text.map_or_else(
+        || json_string(key),
+        |span| transaction.document.text(span).to_owned(),
+    );
     let insertion = Insertion {
         key: Some((key, &key_text)),
         value,
@@ -485,6 +490,46 @@ fn expected_object(
     Ok((path, pointer, text))
 }
 
+/// `object.insert`, `object.remove` and `object.move`.
+fn object_operation(
+    workspace: &mut Workspace<'_>,
+    transaction: &Transaction,
+    action: &Action,
+) -> Outcome<()> {
+    match action {
+        Action::ObjectInsert {
+            tile,
+            index,
+            object,
+        } => {
+            let local = site(&tile.plane, tile.layer, tile.at).local;
+            let object = with_tile(transaction.document.text(*object), local)?;
+            insert_object(workspace, tile, *index, &object)
+        }
+        Action::ObjectRemove { address, expect } => {
+            let (path, pointer, _) = expected_object(workspace, transaction, address, *expect)?;
+            workspace.remove(&path, &pointer, None)
+        }
+        Action::ObjectMove {
+            address,
+            expect,
+            to,
+            index,
+        } => {
+            let (path, pointer, mut moved) =
+                expected_object(workspace, transaction, address, *expect)?;
+            workspace.remove(&path, &pointer, None)?;
+            let from = site(&address.tile.plane, address.tile.layer, address.tile.at).local;
+            let local = site(&to.plane, to.layer, to.at).local;
+            if local != from {
+                moved = with_tile(&moved, local)?;
+            }
+            insert_object(workspace, to, *index, &moved)
+        }
+        _ => Ok(()),
+    }
+}
+
 fn document_operation(
     workspace: &mut Workspace<'_>,
     transaction: &Transaction,
@@ -494,9 +539,18 @@ fn document_operation(
         Action::Set {
             target,
             pointer,
+            key,
             value,
             expect,
-        } => set_value(workspace, transaction, target, pointer, *value, *expect),
+        } => set_value(
+            workspace,
+            transaction,
+            target,
+            pointer,
+            *key,
+            *value,
+            *expect,
+        ),
         Action::Insert {
             target,
             pointer,
@@ -551,34 +605,8 @@ fn document_operation(
             let text = workspace.delete(path)?;
             workspace.create(to, text)
         }
-        Action::ObjectInsert {
-            tile,
-            index,
-            object,
-        } => {
-            let local = site(&tile.plane, tile.layer, tile.at).local;
-            let object = with_tile(transaction.document.text(*object), local)?;
-            insert_object(workspace, tile, *index, &object)
-        }
-        Action::ObjectRemove { address, expect } => {
-            let (path, pointer, _) = expected_object(workspace, transaction, address, *expect)?;
-            workspace.remove(&path, &pointer, None)
-        }
-        Action::ObjectMove {
-            address,
-            expect,
-            to,
-            index,
-        } => {
-            let (path, pointer, mut moved) =
-                expected_object(workspace, transaction, address, *expect)?;
-            workspace.remove(&path, &pointer, None)?;
-            let from = site(&address.tile.plane, address.tile.layer, address.tile.at).local;
-            let local = site(&to.plane, to.layer, to.at).local;
-            if local != from {
-                moved = with_tile(&moved, local)?;
-            }
-            insert_object(workspace, to, *index, &moved)
+        Action::ObjectInsert { .. } | Action::ObjectRemove { .. } | Action::ObjectMove { .. } => {
+            object_operation(workspace, transaction, action)
         }
         Action::TerrainSet { .. } => Ok(()),
     }

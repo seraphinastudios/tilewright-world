@@ -267,9 +267,11 @@ several files. If a step of 4 fails, the files already published are
 restored from the transaction's copy of them, a deleted file with its own
 permissions, the staged files and created directories are removed, the
 directories involved are synced, and the error names any file that could
-not be restored. Whenever nothing is published, the cleanup is synced too. If only step 5 fails,
-every file was published: the error says the transaction was applied, and
-what was left undone. If the process stops during step 4 (a crash or power
+not be restored. Whenever nothing is published, the cleanup is synced too.
+An error always says three things: whether every file was published,
+whether every directory it changed was synced, and whether the cleanup
+finished, naming any staging file or directory it could not remove, to be
+removed by hand. If the process stops during step 4 (a crash or power
 loss), some files have the new bytes and the others the old ones, and
 staging files may remain; the loader rejects a staging file below `planes/`
 or `defs/`, so the tree fails validation until it is repaired. To repair

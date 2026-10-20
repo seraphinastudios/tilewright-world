@@ -195,8 +195,9 @@ impl Plan {
 
 /// Writes `text` to a new file at `path` atomically: it is written beside
 /// the target, synced and renamed into place, and an existing file is never
-/// replaced. Returns whether the new name is durable too: `false` on
-/// platforms that cannot sync a directory, where only the file's bytes are.
+/// replaced. Returns whether the new name is durable too: `false` when its
+/// directory could not be synced, as on platforms that cannot sync a
+/// directory, where only the file's bytes are.
 ///
 /// # Errors
 /// Fails if `path` exists or cannot be written.
@@ -212,11 +213,12 @@ pub fn write_new(path: &Path, text: &str) -> std::io::Result<bool> {
     temporary
         .persist_noclobber(path)
         .map_err(|error| error.error)?;
+    // The file exists from here on; failing to sync its directory only
+    // means its name may not be durable yet.
     #[cfg(unix)]
-    {
-        std::fs::File::open(directory)?.sync_all()?;
-        Ok(true)
-    }
+    return Ok(std::fs::File::open(directory)
+        .and_then(|directory| directory.sync_all())
+        .is_ok());
     #[cfg(not(unix))]
     Ok(false)
 }

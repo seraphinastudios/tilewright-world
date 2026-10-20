@@ -1252,7 +1252,14 @@ fn a_stale_staging_entry_that_cannot_go_is_reported() {
     fs::create_dir(root.join("planes/overworld/.plane.jsonc.tilewright-tmp")).unwrap();
     let plan = planned(root, &tx);
     let failure = plan.publish().unwrap_err();
-    assert!(failure.applied, "{failure:#?}");
+    assert!(
+        failure.applied && failure.durable && !failure.cleaned,
+        "{failure:#?}"
+    );
+    assert_eq!(
+        failure.summary(),
+        "the transaction was applied, but its cleanup is incomplete"
+    );
     assert!(
         failure.problems[0]
             .path
@@ -1380,4 +1387,64 @@ fn a_directory_that_cannot_be_pruned_is_reported() {
         );
     }
     assert!(!root.join("planes/overworld/layers/7/0_0.jsonc").exists());
+}
+
+#[test]
+fn an_added_member_keeps_the_key_spelling_of_its_pointer() {
+    let tree = copy();
+    let root = tree.path();
+    let tx = transaction(
+        r#"{"op": "set", "path": "planes/overworld/zones.jsonc", "pointer": ["zones", {"id": "wilderness"}, "properties"], "value": {"music": "wind"}}"#,
+    );
+    let after = round_trip(root, &tx);
+    let zones = String::from_utf8(after["planes/overworld/zones.jsonc"].clone()).unwrap();
+    assert!(
+        zones.contains(r#""properties": {"music": "wind"}"#),
+        "{zones}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cleanup_that_cannot_be_done_is_reported_with_the_outcome() {
+    let tree = copy();
+    let root = tree.path().to_path_buf();
+    let tx = transaction(
+        r#"{"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["title"], "value": "Changed"},
+    {"op": "test", "path": "planes/overworld/zones.jsonc", "pointer": ["format"], "value": "tilewright.zones/1"}"#,
+    );
+    let plan = planned(&root, &tx);
+    let staging = root.join("planes/overworld/.plane.jsonc.tilewright-tmp");
+    let zones = root.join("planes/overworld/zones.jsonc");
+    let (hook_staging, hook_zones) = (staging.clone(), zones.clone());
+    // While the transaction is staged, another edit changes a file it
+    // consulted, and something that cannot be removed takes the place of
+    // its staging file.
+    publish::BEFORE_CHECK.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            let text = fs::read_to_string(&hook_zones).unwrap();
+            fs::write(&hook_zones, format!("{text}\n")).unwrap();
+            fs::remove_file(&hook_staging).unwrap();
+            fs::create_dir(&hook_staging).unwrap();
+            fs::write(hook_staging.join("x"), "").unwrap();
+        }));
+    });
+    let failure = plan.publish().unwrap_err();
+    assert!(!failure.applied && !failure.cleaned, "{failure:#?}");
+    assert_eq!(
+        failure.summary(),
+        "the transaction was not applied, and its cleanup is incomplete"
+    );
+    assert!(
+        failure.problems.iter().any(|problem| problem
+            .path
+            .ends_with(".plane.jsonc.tilewright-tmp")
+            && problem.message.contains("remove it by hand")),
+        "{failure:#?}"
+    );
+    fs::remove_dir_all(&staging).unwrap();
+    assert_eq!(
+        read(&root, "planes/overworld/plane.jsonc"),
+        read(&fixture(), "planes/overworld/plane.jsonc")
+    );
 }

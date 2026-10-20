@@ -84,6 +84,9 @@ pub(crate) enum Action {
     Set {
         target: Target,
         pointer: Vec<Segment>,
+        /// The last pointer step's text, when it is a key: a member the set
+        /// adds is written with the key spelled as there.
+        key: Option<Span>,
         value: Span,
         expect: Option<Span>,
     },
@@ -867,11 +870,18 @@ impl<'a> Shape<'a> {
     fn set(&mut self, item: &'a Value) -> Option<Action> {
         let target = self.target(item)?;
         let pointer = self.target_pointer(item, &target)?;
+        let key = item
+            .get("pointer")
+            .and_then(Value::as_array)
+            .and_then(<[Value]>::last)
+            .filter(|step| step.as_str().is_some())
+            .map(Value::span);
         let value = self.required(item, "value")?.span();
         let expect = item.get("expect").map(Value::span);
         Some(Action::Set {
             target,
             pointer,
+            key,
             value,
             expect,
         })
