@@ -33,6 +33,7 @@ use tilewright_source::{
 
 mod identities;
 mod rows;
+mod scan;
 pub use identities::Identity;
 pub use rows::{Anchor, Definition, Page, Plane, Zone};
 
@@ -318,8 +319,11 @@ fn stored_document(text: Option<String>, what: &str, code: ErrorCode) -> Result<
             format!("{what} is not canonical JSON of an object with namespaced custom data"),
         )
     };
-    let document = Document::parse(text.ok_or_else(invalid)?, &crate::canonical_limits())
-        .map_err(|_| invalid())?;
+    let text = text.ok_or_else(invalid)?;
+    if !scan::compact(&text) {
+        return Err(invalid());
+    }
+    let document = Document::parse(text, &crate::canonical_limits()).map_err(|_| invalid())?;
     // `custom` data, where a document has it, is keyed by namespaces as in
     // the source format.
     let custom_ok = match document.root().get("custom") {
@@ -511,28 +515,26 @@ fn utf8_column(
 /// [`bounded_identifier`] and [`bounded_text`] (NULL when out of bounds),
 /// after checking that the document has the row's ID. It fails with
 /// [`ErrorCode::DecodeBudget`] when the document lists more than
-/// `maximum_steps` steps, before they are built.
+/// `maximum_steps` steps, before it is parsed.
 pub(super) fn stairwell_row_within(
     row: &rusqlite::Row<'_>,
     maximum_steps: u64,
 ) -> Result<Stairwell, Error> {
     let id = utf8_column(row, 0, ErrorCode::Stairwell)?;
-    let document = stored_document(
-        utf8_column(row, 1, ErrorCode::Stairwell)?,
-        "a stairwell document",
-        ErrorCode::Stairwell,
-    )?;
-    let steps = document
-        .root()
-        .get("steps")
-        .and_then(Value::as_array)
-        .map_or(0, <[Value]>::len);
-    if u64::try_from(steps).unwrap_or(u64::MAX) > maximum_steps {
+    let text = utf8_column(row, 1, ErrorCode::Stairwell)?;
+    // The steps are counted before the document is parsed: a scan of the
+    // text, exact for the canonical JSON a stored document must be.
+    let steps = text
+        .as_deref()
+        .filter(|text| scan::compact(text))
+        .and_then(|text| scan::root_array_items(text, "steps"));
+    if steps.is_some_and(|steps| u64::try_from(steps).unwrap_or(u64::MAX) > maximum_steps) {
         return Err(Error::Rejected(
             ErrorCode::DecodeBudget,
             format!("a stairwell lists more than {maximum_steps} steps, the read's budget"),
         ));
     }
+    let document = stored_document(text, "a stairwell document", ErrorCode::Stairwell)?;
     let stairwell = stored_stairwell(&document)?;
     if id.as_deref() != Some(stairwell.id.as_str()) {
         return Err(Error::Rejected(

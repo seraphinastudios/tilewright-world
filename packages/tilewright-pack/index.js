@@ -44,7 +44,7 @@ export function initialize(source) {
   }
   if (state === "unloaded") {
     state = "loading";
-    loading = initialize_(source === undefined ? undefined : { module_or_path: source }).then(
+    loading = initialize_(source === undefined ? undefined : { module_or_path: fetchable(source) }).then(
       () => {
         state = "ready";
       },
@@ -55,6 +55,42 @@ export function initialize(source) {
     );
   }
   return loading;
+}
+
+// wasm-bindgen's loader recognizes a URL, Request or Response with
+// `instanceof`, which fails for one from another realm, such as an iframe.
+// Those are recognized by brand, as each getter below throws for anything
+// else, and handed over as this realm's: a Response's body, and the
+// Response of fetching a URL or Request.
+const brands = [
+  ["Response", "status"],
+  ["Request", "url"],
+  ["URL", "href"],
+]
+  .filter(([type]) => typeof globalThis[type] === "function")
+  .map(([type, getter]) => [globalThis[type], Object.getOwnPropertyDescriptor(globalThis[type].prototype, getter).get]);
+
+function branded(value, type) {
+  const brand = brands.find(([candidate]) => candidate === type);
+  if (brand === undefined || typeof value !== "object" || value === null || value instanceof type) {
+    return false;
+  }
+  try {
+    brand[1].call(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function fetchable(source) {
+  if (branded(source, globalThis.Response)) {
+    return source.arrayBuffer();
+  }
+  if (branded(source, globalThis.Request) || branded(source, globalThis.URL)) {
+    return fetch(source);
+  }
+  return source;
 }
 
 /**
@@ -279,16 +315,33 @@ function usable() {
  * of JavaScript values, can throw, and either leaves its state unknown.
  */
 function rethrown(error) {
-  // The reader defines name, code and message as its errors' own data
-  // properties, which nothing inherited can supply.
-  if (error instanceof Error && ownValue(error, "name") === "PackError") {
-    const code = ownValue(error, "code");
-    if (typeof code === "string") {
-      return new PackError(code, String(ownValue(error, "message") ?? ""));
-    }
+  const rejection = packRejection(error);
+  if (rejection !== undefined) {
+    return rejection;
   }
   stop(error);
   return error;
+}
+
+/**
+ * The `PackError` for an error the reader made, or `undefined`. The reader
+ * defines name, code and message as its errors' own data properties, which
+ * nothing inherited can supply. Inspecting anything else may itself throw,
+ * as a proxy can; that is no rejected pack either.
+ */
+function packRejection(error) {
+  try {
+    if (error instanceof Error && ownValue(error, "name") === "PackError") {
+      const code = ownValue(error, "code");
+      const message = ownValue(error, "message");
+      if (typeof code === "string" && typeof message === "string") {
+        return new PackError(code, message);
+      }
+    }
+  } catch {
+    // Not an error of the reader's.
+  }
+  return undefined;
 }
 
 function ownValue(target, key) {
