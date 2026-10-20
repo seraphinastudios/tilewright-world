@@ -357,6 +357,12 @@ impl<'r> Workspace<'r> {
                             Failure::access(&error)
                         });
                     }
+                    // A read that failed may have read much first; the
+                    // transaction is rejected, so nothing more is read.
+                    Err(error @ AccessError::Io(..)) => {
+                        self.spent = true;
+                        return Err(Failure::access(&error));
+                    }
                     Err(error) => return Err(Failure::access(&error)),
                 };
                 let base = match bytes {

@@ -2745,3 +2745,26 @@ fn a_transaction_that_would_repeat_a_uid_is_rejected() {
     }
     assert_eq!(snapshot(root), snapshot(&fixture()));
 }
+
+#[cfg(unix)]
+#[test]
+fn a_file_that_cannot_be_read_stops_carrying_out() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let tree = copy();
+    let root = tree.path();
+    let locked = root.join("defs/proto/coin.jsonc");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read(&locked).is_ok() {
+        // A user who may read anything, such as root.
+        return;
+    }
+    let found = problems(
+        root,
+        &transaction(
+            r#"{"op": "test", "path": "defs/proto/coin.jsonc", "pointer": ["id"], "value": "coin"},
+    {"op": "test", "path": "defs/proto/tree.jsonc", "pointer": ["id"], "value": "x"}"#,
+        ),
+    );
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(found[0].code, "tx.io", "{found:#?}");
+}
