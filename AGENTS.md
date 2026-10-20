@@ -19,4 +19,5 @@
   it as its README says, and keep the Rust and Go readers' error codes
   equal to the manifest's.
 - Run `tools/validate.sh` and `git diff --check`. Commits and PR titles use
-  Conventional Commits.
+  Conventional Commits. Merges to `main` are released, versioned by their
+  titles (`docs/RELEASING.md`).

@@ -385,9 +385,13 @@ impl Directory {
 }
 
 /// Who may use a file or directory, from its status.
+#[allow(
+    clippy::useless_conversion,
+    reason = "mode_t is u32 on Linux but u16 on macOS"
+)]
 fn access_of(stat: &Stat) -> Access {
     Access {
-        mode: stat.st_mode & 0o7777,
+        mode: u32::from(stat.st_mode & 0o7777),
         user: stat.st_uid,
         group: stat.st_gid,
     }
@@ -397,25 +401,34 @@ fn access_of(stat: &Stat) -> Access {
 /// group first, since changing it may clear the set-group bit. A group the
 /// user may not give is an error, since the group bits would otherwise
 /// apply to another group.
+#[allow(
+    clippy::useless_conversion,
+    clippy::unnecessary_fallible_conversions,
+    reason = "mode_t is u32 on Linux but u16 on macOS"
+)]
 fn set_access(fd: impl AsFd, access: &Access) -> Result<(), Refused> {
     let stat = fstat(&fd).map_err(|errno| Refused::Io(errno.into()))?;
     if stat.st_gid != access.group {
         fchown(&fd, None, Some(Gid::from_raw(access.group)))
             .map_err(|errno| Refused::Io(errno.into()))?;
     }
-    fchmod(&fd, Mode::from_raw_mode(access.mode)).map_err(|errno| Refused::Io(errno.into()))?;
+    let mode = access.mode.try_into().map_err(|_| {
+        Refused::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("mode {:o} is out of range", access.mode),
+        ))
+    })?;
+    fchmod(&fd, Mode::from_raw_mode(mode)).map_err(|errno| Refused::Io(errno.into()))?;
     // The system may drop a bit without failing, such as the set-group bit
     // for a user outside the group, so the result is checked.
     let stat = fstat(&fd).map_err(|errno| Refused::Io(errno.into()))?;
-    if stat.st_mode & 0o7777 != access.mode || stat.st_gid != access.group {
+    let given = access_of(&stat);
+    if given.mode != access.mode || given.group != access.group {
         return Err(Refused::Io(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             format!(
                 "could not be given mode {:o} and group {}: it has mode {:o} and group {}",
-                access.mode,
-                access.group,
-                stat.st_mode & 0o7777,
-                stat.st_gid
+                access.mode, access.group, given.mode, given.group
             ),
         )));
     }
