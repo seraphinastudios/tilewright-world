@@ -401,7 +401,23 @@ fn set_access(fd: impl AsFd, access: &Access) -> Result<(), Refused> {
         fchown(&fd, None, Some(Gid::from_raw(access.group)))
             .map_err(|errno| Refused::Io(errno.into()))?;
     }
-    fchmod(&fd, Mode::from_raw_mode(access.mode)).map_err(|errno| Refused::Io(errno.into()))
+    fchmod(&fd, Mode::from_raw_mode(access.mode)).map_err(|errno| Refused::Io(errno.into()))?;
+    // The system may drop a bit without failing, such as the set-group bit
+    // for a user outside the group, so the result is checked.
+    let stat = fstat(&fd).map_err(|errno| Refused::Io(errno.into()))?;
+    if stat.st_mode & 0o7777 != access.mode || stat.st_gid != access.group {
+        return Err(Refused::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "could not be given mode {:o} and group {}: it has mode {:o} and group {}",
+                access.mode,
+                access.group,
+                stat.st_mode & 0o7777,
+                stat.st_gid
+            ),
+        )));
+    }
+    Ok(())
 }
 
 /// The access control lists Linux file systems keep beside the mode bits.

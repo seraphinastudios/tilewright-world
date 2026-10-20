@@ -164,12 +164,42 @@ pub(crate) struct Entry {
     pub current: Current,
     /// Inverses of the edits made, in the order they were made.
     pub inverse: Vec<Primitive>,
+    /// The bytes and operations of `inverse`.
+    recorded: (u64, usize),
 }
 
 impl Entry {
     pub fn is_changed(&self) -> bool {
         self.base.as_deref() != self.current.text()
     }
+
+    /// The bytes and operations the inverse holds for this file: none for
+    /// a file the transaction created, which it deletes; the text of one it
+    /// deleted, whatever was done to it before; otherwise the inverse of
+    /// each edit.
+    fn inverse_size(&self) -> (u64, usize) {
+        match (&self.base, &self.current) {
+            (None, _) => (0, 0),
+            (Some(base), Current::Absent) => (u64::try_from(base.len()).unwrap_or(u64::MAX), 1),
+            _ => self.recorded,
+        }
+    }
+}
+
+/// The bytes and operations of `inverse`.
+fn size_of(inverse: &[Primitive]) -> (u64, usize) {
+    let bytes = inverse
+        .iter()
+        .map(Primitive::size)
+        .fold(0, usize::saturating_add);
+    (u64::try_from(bytes).unwrap_or(u64::MAX), inverse.len())
+}
+
+fn plus(left: (u64, usize), right: (u64, usize)) -> (u64, usize) {
+    (
+        left.0.saturating_add(right.0),
+        left.1.saturating_add(right.1),
+    )
 }
 
 /// The files a transaction touches, and its budgets.
@@ -195,7 +225,7 @@ pub(crate) struct Workspace<'r> {
     spent: bool,
     /// The state of each file before the current operation first changed
     /// it, and its inverse's length then, to undo a failed operation.
-    journal: BTreeMap<String, (Current, usize)>,
+    journal: BTreeMap<String, (Current, usize, (u64, usize))>,
     /// The inverse's size and operations before the current operation.
     journal_inverse_bytes: u64,
     journal_inverse_operations: usize,
@@ -239,10 +269,11 @@ impl<'r> Workspace<'r> {
     /// Undoes everything the current operation did, so that a failed
     /// operation changes nothing and later ones see the files without it.
     pub fn roll_back(&mut self) {
-        for (path, (before, length)) in std::mem::take(&mut self.journal) {
+        for (path, (before, length, recorded)) in std::mem::take(&mut self.journal) {
             if let Some(entry) = self.entries.get_mut(&path) {
                 entry.current = before;
                 entry.inverse.truncate(length);
+                entry.recorded = recorded;
             }
         }
         self.inverse_bytes = self.journal_inverse_bytes;
@@ -251,10 +282,10 @@ impl<'r> Workspace<'r> {
 
     /// Keeps a file's state from before the current operation's first
     /// change to it.
-    fn keep(&mut self, path: &str, before: Current, inverse_length: usize) {
+    fn keep(&mut self, path: &str, before: Current, inverse_length: usize, recorded: (u64, usize)) {
         self.journal
             .entry(path.to_owned())
-            .or_insert((before, inverse_length));
+            .or_insert((before, inverse_length, recorded));
     }
 
     /// The entry of `path`, reading the file the first time.
@@ -319,6 +350,7 @@ impl<'r> Workspace<'r> {
                     base,
                     current,
                     inverse: Vec::new(),
+                    recorded: (0, 0),
                 }))
             }
         }
@@ -350,16 +382,17 @@ impl<'r> Workspace<'r> {
         Ok(())
     }
 
-    /// Records inverse text; the inverse must fit in a transaction.
-    fn record(&mut self, inverse: &[Primitive]) -> Outcome<()> {
-        let bytes: usize = inverse
-            .iter()
-            .map(Primitive::size)
-            .fold(0, usize::saturating_add);
+    /// Replaces a file's share of the inverse, `before`, with `after`; the
+    /// inverse must fit in a transaction.
+    fn account(&mut self, before: (u64, usize), after: (u64, usize)) -> Outcome<()> {
         self.inverse_bytes = self
             .inverse_bytes
-            .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
-        self.inverse_operations = self.inverse_operations.saturating_add(inverse.len());
+            .saturating_sub(before.0)
+            .saturating_add(after.0);
+        self.inverse_operations = self
+            .inverse_operations
+            .saturating_sub(before.1)
+            .saturating_add(after.1);
         if self.inverse_operations > limits::OPERATIONS {
             self.spent = true;
             return Err(Failure::limit(format!(
@@ -431,9 +464,6 @@ impl<'r> Workspace<'r> {
         // A file the transaction created is undone by deleting it, so the
         // inverses of its edits are neither kept nor counted.
         let created = self.entry(path)?.base.is_none();
-        if !created {
-            self.record(&inverse)?;
-        }
         let document = match Document::parse(text, &limits()) {
             Ok(document) => document,
             Err(error) => {
@@ -443,13 +473,16 @@ impl<'r> Workspace<'r> {
             }
         };
         let entry = self.entry(path)?;
+        let share = entry.inverse_size();
         let before = std::mem::replace(&mut entry.current, Current::Parsed(document));
-        let length = entry.inverse.len();
+        let (length, recorded) = (entry.inverse.len(), entry.recorded);
         if !created {
+            entry.recorded = plus(entry.recorded, size_of(&inverse));
             entry.inverse.extend(inverse);
         }
-        self.keep(path, before, length);
-        Ok(())
+        let after = entry.inverse_size();
+        self.keep(path, before, length, recorded);
+        self.account(share, after)
     }
 
     /// Creates `path` with `text`, which must parse as JSONC.
@@ -468,22 +501,24 @@ impl<'r> Workspace<'r> {
         }
         self.document(path)?;
         let entry = self.entry(path)?;
+        let share = entry.inverse_size();
         let before = std::mem::replace(&mut entry.current, Current::Absent);
         let text = match &before {
             Current::Absent => return Err(Failure::conflict(format!("{path} does not exist"))),
             Current::Text(text) => text.clone(),
             Current::Parsed(document) => document.source().to_owned(),
         };
-        let length = entry.inverse.len();
-        let created = entry.base.is_none();
-        let inverse = Primitive::Create { text: text.clone() };
-        if !created {
-            entry.inverse.push(inverse.clone());
+        let (length, recorded) = (entry.inverse.len(), entry.recorded);
+        // Kept should the file be created again, when the inverse undoes
+        // each step; while it is deleted, the inverse only creates it.
+        if entry.base.is_some() {
+            let create = Primitive::Create { text: text.clone() };
+            entry.recorded = plus(entry.recorded, size_of(std::slice::from_ref(&create)));
+            entry.inverse.push(create);
         }
-        self.keep(path, before, length);
-        if !created {
-            self.record(std::slice::from_ref(&inverse))?;
-        }
+        let after = entry.inverse_size();
+        self.keep(path, before, length, recorded);
+        self.account(share, after)?;
         Ok(text)
     }
 

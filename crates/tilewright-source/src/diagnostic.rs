@@ -227,6 +227,9 @@ pub(crate) struct Diagnostics {
     items: Vec<Diagnostic>,
     maximum: usize,
     dropped: bool,
+    /// Whether reading stopped at the maximum, so that problems there may
+    /// be were not looked for.
+    skipped: bool,
     /// The diagnostics kept by every collection of one load, shared, so
     /// that the load stops reading once their sum reaches the maximum:
     /// nothing more could be reported.
@@ -244,6 +247,7 @@ impl Diagnostics {
             items: Vec::new(),
             maximum,
             dropped: false,
+            skipped: false,
             total,
         }
     }
@@ -268,7 +272,12 @@ impl Diagnostics {
     }
 
     pub(crate) const fn is_empty(&self) -> bool {
-        self.items.is_empty() && !self.dropped
+        self.items.is_empty() && !self.dropped && !self.skipped
+    }
+
+    /// Notes that reading stopped because the collections are full.
+    pub(crate) const fn skip(&mut self) {
+        self.skipped = true;
     }
 
     /// Takes in another collection of the same load, whose diagnostics are
@@ -276,6 +285,7 @@ impl Diagnostics {
     pub(crate) fn append(&mut self, other: Self) {
         self.items.extend(other.items);
         self.dropped |= other.dropped;
+        self.skipped |= other.skipped;
     }
 
     /// The diagnostics sorted by path and position, without duplicates.
@@ -287,6 +297,15 @@ impl Diagnostics {
                 Code::Budget,
                 format!(
                     "more than {} problems; the rest are not reported",
+                    self.maximum
+                ),
+            ));
+        } else if self.skipped {
+            items.push(Diagnostic::file(
+                ".",
+                Code::Budget,
+                format!(
+                    "{} problems, as many as are reported; reading stopped there, so there may be more",
                     self.maximum
                 ),
             ));

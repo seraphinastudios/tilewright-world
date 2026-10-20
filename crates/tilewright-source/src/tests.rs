@@ -1864,3 +1864,28 @@ fn overlay_keys_must_be_paths() {
         assert!(found[0].message.len() < 200, "{found:?}");
     }
 }
+
+#[test]
+fn reading_stopped_at_the_cap_is_reported() {
+    let copy = workspace();
+    // Each file has one syntax error, found as it is read.
+    for index in 0..30 {
+        fs::write(
+            copy.path().join(format!("defs/proto/bad{index}.jsonc")),
+            "{,}\n",
+        )
+        .unwrap();
+    }
+    let options = LoadOptions {
+        maximum_diagnostics: 10,
+        ..LoadOptions::default()
+    };
+    let found = load_with(copy.path(), &options).expect_err("the files do not parse");
+    assert_eq!(found.len(), 11, "{found:?}");
+    assert!(
+        found
+            .iter()
+            .any(|diagnostic| diagnostic.code == "source.budget"),
+        "{found:?}"
+    );
+}

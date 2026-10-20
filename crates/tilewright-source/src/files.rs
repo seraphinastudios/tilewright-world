@@ -271,6 +271,7 @@ impl<'o> Tree<'o> {
     /// non-UTF-8 names are reported and skipped.
     pub fn list(&mut self, path: &str) -> Vec<Entry> {
         if self.stopped() {
+            self.diagnostics.skip();
             return Vec::new();
         }
         // Overlay files replace, add or remove entries; a directory that
@@ -400,6 +401,7 @@ impl<'o> Tree<'o> {
     /// Reads and parses a JSONC document. Every problem is reported.
     pub fn document(&mut self, path: &str) -> Option<Source> {
         if self.stopped() {
+            self.diagnostics.skip();
             return None;
         }
         match self.overlay.get(path) {
