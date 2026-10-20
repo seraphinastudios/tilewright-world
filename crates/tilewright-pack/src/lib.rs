@@ -25,8 +25,9 @@ pub use chunk::{
 };
 pub use compile::{COMPILER, Written, compile, write_pack};
 pub use read::{
-    DEFAULT_MAXIMUM_DECODED_BYTES, DEFAULT_MAXIMUM_PACK_BYTES, Identity, MAXIMUM_OBJECT_INDEX,
-    Pack, StairwellTile, Summary, UidLocation, VerifyLimits,
+    Anchor, DEFAULT_MAXIMUM_DECODED_BYTES, DEFAULT_MAXIMUM_PACK_BYTES, Definition, Identity,
+    MAXIMUM_OBJECT_INDEX, Pack, Page, Plane, StairwellTile, Summary, UidLocation, VerifyLimits,
+    Zone,
 };
 
 use std::fmt;
@@ -205,9 +206,12 @@ pub enum ErrorCode {
     ObjectUid,
     /// SQLite's integrity check failed.
     Integrity,
-    /// The file's SHA-256 does not match its name.
+    /// The file's SHA-256 does not match its name, or the SHA-256 of a pack
+    /// opened from bytes is not the digest its caller expects.
     Digest,
-    /// The chunks decode to more than the verification budget.
+    /// The chunks decode to more than the verification budget, or a single
+    /// read holds more than its budget: a chunk's objects and fields, or,
+    /// in the browser reader, a stairwell's steps.
     DecodeBudget,
     /// The compiler cannot encode a world.
     Invalid,

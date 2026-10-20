@@ -1,0 +1,47 @@
+{
+  "name": "@seraphinastudios/tilewright-pack",
+  "version": "0.1.0",
+  "description": "Reads and verifies Tilewright content packs in the browser: the Rust pack reader compiled to WebAssembly",
+  "license": "MIT",
+  "author": "Seraphina Studios",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/seraphinastudios/tilewright-world.git",
+    "directory": "packages/tilewright-pack"
+  },
+  "keywords": [
+    "tilewright",
+    "sqlite",
+    "webassembly",
+    "game"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./tilewright_pack.wasm": "./wasm/tilewright_pack_bg.wasm",
+    "./package.json": "./package.json"
+  },
+  "types": "./index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "wasm/tilewright_pack.js",
+    "wasm/tilewright_pack_bg.wasm",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_LICENSES.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.js\""
+  }
+}

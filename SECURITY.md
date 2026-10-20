@@ -45,3 +45,17 @@ longer than a caller-set size limit (8 GiB by default) is rejected before it
 is opened, and hashing stops at that limit. A pack has no free pages, and a
 full verification's integrity check reads every page before the file is
 hashed, so a sparse file cannot hide holes that only the hash reads.
+
+The browser package reads a pack from bytes the caller gives it. It copies
+them once, after checking their length against the pack size limit, into a
+read-only database in WebAssembly memory, so later changes to the caller's
+buffer cannot reach the reader, and an expected digest binds to the copy it
+reads. Its JavaScript layer checks every argument's type and range before
+the reader sees it. Its verification runs on the calling thread, so its
+decoded-byte budget is 256 MiB by default rather than 8 GiB, and a single
+read builds values for at most 65,536 of a chunk's objects and fields, or
+of a stairwell's steps, by default, failing before it builds any past the
+budget. If a call into the module fails other than by
+rejecting a pack, as on a trap from running out of memory, it refuses every
+later call rather than continue in an unknown state, and frees nothing into
+it.

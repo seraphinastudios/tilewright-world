@@ -32,7 +32,10 @@ use tilewright_source::{
 };
 
 mod identities;
+mod rows;
+mod scan;
 pub use identities::Identity;
+pub use rows::{Anchor, Definition, Page, Plane, Zone};
 
 /// The page size of every pack.
 const PAGE_SIZE: i64 = 4096;
@@ -127,11 +130,23 @@ pub struct StairwellTile {
 
 pub struct Pack {
     connection: Connection,
-    /// `None` for a pack the compiler is checking in memory.
-    path: Option<PathBuf>,
+    source: Source,
     /// The pack size limit it was opened with, which bounds
     /// [`Pack::file_digest`].
     maximum_bytes: u64,
+}
+
+/// Where a pack's bytes are, which decides what [`Pack::file_digest`]
+/// hashes and what verification compares the digest with.
+enum Source {
+    /// A file, hashed from its path; its name is the expected digest when
+    /// it is 64 hex digits.
+    File(PathBuf),
+    /// An image in memory, hashed from SQLite's read-only copy of it, and
+    /// the digest the caller expects, if any.
+    Image(Option<[u8; 32]>),
+    /// A pack the compiler is checking in memory.
+    Compiled,
 }
 
 /// Percent-encodes a path for an SQLite URI. On Unix the path's bytes are
@@ -220,14 +235,14 @@ fn recorded_size(value: &types::Value) -> u64 {
 }
 
 /// Decodes the value of [`chunk_data_sql`].
-fn chunk_data(value: types::Value) -> Result<ChunkData, Error> {
+fn chunk_data(value: &types::Value) -> Result<ChunkData, Error> {
     chunk_data_with(value, None)
 }
 
 /// [`chunk_data`], streaming objects to `visit` when it is given.
-fn chunk_data_with(value: types::Value, visit: Option<Visit<'_>>) -> Result<ChunkData, Error> {
+fn chunk_data_with(value: &types::Value, visit: Option<Visit<'_>>) -> Result<ChunkData, Error> {
     match value {
-        types::Value::Blob(data) => decode_chunk_with(&data, visit).map_err(Error::Chunk),
+        types::Value::Blob(data) => decode_chunk_with(data, visit).map_err(Error::Chunk),
         types::Value::Integer(0) => Err(Error::Rejected(
             ErrorCode::ChunkEncoding,
             format!("a chunk's encoding is not {CHUNK_ENCODING}"),
@@ -304,8 +319,11 @@ fn stored_document(text: Option<String>, what: &str, code: ErrorCode) -> Result<
             format!("{what} is not canonical JSON of an object with namespaced custom data"),
         )
     };
-    let document = Document::parse(text.ok_or_else(invalid)?, &crate::canonical_limits())
-        .map_err(|_| invalid())?;
+    let text = text.ok_or_else(invalid)?;
+    if !scan::compact(&text) {
+        return Err(invalid());
+    }
+    let document = Document::parse(text, &crate::canonical_limits()).map_err(|_| invalid())?;
     // `custom` data, where a document has it, is keyed by namespaces as in
     // the source format.
     let custom_ok = match document.root().get("custom") {
@@ -495,14 +513,29 @@ fn utf8_column(
 
 /// A stairwell from a row of `id, document`, bounded in SQL by
 /// [`bounded_identifier`] and [`bounded_text`] (NULL when out of bounds),
-/// after checking that the document has the row's ID.
-fn stairwell_row(row: &rusqlite::Row<'_>) -> Result<Stairwell, Error> {
+/// after checking that the document has the row's ID. It fails with
+/// [`ErrorCode::DecodeBudget`] when the document lists more than
+/// `maximum_steps` steps, before it is parsed.
+pub(super) fn stairwell_row_within(
+    row: &rusqlite::Row<'_>,
+    maximum_steps: u64,
+) -> Result<Stairwell, Error> {
     let id = utf8_column(row, 0, ErrorCode::Stairwell)?;
-    let stairwell = stored_stairwell(&stored_document(
-        utf8_column(row, 1, ErrorCode::Stairwell)?,
-        "a stairwell document",
-        ErrorCode::Stairwell,
-    )?)?;
+    let text = utf8_column(row, 1, ErrorCode::Stairwell)?;
+    // The steps are counted before the document is parsed: a scan of the
+    // text, exact for the canonical JSON a stored document must be.
+    let steps = text
+        .as_deref()
+        .filter(|text| scan::compact(text))
+        .and_then(|text| scan::root_array_items(text, "steps"));
+    if steps.is_some_and(|steps| u64::try_from(steps).unwrap_or(u64::MAX) > maximum_steps) {
+        return Err(Error::Rejected(
+            ErrorCode::DecodeBudget,
+            format!("a stairwell lists more than {maximum_steps} steps, the read's budget"),
+        ));
+    }
+    let document = stored_document(text, "a stairwell document", ErrorCode::Stairwell)?;
+    let stairwell = stored_stairwell(&document)?;
     if id.as_deref() != Some(stairwell.id.as_str()) {
         return Err(Error::Rejected(
             ErrorCode::Stairwell,
@@ -552,32 +585,100 @@ impl Pack {
                 | OpenFlags::SQLITE_OPEN_URI
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
-        connection.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
-        connection.set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)?;
-        connection.execute_batch("PRAGMA query_only = ON")?;
+        harden(&connection)?;
         check_identity(&connection)?;
-        // A pack is exactly its database: nothing, not even a sparse hole,
-        // follows the last page, so hashing it never reads past the pages.
-        let pages: i64 = connection.query_row("PRAGMA page_count", [], |row| row.get(0))?;
-        let length = std::fs::metadata(&path)?.len();
-        if u64::try_from(pages)
-            .ok()
-            .and_then(|pages| pages.checked_mul(PAGE_SIZE.unsigned_abs()))
-            != Some(length)
-        {
-            return Err(Error::Rejected(
-                ErrorCode::FileLength,
-                format!("the file is {length} bytes, not its {pages} pages of {PAGE_SIZE} bytes"),
-            ));
-        }
         // The file SQLite opened may have replaced the one whose length was
         // checked, so its pages are checked against the limit too.
+        check_pages(&connection, std::fs::metadata(&path)?.len(), limits)?;
+        Ok(Self {
+            connection,
+            source: Source::File(path),
+            maximum_bytes: limits.maximum_pack_bytes,
+        })
+    }
+
+    /// Opens a pack from its bytes, as [`Pack::open_from`] does.
+    ///
+    /// # Errors
+    /// Returns an error if the bytes are not a pack of this format or are
+    /// more than the pack size limit.
+    pub fn open_bytes(
+        bytes: &[u8],
+        digest: Option<[u8; 32]>,
+        limits: &VerifyLimits,
+    ) -> Result<Self, Error> {
+        let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        Self::open_from(bytes, length, digest, limits)
+    }
+
+    /// Opens a pack image of exactly `length` bytes, which `read` yields, and checks
+    /// its size, identity and schema as [`Pack::open_with`] checks a file's.
+    /// An image longer than `limits.maximum_pack_bytes` is rejected before
+    /// any of it is read. SQLite reads a read-only copy in memory, which
+    /// stays the pack's bytes until it is dropped.
+    ///
+    /// `digest`, when given, is the SHA-256 the image must have. Like a file
+    /// name that is a digest, verification compares it with the image's
+    /// digest; opening does not hash the image.
+    ///
+    /// # Errors
+    /// Returns an error if `read` fails, ends early or yields more than
+    /// `length` bytes, the image is longer than the limit or than memory can
+    /// hold, or it is not a pack of this format.
+    pub fn open_from(
+        read: impl std::io::Read,
+        length: u64,
+        digest: Option<[u8; 32]>,
+        limits: &VerifyLimits,
+    ) -> Result<Self, Error> {
         if length > limits.maximum_pack_bytes {
             return Err(too_long(limits.maximum_pack_bytes));
         }
+        let size = usize::try_from(length).map_err(|_| {
+            Error::Io(std::io::Error::new(
+                std::io::ErrorKind::OutOfMemory,
+                "the pack is larger than memory can hold",
+            ))
+        })?;
+        let mut connection = Connection::open_in_memory_with_flags(
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        let mut image = Filled {
+            inner: read,
+            missing: false,
+            failure: None,
+        };
+        // An empty image is an empty database, as an empty file is; SQLite
+        // cannot allocate a copy of no bytes.
+        if size > 0 {
+            // `Filled` never fails, so SQLite always takes ownership of its
+            // copy and frees it with the connection, even when the image
+            // could not be read.
+            connection.deserialize_read_exact(rusqlite::MAIN_DB, &mut image, size, true)?;
+        }
+        if let Some(error) = image.failure {
+            return Err(Error::Io(error));
+        }
+        if image.missing {
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("the pack image ends before its {length} bytes"),
+            )));
+        }
+        // The image is exactly `length` bytes: one that goes on is not the
+        // pack its length describes.
+        if read_some(&mut image.inner)? {
+            return Err(Error::Rejected(
+                ErrorCode::FileLength,
+                format!("the pack image is longer than {length} bytes"),
+            ));
+        }
+        harden(&connection)?;
+        check_identity(&connection)?;
+        check_pages(&connection, length, limits)?;
         Ok(Self {
             connection,
-            path: Some(path),
+            source: Source::Image(digest),
             maximum_bytes: limits.maximum_pack_bytes,
         })
     }
@@ -587,7 +688,7 @@ impl Pack {
         check_identity(&connection)?;
         Ok(Self {
             connection,
-            path: None,
+            source: Source::Compiled,
             // There is no file to hash, so the limit is never used.
             maximum_bytes: u64::MAX,
         })
@@ -648,6 +749,28 @@ impl Pack {
         cx: i64,
         cy: i64,
     ) -> Result<Option<ChunkData>, Error> {
+        self.chunk_within(plane, layer, cx, cy, u64::MAX)
+    }
+
+    /// [`Pack::chunk`], with a budget of `maximum_entries` entries: its
+    /// objects, inventories included, and their fields. A record of at most
+    /// 16 MiB can hold about a million small objects, or as many fields, so
+    /// a caller that builds a value for each, such as a browser, can bound
+    /// them. Under a budget the record is first decoded keeping one object
+    /// at a time, and the read fails with [`ErrorCode::DecodeBudget`] once
+    /// it counts more, before any chunk is built.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite fails, the stored record is invalid, or it
+    /// holds more entries than the budget.
+    pub fn chunk_within(
+        &self,
+        plane: &str,
+        layer: i32,
+        cx: i64,
+        cy: i64,
+        maximum_entries: u64,
+    ) -> Result<Option<ChunkData>, Error> {
         let value: Option<types::Value> = self
             .connection
             .query_row(
@@ -659,7 +782,36 @@ impl Pack {
                 |row| row.get(0),
             )
             .optional()?;
-        value.map(chunk_data).transpose()
+        let Some(value) = value else {
+            return Ok(None);
+        };
+        if maximum_entries < u64::MAX {
+            let mut entries: u64 = 0;
+            let mut over = false;
+            let mut count = |object: &ObjectRecord| {
+                let fields = u64::try_from(object.fields.len()).unwrap_or(u64::MAX);
+                entries = entries.saturating_add(1).saturating_add(fields);
+                over = entries > maximum_entries;
+                if over {
+                    Err(DecodeError(
+                        "the chunk holds more entries than the budget".into(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            };
+            let counted = chunk_data_with(&value, Some(&mut count));
+            if over {
+                return Err(Error::Rejected(
+                    ErrorCode::DecodeBudget,
+                    format!(
+                        "the chunk holds more than {maximum_entries} objects and fields, the read's budget"
+                    ),
+                ));
+            }
+            counted?;
+        }
+        chunk_data(&value).map(Some)
     }
 
     /// The profile's `layer_height`: height units per layer, or `None` when
@@ -681,36 +833,32 @@ impl Pack {
     /// Returns an error if SQLite fails, or the stored stairwell does not
     /// have the source format's shape or disagrees with its row.
     pub fn stairwell(&self, plane: &str, id: &str) -> Result<Option<Stairwell>, Error> {
+        self.stairwell_within(plane, id, u64::MAX)
+    }
+
+    /// [`Pack::stairwell`], with a budget of `maximum_steps` steps. A stored
+    /// document can list about a quarter of a million, so a caller that
+    /// builds a value for each, such as a browser, can bound them; the read
+    /// fails with [`ErrorCode::DecodeBudget`] before it builds any step.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite fails, the stored stairwell is invalid or
+    /// disagrees with its row, or it lists more steps than the budget.
+    pub fn stairwell_within(
+        &self,
+        plane: &str,
+        id: &str,
+        maximum_steps: u64,
+    ) -> Result<Option<Stairwell>, Error> {
         let mut statement = self.connection.prepare(&format!(
             "SELECT {}, {} FROM stairwells WHERE plane = ?2 AND id = ?3",
             bounded_identifier("id"),
             bounded_text("document"),
         ))?;
         let mut rows = statement.query(params![maximum_document_bytes(), plane, id])?;
-        rows.next()?.map(stairwell_row).transpose()
-    }
-
-    /// Calls `visit` with each stairwell of a plane, in ID order. One
-    /// stored document is held at a time.
-    ///
-    /// # Errors
-    /// Returns an error if SQLite fails, a stored stairwell is invalid, or
-    /// `visit` fails.
-    pub fn visit_stairwells(
-        &self,
-        plane: &str,
-        visit: &mut dyn FnMut(Stairwell) -> Result<(), Error>,
-    ) -> Result<(), Error> {
-        let mut statement = self.connection.prepare(&format!(
-            "SELECT {}, {} FROM stairwells WHERE plane = ?2 ORDER BY id",
-            bounded_identifier("id"),
-            bounded_text("document"),
-        ))?;
-        let mut rows = statement.query(params![maximum_document_bytes(), plane])?;
-        while let Some(row) = rows.next()? {
-            visit(stairwell_row(row)?)?;
-        }
-        Ok(())
+        rows.next()?
+            .map(|row| stairwell_row_within(row, maximum_steps))
+            .transpose()
     }
 
     /// The stairwell step on a tile of a plane, if any. It checks the shape
@@ -821,11 +969,31 @@ impl Pack {
     /// Returns an error if SQLite fails, the stored row or chunk is invalid,
     /// or they disagree.
     pub fn object(&self, uid: &str) -> Result<Option<(UidLocation, ObjectRecord)>, Error> {
+        self.object_within(uid, u64::MAX)
+    }
+
+    /// [`Pack::object`], decoding the object's chunk with a budget of
+    /// `maximum_entries` objects and fields; see [`Pack::chunk_within`].
+    ///
+    /// # Errors
+    /// Returns an error if SQLite fails, the stored row or chunk is invalid,
+    /// they disagree, or the chunk holds more entries than the budget.
+    pub fn object_within(
+        &self,
+        uid: &str,
+        maximum_entries: u64,
+    ) -> Result<Option<(UidLocation, ObjectRecord)>, Error> {
         let Some(location) = self.object_location(uid)? else {
             return Ok(None);
         };
         let object = self
-            .chunk(&location.plane, location.layer, location.cx, location.cy)?
+            .chunk_within(
+                &location.plane,
+                location.layer,
+                location.cx,
+                location.cy,
+                maximum_entries,
+            )?
             .and_then(|chunk| {
                 chunk
                     .object(location.index)
@@ -867,14 +1035,16 @@ impl Pack {
         })
     }
 
-    /// The SHA-256 of the pack file, read from its path when called.
+    /// The SHA-256 of the pack file, read from its path when called, or of
+    /// the image a pack was opened from.
     ///
-    /// This hashes whatever file is at the pack's path now, not necessarily
-    /// the file SQLite opened: the digest binds to the path. Packs are
-    /// content-addressed files opened from directories the caller controls;
-    /// a directory that others can write to is not supported. It reads at
-    /// most the pack size limit the pack was opened with, and fails for a
-    /// longer file.
+    /// For a file, this hashes whatever file is at the pack's path now, not
+    /// necessarily the file SQLite opened: the digest binds to the path.
+    /// Packs are content-addressed files opened from directories the caller
+    /// controls; a directory that others can write to is not supported. It
+    /// reads at most the pack size limit the pack was opened with, and fails
+    /// for a longer file. An image is hashed from the read-only copy SQLite
+    /// reads, so its digest binds to the bytes the reads see.
     ///
     /// # Errors
     /// Returns an error if the file cannot be read or is longer than the
@@ -885,10 +1055,22 @@ impl Pack {
 
     /// [`Pack::file_digest`], reading at most `maximum` bytes.
     fn digest_within(&self, maximum: u64) -> Result<[u8; 32], Error> {
-        let path = self
-            .path
-            .as_ref()
-            .ok_or_else(|| Error::Rejected(ErrorCode::NotAFile, "the pack is not a file".into()))?;
+        let path = match &self.source {
+            Source::File(path) => path,
+            Source::Image(_) => {
+                let image = self.connection.serialize(rusqlite::MAIN_DB)?;
+                if u64::try_from(image.len()).map_or(true, |length| length > maximum) {
+                    return Err(too_long(maximum));
+                }
+                return Ok(Sha256::digest(&*image).into());
+            }
+            Source::Compiled => {
+                return Err(Error::Rejected(
+                    ErrorCode::NotAFile,
+                    "the pack is not a file".into(),
+                ));
+            }
+        };
         let file = std::fs::File::open(path)?;
         if file.metadata()?.len() > maximum {
             return Err(too_long(maximum));
@@ -964,24 +1146,37 @@ impl Pack {
                 format!("integrity check failed: {integrity}"),
             ));
         }
-        if let Some(stem) = self
-            .path
-            .as_ref()
-            .and_then(|path| path.file_name())
-            .and_then(|name| name.to_str())
-            .and_then(|name| name.strip_suffix(".twpack"))
-            .filter(|stem| stem.len() == 64 && stem.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        {
-            // The name must be the lowercase digest; other cases do not match.
+        if let Some(expected) = self.expected_digest() {
+            // A name must be the lowercase digest; other cases do not match.
             let digest = crate::compile::hex(&self.digest_within(maximum_bytes)?);
-            if digest != stem {
+            if digest != expected {
                 return Err(Error::Rejected(
                     ErrorCode::Digest,
-                    format!("file digest {digest} does not match its name"),
+                    match self.source {
+                        Source::File(_) => format!("file digest {digest} does not match its name"),
+                        _ => format!("pack digest {digest} is not {expected}, the expected digest"),
+                    },
                 ));
             }
         }
         self.verify_contents(limits.maximum_decoded_bytes)
+    }
+
+    /// The digest verification expects, in hex: a file's name when it is 64
+    /// hex digits, or the digest an image was opened with.
+    fn expected_digest(&self) -> Option<String> {
+        match &self.source {
+            Source::File(path) => path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_suffix(".twpack"))
+                .filter(|stem| {
+                    stem.len() == 64 && stem.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+                .map(str::to_owned),
+            Source::Image(digest) => digest.as_ref().map(|digest| crate::compile::hex(digest)),
+            Source::Compiled => None,
+        }
     }
 
     /// Everything [`Pack::verify`] checks except SQLite integrity and the
@@ -1047,7 +1242,7 @@ impl Pack {
                     DecodeError("an object failed verification".into())
                 })
             };
-            let decoded_chunk = chunk_data_with(data, Some(&mut visit));
+            let decoded_chunk = chunk_data_with(&data, Some(&mut visit));
             if let Some(error) = failure {
                 return Err(error);
             }
@@ -1490,6 +1685,75 @@ impl Pack {
     }
 }
 
+/// A pack image being read into SQLite's copy. Reading it never fails:
+/// once the image fails or ends, the rest of the copy is zeros, and whether
+/// it ended early or the error it failed with is kept for the caller.
+/// `rusqlite` frees its copy only once the copy is read in full.
+struct Filled<R> {
+    inner: R,
+    missing: bool,
+    failure: Option<std::io::Error>,
+}
+
+impl<R: std::io::Read> std::io::Read for Filled<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        while !self.missing && self.failure.is_none() {
+            match self.inner.read(buffer) {
+                Ok(0) => self.missing = true,
+                Ok(read) => return Ok(read),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => self.failure = Some(error),
+            }
+        }
+        buffer.fill(0);
+        Ok(buffer.len())
+    }
+}
+
+/// Whether `read` yields at least one more byte.
+fn read_some(read: &mut impl std::io::Read) -> Result<bool, Error> {
+    loop {
+        match read.read(&mut [0]) {
+            Ok(read) => return Ok(read != 0),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(Error::Io(error)),
+        }
+    }
+}
+
+/// Puts a connection to a pack in SQLite's defensive mode, with untrusted
+/// schemas disabled and writes refused.
+fn harden(connection: &Connection) -> Result<(), Error> {
+    connection.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
+    connection.set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)?;
+    connection.execute_batch("PRAGMA query_only = ON")?;
+    Ok(())
+}
+
+/// Checks that a pack of `length` bytes is exactly its pages, and that they
+/// are within the pack size limit. Nothing, not even a sparse hole, follows
+/// the last page, so hashing a pack never reads past its pages.
+fn check_pages(connection: &Connection, length: u64, limits: &VerifyLimits) -> Result<(), Error> {
+    let pages: i64 = connection.query_row("PRAGMA page_count", [], |row| row.get(0))?;
+    if u64::try_from(pages)
+        .ok()
+        .and_then(|pages| pages.checked_mul(PAGE_SIZE.unsigned_abs()))
+        != Some(length)
+    {
+        return Err(Error::Rejected(
+            ErrorCode::FileLength,
+            format!("the file is {length} bytes, not its {pages} pages of {PAGE_SIZE} bytes"),
+        ));
+    }
+    if length > limits.maximum_pack_bytes {
+        return Err(too_long(limits.maximum_pack_bytes));
+    }
+    Ok(())
+}
+
 /// Checks the schema, application ID, user version and `meta` of a pack
 /// before any other query runs.
 fn check_identity(connection: &Connection) -> Result<(), Error> {
@@ -1900,6 +2164,7 @@ impl Targets<'_> {
 #[cfg(test)]
 mod tests {
     use super::{CACHE_ENTRIES, Pack, cached};
+    use sha2::Digest as _;
     use std::{collections::BTreeMap, path::Path};
 
     #[test]
@@ -1926,6 +2191,143 @@ mod tests {
     }
 
     #[test]
+    fn hashing_an_image_reads_sqlite_copy_in_place() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../fixtures/packs/5830e26e449a1f0d0c786b32801b7ed68e351777db5f586532478cb4384844b2.twpack",
+        );
+        let bytes = std::fs::read(path).unwrap();
+        let pack = Pack::open_bytes(&bytes, None, &super::VerifyLimits::default()).unwrap();
+        // The digest reads the buffer SQLite reads, without allocating a
+        // second image: serializing it is a view of that buffer.
+        let image = pack.connection.serialize(rusqlite::MAIN_DB).unwrap();
+        assert!(matches!(image, rusqlite::serialize::Data::Shared(_)));
+        assert_eq!(&*image, bytes.as_slice());
+    }
+
+    #[test]
+    fn images_are_read_only() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../fixtures/packs/5830e26e449a1f0d0c786b32801b7ed68e351777db5f586532478cb4384844b2.twpack",
+        );
+        let bytes = std::fs::read(path).unwrap();
+        let pack = Pack::open_bytes(&bytes, None, &super::VerifyLimits::default()).unwrap();
+        // Even with query_only turned off, the image cannot be written.
+        pack.connection
+            .execute_batch("PRAGMA query_only = OFF")
+            .unwrap();
+        for write in [
+            "DELETE FROM strings",
+            "CREATE TABLE extra (value)",
+            "PRAGMA user_version = 3",
+        ] {
+            assert!(pack.connection.execute_batch(write).is_err(), "{write}");
+        }
+        pack.verify().unwrap();
+        assert_eq!(
+            pack.file_digest().unwrap(),
+            <[u8; 32]>::from(sha2::Sha256::digest(&bytes))
+        );
+    }
+
+    /// Objects at any depth and their fields.
+    fn count(objects: &[crate::ObjectRecord]) -> u64 {
+        objects
+            .iter()
+            .map(|object| {
+                1 + u64::try_from(object.fields.len()).unwrap() + count(&object.inventory)
+            })
+            .sum()
+    }
+
+    /// Objects at any depth.
+    fn count_objects(objects: &[crate::ObjectRecord]) -> u64 {
+        objects
+            .iter()
+            .map(|object| 1 + count_objects(&object.inventory))
+            .sum()
+    }
+
+    #[test]
+    fn chunk_reads_keep_to_their_entry_budget() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../fixtures/packs/5830e26e449a1f0d0c786b32801b7ed68e351777db5f586532478cb4384844b2.twpack",
+        );
+        let pack = Pack::open(&path).unwrap();
+        let chunk = pack.chunk("overworld", 0, 0, 0).unwrap().unwrap();
+        let entries = count(&chunk.objects);
+        assert!(
+            entries > count_objects(&chunk.objects),
+            "the chunk has fields"
+        );
+        assert_eq!(
+            pack.chunk_within("overworld", 0, 0, 0, entries).unwrap(),
+            Some(chunk)
+        );
+        // Fields count as well as objects.
+        let error = pack
+            .chunk_within("overworld", 0, 0, 0, entries - 1)
+            .unwrap_err();
+        assert_eq!(error.code(), crate::ErrorCode::DecodeBudget);
+        // A chunk without objects fits any budget, and a missing chunk is
+        // none.
+        assert!(
+            pack.chunk_within("overworld", 1, 0, 0, 0)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            pack.chunk_within("overworld", 0, 9, 9, 0)
+                .unwrap()
+                .is_none()
+        );
+        // A read of an object decodes its chunk within the budget too.
+        let uid = "o.k3vq7zr2mxa5d6wfh4pnyt2cgu";
+        assert!(pack.object_within(uid, entries).unwrap().is_some());
+        let error = pack.object_within(uid, entries - 1).unwrap_err();
+        assert_eq!(error.code(), crate::ErrorCode::DecodeBudget);
+    }
+
+    #[test]
+    fn stairwell_reads_keep_to_their_step_budget() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../fixtures/packs/5830e26e449a1f0d0c786b32801b7ed68e351777db5f586532478cb4384844b2.twpack",
+        );
+        let pack = Pack::open(&path).unwrap();
+        let mut stairwells = Vec::new();
+        pack.visit_stairwells("overworld", crate::Page::all(), &mut |stairwell| {
+            stairwells.push(stairwell);
+            Ok(())
+        })
+        .unwrap();
+        let longest = stairwells
+            .iter()
+            .max_by_key(|stairwell| stairwell.steps.len())
+            .unwrap();
+        let steps = u64::try_from(longest.steps.len()).unwrap();
+        assert_eq!(
+            pack.stairwell_within("overworld", &longest.id, steps)
+                .unwrap()
+                .as_ref(),
+            Some(longest)
+        );
+        let error = pack
+            .stairwell_within("overworld", &longest.id, steps - 1)
+            .unwrap_err();
+        assert_eq!(error.code(), crate::ErrorCode::DecodeBudget);
+        let mut listed = 0;
+        pack.visit_stairwells_within("overworld", crate::Page::all(), steps, &mut |_| {
+            listed += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(listed, stairwells.len());
+        let error = pack
+            .visit_stairwells_within("overworld", crate::Page::all(), steps - 1, &mut |_| Ok(()))
+            .unwrap_err();
+        assert_eq!(error.code(), crate::ErrorCode::DecodeBudget);
+    }
+
+    #[test]
     fn packs_keep_the_absolute_path_they_opened() {
         // Unit tests run in the package directory, so this path is relative.
         let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
@@ -1940,7 +2342,9 @@ mod tests {
             .join(directory.path().file_name().unwrap())
             .join(written.path.file_name().unwrap());
         let pack = Pack::open(&relative).unwrap();
-        let path = pack.path.as_ref().unwrap();
+        let super::Source::File(path) = &pack.source else {
+            panic!("a pack opened from a path has a file source");
+        };
         assert!(path.is_absolute(), "{}", path.display());
         pack.verify().unwrap();
     }
