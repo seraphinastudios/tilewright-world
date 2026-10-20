@@ -11,9 +11,15 @@ import initialize_, { initSync, Reader } from "./wasm/tilewright_pack.js";
 export class PackError extends Error {
   constructor(code, message) {
     super(message);
-    this.name = "PackError";
-    this.code = code;
+    own(this, "name", "PackError", false);
+    own(this, "code", code, true);
   }
+}
+
+// Defines an own data property: unlike assignment, it finds no setter a
+// page may have added to a prototype, and its descriptor inherits nothing.
+function own(target, key, value, enumerable) {
+  Object.defineProperty(target, key, { __proto__: null, value, writable: true, enumerable, configurable: true });
 }
 
 // The module is "unloaded", "loading" while initialize() waits for it, or
@@ -149,6 +155,38 @@ function bytesOf(bytes) {
 // a call, so its state is no longer known: it is not used again.
 let stopped;
 
+// The readers of packs not yet closed, held weakly. wasm-bindgen frees a
+// reader that is collected by calling into the module, so once the module
+// has stopped, each is detached from that first.
+const open = new Set();
+const collected =
+  typeof FinalizationRegistry === "function" ? new FinalizationRegistry((ref) => open.delete(ref)) : undefined;
+
+function track(reader) {
+  if (typeof WeakRef !== "function") {
+    return undefined;
+  }
+  const ref = new WeakRef(reader);
+  open.add(ref);
+  collected?.register(reader, ref, ref);
+  return ref;
+}
+
+function untrack(ref) {
+  if (ref !== undefined) {
+    open.delete(ref);
+    collected?.unregister(ref);
+  }
+}
+
+function stop(error) {
+  stopped = error;
+  for (const ref of open) {
+    ref.deref()?.__destroy_into_raw();
+  }
+  open.clear();
+}
+
 function usable() {
   if (stopped !== undefined) {
     throw new Error("the pack reader stopped after a WebAssembly error; load the page or process again", {
@@ -163,7 +201,7 @@ function usable() {
  */
 function rethrown(error) {
   if (error instanceof WebAssembly.RuntimeError) {
-    stopped = error;
+    stop(error);
   } else if (error instanceof Error && error.name === "PackError" && typeof error.code === "string") {
     return new PackError(error.code, error.message);
   }
@@ -210,10 +248,12 @@ export function openPack(bytes, settings) {
 /** An open pack. Reads are synchronous and each checks what it loads. */
 export class Pack {
   #reader;
+  #tracked;
 
   constructor(reader) {
     argument(reader instanceof Reader, "open a pack with openPack()");
     this.#reader = reader;
+    this.#tracked = track(reader);
   }
 
   /**
@@ -253,10 +293,17 @@ export class Pack {
 
   /** Releases the pack's memory now rather than when it is collected. */
   close() {
-    if (stopped === undefined) {
-      this.#reader?.free();
-    }
+    const reader = this.#reader;
     this.#reader = undefined;
+    untrack(this.#tracked);
+    if (reader !== undefined) {
+      if (stopped === undefined) {
+        reader.free();
+      } else {
+        // Detaches it without calling into the stopped module.
+        reader.__destroy_into_raw();
+      }
+    }
   }
 
   summary() {

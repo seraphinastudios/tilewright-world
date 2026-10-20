@@ -25,9 +25,10 @@ const MAX_SAFE_INTEGER: i64 = (1 << 53) - 1;
 /// A JavaScript `Error` for a rejected pack: its `name` is `PackError` and
 /// its `code` the stable code, such as `pack.chunk_record`.
 fn rejected(error: &Error) -> JsValue {
-    let thrown = js_sys::Error::new(&error.to_string());
-    thrown.set_name("PackError");
-    set(&thrown, "code", &error.code().as_str().into());
+    let thrown = Object::from(js_sys::Error::new(&error.to_string()));
+    let fields = Fields::new();
+    fields.define(&thrown, &"name".into(), &"PackError".into());
+    fields.define(&thrown, &"code".into(), &error.code().as_str().into());
     thrown.into()
 }
 
@@ -36,18 +37,49 @@ fn bad_argument(message: &str) -> JsValue {
     js_sys::TypeError::new(message).into()
 }
 
-fn set(target: &JsValue, key: &str, value: &JsValue) {
-    // Setting a property of a plain object or error cannot fail.
-    let _ = Reflect::set(target, &JsValue::from_str(key), value);
+/// Defines values as own data properties with `Object.defineProperty`,
+/// which, unlike assignment, finds no setter or read-only property a page
+/// may have added to `Object.prototype` or `Array.prototype`. Its
+/// descriptor has no prototype, so nothing inherited changes it either.
+struct Fields {
+    descriptor: Object,
+}
+
+impl Fields {
+    fn new() -> Self {
+        let descriptor = Object::create(JsValue::NULL.unchecked_ref());
+        for flag in ["writable", "enumerable", "configurable"] {
+            // An object without a prototype takes any property.
+            let _ = Reflect::set(&descriptor, &flag.into(), &JsValue::TRUE);
+        }
+        Self { descriptor }
+    }
+
+    /// Defines `key` on `target`, a new object or array, as `value`.
+    fn define(&self, target: &Object, key: &JsValue, value: &JsValue) {
+        let _ = Reflect::set(&self.descriptor, &"value".into(), value);
+        Object::define_property(target, key, &self.descriptor);
+    }
 }
 
 /// A plain object with `entries`.
 fn object(entries: &[(&str, JsValue)]) -> JsValue {
-    let target: JsValue = Object::new().into();
+    let target = Object::new();
+    let fields = Fields::new();
     for (key, value) in entries {
-        set(&target, key, value);
+        fields.define(&target, &JsValue::from_str(key), value);
     }
-    target
+    target.into()
+}
+
+/// An array of `values`, each defined at its index.
+fn array(values: impl IntoIterator<Item = JsValue>) -> JsValue {
+    let target = Object::from(Array::new());
+    let fields = Fields::new();
+    for (index, value) in (0_u32..).zip(values) {
+        fields.define(&target, &index.into(), &value);
+    }
+    target.into()
 }
 
 /// An integer as a number when it is exact as one, else as a `BigInt`.
@@ -127,22 +159,18 @@ fn definition(definition: &Definition) -> JsValue {
 }
 
 fn stairwell(plane: &str, stairwell: &Stairwell) -> JsValue {
-    let steps: Array = stairwell
-        .steps
-        .iter()
-        .map(|step| {
-            object(&[
-                ("layer", step.layer.into()),
-                ("x", integer(step.at[0])),
-                ("y", integer(step.at[1])),
-                ("proto", text(&step.proto)),
-            ])
-        })
-        .collect();
+    let steps = array(stairwell.steps.iter().map(|step| {
+        object(&[
+            ("layer", step.layer.into()),
+            ("x", integer(step.at[0])),
+            ("y", integer(step.at[1])),
+            ("proto", text(&step.proto)),
+        ])
+    }));
     object(&[
         ("plane", text(plane)),
         ("id", text(&stairwell.id)),
-        ("steps", steps.into()),
+        ("steps", steps),
         ("direction", text(stairwell.direction.as_str())),
         (
             "hiddenOnOtherLayers",
@@ -198,12 +226,13 @@ fn portal(portal: Option<&PortalRecord>) -> JsValue {
 
 /// An object record and its inventory, which nests at most 16 deep.
 fn object_record(record: &ObjectRecord) -> JsValue {
-    let fields: Array = record
-        .fields
-        .iter()
-        .map(|(name, value)| object(&[("name", (*name).into()), ("value", field(value))]))
-        .collect();
-    let inventory: Array = record.inventory.iter().map(object_record).collect();
+    let fields = array(
+        record
+            .fields
+            .iter()
+            .map(|(name, value)| object(&[("name", (*name).into()), ("value", field(value))])),
+    );
+    let inventory = array(record.inventory.iter().map(object_record));
     object(&[
         ("uid", optional_text(record.uid.as_deref())),
         ("tile", record.tile.map_or(JsValue::NULL, JsValue::from)),
@@ -212,29 +241,30 @@ fn object_record(record: &ObjectRecord) -> JsValue {
         ("subLayer", record.sub_layer.into()),
         ("z", record.z.into()),
         ("portal", portal(record.portal.as_ref())),
-        ("fields", fields.into()),
+        ("fields", fields),
         ("custom", optional_text(record.custom.as_deref())),
-        ("inventory", inventory.into()),
+        ("inventory", inventory),
     ])
 }
 
 fn chunk(chunk: &ChunkData) -> JsValue {
-    let ground: Array = chunk
-        .ground
-        .iter()
-        .map(|grid| JsValue::from(Uint16Array::from(grid.as_slice())))
-        .collect();
-    let objects: Array = chunk.objects.iter().map(object_record).collect();
+    let ground = array(
+        chunk
+            .ground
+            .iter()
+            .map(|grid| JsValue::from(Uint16Array::from(grid.as_slice()))),
+    );
+    let objects = array(chunk.objects.iter().map(object_record));
     object(&[
         ("chunkSize", chunk.chunk_size.into()),
         (
             "palette",
             Uint32Array::from(chunk.palette.as_slice()).into(),
         ),
-        ("ground", ground.into()),
+        ("ground", ground),
         ("heights", Int32Array::from(chunk.heights.as_slice()).into()),
         ("zones", Uint16Array::from(chunk.zones.as_slice()).into()),
-        ("objects", objects.into()),
+        ("objects", objects),
     ])
 }
 
@@ -314,9 +344,12 @@ fn listed<T>(
     visit_rows: impl FnOnce(&mut dyn FnMut(T) -> Result<(), Error>) -> Result<(), Error>,
     convert: impl Fn(&T) -> JsValue,
 ) -> Found {
-    let rows = Array::new();
+    let rows = Object::from(Array::new());
+    let fields = Fields::new();
+    let mut index: u32 = 0;
     visit_rows(&mut |row| {
-        rows.push(&convert(&row));
+        fields.define(&rows, &index.into(), &convert(&row));
+        index += 1;
         Ok(())
     })
     .map_err(|error| rejected(&error))?;

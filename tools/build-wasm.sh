@@ -8,8 +8,8 @@
 # wasm-bindgen command whose version matches the crate in Cargo.lock. Both
 # are pinned below. Their release archives are downloaded once into
 # ${TILEWRIGHT_WASM_TOOLS:-${XDG_CACHE_HOME:-~/.cache}/tilewright-world/wasm-tools},
-# and on every run checked by SHA-256 and unpacked into a directory of the
-# run's own under target/wasm-tools.
+# and on every build checked by SHA-256 and unpacked into target/wasm-tools.
+# One build runs at a time in a checkout.
 # Set CC_wasm32_unknown_unknown and AR_wasm32_unknown_unknown to use another
 # clang with the WebAssembly target instead of wasi-sdk.
 set -euo pipefail
@@ -72,19 +72,35 @@ sha256() {
   fi
 }
 
-# This run's own directory, removed when it exits: builds running at the
-# same time in one checkout never share tools or output in progress.
-mkdir -p "${repository}/target/wasm-tools"
-run=$(mktemp -d "${repository}/target/wasm-tools/run.XXXXXX")
-trap 'rm -rf -- "${run}"' EXIT
+# One build at a time per checkout: a second fails rather than share its
+# tools and output. The lock is a directory, which mkdir creates or fails
+# on in one step; it records its holder, and goes when the build exits.
+mkdir -p "${repository}/target"
+lock=${repository}/target/wasm-build.lock
+if ! mkdir "${lock}" 2>/dev/null; then
+  holder=$(cat "${lock}/pid" 2>/dev/null || echo unknown)
+  echo "tools/build-wasm.sh: another build of the WebAssembly reader holds ${lock} (process ${holder}); remove it if that process has ended" >&2
+  exit 1
+fi
+echo "$$" >"${lock}/pid"
+unpacked=${repository}/target/wasm-tools
+trap 'rm -rf -- "${unpacked}" "${lock}"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-# Unpacks the release archive <name>.tar.gz as ${run}/<name>. The archive
-# is downloaded once into ${tools}; on every run it is copied out, and the
-# copy is checked against its pinned SHA-256 before it is unpacked, so a
-# changed cache is never run.
+# This build's tools, unpacked afresh. The path stays the same between
+# builds, so Cargo does not rebuild the C code for a new compiler path.
+rm -rf -- "${unpacked}"
+mkdir "${unpacked}"
+
+# Unpacks the release archive <name>.tar.gz as ${unpacked}/<name>. The
+# archive is downloaded once into ${tools}; on every build it is copied
+# out, and the copy is checked against its pinned SHA-256 before it is
+# unpacked, so a changed cache is never run.
 install() {
   local name=$1 url=$2 expected=$3
-  local archive=${tools}/${name}.tar.gz copy=${run}/${name}.tar.gz
+  local archive=${tools}/${name}.tar.gz copy=${unpacked}/${name}.tar.gz
   if [[ -f ${archive} ]]; then
     cp "${archive}" "${copy}"
   else
@@ -108,19 +124,9 @@ install() {
     cp "${copy}" "${partial}"
     mv "${partial}" "${archive}"
   fi
-  mkdir "${run}/${name}"
-  tar -xzf "${copy}" -C "${run}/${name}" --strip-components 1
+  mkdir "${unpacked}/${name}"
+  tar -xzf "${copy}" -C "${unpacked}/${name}" --strip-components 1
   rm -- "${copy}"
-}
-
-# Replaces `target` with `source` in one rename, so a reader of `target`
-# sees one whole file or the other.
-publish() {
-  local source=$1 target=$2 partial
-  partial=$(mktemp "$(dirname "${target}")/.$(basename "${target}").XXXXXX")
-  cp "${source}" "${partial}"
-  chmod 644 "${partial}"
-  mv -f "${partial}" "${target}"
 }
 
 if [[ -z ${CC_wasm32_unknown_unknown-} || -z ${AR_wasm32_unknown_unknown-} ]]; then
@@ -128,22 +134,8 @@ if [[ -z ${CC_wasm32_unknown_unknown-} || -z ${AR_wasm32_unknown_unknown-} ]]; t
   install "${wasi_sdk}" \
     "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${wasi_sdk_release}/${wasi_sdk}.tar.gz" \
     "${wasi_sdk_sha256}"
-  # Cargo rebuilds the C code when the compiler's path changes, so the
-  # compiler is called through wrappers whose path names only the pinned
-  # version. They run this run's copy, which the environment names.
-  export TILEWRIGHT_WASI_SDK=${run}/${wasi_sdk}
-  wrappers=${repository}/target/wasm-tools/${wasi_sdk}
-  mkdir -p "${wrappers}"
-  for tool in clang llvm-ar; do
-    wrapper=${run}/${tool}
-    # shellcheck disable=SC2016 # The wrapper expands these when it runs.
-    printf '#!/bin/sh\nexec "${TILEWRIGHT_WASI_SDK:?}/bin/%s" "$@"\n' "${tool}" >"${wrapper}"
-    chmod 755 "${wrapper}"
-    publish "${wrapper}" "${wrappers}/${tool}"
-    chmod 755 "${wrappers}/${tool}"
-  done
-  export CC_wasm32_unknown_unknown=${wrappers}/clang
-  export AR_wasm32_unknown_unknown=${wrappers}/llvm-ar
+  export CC_wasm32_unknown_unknown=${unpacked}/${wasi_sdk}/bin/clang
+  export AR_wasm32_unknown_unknown=${unpacked}/${wasi_sdk}/bin/llvm-ar
 fi
 wasm_bindgen=wasm-bindgen-${wasm_bindgen_version}-${wasm_bindgen_platform}
 install "${wasm_bindgen}" \
@@ -171,20 +163,25 @@ if [[ ${check} == true ]]; then
     --package tilewright-pack --package tilewright-pack-wasm --no-deps -- -D warnings
 fi
 cargo build --locked --target wasm32-unknown-unknown --profile wasm --package tilewright-pack-wasm
-cp target/wasm32-unknown-unknown/wasm/tilewright_pack_wasm.wasm "${run}/module.wasm"
 
-"${run}/${wasm_bindgen}/wasm-bindgen" \
+# The generated JavaScript and WebAssembly go together, so wasm/ is replaced
+# as a whole: an interrupted build leaves it missing, never mixed.
+rm -rf -- "${package}"/.wasm.*
+staged=$(mktemp -d "${package}/.wasm.XXXXXX")
+chmod 755 "${staged}"
+"${unpacked}/${wasm_bindgen}/wasm-bindgen" \
   --target web \
   --no-typescript \
   --remove-name-section \
   --remove-producers-section \
-  --out-dir "${run}/out" \
+  --out-dir "${staged}" \
   --out-name tilewright_pack \
-  "${run}/module.wasm"
-mkdir -p "${package}/wasm"
-for file in tilewright_pack_bg.wasm tilewright_pack.js; do
-  publish "${run}/out/${file}" "${package}/wasm/${file}"
-done
+  target/wasm32-unknown-unknown/wasm/tilewright_pack_wasm.wasm
+if [[ -e ${package}/wasm ]]; then
+  mv "${package}/wasm" "${staged}.old"
+fi
+mv "${staged}" "${package}/wasm"
+rm -rf -- "${staged}.old"
 
 wasm=${package}/wasm/tilewright_pack_bg.wasm
 echo "tools/build-wasm.sh: ${wasm}: $(wc -c <"${wasm}" | tr -d ' ') bytes, $(gzip -9 -c "${wasm}" | wc -c | tr -d ' ') gzipped" >&2

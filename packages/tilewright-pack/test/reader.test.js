@@ -261,21 +261,71 @@ test("a closed pack refuses reads", async () => {
   }
 });
 
+test("results and errors are own properties, whatever a page adds to prototypes", async () => {
+  await initialize(module);
+  const pack = openPack(valid);
+  const expected = [...pack.planes()].map((plane) => plane.id);
+  const chunk = pack.chunk("overworld", 0, 0, 0);
+  const polluted = [
+    [Object.prototype, "id"],
+    [Object.prototype, "code"],
+    [Object.prototype, "objects"],
+    [Array.prototype, "0"],
+  ];
+  for (const [prototype, key] of polluted) {
+    Object.defineProperty(prototype, key, { get: () => "polluted", set() {}, configurable: true });
+  }
+  try {
+    assert.deepEqual(
+      [...pack.planes()].map((plane) => plane.id),
+      expected,
+    );
+    const again = pack.chunk("overworld", 0, 0, 0);
+    assert.equal(again.objects.length, chunk.objects.length);
+    assert.ok(Object.hasOwn(again.objects, "0"));
+    assert.throws(() => openPack(new Uint8Array()), (error) => Object.hasOwn(error, "code") && error.code === "pack.schema");
+  } finally {
+    for (const [prototype, key] of polluted) {
+      delete prototype[key];
+    }
+  }
+});
+
 // Last, since it stops the module for the rest of this process.
 test("a trap stops the module for good", async () => {
   await initialize(module);
   const pack = openPack(valid);
-  const summary = Reader.prototype.summary;
+  const other = openPack(valid);
+  const { summary, free, __destroy_into_raw: detach } = Reader.prototype;
+  let freed = 0;
+  let detached = 0;
   Reader.prototype.summary = () => {
     throw new WebAssembly.RuntimeError("unreachable");
   };
+  Reader.prototype.free = function () {
+    freed += 1;
+    return free.call(this);
+  };
+  Reader.prototype.__destroy_into_raw = function () {
+    detached += 1;
+    return detach.call(this);
+  };
   try {
     assert.throws(() => pack.summary(), WebAssembly.RuntimeError);
+    // Every open reader, these two and those earlier tests left open, was
+    // detached from wasm-bindgen's finalizer.
+    assert.ok(detached >= 2, `${detached}`);
+    const before = detached;
+    assert.throws(() => pack.meta("format"), /stopped/);
+    assert.throws(() => other.meta("format"), /stopped/);
+    assert.throws(() => openPack(valid), /stopped/);
+    pack.close();
+    other.close();
+    assert.equal(pack.closed, true);
+    // Closing does not call into the stopped module.
+    assert.equal(freed, 0);
+    assert.equal(detached, before + 2);
   } finally {
-    Reader.prototype.summary = summary;
+    Object.assign(Reader.prototype, { summary, free, __destroy_into_raw: detach });
   }
-  assert.throws(() => pack.meta("format"), /stopped/);
-  assert.throws(() => openPack(valid), /stopped/);
-  pack.close();
-  assert.equal(pack.closed, true);
 });
