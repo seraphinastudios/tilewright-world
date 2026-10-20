@@ -92,7 +92,10 @@ object_count  u32
 objects       object_count × object
 ```
 
-Grids are row-major, `y` then `x`. An object record:
+Grids are row-major, `y` then `x`. Ground grids hold the chunk's tiles with
+the profile's terrain transitions applied (FORMAT.md section 13): the tiles
+the transitions derive are ordinary cells, so readers draw them without
+knowing the rules. An object record:
 
 ```text
 tile          u16      y * N + x; 0xFFFF in inventories

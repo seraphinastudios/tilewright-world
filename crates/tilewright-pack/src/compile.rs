@@ -14,12 +14,15 @@ use crate::{
 use rusqlite::{Connection, MAIN_DB, params};
 use sha2::{Digest, Sha256};
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     io::{Read as _, Write as _},
     path::{Path, PathBuf},
 };
 use tilewright_jsonc::{Limits, MAX_SAFE_INTEGER};
-use tilewright_source::{CHUNK_SIZE, Chunk, FieldValue, Object, Portal, Profile, World};
+use tilewright_source::{
+    CHUNK_SIZE, Chunk, FieldValue, Grid, Object, Plane, Portal, Profile, World,
+};
 
 /// The `compiler` meta value.
 pub const COMPILER: &str = concat!("tilewright-pack ", env!("CARGO_PKG_VERSION"));
@@ -83,16 +86,28 @@ impl<'w> Strings<'w> {
                     plane.chunk_size
                 )));
             }
-            for chunk in plane.chunks.values() {
+            for (&(layer, cx, cy), chunk) in &plane.chunks {
                 check_chunk_shape(chunk, world.profile().ground_layers.len())?;
-                for grid in chunk.ground.iter().chain([&chunk.zones]) {
-                    let used: BTreeSet<u16> = grid.cells.iter().copied().collect();
-                    for cell in used {
-                        if let Some(index) = usize::from(cell).checked_sub(1) {
-                            values.insert(identifier(palette_value(grid, index)?)?);
+                // With transitions, the record holds the resolved ground
+                // grids. The source grids are still checked, since the
+                // resolver reads a cell it cannot look up as empty.
+                match &world.profile().transitions {
+                    Some(transitions) => {
+                        let mut source = BTreeSet::new();
+                        for grid in &chunk.ground {
+                            grid_values(&mut source, grid)?;
+                        }
+                        for value in transitions.resolve_chunk(plane, layer, cx, cy).values() {
+                            values.insert(identifier(value)?);
+                        }
+                    }
+                    None => {
+                        for grid in &chunk.ground {
+                            grid_values(&mut values, grid)?;
                         }
                     }
                 }
+                grid_values(&mut values, &chunk.zones)?;
                 let mut stack: Vec<&Object> = chunk.objects.iter().collect();
                 while let Some(object) = stack.pop() {
                     values.insert(identifier(&object.proto)?);
@@ -139,6 +154,17 @@ impl<'w> Strings<'w> {
     fn optional(&self, value: Option<&String>) -> Result<u32, Error> {
         value.map_or(Ok(0), |value| self.id(value))
     }
+}
+
+/// Adds the values a grid's cells use to `values`.
+pub(crate) fn grid_values<'w>(values: &mut BTreeSet<&'w str>, grid: &'w Grid) -> Result<(), Error> {
+    let used: BTreeSet<u16> = grid.cells.iter().copied().collect();
+    for cell in used {
+        if let Some(index) = usize::from(cell).checked_sub(1) {
+            values.insert(identifier(palette_value(grid, index)?)?);
+        }
+    }
+    Ok(())
 }
 
 /// The palette value of a grid cell's index.
@@ -198,6 +224,19 @@ pub(crate) fn check_profile_document(profile: &Profile) -> Result<(), Error> {
         Err(Error::Invalid(
             "the profile document's layers or layer height differ from the typed profile".into(),
         ))
+    }
+}
+
+/// Checks that the profile's transitions resolve to one grid per ground
+/// layer: the model is public, so they may come from another profile.
+pub(crate) fn check_transitions(profile: &Profile) -> Result<(), Error> {
+    match &profile.transitions {
+        Some(transitions) if transitions.ground_layers() != profile.ground_layers.len() => {
+            Err(Error::Invalid(
+                "the profile's transitions were read for a profile with other ground layers".into(),
+            ))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -353,16 +392,32 @@ pub(crate) fn object_record(
     })
 }
 
+/// A chunk's ground grids as its record holds them: with the profile's
+/// terrain transitions applied (FORMAT.md section 13), or the source's own
+/// when the profile has none.
+fn record_ground<'w>(
+    world: &'w World,
+    plane: &'w Plane,
+    (layer, cx, cy): (i32, i64, i64),
+    chunk: &'w Chunk,
+) -> Cow<'w, [Grid]> {
+    match &world.profile().transitions {
+        Some(transitions) => Cow::Owned(transitions.resolve_chunk(plane, layer, cx, cy).grids()),
+        None => Cow::Borrowed(&chunk.ground),
+    }
+}
+
 /// Builds a chunk record. The chunk palette holds the string IDs its grids
 /// use, in ascending order.
 fn chunk_record(
     chunk: &Chunk,
+    ground: &[Grid],
     layers: &Layers<'_>,
     strings: &Strings<'_>,
 ) -> Result<ChunkData, Error> {
     let chunk_size = CHUNK_SIZE;
     let mut used = BTreeSet::new();
-    for grid in chunk.ground.iter().chain([&chunk.zones]) {
+    for grid in ground.iter().chain([&chunk.zones]) {
         for cell in &grid.cells {
             if let Some(index) = usize::from(*cell).checked_sub(1) {
                 used.insert(strings.id(palette_value(grid, index)?)?);
@@ -374,7 +429,7 @@ fn chunk_record(
     // palette, grids and object count (4 bytes) leave of the record.
     let cells = usize::from(chunk_size) * usize::from(chunk_size);
     let mut budget = MAXIMUM_RECORD_BYTES
-        .saturating_sub(18 + 4 * palette.len() + cells * (2 * chunk.ground.len() + 6));
+        .saturating_sub(18 + 4 * palette.len() + cells * (2 * ground.len() + 6));
     // Declared palette entries that no cell uses are not interned; they map
     // to 0 and are never looked up.
     let remap = |grid: &tilewright_source::Grid| -> Result<Vec<u16>, Error> {
@@ -405,7 +460,7 @@ fn chunk_record(
     };
     Ok(ChunkData {
         chunk_size,
-        ground: chunk.ground.iter().map(remap).collect::<Result<_, _>>()?,
+        ground: ground.iter().map(remap).collect::<Result<_, _>>()?,
         heights: chunk.heights.clone(),
         zones: remap(&chunk.zones)?,
         objects: chunk
@@ -534,6 +589,7 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 /// # Errors
 /// Returns an error if SQLite fails or the world exceeds the pack's bounds.
 pub fn compile(world: &World) -> Result<Vec<u8>, Error> {
+    check_transitions(world.profile())?;
     let strings = Strings::collect(world)?;
     check_profile_document(world.profile())?;
     let layers = render_layers(world.profile())?;
@@ -604,7 +660,8 @@ pub fn compile(world: &World) -> Result<Vec<u8>, Error> {
             insert_stairwells(&connection, id, plane)?;
             for (key, chunk) in &plane.chunks {
                 let (layer, cx, cy) = *key;
-                let record = chunk_record(chunk, &layers, &strings)?;
+                let ground = record_ground(world, plane, *key, chunk);
+                let record = chunk_record(chunk, &ground, &layers, &strings)?;
                 let data = encode_chunk(&record).map_err(|error| Error::Invalid(error.0))?;
                 chunks.execute(params![id, layer, cx, cy, CHUNK_ENCODING, data])?;
                 collect_uids(&mut uids, id, *key, chunk)?;

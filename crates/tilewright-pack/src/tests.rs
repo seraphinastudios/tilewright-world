@@ -2034,3 +2034,84 @@ fn compile_rejects_object_uids_used_twice_or_malformed() {
     .unwrap_err();
     assert!(error.to_string().contains("not an identifier"), "{error}");
 }
+
+fn terrain_world() -> World {
+    tilewright_source::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/terrain"))
+        .expect("the terrain fixture is valid")
+}
+
+#[test]
+fn packs_hold_resolved_terrain_transitions() {
+    let world = terrain_world();
+    let transitions = world.profile().transitions.clone().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let written = write_pack(&world, directory.path()).unwrap();
+    let pack = Pack::open(&written.path).unwrap();
+    assert_eq!(pack.verify().unwrap().chunks, 3);
+    let plane = &world.planes()["island"];
+    for &(layer, cx, cy) in plane.chunks.keys() {
+        let chunk = pack.chunk("island", layer, cx, cy).unwrap().unwrap();
+        let palette: Vec<String> = chunk
+            .palette
+            .iter()
+            .map(|id| pack.string(*id).unwrap().unwrap())
+            .collect();
+        let resolved = transitions.resolve_chunk(plane, layer, cx, cy);
+        assert_eq!(chunk.ground.len(), resolved.ground_layers());
+        for (ground, cells) in chunk.ground.iter().enumerate() {
+            for (index, cell) in cells.iter().enumerate() {
+                let stored = usize::from(*cell)
+                    .checked_sub(1)
+                    .map(|position| palette[position].as_str());
+                assert_eq!(stored, resolved.value(ground, index), "{cx} {cy} {index}");
+            }
+        }
+    }
+    // The pack interns the derived tiles the chunks use, and no others.
+    let connection = Connection::open(&written.path).unwrap();
+    let strings: Vec<String> = connection
+        .prepare("SELECT value FROM strings ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    for derived in ["pond", "shore_n", "grass_edge_3", "sand_s", "dirt_pebbles"] {
+        assert!(strings.iter().any(|value| value == derived), "{derived}");
+    }
+    assert!(!strings.iter().any(|value| value == "grass_edge_5"));
+    // A pond's derived tile is what readers see in the floor grid.
+    let chunk = pack.chunk("island", 0, 0, 0).unwrap().unwrap();
+    let floor = chunk.ground[0][3 * 32 + 3];
+    let id = chunk.palette[usize::from(floor) - 1];
+    assert_eq!(pack.string(id).unwrap().as_deref(), Some("pond"));
+    // Compiling is deterministic with transitions too.
+    assert_eq!(compile(&world).unwrap(), compile(&world).unwrap());
+}
+
+#[test]
+fn compile_checks_transitions_against_the_profile() {
+    use super::compile::check_transitions;
+    let world = terrain_world();
+    let mut profile = world.profile().clone();
+    check_transitions(&profile).unwrap();
+    profile.ground_layers.pop();
+    let error = check_transitions(&profile).unwrap_err();
+    assert!(error.to_string().contains("ground layers"), "{error}");
+    profile.transitions = None;
+    check_transitions(&profile).unwrap();
+}
+
+#[test]
+fn compile_checks_source_grids_under_transitions() {
+    use super::compile::{Strings, grid_values};
+    let world = terrain_world();
+    Strings::collect(&world).unwrap();
+    // The model is public: a cell past its palette is an error, not an
+    // empty tile, with transitions as without.
+    let mut floor = world.planes()["island"].chunks[&(0, 0, 0)].ground[0].clone();
+    grid_values(&mut std::collections::BTreeSet::new(), &floor).unwrap();
+    floor.cells[0] = 99;
+    let error = grid_values(&mut std::collections::BTreeSet::new(), &floor).unwrap_err();
+    assert!(error.to_string().contains("palette"), "{error}");
+}
