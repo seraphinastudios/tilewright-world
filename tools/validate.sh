@@ -20,6 +20,8 @@ cargo run --locked --quiet --package tilewright-cli -- compile fixtures/basic "$
 pack=$(find "${first}" -name '*.twpack')
 cmp "${pack}" "${second}/$(basename "${pack}")"
 cargo run --locked --quiet --package tilewright-cli -- inspect "${pack}"
+# A source tree and the pack compiled from it hold the same IDs.
+cargo run --locked --quiet --package tilewright-cli -- diff fixtures/basic "${pack}"
 
 # The Go pack reader, whose tests run the shared fixtures in fixtures/packs.
 if ! command -v go >/dev/null 2>&1; then
