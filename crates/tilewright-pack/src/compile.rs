@@ -86,28 +86,11 @@ impl<'w> Strings<'w> {
                     plane.chunk_size
                 )));
             }
-            for (&(layer, cx, cy), chunk) in &plane.chunks {
+            for chunk in plane.chunks.values() {
                 check_chunk_shape(chunk, world.profile().ground_layers.len())?;
-                // With transitions, the record holds the resolved ground
-                // grids. The source grids are still checked, since the
-                // resolver reads a cell it cannot look up as empty.
-                match &world.profile().transitions {
-                    Some(transitions) => {
-                        let mut source = BTreeSet::new();
-                        for grid in &chunk.ground {
-                            grid_values(&mut source, grid)?;
-                        }
-                        for value in transitions.resolve_chunk(plane, layer, cx, cy).values() {
-                            values.insert(identifier(value)?);
-                        }
-                    }
-                    None => {
-                        for grid in &chunk.ground {
-                            grid_values(&mut values, grid)?;
-                        }
-                    }
+                for grid in chunk.ground.iter().chain([&chunk.zones]) {
+                    grid_values(&mut values, grid)?;
                 }
-                grid_values(&mut values, &chunk.zones)?;
                 let mut stack: Vec<&Object> = chunk.objects.iter().collect();
                 while let Some(object) = stack.pop() {
                     values.insert(identifier(&object.proto)?);
@@ -135,6 +118,14 @@ impl<'w> Strings<'w> {
                 }
             }
         }
+        // Resolved ground grids hold the source's prototypes and those the
+        // terrain transitions draw, so every prototype the transitions name
+        // is interned, and chunks are resolved once, as they are encoded.
+        if let Some(transitions) = &world.profile().transitions {
+            for proto in transitions.tile_protos() {
+                values.insert(identifier(proto)?);
+            }
+        }
         let mut ids = BTreeMap::new();
         for (index, value) in values.into_iter().enumerate() {
             let id =
@@ -157,7 +148,7 @@ impl<'w> Strings<'w> {
 }
 
 /// Adds the values a grid's cells use to `values`.
-pub(crate) fn grid_values<'w>(values: &mut BTreeSet<&'w str>, grid: &'w Grid) -> Result<(), Error> {
+fn grid_values<'w>(values: &mut BTreeSet<&'w str>, grid: &'w Grid) -> Result<(), Error> {
     let used: BTreeSet<u16> = grid.cells.iter().copied().collect();
     for cell in used {
         if let Some(index) = usize::from(cell).checked_sub(1) {

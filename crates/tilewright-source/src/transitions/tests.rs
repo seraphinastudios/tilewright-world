@@ -98,6 +98,24 @@ fn tile(transitions: &Transitions, plane: &Plane, ground: usize, x: i64, y: i64)
         .map(str::to_owned)
 }
 
+/// Every prototype the fixture defines, in byte order.
+fn fixture_protos() -> Vec<String> {
+    let mut protos: Vec<String> = fs::read_dir(fixture().join("defs/proto"))
+        .unwrap()
+        .map(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_str()
+                .unwrap()
+                .trim_end_matches(".jsonc")
+                .to_owned()
+        })
+        .collect();
+    protos.sort();
+    protos
+}
+
 /// Whether a tile is open water: one of the water's variants.
 fn open_water(tile: Option<&str>) -> bool {
     matches!(tile, Some("water" | "water_ripple"))
@@ -743,12 +761,12 @@ fn counts_are_capped() {
         "{\"format\": \"tilewright.transitions/1\", \"layer\": \"floor\", \"terrains\": []}",
         "shape.range",
     );
-    rejects(&document(&vec![sides; 17].join(", ")), "shape.range");
-    assert!(load_with_document(&document(&vec![sides; 16].join(", "))));
-    // 17 terrains of 16 transitions each pass the document's 256.
-    let crowded: Vec<String> = (1..=15)
-        .map(|index| format!("grass_edge_{index}"))
-        .chain(["shore_n".to_owned(), "shore_e".to_owned()])
+    rejects(&document(&[sides; 9].join(", ")), "shape.range");
+    assert!(load_with_document(&document(&[sides; 8].join(", "))));
+    // One transition, then 32 terrains of 8, pass the document's 256.
+    let crowded: Vec<String> = fixture_protos()
+        .into_iter()
+        .filter(|proto| proto != "dirt")
         .enumerate()
         .map(|(index, proto)| {
             format!(
@@ -758,14 +776,14 @@ fn counts_are_capped() {
                         "\"layer\": \"edge\"",
                         "\"layer\": \"edge\", \"with\": [\"x\"]"
                     );
-                    16
+                    8
                 ]
                 .join(", ")
             )
         })
         .collect();
     let crowded = format!(
-        "{{\"format\": \"tilewright.transitions/1\", \"layer\": \"floor\", \"terrains\": [{{\"id\": \"x\", \"protos\": [\"dirt\"]}}, {}]}}",
+        "{{\"format\": \"tilewright.transitions/1\", \"layer\": \"floor\", \"terrains\": [{{\"id\": \"x\", \"protos\": [\"dirt\"], \"transitions\": [{{\"draw\": \"inside\", \"model\": \"none\", \"layer\": \"floor\", \"tiles\": {{\"0\": \"dirt\"}}}}]}}, {}]}}",
         crowded.join(", ")
     );
     let problems = problems_with(&crowded);
@@ -894,17 +912,19 @@ fn every_terrain_is_checked_at_once() {
 #[test]
 fn transitions_count_as_declared() {
     // Malformed transitions count toward the document's cap too, so the
-    // cap bounds the work however many fail: 17 terrains of 16 each are
+    // cap bounds the work however many fail: 33 terrains of 8 each are
     // more than 256, and the cap is reported once.
-    let terrains: Vec<String> = (0..17)
-        .map(|index| {
+    let terrains: Vec<String> = fixture_protos()
+        .into_iter()
+        .enumerate()
+        .map(|(index, proto)| {
             format!(
-                "{{\"id\": \"t{index}\", \"protos\": [\"grass_edge_{}\"], \"transitions\": [{}]}}",
-                index % 15 + 1,
-                vec!["{}"; 16].join(", ")
+                "{{\"id\": \"t{index}\", \"protos\": [\"{proto}\"], \"transitions\": [{}]}}",
+                ["{}"; 8].join(", ")
             )
         })
         .collect();
+    assert_eq!(terrains.len(), 33);
     let document = format!(
         "{{\"format\": \"tilewright.transitions/1\", \"layer\": \"floor\", \"terrains\": [{}]}}",
         terrains.join(", ")
@@ -955,7 +975,7 @@ fn overlong_lists_count_toward_the_document_cap() {
             .count()
     };
     assert_eq!(count("at most 256 transitions"), 1, "{diagnostics:?}");
-    assert_eq!(count("transitions must list 0 to 16 entries"), 16);
+    assert_eq!(count("transitions must list 0 to 8 entries"), 16);
     // No rule of an overlong list is read.
     assert_eq!(count("missing key \"draw\""), 0);
 }

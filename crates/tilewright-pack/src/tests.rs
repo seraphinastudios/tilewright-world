@@ -2067,7 +2067,8 @@ fn packs_hold_resolved_terrain_transitions() {
             }
         }
     }
-    // The pack interns the derived tiles the chunks use, and no others.
+    // The pack interns every prototype the transitions name, whether or not
+    // a chunk draws it.
     let connection = Connection::open(&written.path).unwrap();
     let strings: Vec<String> = connection
         .prepare("SELECT value FROM strings ORDER BY id")
@@ -2079,7 +2080,8 @@ fn packs_hold_resolved_terrain_transitions() {
     for derived in ["pond", "shore_n", "grass_edge_3", "sand_s", "dirt_pebbles"] {
         assert!(strings.iter().any(|value| value == derived), "{derived}");
     }
-    assert!(!strings.iter().any(|value| value == "grass_edge_5"));
+    assert!(strings.iter().any(|value| value == "grass_edge_5"));
+    assert!(!strings.iter().any(|value| value == "bush_edge"));
     // A pond's derived tile is what readers see in the floor grid.
     let chunk = pack.chunk("island", 0, 0, 0).unwrap().unwrap();
     let floor = chunk.ground[0][3 * 32 + 3];
@@ -2100,18 +2102,4 @@ fn compile_checks_transitions_against_the_profile() {
     assert!(error.to_string().contains("ground layers"), "{error}");
     profile.transitions = None;
     check_transitions(&profile).unwrap();
-}
-
-#[test]
-fn compile_checks_source_grids_under_transitions() {
-    use super::compile::{Strings, grid_values};
-    let world = terrain_world();
-    Strings::collect(&world).unwrap();
-    // The model is public: a cell past its palette is an error, not an
-    // empty tile, with transitions as without.
-    let mut floor = world.planes()["island"].chunks[&(0, 0, 0)].ground[0].clone();
-    grid_values(&mut std::collections::BTreeSet::new(), &floor).unwrap();
-    floor.cells[0] = 99;
-    let error = grid_values(&mut std::collections::BTreeSet::new(), &floor).unwrap_err();
-    assert!(error.to_string().contains("palette"), "{error}");
 }

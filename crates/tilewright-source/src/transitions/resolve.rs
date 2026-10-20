@@ -157,8 +157,11 @@ impl Transitions {
             })
             .collect();
         let window = self.window(source, layer, cx, cy);
-        let mut candidates = Vec::with_capacity(super::MAXIMUM_TILE_TRANSITIONS);
         let terrain_at = |x: usize, y: usize| window.get(y * WINDOW + x).copied().flatten();
+        // For each ground layer, the latest transition to draw on the
+        // current tile, by position, and its tile. A later transition wins,
+        // so the order they are evaluated in does not matter.
+        let mut drawn: Vec<Option<(usize, &'a str)>> = vec![None; self.ground_layers];
         // Plane coordinates of the chunk's first tile; a source chunk keeps
         // them in range, and they are only hashed.
         let side = i64::from(CHUNK_SIZE);
@@ -179,83 +182,82 @@ impl Transitions {
                     terrain_at(x - 1, y - 1),
                 ];
                 let index = (y - 1) * SIDE + (x - 1);
-                self.candidates(terrain, &neighbours, &mut candidates);
-                for transition in candidates
-                    .iter()
-                    .filter_map(|position| self.list.get(*position))
-                {
-                    let shows = neighbours.map(|neighbour| match transition.draw {
-                        Draw::Inside => {
-                            neighbour.is_none_or(|neighbour| !transition.blends_with(neighbour))
-                        }
-                        Draw::Outside => neighbour == Some(transition.terrain),
-                    });
-                    let pattern = transition.model.pattern(transition.draw, shows);
-                    if transition.draw == Draw::Outside && pattern == 0 {
-                        continue;
-                    }
-                    let Some(tiles) = transition.tiles.get(&pattern) else {
+                drawn.fill(None);
+                // Only the tile's own terrain and its neighbours' terrains,
+                // each once, own transitions that can draw here: an outside
+                // transition of any other terrain has pattern 0.
+                let owners =
+                    std::iter::once(terrain).chain(neighbours.iter().enumerate().filter_map(
+                        |(seen, neighbour)| {
+                            let neighbour = (*neighbour)?;
+                            (neighbour != terrain && !neighbours[..seen].contains(&Some(neighbour)))
+                                .then_some(neighbour)
+                        },
+                    ));
+                for owner in owners {
+                    let Some(range) = self
+                        .terrains
+                        .get(owner)
+                        .map(|owner| owner.transitions.clone())
+                    else {
                         continue;
                     };
-                    let output = transition.layer;
-                    // In the terrain layer a transition replaces the
-                    // painted prototype; elsewhere a prototype the source
-                    // places wins.
-                    if output != self.terrain_layer && cell(own.get(output), index).is_some() {
-                        continue;
+                    for position in range {
+                        let Some(transition) = self.list.get(position) else {
+                            continue;
+                        };
+                        // Inside transitions of the tile's terrain, and
+                        // outside ones of its neighbours' that blend with it.
+                        let applies = if owner == terrain {
+                            transition.draw == Draw::Inside
+                        } else {
+                            transition.draw == Draw::Outside && transition.blends_with(terrain)
+                        };
+                        let output = transition.layer;
+                        // In the terrain layer a transition replaces the
+                        // painted prototype; elsewhere a prototype the
+                        // source places wins.
+                        if !applies
+                            || (output != self.terrain_layer
+                                && cell(own.get(output), index).is_some())
+                            || drawn
+                                .get(output)
+                                .is_some_and(|entry| entry.is_some_and(|(at, _)| at > position))
+                        {
+                            continue;
+                        }
+                        let shows = neighbours.map(|neighbour| match transition.draw {
+                            Draw::Inside => {
+                                neighbour.is_none_or(|neighbour| !transition.blends_with(neighbour))
+                            }
+                            Draw::Outside => neighbour == Some(transition.terrain),
+                        });
+                        let pattern = transition.model.pattern(transition.draw, shows);
+                        if transition.draw == Draw::Outside && pattern == 0 {
+                            continue;
+                        }
+                        let Some(tiles) = transition.tiles.get(&pattern) else {
+                            continue;
+                        };
+                        let hash = variant_hash(transition.seed, layer, plane_x, plane_y);
+                        if let Some(slot) = drawn.get_mut(output) {
+                            *slot = Some((position, tiles.pick(hash)));
+                        }
                     }
-                    let hash = variant_hash(transition.seed, layer, plane_x, plane_y);
-                    if let Some(slot) = layers
-                        .get_mut(output)
-                        .and_then(|tiles| tiles.get_mut(index))
-                    {
-                        *slot = Some(tiles.pick(hash));
+                }
+                for (output, entry) in drawn.iter().enumerate() {
+                    if let (Some((_, tile)), Some(slot)) = (
+                        entry,
+                        layers
+                            .get_mut(output)
+                            .and_then(|tiles| tiles.get_mut(index)),
+                    ) {
+                        *slot = Some(*tile);
                     }
                 }
             }
         }
         ResolvedChunk { layers }
-    }
-
-    /// Sets `candidates` to the transitions that may draw on a tile of
-    /// `terrain` with `neighbours`, in the order they run: the inside
-    /// transitions of its terrain, and the outside transitions of its
-    /// neighbours' terrains that blend with it. An outside transition of any
-    /// other terrain has pattern 0 there and draws nothing.
-    fn candidates(
-        &self,
-        terrain: usize,
-        neighbours: &[Option<usize>; 8],
-        candidates: &mut Vec<usize>,
-    ) {
-        candidates.clear();
-        let own = |terrain: usize| {
-            self.terrains
-                .get(terrain)
-                .map_or(0..0, |terrain| terrain.transitions.clone())
-        };
-        candidates.extend(own(terrain).filter(|position| {
-            self.list
-                .get(*position)
-                .is_some_and(|transition| transition.draw == Draw::Inside)
-        }));
-        for (seen, neighbour) in neighbours.iter().enumerate() {
-            let Some(neighbour) = *neighbour else {
-                continue;
-            };
-            // Each neighbouring terrain once; none blends with itself.
-            if neighbour == terrain || neighbours[..seen].contains(&Some(neighbour)) {
-                continue;
-            }
-            candidates.extend(own(neighbour).filter(|position| {
-                self.list.get(*position).is_some_and(|transition| {
-                    transition.draw == Draw::Outside && transition.blends_with(terrain)
-                })
-            }));
-        }
-        // Transitions run in document order, and a terrain's transitions
-        // are a contiguous run of it.
-        candidates.sort_unstable();
     }
 
     /// The terrain of each tile of the chunk at `(layer, cx, cy)` and of the

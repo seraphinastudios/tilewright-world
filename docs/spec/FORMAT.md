@@ -515,7 +515,7 @@ precedence. Each has:
 | --- | --- |
 | `id` | Identifier, unique in the document. |
 | `protos` | 1 to 1,024 `proto` definitions that are this terrain when they are in the terrain layer. A prototype belongs to at most one terrain. A brush that paints the terrain writes the first; the others let tiles placed by hand, such as a variant, count as the terrain. |
-| `transitions` | Optional list of at most 16 transitions; a document has at most 256 in all. |
+| `transitions` | Optional list of at most 8 transitions; a document has at most 256 in all. |
 
 A tile's *terrain* is the terrain whose `protos` hold the tile's cell in the
 terrain layer. A tile that is empty there, holds another prototype, or lies
@@ -548,10 +548,13 @@ Patterns. A model turns the neighbours into a pattern, a sum of bits:
 | `corners` | NE 1, SE 2, SW 4, NW 8 | Each corner touches two sides and the diagonal between them. Inside, its bit is set when all three show *T*; outside, when any does. The 16 patterns of a corner (Wang or marching-squares) set. |
 | `blob` | N 1, NE 2, E 4, SE 8, S 16, SW 32, W 64, NW 128 | Side bits as in `sides`. Inside, a corner's bit is set when its diagonal and both its sides show *T*; outside, when its diagonal shows *T* and neither side does. 47 patterns each way; inside they are those of the common 47-tile blob set. |
 
-`tiles` may hold only patterns its model produces for its `draw`: an
-outside table never holds 0, which no outside transition draws, and a blob
-table holds a corner bit only with both its sides set (inside) or both
-clear (outside). A pattern the table does not list draws nothing.
+The counts include pattern 0, where no neighbour shows *T*, which an
+outside transition never draws. `tiles` may hold only patterns its model
+produces for its `draw`, and never 0 when the transition is outside: an
+inside table has at most 1 (`none`), 16 (`sides`, `corners`) or 47
+(`blob`) keys, an outside table at most 15 or 46, and a blob table holds a
+corner bit only with both its sides set (inside) or both clear (outside).
+A pattern the table does not list draws nothing.
 
 Resolution. The transitions of a document run in order: terrains in
 order, and each terrain's transitions in order. For each tile with a
@@ -571,7 +574,7 @@ Transitions read only the painted terrain, never another transition's
 tiles, so a tile's result does not depend on the order tiles are visited.
 An outside transition draws only next to its own terrain, so the
 transitions of a tile's terrain and of its neighbours' terrains are the
-only ones that can draw on it: at most 144, however many the document has.
+only ones that can draw on it: at most 72, however many the document has.
 
 Variants. A pattern's tile is picked by a hash of the tile's position,
 computed with 64-bit unsigned integers whose multiplications wrap:

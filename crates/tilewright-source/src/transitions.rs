@@ -28,7 +28,7 @@ pub const MAXIMUM_TERRAINS: usize = 1_024;
 pub const MAXIMUM_TERRAIN_PROTOS: usize = 1_024;
 
 /// Most transitions one terrain has.
-pub const MAXIMUM_TERRAIN_TRANSITIONS: usize = 16;
+pub const MAXIMUM_TERRAIN_TRANSITIONS: usize = 8;
 
 /// Most transitions a transitions document has in all.
 pub const MAXIMUM_TRANSITIONS: usize = 256;
@@ -367,6 +367,19 @@ impl Transitions {
     #[must_use]
     pub fn terrain_of(&self, proto: &str) -> Option<usize> {
         self.by_proto.get(proto).copied()
+    }
+
+    /// Every prototype a transition may draw, with repeats: what resolved
+    /// tiles can hold besides the source's own prototypes.
+    pub fn tile_protos(&self) -> impl Iterator<Item = &str> + '_ {
+        self.list.iter().flat_map(|transition| {
+            transition.tiles.values().flat_map(|pattern| {
+                pattern
+                    .variants
+                    .iter()
+                    .map(|variant| variant.proto.as_str())
+            })
+        })
     }
 
     /// The prototype a brush writes into the terrain layer to paint the

@@ -67,8 +67,10 @@ decode, without scanning any table. The chunk records are authoritative;
 
 `strings` interns every string that chunk records reference: prototype IDs,
 ground and zone palette values, field names, string field values, and portal
-plane and anchor IDs. IDs run from 1 in byte order of the values; 0 means
-"none" wherever an ID is optional.
+plane and anchor IDs. With terrain transitions (FORMAT.md section 13), it
+also interns every prototype the transitions name, whether or not a chunk
+draws it. IDs run from 1 in byte order of the values; 0 means "none"
+wherever an ID is optional.
 
 ## 2. Chunk encoding `twc1+zstd`
 
