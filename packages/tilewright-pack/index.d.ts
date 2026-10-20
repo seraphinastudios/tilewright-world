@@ -263,8 +263,8 @@ export function openPack(bytes: ArrayBufferView | ArrayBufferLike, options?: Ope
  *
  * Listings are iterators that read a page at a time, in key order: 64 rows,
  * or fewer once their keys and documents reach 1 MiB, so a walk over a
- * large table holds one page. A page is read when the iterator
- * reaches it, so closing the pack ends the walk with an error.
+ * large table holds one page. Closing the pack ends a walk: the next row
+ * it would yield throws instead.
  */
 export class Pack {
   private constructor();

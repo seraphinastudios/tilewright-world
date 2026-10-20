@@ -241,15 +241,16 @@ function usable() {
 }
 
 /**
- * Converts what the reader throws: a rejected pack becomes a `PackError`,
- * and a trap stops the module.
+ * Converts what the reader throws. A rejected pack becomes a `PackError`.
+ * Anything else stops the module: arguments are checked before they reach
+ * it, so only a trap or a failed host operation, such as growing its table
+ * of JavaScript values, can throw, and either leaves its state unknown.
  */
 function rethrown(error) {
-  if (error instanceof WebAssembly.RuntimeError) {
-    stop(error);
-  } else if (error instanceof Error && error.name === "PackError" && typeof error.code === "string") {
+  if (error instanceof Error && error.name === "PackError" && typeof error.code === "string") {
     return new PackError(error.code, error.message);
   }
+  stop(error);
   return error;
 }
 
@@ -314,15 +315,23 @@ export class Pack {
       }
       // The key is taken before the caller sees, and may change, the rows.
       after = keyOf(page[page.length - 1]);
-      yield* page;
+      for (const row of page) {
+        // Closing the pack ends the walk, even within a page read already.
+        this.#open();
+        yield row;
+      }
     }
   }
 
-  #call(read) {
+  #open() {
     if (this.#reader === undefined) {
       throw new Error("the pack is closed");
     }
     usable();
+  }
+
+  #call(read) {
+    this.#open();
     try {
       return read(this.#reader);
     } catch (error) {

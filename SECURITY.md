@@ -51,6 +51,7 @@ them once, after checking their length against the pack size limit, into a
 read-only database in WebAssembly memory, so later changes to the caller's
 buffer cannot reach the reader, and an expected digest binds to the copy it
 reads. Its JavaScript layer checks every argument's type and range before
-the reader sees it. If the module traps, for example on running out of
-memory, it refuses every later call rather than continue in an unknown
-state.
+the reader sees it. If a call into the module fails other than by
+rejecting a pack, as on a trap from running out of memory, it refuses every
+later call rather than continue in an unknown state, and frees nothing into
+it.

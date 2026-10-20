@@ -132,9 +132,11 @@ verifies has none.
 `pack.not_a_file`, and a pack too large for the module's memory fails with
 `pack.sqlite`. Invalid arguments throw `TypeError`.
 
-Running out of memory in the middle of a read traps the module: that call
-throws a `WebAssembly.RuntimeError`, and since the module's state is then
-unknown, every later call throws until the page or process loads it again.
+A call into the module that fails other than by rejecting a pack, such as
+a trap from running out of memory (a `WebAssembly.RuntimeError`) or a
+failed host operation, leaves the module's state unknown: that call throws
+the error, and every later call throws until the page or process loads the
+module again.
 Packs are not freed into the stopped module either, whether closed or
 collected. A module whose start traps while loading stops the same way;
 a download or compilation that fails can be tried again.

@@ -270,10 +270,15 @@ test("listings read a page at a time from the last key", async () => {
   }
   assert.deepEqual(changed, ["overworld", "vault"]);
   // A listing is lazy: nothing is read until it is iterated, and a pack
-  // closed meanwhile ends it with an error.
+  // closed meanwhile ends it with an error, even within a page read already.
   const planes = pack.planes();
   pack.close();
   assert.throws(() => planes.next(), /closed/);
+  const reopened = openPack(valid);
+  const walk = reopened.planes();
+  assert.equal(walk.next().value.id, "overworld");
+  reopened.close();
+  assert.throws(() => walk.next(), /closed/);
 });
 
 test("chunk reads keep to their budget of objects and fields", async () => {
