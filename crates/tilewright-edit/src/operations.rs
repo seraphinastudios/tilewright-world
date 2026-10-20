@@ -9,11 +9,13 @@ use crate::{
     splice::{self, Insertion, Layout, Step},
     terrain,
     transaction::{
-        Action, Content, Expected, ObjectAddress, Operation, Segment, Target, Tile, Transaction,
-        chunk_of,
+        Action, Content, Destination, Expected, ObjectAddress, Operation, Segment, Target, Tile,
+        Transaction, chunk_of,
     },
 };
+use std::collections::BTreeSet;
 use tilewright_jsonc::{Document, Limits, Span, Value};
+use tilewright_source::{CHUNK_SIZE, is_identifier};
 
 /// Failures of one operation, each at a span of the transaction.
 pub(crate) type Failures = Vec<(Span, Failure)>;
@@ -48,6 +50,26 @@ pub(crate) fn chunk_path(plane: &str, layer: i32, chunk: [i64; 2]) -> String {
         "planes/{plane}/layers/{layer}/{}_{}.jsonc",
         chunk[0], chunk[1]
     )
+}
+
+/// The plane, layer and chunk of a chunk path, if it is one: only the
+/// paths [`chunk_path`] gives for chunks a plane can hold.
+pub(crate) fn chunk_site(path: &str) -> Option<(String, i32, [i64; 2])> {
+    let rest = path.strip_prefix("planes/")?;
+    let (plane, rest) = rest.split_once('/')?;
+    let (layer, name) = rest.strip_prefix("layers/")?.split_once('/')?;
+    let (cx, cy) = name.strip_suffix(".jsonc")?.split_once('_')?;
+    let layer: i32 = layer.parse().ok()?;
+    let chunk: [i64; 2] = [cx.parse().ok()?, cy.parse().ok()?];
+    let size = i64::from(CHUNK_SIZE);
+    let held = chunk.iter().all(|coordinate| {
+        coordinate
+            .checked_mul(size)
+            .and_then(chunk_of)
+            .is_some_and(|(found, _)| found == *coordinate)
+    });
+    (held && is_identifier(plane) && chunk_path(plane, layer, chunk) == path)
+        .then(|| (plane.to_owned(), layer, chunk))
 }
 
 pub(crate) fn site(plane: &str, layer: i32, at: [i64; 2]) -> Site {
@@ -125,15 +147,38 @@ fn tile_name(tile: &Tile) -> String {
     )
 }
 
-/// The chunk path and array position of an addressed object.
-fn locate(workspace: &mut Workspace<'_>, address: &ObjectAddress) -> Outcome<(String, usize)> {
-    let tile = &address.tile;
+/// An addressed object: its chunk, the steps to it there, and, for an
+/// object on a tile rather than in an inventory, the tile and its index
+/// among the tile's objects.
+struct Located {
+    path: String,
+    pointer: Vec<Step>,
+    place: Option<(Tile, usize)>,
+}
+
+/// Finds an addressed object: by its place on a tile, or by its uid
+/// wherever it is now.
+fn locate(workspace: &mut Workspace<'_>, address: &ObjectAddress) -> Outcome<Located> {
+    let (tile, index) = match address {
+        ObjectAddress::Place { tile, index } => (tile, *index),
+        ObjectAddress::Uid(uid) => {
+            let (path, pointer) = workspace.find_uid(uid)?;
+            let place = match pointer.as_slice() {
+                [_, Step::Index(position)] => Some(place_of(workspace, &path, *position)?),
+                _ => None,
+            };
+            return Ok(Located {
+                path,
+                pointer,
+                place,
+            });
+        }
+    };
     let site = site(&tile.plane, tile.layer, tile.at);
     let missing = || {
         Failure::conflict(format!(
-            "{} has no object at index {}",
-            tile_name(tile),
-            address.index
+            "{} has no object at index {index}",
+            tile_name(tile)
         ))
     };
     if !workspace.exists(&site.path)? {
@@ -141,8 +186,65 @@ fn locate(workspace: &mut Workspace<'_>, address: &ObjectAddress) -> Outcome<(St
     }
     let document = workspace.document(&site.path)?;
     let (positions, _) = tile_objects(document, &site.path, site.local)?;
-    let position = *positions.get(address.index).ok_or_else(missing)?;
-    Ok((site.path, position))
+    let position = *positions.get(index).ok_or_else(missing)?;
+    Ok(Located {
+        path: site.path,
+        pointer: vec![Step::Key("objects".to_owned()), Step::Index(position)],
+        place: Some((tile.clone(), index)),
+    })
+}
+
+/// The tile of the object at `position` of the `objects` of the chunk at
+/// `path`, and the object's index among the tile's objects.
+fn place_of(workspace: &mut Workspace<'_>, path: &str, position: usize) -> Outcome<(Tile, usize)> {
+    let invalid = || {
+        Failure::conflict(format!(
+            "{path}: object {position} has no valid \"at\"; the chunk cannot be edited"
+        ))
+    };
+    // The uid index holds chunk paths only.
+    let (plane, layer, chunk) =
+        chunk_site(path).ok_or_else(|| Failure::conflict(format!("{path} is not a chunk")))?;
+    let document = workspace.document(path)?;
+    let at = document
+        .root()
+        .get("objects")
+        .and_then(Value::as_array)
+        .and_then(|objects| objects.get(position))
+        .and_then(|object| object.get("at"))
+        .and_then(Value::as_array);
+    let size = i64::from(CHUNK_SIZE);
+    let local = |value: &Value| {
+        value
+            .as_i64()
+            .filter(|local| (0..size).contains(local))
+            .and_then(|local| u16::try_from(local).ok())
+    };
+    let Some([Some(x), Some(y)]) = at.and_then(|at| match at {
+        [x, y] => Some([local(x), local(y)]),
+        _ => None,
+    }) else {
+        return Err(invalid());
+    };
+    let (positions, _) = tile_objects(document, path, [x, y])?;
+    let index = positions
+        .iter()
+        .position(|found| *found == position)
+        .ok_or_else(invalid)?;
+    // The chunk is one a plane can hold, so its tiles are in range.
+    let at = [
+        chunk[0] * size + i64::from(x),
+        chunk[1] * size + i64::from(y),
+    ];
+    Ok((Tile { plane, layer, at }, index))
+}
+
+/// How messages name an addressed object.
+fn object_name(address: &ObjectAddress) -> String {
+    match address {
+        ObjectAddress::Place { tile, index } => format!("object {index} on {}", tile_name(tile)),
+        ObjectAddress::Uid(uid) => format!("object {}", crate::diagnostic::quoted(uid)),
+    }
 }
 
 /// Checks an object against `expect`: every member it names is present
@@ -159,9 +261,8 @@ fn check_object(
         if !found.is_some_and(|value| equal(document, value, &transaction.document, &member.value))
         {
             return Err(Failure::conflict(format!(
-                "object {} on {} has {} {}, expected {}",
-                address.index,
-                tile_name(&address.tile),
+                "{} has {} {}, expected {}",
+                object_name(address),
                 crate::diagnostic::quoted(&member.key),
                 found.map_or_else(|| "absent".to_owned(), |value| shown(document, value)),
                 shown(&transaction.document, &member.value)
@@ -297,11 +398,16 @@ fn target(workspace: &mut Workspace<'_>, target: &Target) -> Outcome<(String, Ve
     match target {
         Target::Path(path) => Ok((path.clone(), Vec::new())),
         Target::Object(address) => {
-            let (path, position) = locate(workspace, address)?;
-            Ok((
-                path,
-                vec![Segment::Key("objects".to_owned()), Segment::Index(position)],
-            ))
+            let located = locate(workspace, address)?;
+            let prefix = located
+                .pointer
+                .into_iter()
+                .map(|step| match step {
+                    Step::Key(key) => Segment::Key(key),
+                    Step::Index(index) => Segment::Index(index),
+                })
+                .collect();
+            Ok((located.path, prefix))
         }
     }
 }
@@ -494,29 +600,29 @@ fn test_value(
     }
 }
 
-/// The addressed object, checked against `expect`: its chunk, its pointer
-/// and its exact text.
+/// The addressed object, checked against `expect`, and its exact text.
 fn expected_object(
     workspace: &mut Workspace<'_>,
     transaction: &Transaction,
     address: &ObjectAddress,
     expect: Span,
-) -> Outcome<(String, [Step; 2], String)> {
-    let (path, position) = locate(workspace, address)?;
-    let pointer = [Step::Key("objects".to_owned()), Step::Index(position)];
-    let document = workspace.document(&path)?;
-    let object = splice::find(document.root(), &pointer)
+) -> Outcome<(Located, String)> {
+    let located = locate(workspace, address)?;
+    let document = workspace.document(&located.path)?;
+    let object = splice::find(document.root(), &located.pointer)
         .ok_or_else(|| Failure::conflict("the object is missing"))?;
     check_object(document, object, transaction, expect, address)?;
     let text = document.text(object.span()).to_owned();
-    Ok((path, pointer, text))
+    Ok((located, text))
 }
 
-/// `object.insert`, `object.remove` and `object.move`.
+/// `object.insert`, `object.remove` and `object.move`. The chunks of the
+/// tiles they edit are added to `chunks`.
 fn object_operation(
     workspace: &mut Workspace<'_>,
     transaction: &Transaction,
     action: &Action,
+    chunks: &mut BTreeSet<String>,
 ) -> Outcome<()> {
     match action {
         Action::ObjectInsert {
@@ -524,42 +630,66 @@ fn object_operation(
             index,
             object,
         } => {
-            let local = site(&tile.plane, tile.layer, tile.at).local;
-            let object = with_tile(transaction.document.text(*object), local)?;
+            let site = site(&tile.plane, tile.layer, tile.at);
+            chunks.insert(site.path);
+            let object = with_tile(transaction.document.text(*object), site.local)?;
             insert_object(workspace, tile, *index, &object)
         }
         Action::ObjectRemove { address, expect } => {
-            let (path, pointer, _) = expected_object(workspace, transaction, address, *expect)?;
-            workspace.remove(&path, &pointer, None)
+            let (located, _) = expected_object(workspace, transaction, address, *expect)?;
+            chunks.insert(located.path.clone());
+            workspace.remove(&located.path, &located.pointer, None)
         }
         Action::ObjectMove {
             address,
             expect,
             to,
             index,
-        } => {
-            let (path, pointer, mut moved) =
-                expected_object(workspace, transaction, address, *expect)?;
-            // A move to where the object already is changes nothing, not even
-            // its separators.
-            if *to == address.tile {
-                let site = site(&to.plane, to.layer, to.at);
-                let document = workspace.document(&path)?;
-                let count = tile_objects(document, &path, site.local)?.0.len();
-                if index.unwrap_or(count - 1) == address.index {
-                    return Ok(());
-                }
-            }
-            workspace.remove(&path, &pointer, None)?;
-            let from = site(&address.tile.plane, address.tile.layer, address.tile.at).local;
-            let local = site(&to.plane, to.layer, to.at).local;
-            if local != from {
-                moved = with_tile(&moved, local)?;
-            }
-            insert_object(workspace, to, *index, &moved)
-        }
+        } => move_object(workspace, transaction, address, *expect, to, *index, chunks),
         _ => Ok(()),
     }
+}
+
+/// `object.move`: the destination's parts not given are the object's own.
+fn move_object(
+    workspace: &mut Workspace<'_>,
+    transaction: &Transaction,
+    address: &ObjectAddress,
+    expect: Span,
+    to: &Destination,
+    index: Option<usize>,
+    chunks: &mut BTreeSet<String>,
+) -> Outcome<()> {
+    let (located, mut moved) = expected_object(workspace, transaction, address, expect)?;
+    let Some((from, own_index)) = located.place else {
+        return Err(Failure::conflict(format!(
+            "{} is in an inventory; move it by removing it there and inserting it elsewhere",
+            object_name(address)
+        )));
+    };
+    let to = Tile {
+        plane: to.plane.clone().unwrap_or_else(|| from.plane.clone()),
+        layer: to.layer.unwrap_or(from.layer),
+        at: to.at.unwrap_or(from.at),
+    };
+    let source = site(&from.plane, from.layer, from.at);
+    let destination = site(&to.plane, to.layer, to.at);
+    chunks.insert(source.path.clone());
+    chunks.insert(destination.path.clone());
+    // A move to where the object already is changes nothing, not even its
+    // separators.
+    if to == from {
+        let document = workspace.document(&located.path)?;
+        let count = tile_objects(document, &located.path, source.local)?.0.len();
+        if index.unwrap_or(count - 1) == own_index {
+            return Ok(());
+        }
+    }
+    workspace.remove(&located.path, &located.pointer, None)?;
+    if destination.local != source.local {
+        moved = with_tile(&moved, destination.local)?;
+    }
+    insert_object(workspace, &to, index, &moved)
 }
 
 fn document_operation(
@@ -637,10 +767,10 @@ fn document_operation(
             let text = workspace.delete(path)?;
             workspace.create(to, text)
         }
-        Action::ObjectInsert { .. } | Action::ObjectRemove { .. } | Action::ObjectMove { .. } => {
-            object_operation(workspace, transaction, action)
-        }
-        Action::TerrainSet { .. } => Ok(()),
+        Action::ObjectInsert { .. }
+        | Action::ObjectRemove { .. }
+        | Action::ObjectMove { .. }
+        | Action::TerrainSet { .. } => Ok(()),
     }
 }
 
@@ -650,7 +780,7 @@ pub(crate) fn run(
     workspace: &mut Workspace<'_>,
     transaction: &Transaction,
     operation: &Operation,
-    chunks: &mut std::collections::BTreeSet<String>,
+    chunks: &mut BTreeSet<String>,
 ) -> Result<(), Failures> {
     let at = |failure| vec![(operation.span, failure)];
     match &operation.action {
@@ -667,23 +797,9 @@ pub(crate) fn run(
                     .collect()
             })
         }
-        action => {
-            match action {
-                Action::ObjectInsert { tile, .. } => {
-                    chunks.insert(site(&tile.plane, tile.layer, tile.at).path);
-                }
-                Action::ObjectRemove { address, .. } => {
-                    let tile = &address.tile;
-                    chunks.insert(site(&tile.plane, tile.layer, tile.at).path);
-                }
-                Action::ObjectMove { address, to, .. } => {
-                    let tile = &address.tile;
-                    chunks.insert(site(&tile.plane, tile.layer, tile.at).path);
-                    chunks.insert(site(&to.plane, to.layer, to.at).path);
-                }
-                _ => {}
-            }
-            document_operation(workspace, transaction, action).map_err(at)
+        Action::ObjectInsert { .. } | Action::ObjectRemove { .. } | Action::ObjectMove { .. } => {
+            object_operation(workspace, transaction, &operation.action, chunks).map_err(at)
         }
+        action => document_operation(workspace, transaction, action).map_err(at),
     }
 }
