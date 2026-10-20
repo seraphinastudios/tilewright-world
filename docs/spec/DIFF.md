@@ -46,7 +46,7 @@ baseline revision.
 | --- | --- | --- | --- |
 | `anchor` | `<plane>/<id>` | its plane | its `layer` and `at` |
 | `definition` | `<type>/<id>` | its type | its document without `id` |
-| `object` | `<uid>` | the world | its place: the plane, layer and chunk coordinates of its chunk, and its index in the chunk (FORMAT.md section 7) |
+| `object` | `<uid>` | the world | nothing: object uids pair only by a declared rename |
 | `plane` | `<id>` | the world | its document without `id` and `title`; the IDs and content of its zones, anchors and stairwells; and the addresses (layer and chunk coordinates) of its chunks, not their contents |
 | `render_layer` | `<name>` | the profile | its position in `render_layers` |
 | `stairwell` | `<plane>/<id>` | its plane | its entry without `id` |
@@ -60,10 +60,10 @@ matter, but member order and the spelling of numbers do. Display names
 
 An object's ID is its uid, which is unique in the world and names it
 wherever it is: an object that moves to another tile, chunk, plane or
-container keeps its ID, and is not reported. Its place is the content a
-rename compares, so a uid that changes while its object stays in place is
-a likely rename, and one that changes as its object moves is a removal and
-an addition.
+container keeps its ID, and is not reported. An object's place and content
+change freely while it keeps its uid, so neither shows that two uids name
+one object: a uid that changes is a removal and an addition, unless a
+`rename` entry declares it.
 
 These are not kinds of their own:
 
@@ -87,12 +87,12 @@ Pairs are found in this order:
    with its `to` when `from` was removed and `to` is an ID of the new world.
    `to` need not be new: renaming into an existing ID merges two IDs.
 2. **Same content.** Of the removed and added IDs left, a removed ID and an
-   added ID pair when they are the only removed and the only added ID with
-   the same kind, scope and content (section 2). The scope is the plane for
-   zones, anchors and stairwells, the type for definitions, and the world
-   for planes, render layers and objects. The zones, anchors and
-   stairwells of a renamed plane count as being in its new plane, so
-   planes are paired first.
+   added ID of a kind other than `object` pair when they are the only
+   removed and the only added ID with the same kind, scope and content
+   (section 2). The scope is the plane for zones, anchors and stairwells,
+   the type for definitions, and the world for planes and render layers.
+   The zones, anchors and stairwells of a renamed plane count as being in
+   its new plane, so planes are paired first.
 
 There is no other matching: IDs are never paired by similar names or
 similar content. A same-content pair is a likely rename, not a certain

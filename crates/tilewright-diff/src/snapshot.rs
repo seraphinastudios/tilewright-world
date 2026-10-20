@@ -84,16 +84,12 @@ impl Snapshot {
                 for (stairwell, entry) in &plane.stairwells {
                     builder.stairwell(id, stairwell, &entry.canonical)?;
                 }
-                for (&(layer, cx, cy), chunk) in &plane.chunks {
-                    builder.chunk(id, layer, cx, cy)?;
-                    // Depth-first order is a compiled record's, so an
-                    // object's index is the one its pack row holds.
-                    for (index, object) in chunk.depth_first().enumerate() {
-                        if let Some(uid) = &object.uid {
-                            builder.object(uid, id, layer, cx, cy, index)?;
-                        }
-                    }
+                for (layer, cx, cy) in plane.chunks.keys() {
+                    builder.chunk(id, *layer, *cx, *cy)?;
                 }
+            }
+            for (uid, location) in world.object_uids() {
+                builder.object(uid, &location.plane)?;
             }
             for ((kind, id), definition) in world.definitions() {
                 builder.definition(kind, id, &definition.canonical)?;
@@ -152,14 +148,7 @@ impl Snapshot {
                     cx,
                     cy,
                 } => builder.chunk(plane, layer, cx, cy),
-                Identity::Object {
-                    uid,
-                    plane,
-                    layer,
-                    cx,
-                    cy,
-                    index,
-                } => builder.object(uid, plane, layer, cx, cy, index),
+                Identity::Object { uid, plane, .. } => builder.object(uid, plane),
             }
             .map_err(tilewright_pack::Error::Invalid)
         });
@@ -320,29 +309,15 @@ impl Builder {
         self.insert(Kind::Definition, format!("{kind}/{id}"), fingerprint)
     }
 
-    /// An object stands in for its content with its place: its chunk's
-    /// plane, layer and coordinates, and its index in the chunk's
-    /// depth-first order.
-    fn object(
-        &mut self,
-        uid: &str,
-        plane: &str,
-        layer: i32,
-        cx: i64,
-        cy: i64,
-        index: usize,
-    ) -> Result<(), String> {
+    /// Object uids are never paired by content (see [`Kind::pairs_by_content`]),
+    /// so an object's fingerprint is the same for every object. Its plane is
+    /// kept, so that removing the plane can accept the removal of its uid.
+    fn object(&mut self, uid: &str, plane: &str) -> Result<(), String> {
         self.admit()?;
-        if !is_identifier(uid) {
-            return Err("an object uid is not an identifier".into());
+        if !is_identifier(uid) || !is_identifier(plane) {
+            return Err("an object uid or its plane is not an identifier".into());
         }
-        let mut content = String::from("{\"plane\":");
-        write_json_string(plane, &mut content);
-        let _ = write!(
-            content,
-            ",\"layer\":{layer},\"chunk\":[{cx},{cy}],\"index\":{index}}}"
-        );
-        self.insert(Kind::Object, uid.to_owned(), Sha256::digest(content).into())?;
+        self.insert(Kind::Object, uid.to_owned(), [0; 32])?;
         self.object_planes.insert(uid.to_owned(), plane.to_owned());
         Ok(())
     }

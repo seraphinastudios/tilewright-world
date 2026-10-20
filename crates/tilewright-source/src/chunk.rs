@@ -368,8 +368,10 @@ fn read_object<'a>(
         ],
     )?;
     // The uid is claimed before the object's inventory is read, so of two
-    // objects that share one, the first in document order keeps it.
-    let mut uid_ok = true;
+    // objects that share one, the first in document order keeps it. A
+    // problem with the uid or an inventory entry fails the object only once
+    // the rest of it, and every entry, has been checked.
+    let mut ok = true;
     let uid = match entry.get("uid") {
         Some(value) => {
             let uid = reader.identifier(value)?;
@@ -379,7 +381,7 @@ fn read_object<'a>(
                     Code::Duplicate,
                     format!("object uid \"{uid}\" is already used by an object in {first}"),
                 );
-                uid_ok = false;
+                ok = false;
             }
             Some(uid)
         }
@@ -463,11 +465,14 @@ fn read_object<'a>(
             return None;
         }
         for item in reader.array(items_value)? {
-            inventory.push(read_object(reader, context, item, depth + 1)?);
+            match read_object(reader, context, item, depth + 1) {
+                Some(object) => inventory.push(object),
+                None => ok = false,
+            }
         }
     }
     let custom = reader.custom(entry);
-    uid_ok.then_some(Object {
+    ok.then_some(Object {
         uid,
         at,
         proto,

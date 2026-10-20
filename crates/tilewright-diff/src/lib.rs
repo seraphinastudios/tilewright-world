@@ -119,6 +119,15 @@ impl Kind {
         Self::ALL.into_iter().find(|kind| kind.as_str() == text)
     }
 
+    /// Whether a removed and an added ID of this kind may pair as a rename
+    /// by having the same content. Object uids pair only by a declared
+    /// rename: an object's content and place change freely while it keeps
+    /// its uid, so neither shows that two uids name one object.
+    #[must_use]
+    pub const fn pairs_by_content(self) -> bool {
+        !matches!(self, Self::Object)
+    }
+
     /// Whether IDs of this kind belong to a plane and are written
     /// `<plane>/<id>`.
     #[must_use]

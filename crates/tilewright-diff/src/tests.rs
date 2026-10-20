@@ -179,8 +179,8 @@ fn with_extra(kind: Kind) -> (Copy, &'static str) {
 
 /// The fixture with one ID of `kind` renamed, every reference to it
 /// updated, and a display name changed where the kind has one; and the
-/// report line for it.
-fn with_renamed(kind: Kind) -> (Copy, &'static str) {
+/// report's lines for it.
+fn with_renamed(kind: Kind) -> (Copy, &'static [&'static str]) {
     let copy = Copy::new();
     match kind {
         Kind::Anchor => (
@@ -194,7 +194,7 @@ fn with_renamed(kind: Kind) -> (Copy, &'static str) {
                 "\"anchor\": \"village.well\"",
                 "\"anchor\": \"village.fountain\"",
             ),
-            "renamed anchor overworld/village.well -> overworld/village.fountain (same content)",
+            &["renamed anchor overworld/village.well -> overworld/village.fountain (same content)"],
         ),
         Kind::Definition => (
             copy.rename("defs/proto/tree.jsonc", "defs/proto/oak.jsonc")
@@ -208,11 +208,15 @@ fn with_renamed(kind: Kind) -> (Copy, &'static str) {
                     "\"proto\": \"tree\"",
                     "\"proto\": \"oak\"",
                 ),
-            "renamed definition proto/tree -> proto/oak (same content)",
+            &["renamed definition proto/tree -> proto/oak (same content)"],
         ),
         Kind::Object => (
             copy.edit(CHUNK, "\"ruin.north_wall\"", "\"ruin.wall.north\""),
-            "renamed object ruin.north_wall -> ruin.wall.north (same content)",
+            // Object uids pair only by a declared rename.
+            &[
+                "removed object ruin.north_wall",
+                "added object ruin.wall.north",
+            ],
         ),
         Kind::Plane => (
             copy.edit("world.jsonc", "\"vault\"]", "\"strongroom\"]")
@@ -232,7 +236,7 @@ fn with_renamed(kind: Kind) -> (Copy, &'static str) {
                     "\"plane\": \"vault\"",
                     "\"plane\": \"strongroom\"",
                 ),
-            "renamed plane vault -> strongroom (same content)",
+            &["renamed plane vault -> strongroom (same content)"],
         ),
         Kind::RenderLayer => (
             copy.edit(
@@ -245,7 +249,7 @@ fn with_renamed(kind: Kind) -> (Copy, &'static str) {
                 "\"living\", \"effect\"]",
                 "\"living\", \"effects\"]",
             ),
-            "renamed render_layer effect -> effects (same content)",
+            &["renamed render_layer effect -> effects (same content)"],
         ),
         Kind::Stairwell => (
             copy.edit(
@@ -253,7 +257,7 @@ fn with_renamed(kind: Kind) -> (Copy, &'static str) {
                 "\"id\": \"cave.chute\"",
                 "\"id\": \"cave.slide\"",
             ),
-            "renamed stairwell overworld/cave.chute -> overworld/cave.slide (same content)",
+            &["renamed stairwell overworld/cave.chute -> overworld/cave.slide (same content)"],
         ),
         Kind::Zone => (
             copy.edit(
@@ -271,7 +275,7 @@ fn with_renamed(kind: Kind) -> (Copy, &'static str) {
                 "\"v\": \"village\"",
                 "\"v\": \"hamlet\"",
             ),
-            "renamed zone overworld/village -> overworld/hamlet (same content)",
+            &["renamed zone overworld/village -> overworld/hamlet (same content)"],
         ),
     }
 }
@@ -342,10 +346,10 @@ fn each_kind_reports_removed_added_and_renamed_ids() {
         assert_eq!(diff(&extra_pack, &old, &none).to_text(), report.to_text());
         assert_eq!(diff(&extra, &old_pack, &none).to_text(), report.to_text());
 
-        let (renamed, line) = with_renamed(kind);
+        let (renamed, expected) = with_renamed(kind);
         let (renamed, renamed_pack) = (renamed.source(), renamed.pack());
         let report = diff(&old, &renamed, &none);
-        assert_eq!(lines(&report), [line], "{kind}");
+        assert_eq!(lines(&report), expected, "{kind}");
         assert!(report.breaking());
         assert_eq!(report.not_allowed(), 1);
         assert_eq!(diff(&old, &renamed_pack, &none).to_text(), report.to_text());
@@ -992,6 +996,22 @@ fn object_uids_follow_their_objects() {
         ["renamed object vault.chest -> vault.box (declared, allowed)"]
     );
     assert!(!report.breaking());
+
+    // Uids are never paired by content: one that changes, in place or as
+    // its object moves to another tile, is a removal and an addition.
+    for to in [
+        "\"uid\": \"ruin.wall\", \"at\": [15, 0]",
+        "\"uid\": \"ruin.wall\", \"at\": [16, 0]",
+    ] {
+        let changed = Copy::new().edit(CHUNK, "\"uid\": \"ruin.north_wall\", \"at\": [15, 0]", to);
+        for new in [changed.source(), changed.pack()] {
+            assert_eq!(
+                lines(&diff(&old, &new, &none)),
+                ["removed object ruin.north_wall", "added object ruin.wall"],
+                "{to}"
+            );
+        }
+    }
 
     // Unknown kinds are told every kind, objects included.
     let error = Allowlist::parse(

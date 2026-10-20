@@ -1791,6 +1791,40 @@ fn duplicate_object_uids_are_reported_where_they_repeat() {
         .unwrap()
         + 1;
     assert_eq!(found, [("ref.duplicate", CHUNK.to_owned(), line)]);
+
+    // Every repeat in one inventory is reported, as is a problem in an
+    // entry after them.
+    let copy = workspace();
+    edit(
+        copy.path(),
+        CHUNK,
+        "{\"proto\": \"coin\", \"fields\": {\"count\": 3}},",
+        "{\"uid\": \"ruin.north_wall\", \"proto\": \"coin\"}, {\"uid\": \"village.chest\", \"proto\": \"coin\"}, {\"proto\": \"missing\"},",
+    );
+    let found: Vec<_> = load(copy.path())
+        .expect_err("uids repeat")
+        .into_iter()
+        .map(|diagnostic| (diagnostic.code, diagnostic.path, diagnostic.message))
+        .collect();
+    let repeat = |uid: &str| {
+        (
+            "ref.duplicate",
+            CHUNK.to_owned(),
+            format!("object uid \"{uid}\" is already used by an object in {CHUNK}"),
+        )
+    };
+    assert_eq!(
+        found,
+        [
+            repeat("ruin.north_wall"),
+            repeat("village.chest"),
+            (
+                "ref.unresolved",
+                CHUNK.to_owned(),
+                "no proto definition \"missing\"".to_owned()
+            ),
+        ]
+    );
 }
 
 #[test]
