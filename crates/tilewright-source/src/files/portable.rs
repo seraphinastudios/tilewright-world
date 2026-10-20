@@ -82,6 +82,11 @@ impl Root {
         let mut current = self.base()?;
         let mut metadata = fs::metadata(&current).map_err(refused)?;
         for (index, component) in components.iter().enumerate() {
+            // Beneath a file there is nothing, which Windows reports as a
+            // missing path rather than as a file in the way.
+            if !metadata.is_dir() {
+                return Err(Refused::Unexpected);
+            }
             current.push(component);
             metadata = fs::symlink_metadata(&current).map_err(refused)?;
             if is_link(&metadata) {
