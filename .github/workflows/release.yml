@@ -121,7 +121,7 @@ jobs:
           # run failed in between, finish that release before any newer one,
           # which would otherwise count from a tag that has no release.
           previous=$(jq -r '.previous_tag // empty' "${plan}")
-          if [[ -n ${previous} ]] && ! gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${previous}" >/dev/null; then
+          if [[ -n ${previous} ]] && [[ $(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${previous}" --jq .draft || true) != false ]]; then
             echo "::error::${previous}, the latest release tag on ${BRANCH}, has no published release. Re-run the failed jobs of the run that created it first; see docs/RELEASING.md."
             exit 1
           fi
@@ -444,10 +444,18 @@ jobs:
               GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth}" \
               git push --atomic origin "${missing[@]}"
           fi
-          if gh api "repos/${GH_REPO}/releases/tags/${TAG}" >/dev/null 2>&1; then
+          if [[ $(gh api "repos/${GH_REPO}/releases/tags/${TAG}" --jq .draft 2>/dev/null || true) == false ]]; then
             echo "::notice::${TAG} is already published; checking it"
             echo "published=true" >>"${GITHUB_OUTPUT}"
           else
+            # A failed attempt may have left a draft for the tag; drafts are
+            # private and mutable, and the release is created afresh.
+            gh api --paginate "repos/${GH_REPO}/releases" \
+              | jq -r --arg tag "${TAG}" '.[] | select(.draft and .tag_name == $tag) | .id' \
+              | while read -r draft; do
+                  echo "::notice::deleting draft release ${draft} left for ${TAG}"
+                  gh api --method DELETE "repos/${GH_REPO}/releases/${draft}"
+                done
             echo "published=false" >>"${GITHUB_OUTPUT}"
           fi
 

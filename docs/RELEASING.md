@@ -230,7 +230,10 @@ To turn it on:
    reviewers as well if each publication should wait for approval.
 4. In the package's settings on npmjs.com, add a trusted publisher:
    GitHub Actions, organization `seraphinastudios`, repository
-   `tilewright-world`, workflow `release.yml`, environment `npm`.
+   `tilewright-world`, workflow `release.yml`, environment `npm`. Under
+   "Allowed actions", allow `npm publish`. The job publishes directly, and
+   configurations created after 3 September 2026 allow only
+   `npm stage publish` unless direct publishing is selected.
 5. Set the repository variable `TILEWRIGHT_NPM_PUBLISH` to `true`.
 
 From then on, each release from `main` is published to npm with the
@@ -264,8 +267,9 @@ source releases (its `docs/CRATE-RELEASE.md`):
   Fix the cause. The next merge releases everything since the last
   release, or re-run the failed jobs.
 - **"Publish the GitHub release" failed before publishing**: the tags may
-  exist, but the release does not. Delete any draft release left behind, then
-  re-run the failed jobs within 30 days, while the run's artifacts last.
+  exist, and a draft release may be left, but nothing is published. Re-run
+  the failed jobs within 30 days, while the run's artifacts last. The re-run
+  deletes drafts left for the tag and publishes the release afresh.
   The re-run accepts tags the failed attempt created at the same commit.
   The ruleset keeps such tags from being deleted, so the plan job of every
   later run on that branch stops until that release is published.
