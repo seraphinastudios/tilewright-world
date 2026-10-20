@@ -1691,6 +1691,21 @@ fn verification_caps_stairwells_per_plane() {
     assert!(error.to_string().contains("more stairwells"), "{error}");
 }
 
+#[test]
+fn verification_caps_zones_per_plane() {
+    // 250,001 root zones in one plane: more than its one source document
+    // holds, so the plane's parent chains are not followed.
+    let (_directory, copy) = tampered(
+        "zones.twpack",
+        "DELETE FROM zones WHERE plane = 'vault'; \
+         WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 250001) \
+         INSERT INTO zones SELECT 'vault', 'z' || i, NULL, '{\"id\":\"z' || i || '\"}' FROM n;",
+    );
+    let error = Pack::open(&copy).unwrap().verify().unwrap_err();
+    assert_eq!(error.code(), super::ErrorCode::Zone);
+    assert!(error.to_string().contains("more zones"), "{error}");
+}
+
 /// The uids of the fixture, with the plane, layer, chunk position and
 /// depth-first index of each object, in uid order.
 const FIXTURE_UIDS: [(&str, &str, i32, i64, i64, i64); 5] = [
@@ -1898,6 +1913,7 @@ fn verification_checks_object_uids_against_the_records() {
         let (_directory, copy) = tampered(name, sql);
         let error = Pack::open(&copy).unwrap().verify().unwrap_err();
         assert!(error.to_string().contains(problem), "{name}: {error}");
+        assert_eq!(error.code(), super::ErrorCode::ObjectUid, "{name}");
     }
 
     // A uid used twice in the records: across planes, and in one chunk.
@@ -1949,6 +1965,7 @@ fn single_uid_reads_check_bounds_and_agreement() {
             error.to_string().contains("out of range"),
             "{name}: {error}"
         );
+        assert_eq!(error.code(), super::ErrorCode::ObjectUid, "{name}");
         assert!(pack.object("village.chest").is_err(), "{name}");
         // Other rows still read.
         assert!(pack.object("vault.chest").unwrap().is_some(), "{name}");
@@ -1975,6 +1992,7 @@ fn single_uid_reads_check_bounds_and_agreement() {
             error.to_string().contains("does not name an object"),
             "{name}: {error}"
         );
+        assert_eq!(error.code(), super::ErrorCode::ObjectUid, "{name}");
     }
 }
 

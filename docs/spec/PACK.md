@@ -201,7 +201,10 @@ A full verification also:
   values, and every string is UTF-8 text of at most 1 MiB without NUL;
 - checks that plane, zone, anchor, stairwell and definition keys are
   identifiers; plane kinds, and a chunk size of 32 as format 1 requires; zone
-  planes, parents and that parent chains end at a root; anchor planes, layers
+  planes, parents and that parent chains end at a root, following one
+  plane's chains at a time after checking that the plane has at most
+  250,000 zones, the array limit of the one source document that holds
+  them; anchor planes, layers
   and positions; stairwell planes; that every
   `stairwell_steps` row names a stairwell of its plane and a `proto`
   definition, with a 32-bit layer, a position within ±9,007,199,254,740,991
@@ -244,3 +247,43 @@ A full verification also:
   objects with uids. Each such object costs one primary-key lookup. Two
   objects with one uid would need its one row to name both, so this also
   checks that uids are unique in the pack.
+
+## 4. Error codes
+
+Readers report why they reject a pack with one of these stable codes. The
+conformance fixtures in `fixtures/packs` pin the code each broken pack
+fails with, and every reader in this repository runs them.
+
+| Code | Meaning |
+| --- | --- |
+| `pack.io` | The file could not be read. |
+| `pack.sqlite` | SQLite failed, for example on a file that is not a database. |
+| `pack.not_a_file` | The path is not a regular file. |
+| `pack.too_large` | The file is longer than the pack-size limit. |
+| `pack.file_length` | The file is not exactly its pages. |
+| `pack.schema` | The schema is not exactly section 1. |
+| `pack.identity` | The `application_id`, `user_version` or page size is not the format's. |
+| `pack.free_pages` | The pack has free pages. |
+| `pack.meta` | `meta` does not hold exactly the keys and values of section 1. |
+| `pack.profile` | The stored profile is invalid or disagrees with `meta`. |
+| `pack.string` | A string is not UTF-8 text of at most 1 MiB without NUL. |
+| `pack.string_ids` | String IDs are not `1..=count` in byte order of their values. |
+| `pack.plane` | A plane row or document is invalid. |
+| `pack.zone` | A zone row or document is invalid, or zone parents form a cycle. |
+| `pack.anchor` | An anchor row is invalid. |
+| `pack.stairwell` | A stairwell row or document is invalid or disagrees with its steps. |
+| `pack.stairwell_step` | A `stairwell_steps` row is invalid or listed by no stairwell. |
+| `pack.definition` | A definition row or document is invalid. |
+| `pack.chunk` | A chunk row's key is invalid, or its record disagrees with its plane or the profile. |
+| `pack.chunk_encoding` | A chunk's `encoding` is not `twc1+zstd`. |
+| `pack.chunk_data` | A chunk's `data` is not a blob within the bound of section 2. |
+| `pack.chunk_record` | A chunk's data is not a valid `twc1+zstd` record. |
+| `pack.reference` | A chunk record names a target that does not exist or is out of range. |
+| `pack.object_uid` | An `object_uids` row is invalid, or the table does not index exactly the uids of the chunk records. |
+| `pack.integrity` | SQLite's integrity check failed. |
+| `pack.digest` | The file's SHA-256 does not match its name. |
+| `pack.decode_budget` | The chunks decode to more than the verification budget. |
+
+Text that is not UTF-8 in a value a reader loads gets the code of that
+value's rule, not `pack.sqlite`. A pack that breaks several rules may be
+reported with the code of any of them; each fixture breaks one.

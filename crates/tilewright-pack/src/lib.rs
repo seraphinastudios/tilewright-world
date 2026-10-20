@@ -147,12 +147,170 @@ pub(crate) static SCHEMA: std::sync::LazyLock<String> = std::sync::LazyLock::new
         .join("\n")
 });
 
+/// Stable codes for why a pack failed to open, read or verify, one per rule
+/// of `docs/spec/PACK.md` section 3. The Go reader reports the same codes,
+/// and the conformance fixtures in `fixtures/packs` pin them.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
+pub enum ErrorCode {
+    /// The file could not be read.
+    Io,
+    /// SQLite failed, for example on a file that is not a database.
+    Sqlite,
+    /// The path is not a regular file.
+    NotAFile,
+    /// The file is longer than the pack size limit.
+    TooLarge,
+    /// The file is not exactly its pages.
+    FileLength,
+    /// The schema is not exactly the format's.
+    Schema,
+    /// The application ID, user version or page size is not the format's.
+    Identity,
+    /// The pack has free pages.
+    FreePages,
+    /// `meta` does not hold exactly the format's keys and values.
+    Meta,
+    /// The stored profile is invalid or disagrees with `meta`.
+    Profile,
+    /// A string is not UTF-8 text of at most 1 MiB without NUL.
+    String,
+    /// String IDs are not `1..=count` in byte order of their values.
+    StringIds,
+    /// A plane row or document is invalid.
+    Plane,
+    /// A zone row or document is invalid, or zone parents form a cycle.
+    Zone,
+    /// An anchor row is invalid.
+    Anchor,
+    /// A stairwell row or document is invalid or disagrees with its steps.
+    Stairwell,
+    /// A `stairwell_steps` row is invalid or listed by no stairwell.
+    StairwellStep,
+    /// A definition row or document is invalid.
+    Definition,
+    /// A chunk row's key is invalid, or its record disagrees with its plane
+    /// or the profile.
+    Chunk,
+    /// A chunk's `encoding` is not `twc1+zstd`.
+    ChunkEncoding,
+    /// A chunk's `data` is not a blob within the encoding's bound.
+    ChunkData,
+    /// A chunk's data is not a valid `twc1+zstd` record.
+    ChunkRecord,
+    /// A chunk record names a target that does not exist or is out of range.
+    Reference,
+    /// An `object_uids` row is invalid, or the table does not index exactly
+    /// the uids of the chunk records.
+    ObjectUid,
+    /// SQLite's integrity check failed.
+    Integrity,
+    /// The file's SHA-256 does not match its name.
+    Digest,
+    /// The chunks decode to more than the verification budget.
+    DecodeBudget,
+    /// The compiler cannot encode a world.
+    Invalid,
+}
+
+impl ErrorCode {
+    /// Every code, in declaration order.
+    pub const ALL: [Self; 28] = [
+        Self::Io,
+        Self::Sqlite,
+        Self::NotAFile,
+        Self::TooLarge,
+        Self::FileLength,
+        Self::Schema,
+        Self::Identity,
+        Self::FreePages,
+        Self::Meta,
+        Self::Profile,
+        Self::String,
+        Self::StringIds,
+        Self::Plane,
+        Self::Zone,
+        Self::Anchor,
+        Self::Stairwell,
+        Self::StairwellStep,
+        Self::Definition,
+        Self::Chunk,
+        Self::ChunkEncoding,
+        Self::ChunkData,
+        Self::ChunkRecord,
+        Self::Reference,
+        Self::ObjectUid,
+        Self::Integrity,
+        Self::Digest,
+        Self::DecodeBudget,
+        Self::Invalid,
+    ];
+
+    /// The stable string form, such as `pack.free_pages`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Io => "pack.io",
+            Self::Sqlite => "pack.sqlite",
+            Self::NotAFile => "pack.not_a_file",
+            Self::TooLarge => "pack.too_large",
+            Self::FileLength => "pack.file_length",
+            Self::Schema => "pack.schema",
+            Self::Identity => "pack.identity",
+            Self::FreePages => "pack.free_pages",
+            Self::Meta => "pack.meta",
+            Self::Profile => "pack.profile",
+            Self::String => "pack.string",
+            Self::StringIds => "pack.string_ids",
+            Self::Plane => "pack.plane",
+            Self::Zone => "pack.zone",
+            Self::Anchor => "pack.anchor",
+            Self::Stairwell => "pack.stairwell",
+            Self::StairwellStep => "pack.stairwell_step",
+            Self::Definition => "pack.definition",
+            Self::Chunk => "pack.chunk",
+            Self::ChunkEncoding => "pack.chunk_encoding",
+            Self::ChunkData => "pack.chunk_data",
+            Self::ChunkRecord => "pack.chunk_record",
+            Self::Reference => "pack.reference",
+            Self::ObjectUid => "pack.object_uid",
+            Self::Integrity => "pack.integrity",
+            Self::Digest => "pack.digest",
+            Self::DecodeBudget => "pack.decode_budget",
+            Self::Invalid => "pack.invalid",
+        }
+    }
+}
+
+impl fmt::Display for ErrorCode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug)]
 pub enum Error {
     Io(std::io::Error),
     Sqlite(rusqlite::Error),
     Chunk(DecodeError),
+    /// A pack the reader rejects, with the code of the rule it breaks.
+    Rejected(ErrorCode, String),
+    /// A world the compiler cannot encode.
     Invalid(String),
+}
+
+impl Error {
+    /// The stable code of this error.
+    #[must_use]
+    pub const fn code(&self) -> ErrorCode {
+        match self {
+            Self::Io(_) => ErrorCode::Io,
+            Self::Sqlite(_) => ErrorCode::Sqlite,
+            Self::Chunk(_) => ErrorCode::ChunkRecord,
+            Self::Rejected(code, _) => *code,
+            Self::Invalid(_) => ErrorCode::Invalid,
+        }
+    }
 }
 
 impl fmt::Display for Error {
@@ -161,7 +319,7 @@ impl fmt::Display for Error {
             Self::Io(error) => write!(formatter, "I/O error: {error}"),
             Self::Sqlite(error) => write!(formatter, "SQLite error: {error}"),
             Self::Chunk(error) => error.fmt(formatter),
-            Self::Invalid(message) => formatter.write_str(message),
+            Self::Rejected(_, message) | Self::Invalid(message) => formatter.write_str(message),
         }
     }
 }

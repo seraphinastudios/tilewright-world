@@ -7,9 +7,9 @@
 
 use super::{
     bounded_identifier, bounded_text, maximum_document_bytes, stored_document, stored_stairwell,
-    text,
+    text, utf8_column,
 };
-use crate::{Error, MAXIMUM_OBJECT_INDEX, Pack, is_identifier};
+use crate::{Error, ErrorCode, MAXIMUM_OBJECT_INDEX, Pack, is_identifier};
 use rusqlite::Row;
 use tilewright_jsonc::{Document, MAX_SAFE_INTEGER, Value};
 use tilewright_source::CHUNK_SIZE;
@@ -75,54 +75,60 @@ fn integer(column: &str) -> String {
 }
 
 /// The identifier in column `index` of a row selected with
-/// [`bounded_identifier`].
-fn identifier(row: &Row<'_>, index: usize, what: &str) -> Result<String, Error> {
-    let value: Option<String> = row.get(index)?;
-    value
+/// [`bounded_identifier`]; `code` is the rule a bad one breaks.
+fn identifier(row: &Row<'_>, index: usize, what: &str, code: ErrorCode) -> Result<String, Error> {
+    utf8_column(row, index, code)?
         .filter(|value| is_identifier(value))
-        .ok_or_else(|| Error::Invalid(format!("a {what} key is not an identifier")))
+        .ok_or_else(|| Error::Rejected(code, format!("a {what} key is not an identifier")))
 }
 
 /// The 32-bit layer in column `index` of a row selected with [`integer`].
-fn layer(row: &Row<'_>, index: usize, what: &str) -> Result<i32, Error> {
+fn layer(row: &Row<'_>, index: usize, what: &str, code: ErrorCode) -> Result<i32, Error> {
     let value: Option<i64> = row.get(index)?;
     value
         .and_then(|layer| i32::try_from(layer).ok())
-        .ok_or_else(|| Error::Invalid(format!("a {what} layer is not a 32-bit integer")))
+        .ok_or_else(|| Error::Rejected(code, format!("a {what} layer is not a 32-bit integer")))
 }
 
 /// The integer in column `index` of a row selected with [`integer`], within
 /// the source format's integer range.
-fn position(row: &Row<'_>, index: usize, what: &str) -> Result<i64, Error> {
+fn position(row: &Row<'_>, index: usize, what: &str, code: ErrorCode) -> Result<i64, Error> {
     let value: Option<i64> = row.get(index)?;
     value
         .filter(|value| (-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER).contains(value))
         .ok_or_else(|| {
-            Error::Invalid(format!(
-                "a {what} position is not an integer within ±{MAX_SAFE_INTEGER}"
-            ))
+            Error::Rejected(
+                code,
+                format!("a {what} position is not an integer within ±{MAX_SAFE_INTEGER}"),
+            )
         })
 }
 
 /// The chunk coordinate in column `index` of a row selected with
 /// [`integer`]: one whose chunk, `CHUNK_SIZE` tiles across as format 1
 /// requires, keeps every tile within the format's integer range.
-fn chunk_coordinate(row: &Row<'_>, index: usize) -> Result<i64, Error> {
+fn chunk_coordinate(row: &Row<'_>, index: usize, code: ErrorCode) -> Result<i64, Error> {
     let size = i64::from(CHUNK_SIZE);
     let range = -(MAX_SAFE_INTEGER / size)..=(MAX_SAFE_INTEGER - (size - 1)) / size;
     let value: Option<i64> = row.get(index)?;
     value.filter(|value| range.contains(value)).ok_or_else(|| {
-        Error::Invalid(format!(
-            "a chunk coordinate is not an integer from {} to {}",
-            range.start(),
-            range.end()
-        ))
+        Error::Rejected(
+            code,
+            format!(
+                "a chunk coordinate is not an integer from {} to {}",
+                range.start(),
+                range.end()
+            ),
+        )
     })
 }
 
 /// The error for a stored document that disagrees with its row.
-fn disagrees(what: &str) -> Error {
-    Error::Invalid(format!("the document of {what} disagrees with its row"))
+fn disagrees(what: &str, code: ErrorCode) -> Error {
+    Error::Rejected(
+        code,
+        format!("the document of {what} disagrees with its row"),
+    )
 }
 
 /// A row of `planes` selected as `id, kind, chunk_size, document`, and its
@@ -130,25 +136,30 @@ fn disagrees(what: &str) -> Error {
 /// defines, the chunk size is [`CHUNK_SIZE`], and the document agrees with
 /// the row on its format, ID, kind and chunk size.
 fn plane_row(row: &Row<'_>) -> Result<(String, Document), Error> {
-    let id = identifier(row, 0, "plane")?;
-    let kind: Option<String> = row.get(1)?;
+    let id = identifier(row, 0, "plane", ErrorCode::Plane)?;
+    let kind = utf8_column(row, 1, ErrorCode::Plane)?;
     let chunk_size: Option<i64> = row.get(2)?;
-    let stored = stored_document(row.get(3)?, "a plane document")?;
+    let stored = stored_document(
+        utf8_column(row, 3, ErrorCode::Plane)?,
+        "a plane document",
+        ErrorCode::Plane,
+    )?;
     if !kind
         .as_deref()
         .is_some_and(|kind| ["shared", "instanced", "per_player"].contains(&kind))
         || chunk_size != Some(i64::from(CHUNK_SIZE))
     {
-        return Err(Error::Invalid(format!(
-            "plane {id} has an invalid kind or a chunk size other than {CHUNK_SIZE}"
-        )));
+        return Err(Error::Rejected(
+            ErrorCode::Plane,
+            format!("plane {id} has an invalid kind or a chunk size other than {CHUNK_SIZE}"),
+        ));
     }
     if text(&stored, "format") != Some("tilewright.plane/1")
         || text(&stored, "id") != Some(&id)
         || text(&stored, "kind") != kind.as_deref()
         || stored.root().get("chunk_size").and_then(Value::as_i64) != chunk_size
     {
-        return Err(disagrees(&format!("plane {id}")));
+        return Err(disagrees(&format!("plane {id}"), ErrorCode::Plane));
     }
     Ok((id, stored))
 }
@@ -157,17 +168,24 @@ fn plane_row(row: &Row<'_>) -> Result<(String, Document), Error> {
 /// document`, and its stored document, which agrees with the row on its ID
 /// and parent, as verification checks.
 fn zone_row(row: &Row<'_>) -> Result<(String, String, Document), Error> {
-    let (plane, id) = (identifier(row, 0, "zone")?, identifier(row, 1, "zone")?);
+    let (plane, id) = (
+        identifier(row, 0, "zone", ErrorCode::Zone)?,
+        identifier(row, 1, "zone", ErrorCode::Zone)?,
+    );
     let parent = if row.get::<_, bool>(2)? {
         None
     } else {
-        Some(identifier(row, 3, "zone parent")?)
+        Some(identifier(row, 3, "zone parent", ErrorCode::Zone)?)
     };
-    let stored = stored_document(row.get(4)?, "a zone document")?;
+    let stored = stored_document(
+        utf8_column(row, 4, ErrorCode::Zone)?,
+        "a zone document",
+        ErrorCode::Zone,
+    )?;
     if text(&stored, "id") != Some(&id)
         || stored.root().get("parent").map(Value::as_str) != parent.as_deref().map(Some)
     {
-        return Err(disagrees(&format!("zone {plane}/{id}")));
+        return Err(disagrees(&format!("zone {plane}/{id}"), ErrorCode::Zone));
     }
     Ok((plane, id, stored))
 }
@@ -233,22 +251,7 @@ impl Pack {
         let document = bounded_text("document");
         let key = bounded_identifier;
 
-        // The whole profile is checked, so its render layers are 1 to
-        // 65,534 unique identifiers.
-        self.profile_layers()?;
-        let profile = stored_document(self.meta("profile")?, "the stored profile")?;
-        let layers = profile
-            .root()
-            .get("render_layers")
-            .and_then(Value::as_array)
-            .ok_or_else(|| Error::Invalid("the stored profile lists no render layers".into()))?;
-        for (position, layer) in layers.iter().enumerate() {
-            let name = layer
-                .as_str()
-                .ok_or_else(|| Error::Invalid("a render layer is not a string".into()))?;
-            visit(Identity::RenderLayer { name, position })?;
-        }
-        drop(profile);
+        self.visit_render_layers(visit)?;
 
         self.each_row(
             &format!(
@@ -289,13 +292,19 @@ impl Pack {
             ),
             &mut |row| {
                 let (plane, id) = (
-                    identifier(row, 0, "stairwell")?,
-                    identifier(row, 1, "stairwell")?,
+                    identifier(row, 0, "stairwell", ErrorCode::Stairwell)?,
+                    identifier(row, 1, "stairwell", ErrorCode::Stairwell)?,
                 );
-                let stairwell =
-                    stored_stairwell(&stored_document(row.get(2)?, "a stairwell document")?)?;
+                let stairwell = stored_stairwell(&stored_document(
+                    utf8_column(row, 2, ErrorCode::Stairwell)?,
+                    "a stairwell document",
+                    ErrorCode::Stairwell,
+                )?)?;
                 if stairwell.id != id {
-                    return Err(disagrees(&format!("stairwell {plane}/{id}")));
+                    return Err(disagrees(
+                        &format!("stairwell {plane}/{id}"),
+                        ErrorCode::Stairwell,
+                    ));
                 }
                 visit(Identity::Stairwell {
                     plane: &plane,
@@ -312,15 +321,22 @@ impl Pack {
             ),
             &mut |row| {
                 let (kind, id) = (
-                    identifier(row, 0, "definition")?,
-                    identifier(row, 1, "definition")?,
+                    identifier(row, 0, "definition", ErrorCode::Definition)?,
+                    identifier(row, 1, "definition", ErrorCode::Definition)?,
                 );
-                let stored = stored_document(row.get(2)?, "a definition document")?;
+                let stored = stored_document(
+                    utf8_column(row, 2, ErrorCode::Definition)?,
+                    "a definition document",
+                    ErrorCode::Definition,
+                )?;
                 if text(&stored, "format") != Some("tilewright.def/1")
                     || text(&stored, "type") != Some(&kind)
                     || text(&stored, "id") != Some(&id)
                 {
-                    return Err(disagrees(&format!("definition {kind}/{id}")));
+                    return Err(disagrees(
+                        &format!("definition {kind}/{id}"),
+                        ErrorCode::Definition,
+                    ));
                 }
                 visit(Identity::Definition {
                     kind: &kind,
@@ -330,6 +346,38 @@ impl Pack {
             },
         )?;
         self.visit_positions(visit)
+    }
+
+    /// The render layers of [`Pack::visit_rows`], in the profile's order.
+    fn visit_render_layers(
+        &self,
+        visit: &mut dyn FnMut(Identity<'_>) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        // The whole profile is checked, so its render layers are 1 to
+        // 65,534 unique identifiers.
+        self.profile_layers()?;
+        let profile = stored_document(
+            self.meta("profile")?,
+            "the stored profile",
+            ErrorCode::Profile,
+        )?;
+        let layers = profile
+            .root()
+            .get("render_layers")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                Error::Rejected(
+                    ErrorCode::Profile,
+                    "the stored profile lists no render layers".into(),
+                )
+            })?;
+        for (position, layer) in layers.iter().enumerate() {
+            let name = layer.as_str().ok_or_else(|| {
+                Error::Rejected(ErrorCode::Profile, "a render layer is not a string".into())
+            })?;
+            visit(Identity::RenderLayer { name, position })?;
+        }
+        Ok(())
     }
 
     /// The anchors, chunk addresses and object uids of [`Pack::visit_rows`].
@@ -348,11 +396,15 @@ impl Pack {
                 integer("y")
             ),
             &mut |row| {
+                let code = ErrorCode::Anchor;
                 visit(Identity::Anchor {
-                    plane: &identifier(row, 0, "anchor")?,
-                    id: &identifier(row, 1, "anchor")?,
-                    layer: layer(row, 2, "anchor")?,
-                    at: [position(row, 3, "anchor")?, position(row, 4, "anchor")?],
+                    plane: &identifier(row, 0, "anchor", code)?,
+                    id: &identifier(row, 1, "anchor", code)?,
+                    layer: layer(row, 2, "anchor", code)?,
+                    at: [
+                        position(row, 3, "anchor", code)?,
+                        position(row, 4, "anchor", code)?,
+                    ],
                 })
             },
         )?;
@@ -366,10 +418,10 @@ impl Pack {
             ),
             &mut |row| {
                 visit(Identity::Chunk {
-                    plane: &identifier(row, 0, "chunk")?,
-                    layer: layer(row, 1, "chunk")?,
-                    cx: chunk_coordinate(row, 2)?,
-                    cy: chunk_coordinate(row, 3)?,
+                    plane: &identifier(row, 0, "chunk", ErrorCode::Chunk)?,
+                    layer: layer(row, 1, "chunk", ErrorCode::Chunk)?,
+                    cx: chunk_coordinate(row, 2, ErrorCode::Chunk)?,
+                    cy: chunk_coordinate(row, 3, ErrorCode::Chunk)?,
                 })
             },
         )?;
@@ -384,21 +436,25 @@ impl Pack {
                 integer("object")
             ),
             &mut |row| {
+                let code = ErrorCode::ObjectUid;
                 let index: Option<i64> = row.get(5)?;
                 let index = index
                     .and_then(|index| usize::try_from(index).ok())
                     .filter(|index| *index <= MAXIMUM_OBJECT_INDEX)
                     .ok_or_else(|| {
-                        Error::Invalid(format!(
-                            "an object index is not an integer from 0 to {MAXIMUM_OBJECT_INDEX}"
-                        ))
+                        Error::Rejected(
+                            code,
+                            format!(
+                                "an object index is not an integer from 0 to {MAXIMUM_OBJECT_INDEX}"
+                            ),
+                        )
                     })?;
                 visit(Identity::Object {
-                    uid: &identifier(row, 0, "uid")?,
-                    plane: &identifier(row, 1, "uid")?,
-                    layer: layer(row, 2, "uid")?,
-                    cx: chunk_coordinate(row, 3)?,
-                    cy: chunk_coordinate(row, 4)?,
+                    uid: &identifier(row, 0, "uid", code)?,
+                    plane: &identifier(row, 1, "uid", code)?,
+                    layer: layer(row, 2, "uid", code)?,
+                    cx: chunk_coordinate(row, 3, code)?,
+                    cy: chunk_coordinate(row, 4, code)?,
                     index,
                 })
             },
