@@ -696,7 +696,9 @@ impl Plan {
     /// the load's entry budget.
     fn named_exactly(&self, root: &SourceRoot) -> Result<(), Vec<Diagnostic>> {
         let mut listed: BTreeMap<String, Option<BTreeSet<String>>> = BTreeMap::new();
-        let mut remaining = self.load.maximum_entries;
+        // One more than a load reads: the lock file publishing made in the
+        // root, on Windows.
+        let mut remaining = self.load.maximum_entries.saturating_add(1);
         for file in &self.files {
             let mut directory = String::new();
             for component in file.path.split('/') {

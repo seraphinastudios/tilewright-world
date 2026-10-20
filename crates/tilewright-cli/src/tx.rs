@@ -165,6 +165,9 @@ fn outside(root: &Path, path: &Path) -> Result<(), Failure> {
                     .first()
                     .is_some_and(|first| ["planes", "defs", "profile"].contains(&first.as_str()))
                 || relative.iter().any(|component| !component.is_ascii())
+                // On Windows a colon names a stream of a file, which goes
+                // with the file when publishing replaces it.
+                || relative.iter().any(|component| component.contains(':'))
         });
     if inside {
         return Err(Failure::message(format!(
@@ -411,6 +414,7 @@ mod tests {
             ".WORLD.JSONC.tilewright-tmp",
             ".world.jsonc.tilewright-tmp.",
             ".world.j\u{17f}onc.tilewright-tmp",
+            "world.jsonc:undo",
             ".tilewright.lock",
         ] {
             let inside = Path::new(&root).join(inside);
