@@ -113,6 +113,15 @@ function argument(condition, message) {
   }
 }
 
+// The longest key a pack row can have: an identifier, ASCII of at most 128
+// bytes. A longer string finds nothing, so it is not copied into the
+// module's memory to look for.
+const MAX_KEY = 128;
+
+function fits(...keys) {
+  return keys.every((key) => key === undefined || key.length <= MAX_KEY);
+}
+
 function text(value, name) {
   argument(typeof value === "string", `${name} must be a string`);
   return value;
@@ -223,16 +232,19 @@ let stoppedBy;
 const unclosed =
   typeof FinalizationRegistry === "function" ? new FinalizationRegistry((reader) => release(reader)) : undefined;
 
+// Frees `reader`, or after the module stopped detaches it, and returns
+// what freeing threw, which also stops the module.
 function release(reader) {
   if (stopped) {
     // Unregisters wasm-bindgen's finalizer without calling into the module.
     reader.__destroy_into_raw();
-    return;
+    return undefined;
   }
   try {
     reader.free();
+    return undefined;
   } catch (error) {
-    rethrown(error);
+    return { error: rethrown(error) };
   }
 }
 
@@ -262,11 +274,21 @@ function usable() {
  * of JavaScript values, can throw, and either leaves its state unknown.
  */
 function rethrown(error) {
-  if (error instanceof Error && error.name === "PackError" && typeof error.code === "string") {
-    return new PackError(error.code, error.message);
+  // The reader defines name, code and message as its errors' own data
+  // properties, which nothing inherited can supply.
+  if (error instanceof Error && ownValue(error, "name") === "PackError") {
+    const code = ownValue(error, "code");
+    if (typeof code === "string") {
+      return new PackError(code, String(ownValue(error, "message") ?? ""));
+    }
   }
   stop(error);
   return error;
+}
+
+function ownValue(target, key) {
+  const descriptor = Object.getOwnPropertyDescriptor(target, key);
+  return descriptor !== undefined && Object.hasOwn(descriptor, "value") ? descriptor.value : undefined;
 }
 
 /**
@@ -345,6 +367,12 @@ export class Pack {
     usable();
   }
 
+  /** What a read of a key no row can have finds, once the pack is open. */
+  #missing() {
+    this.#open();
+    return undefined;
+  }
+
   #call(read) {
     this.#open();
     try {
@@ -365,7 +393,10 @@ export class Pack {
     this.#reader = undefined;
     if (reader !== undefined) {
       unclosed?.unregister(this);
-      release(reader);
+      const failure = release(reader);
+      if (failure !== undefined) {
+        throw failure.error;
+      }
     }
   }
 
@@ -375,7 +406,7 @@ export class Pack {
 
   meta(key) {
     text(key, "key");
-    return this.#call((reader) => reader.meta(key));
+    return fits(key) ? this.#call((reader) => reader.meta(key)) : this.#missing();
   }
 
   profile() {
@@ -393,7 +424,7 @@ export class Pack {
 
   plane(id) {
     text(id, "id");
-    return this.#call((reader) => reader.plane(id));
+    return fits(id) ? this.#call((reader) => reader.plane(id)) : this.#missing();
   }
 
   planes() {
@@ -406,13 +437,13 @@ export class Pack {
   zone(plane, id) {
     text(plane, "plane");
     text(id, "id");
-    return this.#call((reader) => reader.zone(plane, id));
+    return fits(plane, id) ? this.#call((reader) => reader.zone(plane, id)) : this.#missing();
   }
 
   zones(plane) {
     text(plane, "plane");
     return this.#rows(
-      (reader, after) => reader.zones(plane, after, PAGE, PAGE_BYTES),
+      (reader, after) => (fits(plane) ? reader.zones(plane, after, PAGE, PAGE_BYTES) : []),
       (zone) => zone.id,
     );
   }
@@ -420,13 +451,13 @@ export class Pack {
   anchor(plane, id) {
     text(plane, "plane");
     text(id, "id");
-    return this.#call((reader) => reader.anchor(plane, id));
+    return fits(plane, id) ? this.#call((reader) => reader.anchor(plane, id)) : this.#missing();
   }
 
   anchors(plane) {
     text(plane, "plane");
     return this.#rows(
-      (reader, after) => reader.anchors(plane, after, PAGE, PAGE_BYTES),
+      (reader, after) => (fits(plane) ? reader.anchors(plane, after, PAGE, PAGE_BYTES) : []),
       (anchor) => anchor.id,
     );
   }
@@ -435,14 +466,16 @@ export class Pack {
     text(plane, "plane");
     text(id, "id");
     const maxEntries = entryBudget(limits);
-    return this.#call((reader) => reader.stairwell(plane, id, maxEntries));
+    return fits(plane, id)
+      ? this.#call((reader) => reader.stairwell(plane, id, maxEntries))
+      : this.#missing();
   }
 
   stairwells(plane, limits) {
     text(plane, "plane");
     const maxEntries = entryBudget(limits);
     return this.#rows(
-      (reader, after) => reader.stairwells(plane, after, PAGE, PAGE_BYTES, maxEntries),
+      (reader, after) => (fits(plane) ? reader.stairwells(plane, after, PAGE, PAGE_BYTES, maxEntries) : []),
       (stairwell) => stairwell.id,
     );
   }
@@ -451,13 +484,15 @@ export class Pack {
     text(plane, "plane");
     int(layer, "layer", I32);
     const [bigX, bigY] = [big(x, "x", I64), big(y, "y", I64)];
-    return this.#call((reader) => reader.stairwellStep(plane, layer, bigX, bigY));
+    return fits(plane)
+      ? this.#call((reader) => reader.stairwellStep(plane, layer, bigX, bigY))
+      : this.#missing();
   }
 
   definition(type, id) {
     text(type, "type");
     text(id, "id");
-    return this.#call((reader) => reader.definition(type, id));
+    return fits(type, id) ? this.#call((reader) => reader.definition(type, id)) : this.#missing();
   }
 
   definitions(type) {
@@ -465,7 +500,8 @@ export class Pack {
       text(type, "type");
     }
     return this.#rows(
-      (reader, after) => reader.definitions(type, after?.[0], after?.[1], PAGE, PAGE_BYTES),
+      (reader, after) =>
+        fits(type) ? reader.definitions(type, after?.[0], after?.[1], PAGE, PAGE_BYTES) : [],
       (definition) => [definition.type, definition.id],
     );
   }
@@ -473,7 +509,7 @@ export class Pack {
   layers(plane) {
     text(plane, "plane");
     return this.#rows(
-      (reader, after) => reader.layers(plane, after, PAGE, PAGE_BYTES),
+      (reader, after) => (fits(plane) ? reader.layers(plane, after, PAGE, PAGE_BYTES) : []),
       (layer) => layer,
     );
   }
@@ -482,7 +518,8 @@ export class Pack {
     text(plane, "plane");
     int(layer, "layer", I32);
     return this.#rows(
-      (reader, after) => reader.chunkKeys(plane, layer, after?.[0], after?.[1], PAGE, PAGE_BYTES),
+      (reader, after) =>
+        fits(plane) ? reader.chunkKeys(plane, layer, after?.[0], after?.[1], PAGE, PAGE_BYTES) : [],
       (key) => [BigInt(key.cx), BigInt(key.cy)],
     );
   }
@@ -492,18 +529,20 @@ export class Pack {
     int(layer, "layer", I32);
     const [bigX, bigY] = [big(cx, "cx", I64), big(cy, "cy", I64)];
     const maxEntries = entryBudget(limits);
-    return this.#call((reader) => reader.chunk(plane, layer, bigX, bigY, maxEntries));
+    return fits(plane)
+      ? this.#call((reader) => reader.chunk(plane, layer, bigX, bigY, maxEntries))
+      : this.#missing();
   }
 
   objectLocation(uid) {
     text(uid, "uid");
-    return this.#call((reader) => reader.objectLocation(uid));
+    return fits(uid) ? this.#call((reader) => reader.objectLocation(uid)) : this.#missing();
   }
 
   object(uid, limits) {
     text(uid, "uid");
     const maxEntries = entryBudget(limits);
-    return this.#call((reader) => reader.object(uid, maxEntries));
+    return fits(uid) ? this.#call((reader) => reader.object(uid, maxEntries)) : this.#missing();
   }
 
   verify(limits) {

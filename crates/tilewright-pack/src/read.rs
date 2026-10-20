@@ -2189,6 +2189,20 @@ mod tests {
     }
 
     #[test]
+    fn hashing_an_image_reads_sqlite_copy_in_place() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../fixtures/packs/5830e26e449a1f0d0c786b32801b7ed68e351777db5f586532478cb4384844b2.twpack",
+        );
+        let bytes = std::fs::read(path).unwrap();
+        let pack = Pack::open_bytes(&bytes, None, &super::VerifyLimits::default()).unwrap();
+        // The digest reads the buffer SQLite reads, without allocating a
+        // second image: serializing it is a view of that buffer.
+        let image = pack.connection.serialize(rusqlite::MAIN_DB).unwrap();
+        assert!(matches!(image, rusqlite::serialize::Data::Shared(_)));
+        assert_eq!(&*image, bytes.as_slice());
+    }
+
+    #[test]
     fn images_are_read_only() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(
             "../../fixtures/packs/5830e26e449a1f0d0c786b32801b7ed68e351777db5f586532478cb4384844b2.twpack",

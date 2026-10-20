@@ -345,6 +345,39 @@ test("options are read from the bag's own properties only", async () => {
   }
 });
 
+test("keys longer than any row's are not looked up", async () => {
+  await initialize(module);
+  const pack = openPack(valid);
+  const long = "a".repeat(129);
+  const calls = await counting("plane", async () => {
+    assert.equal(pack.plane(long), undefined);
+  });
+  assert.equal(calls, 0);
+  assert.equal(pack.meta(long), undefined);
+  assert.equal(pack.zone("overworld", long), undefined);
+  assert.equal(pack.anchor(long, "x"), undefined);
+  assert.equal(pack.stairwell("overworld", long), undefined);
+  assert.equal(pack.stairwellStep(long, 0, 0, 0), undefined);
+  assert.equal(pack.definition(long, "x"), undefined);
+  assert.equal(pack.chunk(long, 0, 0, 0), undefined);
+  assert.equal(pack.objectLocation(long), undefined);
+  assert.equal(pack.object(long), undefined);
+  for (const listing of [
+    pack.zones(long),
+    pack.anchors(long),
+    pack.stairwells(long),
+    pack.definitions(long),
+    pack.layers(long),
+    pack.chunkKeys(long, 0),
+  ]) {
+    assert.deepEqual([...listing], []);
+  }
+  // A key of the longest length is still looked up.
+  assert.equal(pack.plane("a".repeat(128)), undefined);
+  pack.close();
+  assert.throws(() => pack.plane(long), /closed/);
+});
+
 test("a pack collected without being closed is freed", async () => {
   await initialize(module);
   const freed = await counting("free", async (calls) => {
