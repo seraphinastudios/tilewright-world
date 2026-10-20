@@ -67,8 +67,10 @@ decode, without scanning any table. The chunk records are authoritative;
 
 `strings` interns every string that chunk records reference: prototype IDs,
 ground and zone palette values, field names, string field values, and portal
-plane and anchor IDs. IDs run from 1 in byte order of the values; 0 means
-"none" wherever an ID is optional.
+plane and anchor IDs. With terrain transitions (FORMAT.md section 13), it
+also interns every prototype the transitions name, whether or not a chunk
+draws it. IDs run from 1 in byte order of the values; 0 means "none"
+wherever an ID is optional.
 
 ## 2. Chunk encoding `twc1+zstd`
 
@@ -92,7 +94,11 @@ object_count  u32
 objects       object_count × object
 ```
 
-Grids are row-major, `y` then `x`. An object record:
+Grids are row-major, `y` then `x`. Ground grids hold the chunk's tiles with
+the profile's terrain transitions applied (FORMAT.md section 13): the
+terrain layer's grid holds the painted terrain as the source does, and the
+tiles the transitions derive are ordinary cells of the other ground grids,
+so readers draw them without knowing the rules. An object record:
 
 ```text
 tile          u16      y * N + x; 0xFFFF in inventories

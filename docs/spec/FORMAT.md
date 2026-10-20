@@ -22,6 +22,7 @@ Every tile has one address, `(plane, layer, x, y)`.
 | Portal | An object property that targets a location or an anchor. |
 | Anchor | A stable named location referenced by scripts, quests, portals and respawn points. |
 | Stairwell | One exit that spans several layers: a connected run of steps on adjacent layers, used from end to end in one move (section 10). |
+| Terrain | A kind of ground a brush paints, such as grass or water. The profile's transitions derive the edge, corner and variant tiles where terrains meet (section 13). |
 
 Chunk `(cx, cy)` covers tiles `x` in `[cx * chunk_size, (cx + 1) * chunk_size)`
 and `y` in `[cy * chunk_size, (cy + 1) * chunk_size)`. Coordinates are signed
@@ -57,12 +58,13 @@ Windows, any reparse point, junctions included). Other files at the root, such a
 ignored. Assets such as images and sounds stay ordinary files referenced by
 path or by an ID the profile defines.
 
-Paths written inside documents (the profile path, schema paths) are relative,
-`/`-separated, made of ASCII letters, digits, `_`, `.` and `-`, with no
-component starting with `.` or `-`, and end in `.jsonc`. A path is at most
-1,024 bytes and 32 components, each at most 128 bytes. Schema paths are
-relative to the profile's directory and cannot leave it. Several roles may
-name the same schema; it is read once.
+Paths written inside documents (the profile path, schema paths, the
+transitions path) are relative, `/`-separated, made of ASCII letters,
+digits, `_`, `.` and `-`, with no component starting with `.` or `-`, and
+end in `.jsonc`. A path is at most 1,024 bytes and 32 components, each at
+most 128 bytes. Schema and transitions paths are relative to the profile's
+directory and cannot leave it. Several roles may name the same schema; it
+is read once.
 
 ## 3. Syntax: strict JSONC
 
@@ -128,7 +130,8 @@ transactions ([TRANSACTIONS.md](TRANSACTIONS.md)).
   "object_fields": "schema/object-fields.jsonc",
   "zone_properties": "schema/zone-properties.jsonc",
   "layer_height": 50,
-  "movement": {"max_step": 12, "fall_unit": 50}
+  "movement": {"max_step": 12, "fall_unit": 50},
+  "transitions": "transitions.jsonc"
 }
 ```
 
@@ -154,6 +157,8 @@ transactions ([TRANSACTIONS.md](TRANSACTIONS.md)).
 - `movement` (optional) holds the editor's analysis rules, `max_step` (0 to
   4,294,967,295) and `fall_unit` (1 to 4,294,967,295); the format itself does
   not interpret them.
+- `transitions` (optional) names the terrain transitions document (section
+  13), a path relative to the profile's directory, like a schema path.
 - `custom` (optional) holds namespaced extension data, as in section 7.
 
 ## 6. Plane: `planes/<plane>/plane.jsonc`
@@ -217,6 +222,9 @@ Terrain grids:
 - A tile's terrain floor is the plain prototype in its cell. A floor with
   field overrides, or an additional floor on another sub-layer, is an object
   entry instead.
+- With terrain transitions (section 13), the profile's terrain layer holds
+  painted terrain, and the edge, corner and variant tiles around it are
+  derived into the other ground layers, not stored.
 
 Objects:
 
@@ -473,16 +481,138 @@ them. A recipe and a weighted loot table:
 The model and the content pack keep `list` and `object` values, like `json`
 values, as canonical JSON.
 
-## 13. Validation summary
+## 13. Terrain transitions
+
+A profile may name a transitions document. Its rules choose the edge,
+corner and variant tiles around painted terrain: grass meeting dirt, a
+shoreline, a random choice among grass tiles. The source then stores only
+the terrain a brush paints, and every tool derives the same tiles from it.
+
+```jsonc
+// profile/transitions.jsonc
+{
+  "format": "tilewright.transitions/1",
+  "layer": "floor",
+  "terrains": [
+    {"id": "water", "protos": ["water"], "transitions": [
+      {"draw": "inside", "model": "blob", "layer": "mask",
+       "tiles": {"255": [{"proto": "water", "weight": 3}, "water_ripple"], "0": "pond",
+                 "124": "shore_n", "241": "shore_e", "199": "shore_s", "31": "shore_w"}}
+    ]},
+    {"id": "dirt", "protos": ["dirt"]},
+    {"id": "grass", "protos": ["grass", "grass_flowers"], "transitions": [
+      {"draw": "outside", "model": "corners", "layer": "mask", "with": ["dirt"], "seed": 7,
+       "tiles": {"1": "grass_ne", "2": "grass_se", "3": "grass_e", "15": "grass_all"}}
+    ]}
+  ]
+}
+```
+
+`layer` is the *terrain layer*: the ground layer that holds painted
+terrain. `terrains` lists 1 to 1,024 terrains, from lowest to highest
+precedence. Each has:
+
+| Key | Meaning |
+| --- | --- |
+| `id` | Identifier, unique in the document. |
+| `protos` | 1 to 1,024 `proto` definitions that are this terrain when they are in the terrain layer. A prototype belongs to at most one terrain. A brush that paints the terrain writes the first; the others let tiles placed by hand, such as a variant, count as the terrain. |
+| `transitions` | Optional list of at most 8 transitions; a document has at most 256 in all. |
+
+A tile's *terrain* is the terrain whose `protos` hold the tile's cell in the
+terrain layer. A tile that is empty there, holds another prototype, or lies
+in a chunk the plane does not have has no terrain. A transition:
+
+| Key | Meaning |
+| --- | --- |
+| `draw` | `"inside"` draws on tiles of the transition's terrain, *T*, where its neighbours differ, such as a shore drawn inside the water. `"outside"` draws on tiles of the terrains in `with`, showing *T* reaching in from their neighbours, such as grass edges drawn over the dirt next to the grass. |
+| `model` | The neighbourhood it reads: `"none"`, `"sides"`, `"corners"` or `"blob"` (below). An outside transition cannot use `"none"`. |
+| `layer` | The ground layer its tiles go into: any but the terrain layer, which keeps the painted terrain. |
+| `with` | Optional list of 1 to 1,024 unique terrain IDs, never *T*: the terrains it blends with. Without it, an inside transition blends with every other terrain, and an outside one draws onto every terrain listed before *T*, of which there must be at least one. |
+| `seed` | Optional integer from 0 to 4,294,967,295, default 0, mixed into the choice of variants. |
+| `tiles` | The tile of each pattern: an object whose keys are patterns, written as decimal integers without leading zeros. Each value is a prototype ID, or a list of 1 to 256 variants, each a prototype ID or `{"proto": id, "weight": w}` with `w` from 1 to 65,535 (default 1). Every prototype is a `proto` definition. |
+
+Neighbours. The neighbours of tile `(x, y)` are the eight tiles around it
+on its layer, across chunk edges: N `(x, y - 1)`, NE `(x + 1, y - 1)`, E
+`(x + 1, y)`, SE `(x + 1, y + 1)`, S `(x, y + 1)`, SW `(x - 1, y + 1)`, W
+`(x - 1, y)` and NW `(x - 1, y - 1)`. A neighbour *shows T* when, for an
+inside transition, its terrain is not in `with` (it is *T*, a terrain *T*
+does not blend with, or no terrain at all, so water continues under a
+bridge and at the edge of the painted world); and, for an outside
+transition, when its terrain is *T*.
+
+Patterns. A model turns the neighbours into a pattern, a sum of bits:
+
+| Model | Bits | Pattern |
+| --- | --- | --- |
+| `none` | | Always 0: every tile of *T* draws the same tile, as variants. |
+| `sides` | N 1, E 2, S 4, W 8 | A side's bit is set when that neighbour shows *T*. 16 patterns. |
+| `corners` | NE 1, SE 2, SW 4, NW 8 | Each corner touches two sides and the diagonal between them. Inside, its bit is set when all three show *T*; outside, when any does. The 16 patterns of a corner (Wang or marching-squares) set. |
+| `blob` | N 1, NE 2, E 4, SE 8, S 16, SW 32, W 64, NW 128 | Side bits as in `sides`. Inside, a corner's bit is set when its diagonal and both its sides show *T*; outside, when its diagonal shows *T* and neither side does. 47 patterns each way; inside they are those of the common 47-tile blob set. |
+
+The counts include pattern 0, where no neighbour shows *T*, which an
+outside transition never draws. `tiles` may hold only patterns its model
+produces for its `draw`, and never 0 when the transition is outside: an
+inside table has at most 1 (`none`), 16 (`sides`, `corners`) or 47
+(`blob`) keys, an outside table at most 15 or 46, and a blob table holds a
+corner bit only with both its sides set (inside) or both clear (outside).
+A pattern the table does not list draws nothing.
+
+Resolution. The transitions of a document run in order: terrains in
+order, and each terrain's transitions in order. For each tile with a
+terrain, every transition that applies to it, an inside one of its terrain
+or an outside one whose `with` holds its terrain, computes the tile's
+pattern. If `tiles` lists the pattern, the transition picks a variant and
+draws it into its `layer`, but only where the source leaves that cell
+empty: a prototype the source places there wins, so an author can
+override a transition by hand.
+
+A later transition that draws into the same cell replaces the earlier
+one's tile, so a terrain's edges draw over those of the terrains before it.
+Transitions read only the painted terrain, never another transition's
+tiles, so a tile's result does not depend on the order tiles are visited.
+An outside transition draws only next to its own terrain, so the
+transitions of a tile's terrain and of its neighbours' terrains are the
+only ones that can draw on it: at most 72, however many the document has.
+
+Variants. A pattern's tile is picked by a hash of the tile's position,
+computed with 64-bit unsigned integers whose multiplications wrap:
+
+```text
+mix(z) = z ^= z >> 30; z *= 0xbf58476d1ce4e5b9; z ^= z >> 27; z *= 0x94d049bb133111eb; z ^ (z >> 31)
+hash   = mix(mix(mix(mix(seed) ^ layer) ^ x) ^ y)
+```
+
+`layer`, `x` and `y` are the tile's layer and plane coordinates as 64-bit
+two's complement. With *W* the sum of the variants' weights, the tile is
+the first variant at which the running sum of weights exceeds `hash` mod
+*W*. For example, `hash` is `0x7ab40e090f363a7d` for seed 0 at layer 0,
+tile `(1, 0)`, and `0x2dc3a5ddf0d229e7` for seed 42 at layer -3, tile
+`(100, -200)`. The same world always picks the same variants.
+
+Where the tiles live. Source chunks store only painted terrain: a brush
+that paints a terrain writes its first prototype into the terrain layer,
+one cell per painted tile (a `terrain.set` operation,
+[TRANSACTIONS.md](TRANSACTIONS.md)), so diffs and transactions stay as
+small as the painting, and changing a rule never rewrites the world. The
+compiler resolves transitions into the pack's other ground grids (PACK.md
+section 2), so readers and renderers draw them without knowing the rules,
+and the pack's terrain layer holds the painted terrain, for game logic
+such as which tiles are water. The rules are not stored in the pack.
+Editors and other tools call the same resolver (`Transitions::resolve_chunk`
+in `tilewright-source`) to show the tiles. A tile's transitions depend on
+its neighbours, so painting a tile changes what is drawn on the tiles
+around it, in adjacent chunks too.
+
+## 14. Validation summary
 
 A source tree is valid when every document parses under section 3, every
 document matches its section's shape and the profile's schemas, at every
 level of `list` and `object` fields, every reference resolves (profile,
 schemas, planes, zones, anchors, prototypes, references, portal targets,
-stairwell steps), file names match content, every stairwell's steps
+stairwell steps, terrain transitions), file names match content, every stairwell's steps
 connect, no tile holds two stairwell steps, no two zones, anchors,
-stairwells, planes or definitions share an ID, and no two objects of the
-world share a uid. Validators report every error
+stairwells, planes, definitions or terrains share an ID, no prototype
+belongs to two terrains, and no two objects of the world share a uid. Validators report every error
 with file, byte span, line, column and a stable code, up to a limit they
 state (10,000 by default in the reference loader); past it they report one
 `source.budget` diagnostic instead of the rest:

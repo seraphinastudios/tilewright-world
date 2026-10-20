@@ -10,6 +10,10 @@
 //! reported as a [`Diagnostic`] with its file, byte span and a stable code.
 //! A world is returned only when there are no diagnostics at all.
 //!
+//! A profile's terrain transitions ([`transitions`]) derive edge, corner and
+//! variant tiles from painted terrain; [`Transitions::resolve_chunk`] is the
+//! one resolver the compiler, editors and other tools share.
+//!
 //! The root path is resolved as the caller gives it and may be a link;
 //! nothing beneath it is followed. On Unix every path component beneath the
 //! root is opened through its parent directory's handle without following
@@ -35,6 +39,7 @@ mod profile;
 mod read;
 mod schema;
 mod stairwell;
+pub mod transitions;
 mod uid;
 
 use std::{collections::BTreeMap, path::Path, sync::Arc};
@@ -48,6 +53,7 @@ pub use diagnostic::{Code, Diagnostic};
 pub use files::is_jsonc_path;
 pub use read::{is_identifier, is_namespace};
 pub use schema::{FieldSpec, FieldType, MAXIMUM_FIELD_DEPTH, MAXIMUM_LIST_ITEMS, Schema};
+pub use transitions::{ResolvedChunk, TerrainSource, Transitions};
 
 /// Tiles along each side of a chunk in format 1.
 pub const CHUNK_SIZE: u16 = 32;
@@ -190,6 +196,10 @@ pub struct Profile {
     /// does not stack layers.
     pub layer_height: Option<u32>,
     pub movement: Option<Movement>,
+    /// The terrain transitions the profile names (`docs/spec/FORMAT.md`
+    /// section 13), which derive edge, corner and variant tiles from
+    /// painted terrain.
+    pub transitions: Option<Arc<Transitions>>,
     /// Canonical JSON of the profile document.
     pub canonical: String,
 }
@@ -620,9 +630,16 @@ fn within_format(limits: Limits) -> Limits {
 
 fn load_tree(tree: &mut files::Tree, diagnostics: &mut Diagnostics) -> Option<World> {
     let (manifest_path, plane_ids) = profile::read_manifest(tree, diagnostics)?;
-    let profile = profile::read_profile(tree, &manifest_path, diagnostics)?;
+    let (mut profile, transitions_path) = profile::read_profile(tree, &manifest_path, diagnostics)?;
     let mut references = schema::References::new(&profile);
     let definitions = defs::read_definitions(tree, &profile, &mut references, diagnostics);
+    // A transitions document that fails has reported why, so the load
+    // fails with it.
+    if let Some(path) = transitions_path {
+        profile.transitions =
+            transitions::read_transitions(tree, &path, &profile, &references, diagnostics)
+                .map(Arc::new);
+    }
     let mut planes = BTreeMap::new();
     for plane in plane::read_planes(tree, &profile, &plane_ids, &mut references, diagnostics) {
         planes.insert(plane.id.clone(), plane);

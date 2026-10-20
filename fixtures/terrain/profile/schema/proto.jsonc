@@ -1,0 +1,6 @@
+{
+  "format": "tilewright.schema/1",
+  "fields": {
+    "face": {"type": "string", "required": true, "max_length": 128}
+  }
+}

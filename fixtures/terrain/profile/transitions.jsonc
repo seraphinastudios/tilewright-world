@@ -1,0 +1,92 @@
+// Terrains from lowest to highest precedence. Brushes paint the first
+// prototype of a terrain into the floor layer, which keeps the painted
+// terrain; the transitions below draw into the decal and edge layers, in
+// order, so a later one wins where two draw into one tile.
+{
+  "format": "tilewright.transitions/1",
+  "layer": "floor",
+  "terrains": [
+    {
+      "id": "water",
+      "protos": ["water"],
+      "transitions": [
+        // Shores drawn over the water's own tiles, in the 47-pattern blob
+        // model. Open water picks one of two variants; a pattern without a
+        // tile draws nothing.
+        {
+          "draw": "inside",
+          "model": "blob",
+          "layer": "edge",
+          "tiles": {
+            "255": [{"proto": "water", "weight": 3}, "water_ripple"],
+            "0": "pond",
+            "124": "shore_n",
+            "241": "shore_e",
+            "199": "shore_s",
+            "31": "shore_w"
+          }
+        }
+      ]
+    },
+    {
+      "id": "sand",
+      "protos": ["sand"],
+      "transitions": [
+        // Classic side edges drawn onto the dirt next to the sand.
+        {
+          "draw": "outside",
+          "model": "sides",
+          "layer": "edge",
+          "with": ["dirt"],
+          "tiles": {"1": "sand_n", "2": "sand_e", "4": "sand_s", "8": "sand_w"}
+        }
+      ]
+    },
+    {
+      "id": "dirt",
+      "protos": ["dirt"],
+      "transitions": [
+        // Weighted variant decals over the dirt itself.
+        {
+          "draw": "inside",
+          "model": "none",
+          "layer": "decal",
+          "seed": 7,
+          "tiles": {"0": [{"proto": "dirt", "weight": 4}, "dirt_pebbles"]}
+        }
+      ]
+    },
+    {
+      // Hand-placed flowers count as grass too.
+      "id": "grass",
+      "protos": ["grass", "grass_flowers"],
+      "transitions": [
+        // A corner set drawn onto every lower terrain next to the grass,
+        // the default without "with". It runs after the sand's edges, so
+        // it wins where both draw into one tile.
+        {
+          "draw": "outside",
+          "model": "corners",
+          "layer": "edge",
+          "tiles": {
+            "1": "grass_edge_1",
+            "2": "grass_edge_2",
+            "3": "grass_edge_3",
+            "4": "grass_edge_4",
+            "5": "grass_edge_5",
+            "6": "grass_edge_6",
+            "7": "grass_edge_7",
+            "8": "grass_edge_8",
+            "9": "grass_edge_9",
+            "10": "grass_edge_10",
+            "11": "grass_edge_11",
+            "12": "grass_edge_12",
+            "13": "grass_edge_13",
+            "14": "grass_edge_14",
+            "15": "grass_edge_15"
+          }
+        }
+      ]
+    }
+  ]
+}

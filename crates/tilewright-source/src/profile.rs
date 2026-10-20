@@ -79,12 +79,15 @@ fn beside(profile: &str, relative: &str) -> String {
     crate::files::join(directory(profile), relative)
 }
 
+/// Reads the profile and its schemas. Also returns the path of its
+/// transitions document, if it names one, which is read once the
+/// definitions are listed, since its prototypes refer to them.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn read_profile(
     tree: &mut Tree<'_>,
     path: &str,
     diagnostics: &mut Diagnostics,
-) -> Option<Profile> {
+) -> Option<(Profile, Option<String>)> {
     let source = tree.document(path)?;
     let reader = Reader::new(&source, diagnostics);
     let root = reader.object(
@@ -101,6 +104,7 @@ pub(crate) fn read_profile(
             "zone_properties",
             "layer_height",
             "movement",
+            "transitions",
             "custom",
         ],
     )?;
@@ -191,6 +195,25 @@ pub(crate) fn read_profile(
                 fall_unit: reader.u32(reader.required(value, "fall_unit")?, 1)?,
             })
         }
+        None => None,
+    };
+    let transitions = match root.get("transitions") {
+        Some(value) => match reader.string(value) {
+            Some(text) if is_jsonc_path(text) => Some(beside(path, text)),
+            Some(_) => {
+                reader.report(
+                    value.span(),
+                    Code::Path,
+                    "transitions must be a safe relative .jsonc path",
+                );
+                ok = false;
+                None
+            }
+            None => {
+                ok = false;
+                None
+            }
+        },
         None => None,
     };
     reader.custom(root);
@@ -304,7 +327,7 @@ pub(crate) fn read_profile(
     let (Some(object_fields), Some(zone_properties)) = (object_fields, zone_properties) else {
         return None;
     };
-    ok.then_some(Profile {
+    let profile = Profile {
         id,
         version,
         projection,
@@ -315,6 +338,8 @@ pub(crate) fn read_profile(
         zone_properties,
         layer_height,
         movement,
+        transitions: None,
         canonical,
-    })
+    };
+    ok.then_some((profile, transitions))
 }
