@@ -409,6 +409,9 @@ fn check_terrain_addresses(
         found: Vec::new(),
     };
     for operation in &transaction.operations {
+        if problems.found.len() >= limits::DIAGNOSTICS {
+            break;
+        }
         if let transaction::Action::TerrainSet { plane, grid, .. } = &operation.action
             && let Some(message) = terrain_problem(world, plane, grid)
         {
@@ -497,15 +500,17 @@ fn publish_inputs(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let created = |path: &str| {
-        files
-            .iter()
-            .any(|file| file.path == path && file.before.is_none() && file.after.is_some())
-    };
+    // A file made by a rename, or created like another, keeps that
+    // provenance while it exists, even where an older file was deleted.
+    let present: BTreeSet<&str> = files
+        .iter()
+        .filter(|file| file.after.is_some())
+        .map(|file| file.path.as_str())
+        .collect();
     let renames = workspace
         .renames
         .iter()
-        .filter(|(to, _)| created(to))
+        .filter(|(to, _)| present.contains(to.as_str()))
         .map(|(to, from)| (to.clone(), from.clone()))
         .collect();
     (terrain, renames)
@@ -826,19 +831,20 @@ fn write_operation(
     output.push("}")
 }
 
-/// The file `path` was renamed to, if the transaction created it so.
-fn renamed_to<'w>(workspace: &'w Workspace<'_>, path: &str) -> Option<&'w str> {
+/// The file each file was renamed to, by the file it came from, for the
+/// renamed files that exist at the end.
+fn renamed_to<'w>(workspace: &'w Workspace<'_>) -> BTreeMap<&'w str, &'w str> {
     workspace
         .renames
         .iter()
-        .find(|(to, from)| {
-            from.as_str() == path
-                && workspace
-                    .entries
-                    .get(to.as_str())
-                    .is_some_and(|entry| entry.base.is_none() && entry.current.text().is_some())
+        .filter(|(to, _)| {
+            workspace
+                .entries
+                .get(to.as_str())
+                .is_some_and(|entry| entry.current.text().is_some())
         })
-        .map(|(to, _)| to.as_str())
+        .map(|(to, from)| (from.as_str(), to.as_str()))
+        .collect()
 }
 
 /// The exact inverse of the workspace's edits: per changed file, in path
@@ -863,6 +869,7 @@ fn inverse(workspace: &Workspace<'_>) -> Result<String, TooLarge> {
             .map(|(path, entry)| (path.as_str(), digest(entry.base.as_deref()))),
         "  ",
     );
+    let renamed = renamed_to(workspace);
     let mut output = Bounded {
         text: String::new(),
         limit: Limits::default().max_input_bytes,
@@ -891,7 +898,7 @@ fn inverse(workspace: &Workspace<'_>) -> Result<String, TooLarge> {
                 first = false;
                 output.push("{\"op\": \"document.create\", \"path\": ")?;
                 output.push_json(path)?;
-                if let Some(like) = renamed_to(workspace, path) {
+                if let Some(like) = renamed.get(path.as_str()) {
                     output.push(", \"like\": ")?;
                     output.push_json(like)?;
                 }

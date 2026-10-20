@@ -885,10 +885,13 @@ impl<'a> Shape<'a> {
 
     /// The pointer of an operation, checked against its target: an object
     /// target's pointer is not empty and does not start at `at`.
-    fn target_pointer(&mut self, item: &'a Value, target: &Target) -> Option<Vec<Segment>> {
+    /// The pointer of an operation, checked against its target: an object
+    /// target's pointer is not empty and does not start at `at`. A target
+    /// that failed its own checks does not stop the pointer's.
+    fn target_pointer(&mut self, item: &'a Value, target: Option<&Target>) -> Option<Vec<Segment>> {
         let value = self.required(item, "pointer")?;
         let pointer = self.pointer(value)?;
-        if let Target::Object(_) = target {
+        if let Some(Target::Object(_)) = target {
             match pointer.first() {
                 None => {
                     self.shape(value.span(), "an object's pointer names a part of it");
@@ -904,119 +907,122 @@ impl<'a> Shape<'a> {
         Some(pointer)
     }
 
+    // Each of these checks every field before giving up on the operation,
+    // so that all of its problems are reported.
+
     fn set(&mut self, item: &'a Value) -> Option<Action> {
-        let target = self.target(item)?;
-        let pointer = self.target_pointer(item, &target)?;
+        let target = self.target(item);
+        let pointer = self.target_pointer(item, target.as_ref());
         let key = item
             .get("pointer")
             .and_then(Value::as_array)
             .and_then(<[Value]>::last)
             .filter(|step| step.as_str().is_some())
             .map(Value::span);
-        let value = self.required(item, "value")?.span();
+        let value = self.required(item, "value").map(Value::span);
         let expect = item.get("expect").map(Value::span);
         Some(Action::Set {
-            target,
-            pointer,
+            target: target?,
+            pointer: pointer?,
             key,
-            value,
+            value: value?,
             expect,
         })
     }
 
     fn insert(&mut self, item: &'a Value) -> Option<Action> {
-        let target = self.target(item)?;
-        let pointer_value = self.required(item, "pointer")?;
-        let mut pointer = self.target_pointer(item, &target)?;
-        let Some(Segment::Index(index)) = pointer.pop() else {
-            self.shape(
-                pointer_value.span(),
-                "an insert's pointer ends with an index",
-            );
-            return None;
-        };
-        if matches!(target, Target::Object(_)) && pointer.is_empty() {
-            self.shape(
-                pointer_value.span(),
-                "an object's pointer names a part of it",
-            );
-            return None;
-        }
+        let target = self.target(item);
+        let pointer = self
+            .target_pointer(item, target.as_ref())
+            .and_then(|mut pointer| {
+                let span = item.get("pointer").map_or(item.span(), Value::span);
+                let Some(Segment::Index(index)) = pointer.pop() else {
+                    self.shape(span, "an insert's pointer ends with an index");
+                    return None;
+                };
+                if matches!(target, Some(Target::Object(_))) && pointer.is_empty() {
+                    self.shape(span, "an object's pointer names a part of it");
+                    return None;
+                }
+                Some((pointer, index))
+            });
         let key = match item.get("key") {
-            Some(value) => {
-                self.string(value)?;
-                Some(value.span())
-            }
-            None => None,
+            Some(value) => self.string(value).map(|_| Some(value.span())),
+            None => Some(None),
         };
-        let value = self.required(item, "value")?.span();
+        let value = self.required(item, "value").map(Value::span);
         let layout = match (item.get("before"), item.get("after")) {
             (Some(before), Some(after)) => {
                 let before = self.separator(before);
                 let after = self.separator(after);
-                Some((before?, after?))
+                before.zip(after).map(Some)
             }
-            (None, None) => None,
+            (None, None) => Some(None),
             _ => {
                 self.shape(item.span(), "give both before and after, or neither");
-                return None;
+                None
             }
         };
-        let colon = match (item.get("colon"), key) {
-            (Some(value), Some(_)) => Some(self.separator(value)?),
+        let colon = match (item.get("colon"), item.get("key")) {
+            (Some(value), Some(_)) => self.separator(value).map(Some),
             (Some(value), None) => {
                 self.shape(value.span(), "colon goes with key, for an object member");
-                return None;
+                None
             }
-            (None, _) => None,
+            (None, _) => Some(None),
         };
+        let (pointer, index) = pointer?;
         Some(Action::Insert {
-            target,
+            target: target?,
             pointer,
             index,
-            key,
-            value,
-            layout,
-            colon,
+            key: key?,
+            value: value?,
+            layout: layout?,
+            colon: colon?,
         })
     }
 
     fn remove(&mut self, item: &'a Value) -> Option<Action> {
-        let target = self.target(item)?;
-        let pointer_value = self.required(item, "pointer")?;
-        let pointer = self.target_pointer(item, &target)?;
-        if pointer.is_empty() {
-            self.shape(pointer_value.span(), "the root value cannot be removed");
-            return None;
-        }
+        let target = self.target(item);
+        let pointer = self
+            .target_pointer(item, target.as_ref())
+            .and_then(|pointer| {
+                if pointer.is_empty() {
+                    let span = item.get("pointer").map_or(item.span(), Value::span);
+                    self.shape(span, "the root value cannot be removed");
+                    return None;
+                }
+                Some(pointer)
+            });
         let expect = item.get("expect").map(Value::span);
         let separator = match item.get("separator") {
-            Some(value) => Some(self.separator(value)?),
-            None => None,
+            Some(value) => self.separator(value).map(Some),
+            None => Some(None),
         };
         Some(Action::Remove {
-            target,
-            pointer,
+            target: target?,
+            pointer: pointer?,
             expect,
-            separator,
+            separator: separator?,
         })
     }
 
     fn test(&mut self, item: &'a Value) -> Option<Action> {
-        let target = self.target(item)?;
-        let pointer = self.target_pointer(item, &target)?;
+        let target = self.target(item);
+        let pointer = self.target_pointer(item, target.as_ref());
         let expected = match (item.get("value"), item.get("absent")) {
-            (Some(value), None) => Expected::Value(value.span()),
-            (None, Some(Value::Bool { value: true, .. })) => Expected::Absent,
+            (Some(value), None) => Some(Expected::Value(value.span())),
+            (None, Some(Value::Bool { value: true, .. })) => Some(Expected::Absent),
             _ => {
                 self.shape(item.span(), "give exactly one of value or \"absent\": true");
-                return None;
+                None
             }
         };
         Some(Action::Test {
-            target,
-            pointer,
-            expected,
+            target: target?,
+            pointer: pointer?,
+            expected: expected?,
         })
     }
 

@@ -1869,3 +1869,54 @@ fn a_file_and_a_directory_of_one_name_are_refused_when_planning() {
         "{found:#?}"
     );
 }
+
+#[test]
+fn an_operation_reports_every_field_problem() {
+    let found = Transaction::parse("t.jsonc", wrap(r#"{"op": "set"}"#)).unwrap_err();
+    assert!(
+        has(&found, "tx.shape", "give exactly one of path or object"),
+        "{found:#?}"
+    );
+    assert!(
+        has(&found, "tx.shape", "missing key \"pointer\""),
+        "{found:#?}"
+    );
+    assert!(
+        has(&found, "tx.shape", "missing key \"value\""),
+        "{found:#?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_rename_over_a_deleted_file_keeps_the_renamed_permissions() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let tree = copy();
+    let root = tree.path();
+    fs::set_permissions(
+        root.join("defs/proto/edge_n.jsonc"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    fs::set_permissions(
+        root.join("defs/proto/coin.jsonc"),
+        fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    // coin.jsonc is replaced by a renamed edge_n.jsonc, given coin's id,
+    // and the old edge reference moves to the new name.
+    apply(
+        root,
+        &transaction(
+            r#"{"op": "document.delete", "path": "defs/proto/coin.jsonc"},
+    {"op": "document.rename", "path": "defs/proto/edge_n.jsonc", "to": "defs/proto/coin.jsonc"},
+    {"op": "set", "path": "defs/proto/coin.jsonc", "pointer": ["id"], "value": "coin"},
+    {"op": "set", "path": "planes/overworld/layers/0/0_0.jsonc", "pointer": ["terrain", "mask", "palette", "n"], "value": "coin"}"#,
+        ),
+    );
+    let mode = fs::metadata(root.join("defs/proto/coin.jsonc"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
+}
