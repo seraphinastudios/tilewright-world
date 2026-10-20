@@ -1,0 +1,2 @@
+# Generated packs are binary; never convert or diff them as text.
+*.twpack binary

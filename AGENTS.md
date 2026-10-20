@@ -15,5 +15,8 @@
 - New code, tests, docs and fixtures are MIT. Do not copy, adapt or depend on
   GPL/AGPL source. Record any reuse of outside MIT-compatible material in
   `PROVENANCE.md`.
+- `fixtures/packs` is generated: when compiler output changes, regenerate
+  it as its README says, and keep the Rust and Go readers' error codes
+  equal to the manifest's.
 - Run `tools/validate.sh` and `git diff --check`. Commits and PR titles use
   Conventional Commits.
