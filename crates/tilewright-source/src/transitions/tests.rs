@@ -991,6 +991,26 @@ fn every_member_of_a_list_is_checked() {
             "{message}: {found:?}"
         );
     }
+    // A pattern that is not one of the model's still has its tile checked.
+    let found = messages(&document(&SIDES.replace(
+        r#""1": "sand_n""#,
+        r#""16": {"proto": "lava", "weight": 0}"#,
+    )));
+    for (code, message) in [
+        (
+            "shape.range",
+            "\"16\" is not a pattern of the sides model drawn outside",
+        ),
+        ("shape.range", "0 is outside 1..=65535"),
+        ("ref.unresolved", "no proto definition \"lava\""),
+    ] {
+        assert!(
+            found
+                .iter()
+                .any(|(found, text)| *found == code && text == message),
+            "{message}: {found:?}"
+        );
+    }
     // Nor does a bad terrain ID in `with` hide a later unknown one.
     let found = messages(&document(&SIDES.replace(
         "\"layer\": \"edge\"",

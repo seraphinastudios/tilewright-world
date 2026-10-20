@@ -313,6 +313,9 @@ fn read_transition<'a>(
                 // Checked once the draw and model are known.
                 _ => true,
             });
+            // The tile is checked whatever its key, so every problem is
+            // reported at once.
+            let tile = read_pattern(reader, references, &member.value);
             let Some(pattern) = pattern else {
                 let message = match (draw, model) {
                     (Some(draw), Some(model)) => format!(
@@ -327,7 +330,7 @@ fn read_transition<'a>(
                 ok = false;
                 continue;
             };
-            match read_pattern(reader, references, &member.value) {
+            match tile {
                 Some(tile) => {
                     tiles.insert(pattern, tile);
                 }
