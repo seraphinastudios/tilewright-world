@@ -20,5 +20,7 @@ cargo run --locked --quiet --package tilewright-cli -- compile fixtures/basic "$
 pack=$(find "${first}" -name '*.twpack')
 cmp "${pack}" "${second}/$(basename "${pack}")"
 cargo run --locked --quiet --package tilewright-cli -- inspect "${pack}"
+# A source tree and the pack compiled from it hold the same IDs.
+cargo run --locked --quiet --package tilewright-cli -- diff fixtures/basic "${pack}"
 
 git diff --check
