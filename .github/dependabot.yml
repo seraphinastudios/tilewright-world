@@ -14,6 +14,11 @@ updates:
       modernc:
         patterns:
           - "modernc.org/*"
+  # The release planner's locked tools.
+  - package-ecosystem: npm
+    directory: /scripts/release
+    schedule:
+      interval: weekly
   - package-ecosystem: github-actions
     directory: /
     schedule:

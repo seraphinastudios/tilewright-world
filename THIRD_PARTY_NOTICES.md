@@ -13,6 +13,9 @@ contribute.
 
 Rust crate dependencies keep their own licenses as recorded in `Cargo.lock`
 and their crate metadata. No outside source is copied into this repository.
+Each release archive of the CLI carries `THIRD_PARTY_LICENSES.txt`, which
+`tools/release/package.py` assembles from the license files of every crate
+that binary compiles in.
 
 ## Go module (`go/`)
 
@@ -48,3 +51,16 @@ them is compiled into the reader:
 No dependency is GPL or AGPL licensed. To list what a build compiles in, run
 `go list -deps -f '{{with .Module}}{{.Path}} {{.Version}}{{end}}' ./...` in
 `go/`, with `GOOS` set for other platforms.
+
+## Release tooling (`scripts/release/`)
+
+The release planner runs these npm packages in CI, locked in
+`scripts/release/package-lock.json`. Nothing of them is distributed.
+
+| Package | Version | License |
+| --- | --- | --- |
+| [@semantic-release/commit-analyzer](https://github.com/semantic-release/commit-analyzer) | 13.0.1 | MIT |
+| [conventional-changelog-conventionalcommits](https://github.com/conventional-changelog/conventional-changelog) | 9.3.1 | ISC |
+
+Their 28 dependencies in the lockfile are MIT, ISC, BSD-2-Clause
+(`uglify-js`) or BSD-3-Clause (`source-map`) licensed.

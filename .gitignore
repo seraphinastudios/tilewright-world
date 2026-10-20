@@ -1,2 +1,4 @@
 /target
 **/*.rs.bk
+/scripts/release/node_modules
+__pycache__/

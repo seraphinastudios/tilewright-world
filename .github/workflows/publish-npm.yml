@@ -1,0 +1,119 @@
+name: Publish npm package
+
+# Publishes the npm tarball a release carries to the npm registry, byte for
+# byte, after checking that the release is immutable and that the tarball
+# matches SHA256SUMS and the build provenance release.yml attested.
+#
+# Off until the repository variable TILEWRIGHT_NPM_PUBLISH is "true": until
+# then the job is skipped. It publishes with npm trusted publishing (OIDC),
+# so it needs no npm token. docs/RELEASING.md says how to turn it on.
+# release.yml dispatches it after each release while it is on; it can also be
+# run by hand for an existing release tag.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag (vX.Y.Z) whose npm tarball to publish
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: world-npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish to npm
+    if: vars.TILEWRIGHT_NPM_PUBLISH == 'true' && github.repository == 'seraphinastudios/tilewright-world' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: npm
+    permissions:
+      contents: read
+      attestations: read
+      id-token: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ inputs.tag }}
+      PACKAGE: '@seraphinastudios/tilewright-pack'
+    steps:
+      - name: Download and check the release's npm tarball
+        id: tarball
+        run: |
+          set -euo pipefail
+          if [[ ! ${TAG} =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::not a release tag: ${TAG}"
+            exit 1
+          fi
+          version=${TAG#v}
+          gh api "repos/${GH_REPO}/releases/tags/${TAG}" >"${RUNNER_TEMP}/release.json"
+          if ! jq -e '.draft == false and .prerelease == false and .immutable == true' "${RUNNER_TEMP}/release.json" >/dev/null; then
+            echo "::error::${TAG} is not a published, immutable release"
+            exit 1
+          fi
+          mkdir dist
+          gh release download "${TAG}" --dir dist --pattern SHA256SUMS --pattern '*.tgz'
+          cd dist
+          tarballs=(*.tgz)
+          if [[ ${#tarballs[@]} -ne 1 || ! -f ${tarballs[0]} ]]; then
+            echo "::error::${TAG} does not carry exactly one npm tarball"
+            exit 1
+          fi
+          tarball=${tarballs[0]}
+          # The tarball matches SHA256SUMS and the digest GitHub recorded.
+          listed=$(awk -v name="${tarball}" '$2 == name' SHA256SUMS)
+          if [[ $(wc -l <<<"${listed}") -ne 1 || -z ${listed} ]]; then
+            echo "::error::SHA256SUMS does not list ${tarball} once"
+            exit 1
+          fi
+          sha256sum --check --strict <<<"${listed}"
+          recorded=$(jq -r --arg name "${tarball}" '.assets[] | select(.name == $name) | .digest' "${RUNNER_TEMP}/release.json")
+          if [[ ${recorded} != "sha256:$(sha256sum "${tarball}" | cut -d' ' -f1)" ]]; then
+            echo "::error::${tarball} does not match the digest of the release asset"
+            exit 1
+          fi
+          gh attestation verify "${tarball}" --repo "${GH_REPO}" \
+            --signer-workflow "${GH_REPO}/.github/workflows/release.yml" --deny-self-hosted-runners
+          manifest=$(tar -xOzf "${tarball}" package/package.json)
+          if [[ $(jq -r .name <<<"${manifest}") != "${PACKAGE}" || $(jq -r .version <<<"${manifest}") != "${version}" ]]; then
+            echo "::error::${tarball} is not ${PACKAGE}@${version}"
+            exit 1
+          fi
+          # The newest release is npm's latest; an older one, such as a
+          # maintenance release, gets a dist-tag for its line.
+          if [[ $(gh api "repos/${GH_REPO}/releases/latest" --jq .tag_name) == "${TAG}" ]]; then
+            dist_tag=latest
+          else
+            dist_tag="maintenance-$(cut -d. -f1-2 <<<"${version}")"
+          fi
+          {
+            echo "path=dist/${tarball}"
+            echo "dist_tag=${dist_tag}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.18.1
+          registry-url: https://registry.npmjs.org
+
+      # Trusted publishing exchanges this job's OIDC token for a short-lived
+      # npm credential and adds npm's provenance statement; it needs npm
+      # 11.5.1 or later.
+      - name: Publish the attested tarball
+        env:
+          TARBALL: ${{ steps.tarball.outputs.path }}
+          DIST_TAG: ${{ steps.tarball.outputs.dist_tag }}
+        run: |
+          set -euo pipefail
+          node -e '
+            const [major, minor, patch] = process.argv[1].split(".").map(Number);
+            if (major < 11 || (major === 11 && (minor < 5 || (minor === 5 && patch < 1)))) {
+              console.error("npm " + process.argv[1] + " is too old for trusted publishing");
+              process.exit(1);
+            }' "$(npm --version)"
+          npm publish "${TARBALL}" --access public --tag "${DIST_TAG}"

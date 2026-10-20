@@ -1,0 +1,477 @@
+name: Release
+
+# Releases tilewright-world: the tilewright CLI for five platforms, a source
+# archive and, once packages/tilewright-pack exists, the npm tarball of the
+# browser pack reader, all with SHA-256 digests and build provenance, plus
+# the Go module tag go/vX.Y.Z. docs/RELEASING.md describes the whole process.
+#
+# - push to main or a MAJOR.MINOR.x branch: releases when commits since the
+#   last release call for one. The first release is never cut by a push.
+# - workflow_dispatch: the same, and the only way to cut the first release.
+# - pull_request: builds and packages everything as a check; never attests
+#   or publishes.
+
+on:
+  push:
+    branches:
+      - main
+      - '[0-9]+.[0-9]+.x'
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - .github/workflows/publish-npm.yml
+      - .github/workflows/validate.yml
+      - .releaserc.json
+      - scripts/release/**
+      - tools/release/**
+      - tools/build-wasm.sh
+      - packages/tilewright-pack/**
+      - rust-toolchain.toml
+      - Cargo.lock
+      - '**/Cargo.toml'
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('world-release-check-{0}', github.event.pull_request.number) || 'world-release' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  NPM_PACKAGE_DIRECTORY: packages/tilewright-pack
+
+jobs:
+  plan:
+    name: Plan release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      revision: ${{ steps.plan.outputs.revision }}
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      go_tag: ${{ steps.plan.outputs.go_tag }}
+      previous_tag: ${{ steps.plan.outputs.previous_tag }}
+      latest: ${{ steps.plan.outputs.latest }}
+      build: ${{ steps.plan.outputs.build }}
+      publish: ${{ steps.plan.outputs.publish }}
+      npm: ${{ steps.plan.outputs.npm }}
+    steps:
+      - name: Check out with tags
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.18.1
+
+      - name: Install the locked planner tools without lifecycle scripts
+        run: npm ci --prefix scripts/release --ignore-scripts --no-audit --no-fund
+
+      - name: Test the release policy, planner and packaging
+        run: |
+          node scripts/release/test-release-policy.cjs
+          node scripts/release/test-plan.mjs
+          python3 -m unittest discover -s tools/release
+
+      - name: Plan
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          BRANCH: ${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}
+          PULL_REQUEST: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          plan="${RUNNER_TEMP}/plan.json"
+          TILEWRIGHT_RELEASE_TRIGGER=${EVENT} TILEWRIGHT_RELEASE_BRANCH=${BRANCH} \
+            node scripts/release/plan.mjs >"${plan}"
+          {
+            echo '### Release plan'
+            echo
+            echo '```json'
+            jq . "${plan}"
+            echo '```'
+          } >>"${GITHUB_STEP_SUMMARY}"
+          echo "::notice title=Release plan::$(jq -r .reason "${plan}")"
+          publish=$(jq -r .publish "${plan}")
+          if [[ ${EVENT} == pull_request ]]; then
+            # A check build under a version that can never be released.
+            build=true
+            version="0.0.0-check.${PULL_REQUEST}"
+          elif [[ ${publish} == true ]]; then
+            build=true
+            version=$(jq -r .version "${plan}")
+          else
+            build=false
+            version=
+          fi
+          if [[ -f ${NPM_PACKAGE_DIRECTORY}/package.json ]]; then
+            npm=true
+          else
+            npm=false
+          fi
+          {
+            echo "revision=$(jq -r .revision "${plan}")"
+            echo "version=${version}"
+            echo "tag=$(jq -r '.tag // empty' "${plan}")"
+            echo "go_tag=$(jq -r '.go_tag // empty' "${plan}")"
+            echo "previous_tag=$(jq -r '.previous_tag // empty' "${plan}")"
+            echo "latest=$(jq -r .latest "${plan}")"
+            echo "build=${build}"
+            echo "publish=${publish}"
+            echo "npm=${npm}"
+          } >>"${GITHUB_OUTPUT}"
+
+  validate:
+    name: Revalidate
+    needs: plan
+    if: needs.plan.outputs.publish == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/validate.yml
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        # Each target builds on a GitHub-hosted runner of its own OS and
+        # architecture. Keep in step with PLATFORMS in tools/release/package.py.
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - target: aarch64-apple-darwin
+            runner: macos-15
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2025
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # The fixture compiles to the same pack on every platform only from the
+      # committed bytes.
+      - name: Keep committed line endings
+        run: git config --global core.autocrlf false
+
+      - name: Check out the release revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.revision }}
+          persist-credentials: false
+
+      - name: Install musl-gcc
+        if: endsWith(matrix.target, '-linux-musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes musl-tools
+
+      - name: Build and run the CLI
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: bash tools/release/build.sh "${TARGET}" "${VERSION}" dist/cli
+
+      - name: Keep the binary for packaging
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cli-${{ matrix.target }}
+          path: dist/cli/
+          if-no-files-found: error
+          retention-days: 7
+          # A re-run of this job replaces its artifact.
+          overwrite: true
+
+  npm:
+    name: Build the npm package
+    needs: plan
+    if: needs.plan.outputs.build == 'true' && needs.plan.outputs.npm == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the release revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.revision }}
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: ${{ env.NPM_PACKAGE_DIRECTORY }}/.node-version
+
+      - name: Build the WebAssembly module
+        run: tools/build-wasm.sh
+
+      - name: Pack at the release version
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          test -s "${NPM_PACKAGE_DIRECTORY}/wasm/tilewright_pack_bg.wasm"
+          mkdir -p dist/npm
+          destination=$(realpath dist/npm)
+          cd "${NPM_PACKAGE_DIRECTORY}"
+          npm version "${VERSION}" --no-git-tag-version --allow-same-version --ignore-scripts
+          npm pack --ignore-scripts --pack-destination "${destination}"
+
+      - name: Keep the tarball for packaging
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: npm-package
+          path: dist/npm/
+          if-no-files-found: error
+          retention-days: 7
+          # A re-run of this job replaces its artifact.
+          overwrite: true
+
+  package:
+    name: Package release assets
+    needs: [plan, build, npm]
+    if: ${{ !cancelled() && needs.plan.outputs.build == 'true' && needs.build.result == 'success' && (needs.plan.outputs.npm != 'true' || needs.npm.result == 'success') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the release revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.revision }}
+          persist-credentials: false
+
+      - name: Collect the binaries
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: cli-*
+          path: dist/binaries
+          merge-multiple: true
+
+      - name: Collect the npm tarball
+        if: needs.plan.outputs.npm == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: npm-package
+          path: dist/npm
+
+      - name: Assemble the assets and SHA256SUMS
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          REVISION: ${{ needs.plan.outputs.revision }}
+          NPM: ${{ needs.plan.outputs.npm }}
+        run: |
+          set -euo pipefail
+          npm_tarball=()
+          if [[ ${NPM} == true ]]; then
+            tarballs=(dist/npm/*.tgz)
+            if [[ ${#tarballs[@]} -ne 1 || ! -f ${tarballs[0]} ]]; then
+              echo "expected exactly one npm tarball" >&2
+              exit 1
+            fi
+            npm_tarball=(--npm-tarball "${tarballs[0]}")
+          fi
+          python3 tools/release/package.py assemble --version "${VERSION}" \
+            --revision "${REVISION}" --binaries dist/binaries --output dist/release \
+            "${npm_tarball[@]}"
+          {
+            echo "### Release assets for ${VERSION}"
+            echo
+            echo '```'
+            cat dist/release/assets/SHA256SUMS
+            echo '```'
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+      - name: Keep the assets for attestation and publication
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-assets
+          path: dist/release/
+          if-no-files-found: error
+          retention-days: 7
+          # A re-run of this job replaces its artifact.
+          overwrite: true
+
+  attest:
+    name: Attest build provenance
+    needs: [plan, validate, package]
+    if: ${{ !cancelled() && needs.plan.outputs.publish == 'true' && needs.validate.result == 'success' && needs.package.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out the release revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.revision }}
+          persist-credentials: false
+
+      - name: Collect the assets
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-assets
+          path: dist/release
+
+      - name: Verify the assets before attesting them
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          NPM: ${{ needs.plan.outputs.npm }}
+        run: |
+          npm_flag=()
+          if [[ ${NPM} == true ]]; then npm_flag=(--npm); fi
+          python3 tools/release/package.py verify --version "${VERSION}" "${npm_flag[@]}" dist/release
+
+      # One attestation covers every asset, SHA256SUMS included, and the bare
+      # binaries the archives hold, so an installed binary verifies too.
+      - name: Attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/release/assets/*
+            dist/release/binaries/*
+
+  release:
+    name: Publish the GitHub release
+    needs: [plan, attest]
+    if: ${{ !cancelled() && needs.plan.outputs.publish == 'true' && needs.attest.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.plan.outputs.version }}
+      TAG: ${{ needs.plan.outputs.tag }}
+      GO_TAG: ${{ needs.plan.outputs.go_tag }}
+      REVISION: ${{ needs.plan.outputs.revision }}
+      PREVIOUS_TAG: ${{ needs.plan.outputs.previous_tag }}
+      LATEST: ${{ needs.plan.outputs.latest }}
+      NPM: ${{ needs.plan.outputs.npm }}
+    steps:
+      - name: Check out the release revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.revision }}
+          persist-credentials: false
+
+      - name: Collect the assets
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-assets
+          path: dist/release
+
+      - name: Verify the assets
+        run: |
+          npm_flag=()
+          if [[ ${NPM} == true ]]; then npm_flag=(--npm); fi
+          python3 tools/release/package.py verify --version "${VERSION}" "${npm_flag[@]}" dist/release
+
+      # gh would attach the release to an existing tag wherever it points.
+      - name: Check that the tag is new
+        run: |
+          set -euo pipefail
+          existing=$(gh api "repos/${GH_REPO}/git/matching-refs/tags/${TAG}" \
+            | jq --arg ref "refs/tags/${TAG}" '[.[] | select(.ref == $ref)] | length')
+          if [[ ${existing} != 0 ]]; then
+            echo "::error::${TAG} already exists"
+            exit 1
+          fi
+
+      - name: Write the release notes
+        run: bash tools/release/notes.sh dist/release/assets >"${RUNNER_TEMP}/notes.md"
+
+      # gh creates a draft, uploads every asset, then publishes it. Publishing
+      # creates the tag at the revision and, with immutable releases on,
+      # locks the tag and the assets.
+      - name: Publish
+        run: |
+          set -euo pipefail
+          options=(--target "${REVISION}" --title "${TAG}" --notes-file "${RUNNER_TEMP}/notes.md"
+            --generate-notes "--latest=${LATEST}")
+          if [[ -n ${PREVIOUS_TAG} ]]; then
+            options+=(--notes-start-tag "${PREVIOUS_TAG}")
+          fi
+          gh release create "${TAG}" dist/release/assets/* "${options[@]}"
+
+      - name: Check the published release
+        run: |
+          set -euo pipefail
+          gh api "repos/${GH_REPO}/releases/tags/${TAG}" >"${RUNNER_TEMP}/release.json"
+          if ! jq -e '.draft == false and .immutable == true' "${RUNNER_TEMP}/release.json" >/dev/null; then
+            echo "::error::${TAG} was published, but it is not immutable. Turn immutable releases back on and see docs/RELEASING.md."
+            exit 1
+          fi
+          tagged=$(gh api "repos/${GH_REPO}/git/ref/tags/${TAG}" --jq .object.sha)
+          if [[ ${tagged} != "${REVISION}" ]]; then
+            echo "::error::${TAG} points at ${tagged}, not ${REVISION}"
+            exit 1
+          fi
+          cd dist/release/assets
+          diff -u \
+            <({ cat SHA256SUMS; sha256sum SHA256SUMS; } | sort -k2) \
+            <(jq -r '.assets[] | "\(.digest | ltrimstr("sha256:"))  \(.name)"' "${RUNNER_TEMP}/release.json" | sort -k2)
+          jq -r .html_url "${RUNNER_TEMP}/release.json" >>"${GITHUB_STEP_SUMMARY}"
+
+  go-tag:
+    name: Tag the Go module
+    needs: [plan, release]
+    if: ${{ !cancelled() && needs.plan.outputs.publish == 'true' && needs.release.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Tag go/vX.Y.Z at the release revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          GO_TAG: ${{ needs.plan.outputs.go_tag }}
+          REVISION: ${{ needs.plan.outputs.revision }}
+        run: |
+          set -euo pipefail
+          ref="refs/tags/${GO_TAG}"
+          existing=$(gh api "repos/${GH_REPO}/git/matching-refs/tags/${GO_TAG}" \
+            | jq -r --arg ref "${ref}" '.[] | select(.ref == $ref) | .object.sha')
+          if [[ -z ${existing} ]]; then
+            gh api --method POST "repos/${GH_REPO}/git/refs" -f "ref=${ref}" -f "sha=${REVISION}" >/dev/null
+          elif [[ ${existing} != "${REVISION}" ]]; then
+            echo "::error::${GO_TAG} already points at ${existing}, not ${REVISION}"
+            exit 1
+          fi
+          echo "${GO_TAG} -> ${REVISION}" >>"${GITHUB_STEP_SUMMARY}"
+
+  npm-publish:
+    name: Start npm publication
+    needs: [plan, release]
+    # Off until the owner sets the repository variable TILEWRIGHT_NPM_PUBLISH
+    # to true; see docs/RELEASING.md.
+    if: ${{ !cancelled() && needs.plan.outputs.publish == 'true' && needs.plan.outputs.npm == 'true' && needs.release.result == 'success' && vars.TILEWRIGHT_NPM_PUBLISH == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch publish-npm.yml for the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: gh workflow run publish-npm.yml --ref main -f "tag=${TAG}"
