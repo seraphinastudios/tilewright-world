@@ -16,6 +16,11 @@ tilewright-jsonc.workspace = true
 tilewright-source.workspace = true
 zstd.workspace = true
 
+# On the web (`wasm32-unknown-unknown`), SQLite comes from `sqlite-wasm-rs`,
+# which compiles the same amalgamation for WebAssembly.
+[target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
+rusqlite = { workspace = true, features = ["ffi-sqlite-wasm-rs"] }
+
 [dev-dependencies]
 rusqlite.workspace = true
 

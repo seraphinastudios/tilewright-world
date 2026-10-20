@@ -52,4 +52,17 @@ fi
   fi
 )
 
+# The WebAssembly pack reader: built for wasm32, then run in Node against
+# the same fixtures, and its package's license file kept current.
+if ! command -v node >/dev/null 2>&1; then
+  echo "tools/validate.sh: node is not on PATH; install the Node.js packages/tilewright-pack/.node-version names" >&2
+  exit 1
+fi
+tools/build-wasm.sh --check
+(
+  cd packages/tilewright-pack
+  node --test "test/*.test.js"
+  node scripts/licenses.mjs --check
+)
+
 git diff --check

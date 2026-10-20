@@ -32,7 +32,9 @@ use tilewright_source::{
 };
 
 mod identities;
+mod rows;
 pub use identities::Identity;
+pub use rows::{Anchor, Definition, Plane, Zone};
 
 /// The page size of every pack.
 const PAGE_SIZE: i64 = 4096;
@@ -127,11 +129,23 @@ pub struct StairwellTile {
 
 pub struct Pack {
     connection: Connection,
-    /// `None` for a pack the compiler is checking in memory.
-    path: Option<PathBuf>,
+    source: Source,
     /// The pack size limit it was opened with, which bounds
     /// [`Pack::file_digest`].
     maximum_bytes: u64,
+}
+
+/// Where a pack's bytes are, which decides what [`Pack::file_digest`]
+/// hashes and what verification compares the digest with.
+enum Source {
+    /// A file, hashed from its path; its name is the expected digest when
+    /// it is 64 hex digits.
+    File(PathBuf),
+    /// An image in memory, hashed from SQLite's read-only copy of it, and
+    /// the digest the caller expects, if any.
+    Image(Option<[u8; 32]>),
+    /// A pack the compiler is checking in memory.
+    Compiled,
 }
 
 /// Percent-encodes a path for an SQLite URI. On Unix the path's bytes are
@@ -552,32 +566,101 @@ impl Pack {
                 | OpenFlags::SQLITE_OPEN_URI
                 | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
-        connection.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
-        connection.set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)?;
-        connection.execute_batch("PRAGMA query_only = ON")?;
+        harden(&connection)?;
         check_identity(&connection)?;
-        // A pack is exactly its database: nothing, not even a sparse hole,
-        // follows the last page, so hashing it never reads past the pages.
-        let pages: i64 = connection.query_row("PRAGMA page_count", [], |row| row.get(0))?;
-        let length = std::fs::metadata(&path)?.len();
-        if u64::try_from(pages)
-            .ok()
-            .and_then(|pages| pages.checked_mul(PAGE_SIZE.unsigned_abs()))
-            != Some(length)
-        {
-            return Err(Error::Rejected(
-                ErrorCode::FileLength,
-                format!("the file is {length} bytes, not its {pages} pages of {PAGE_SIZE} bytes"),
-            ));
-        }
         // The file SQLite opened may have replaced the one whose length was
         // checked, so its pages are checked against the limit too.
+        check_pages(&connection, std::fs::metadata(&path)?.len(), limits)?;
+        Ok(Self {
+            connection,
+            source: Source::File(path),
+            maximum_bytes: limits.maximum_pack_bytes,
+        })
+    }
+
+    /// Opens a pack from its bytes, as [`Pack::open_from`] does.
+    ///
+    /// # Errors
+    /// Returns an error if the bytes are not a pack of this format or are
+    /// more than the pack size limit.
+    pub fn open_bytes(
+        bytes: &[u8],
+        digest: Option<[u8; 32]>,
+        limits: &VerifyLimits,
+    ) -> Result<Self, Error> {
+        let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        Self::open_from(bytes, length, digest, limits)
+    }
+
+    /// Opens a pack image of exactly `length` bytes, which `read` yields, and checks
+    /// its size, identity and schema as [`Pack::open_with`] checks a file's.
+    /// An image longer than `limits.maximum_pack_bytes` is rejected before
+    /// any of it is read. SQLite reads a read-only copy in memory, which
+    /// stays the pack's bytes until it is dropped.
+    ///
+    /// `digest`, when given, is the SHA-256 the image must have. Like a file
+    /// name that is a digest, verification compares it with the image's
+    /// digest; opening does not hash the image.
+    ///
+    /// # Errors
+    /// Returns an error if `read` fails, ends early or yields more than
+    /// `length` bytes, the image is longer than the limit or than memory can
+    /// hold, or it is not a pack of this format.
+    pub fn open_from(
+        read: impl std::io::Read,
+        length: u64,
+        digest: Option<[u8; 32]>,
+        limits: &VerifyLimits,
+    ) -> Result<Self, Error> {
         if length > limits.maximum_pack_bytes {
             return Err(too_long(limits.maximum_pack_bytes));
         }
+        let size = usize::try_from(length).map_err(|_| {
+            Error::Io(std::io::Error::new(
+                std::io::ErrorKind::OutOfMemory,
+                "the pack is larger than memory can hold",
+            ))
+        })?;
+        let mut connection = Connection::open_in_memory_with_flags(
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        // An empty image is an empty database, as an empty file is; SQLite
+        // cannot allocate a copy of no bytes.
+        if size > 0 {
+            let mut image = Counted {
+                read,
+                started: false,
+                remaining: size,
+                failure: None,
+            };
+            let loaded =
+                connection.deserialize_read_exact(rusqlite::MAIN_DB, &mut image, size, true);
+            // SQLite reports a failed read as its own error; it is the
+            // image that could not be read.
+            if let Some(error) = image.failure {
+                return Err(Error::Io(error));
+            }
+            // Once reading started, SQLite has its copy, so an image that
+            // ended early is what failed.
+            if loaded.is_err() && image.started && image.remaining > 0 {
+                return Err(Error::Io(std::io::ErrorKind::UnexpectedEof.into()));
+            }
+            loaded?;
+            // The image is exactly `length` bytes: one that goes on is not
+            // the pack its length describes.
+            if std::io::Read::read(&mut image, &mut [0])? != 0 {
+                return Err(Error::Rejected(
+                    ErrorCode::FileLength,
+                    format!("the pack image is longer than {length} bytes"),
+                ));
+            }
+        }
+        harden(&connection)?;
+        check_identity(&connection)?;
+        check_pages(&connection, length, limits)?;
         Ok(Self {
             connection,
-            path: Some(path),
+            source: Source::Image(digest),
             maximum_bytes: limits.maximum_pack_bytes,
         })
     }
@@ -587,7 +670,7 @@ impl Pack {
         check_identity(&connection)?;
         Ok(Self {
             connection,
-            path: None,
+            source: Source::Compiled,
             // There is no file to hash, so the limit is never used.
             maximum_bytes: u64::MAX,
         })
@@ -867,14 +950,16 @@ impl Pack {
         })
     }
 
-    /// The SHA-256 of the pack file, read from its path when called.
+    /// The SHA-256 of the pack file, read from its path when called, or of
+    /// the image a pack was opened from.
     ///
-    /// This hashes whatever file is at the pack's path now, not necessarily
-    /// the file SQLite opened: the digest binds to the path. Packs are
-    /// content-addressed files opened from directories the caller controls;
-    /// a directory that others can write to is not supported. It reads at
-    /// most the pack size limit the pack was opened with, and fails for a
-    /// longer file.
+    /// For a file, this hashes whatever file is at the pack's path now, not
+    /// necessarily the file SQLite opened: the digest binds to the path.
+    /// Packs are content-addressed files opened from directories the caller
+    /// controls; a directory that others can write to is not supported. It
+    /// reads at most the pack size limit the pack was opened with, and fails
+    /// for a longer file. An image is hashed from the read-only copy SQLite
+    /// reads, so its digest binds to the bytes the reads see.
     ///
     /// # Errors
     /// Returns an error if the file cannot be read or is longer than the
@@ -885,10 +970,22 @@ impl Pack {
 
     /// [`Pack::file_digest`], reading at most `maximum` bytes.
     fn digest_within(&self, maximum: u64) -> Result<[u8; 32], Error> {
-        let path = self
-            .path
-            .as_ref()
-            .ok_or_else(|| Error::Rejected(ErrorCode::NotAFile, "the pack is not a file".into()))?;
+        let path = match &self.source {
+            Source::File(path) => path,
+            Source::Image(_) => {
+                let image = self.connection.serialize(rusqlite::MAIN_DB)?;
+                if u64::try_from(image.len()).map_or(true, |length| length > maximum) {
+                    return Err(too_long(maximum));
+                }
+                return Ok(Sha256::digest(&*image).into());
+            }
+            Source::Compiled => {
+                return Err(Error::Rejected(
+                    ErrorCode::NotAFile,
+                    "the pack is not a file".into(),
+                ));
+            }
+        };
         let file = std::fs::File::open(path)?;
         if file.metadata()?.len() > maximum {
             return Err(too_long(maximum));
@@ -964,24 +1061,37 @@ impl Pack {
                 format!("integrity check failed: {integrity}"),
             ));
         }
-        if let Some(stem) = self
-            .path
-            .as_ref()
-            .and_then(|path| path.file_name())
-            .and_then(|name| name.to_str())
-            .and_then(|name| name.strip_suffix(".twpack"))
-            .filter(|stem| stem.len() == 64 && stem.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        {
-            // The name must be the lowercase digest; other cases do not match.
+        if let Some(expected) = self.expected_digest() {
+            // A name must be the lowercase digest; other cases do not match.
             let digest = crate::compile::hex(&self.digest_within(maximum_bytes)?);
-            if digest != stem {
+            if digest != expected {
                 return Err(Error::Rejected(
                     ErrorCode::Digest,
-                    format!("file digest {digest} does not match its name"),
+                    match self.source {
+                        Source::File(_) => format!("file digest {digest} does not match its name"),
+                        _ => format!("pack digest {digest} is not {expected}, the expected digest"),
+                    },
                 ));
             }
         }
         self.verify_contents(limits.maximum_decoded_bytes)
+    }
+
+    /// The digest verification expects, in hex: a file's name when it is 64
+    /// hex digits, or the digest an image was opened with.
+    fn expected_digest(&self) -> Option<String> {
+        match &self.source {
+            Source::File(path) => path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_suffix(".twpack"))
+                .filter(|stem| {
+                    stem.len() == 64 && stem.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+                .map(str::to_owned),
+            Source::Image(digest) => digest.as_ref().map(|digest| crate::compile::hex(digest)),
+            Source::Compiled => None,
+        }
     }
 
     /// Everything [`Pack::verify`] checks except SQLite integrity and the
@@ -1490,6 +1600,64 @@ impl Pack {
     }
 }
 
+/// A pack image being read into SQLite's copy: whether reading started,
+/// how much of the image is left, and the error reading it failed with, if
+/// any.
+struct Counted<R> {
+    read: R,
+    started: bool,
+    remaining: usize,
+    failure: Option<std::io::Error>,
+}
+
+impl<R: std::io::Read> std::io::Read for Counted<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.started = true;
+        match self.read.read(buffer) {
+            Ok(read) => {
+                self.remaining = self.remaining.saturating_sub(read);
+                Ok(read)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => Err(error),
+            Err(error) => {
+                let kind = error.kind();
+                self.failure = Some(error);
+                Err(kind.into())
+            }
+        }
+    }
+}
+
+/// Puts a connection to a pack in SQLite's defensive mode, with untrusted
+/// schemas disabled and writes refused.
+fn harden(connection: &Connection) -> Result<(), Error> {
+    connection.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
+    connection.set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)?;
+    connection.execute_batch("PRAGMA query_only = ON")?;
+    Ok(())
+}
+
+/// Checks that a pack of `length` bytes is exactly its pages, and that they
+/// are within the pack size limit. Nothing, not even a sparse hole, follows
+/// the last page, so hashing a pack never reads past its pages.
+fn check_pages(connection: &Connection, length: u64, limits: &VerifyLimits) -> Result<(), Error> {
+    let pages: i64 = connection.query_row("PRAGMA page_count", [], |row| row.get(0))?;
+    if u64::try_from(pages)
+        .ok()
+        .and_then(|pages| pages.checked_mul(PAGE_SIZE.unsigned_abs()))
+        != Some(length)
+    {
+        return Err(Error::Rejected(
+            ErrorCode::FileLength,
+            format!("the file is {length} bytes, not its {pages} pages of {PAGE_SIZE} bytes"),
+        ));
+    }
+    if length > limits.maximum_pack_bytes {
+        return Err(too_long(limits.maximum_pack_bytes));
+    }
+    Ok(())
+}
+
 /// Checks the schema, application ID, user version and `meta` of a pack
 /// before any other query runs.
 fn check_identity(connection: &Connection) -> Result<(), Error> {
@@ -1900,6 +2068,7 @@ impl Targets<'_> {
 #[cfg(test)]
 mod tests {
     use super::{CACHE_ENTRIES, Pack, cached};
+    use sha2::Digest as _;
     use std::{collections::BTreeMap, path::Path};
 
     #[test]
@@ -1926,6 +2095,31 @@ mod tests {
     }
 
     #[test]
+    fn images_are_read_only() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../fixtures/packs/5830e26e449a1f0d0c786b32801b7ed68e351777db5f586532478cb4384844b2.twpack",
+        );
+        let bytes = std::fs::read(path).unwrap();
+        let pack = Pack::open_bytes(&bytes, None, &super::VerifyLimits::default()).unwrap();
+        // Even with query_only turned off, the image cannot be written.
+        pack.connection
+            .execute_batch("PRAGMA query_only = OFF")
+            .unwrap();
+        for write in [
+            "DELETE FROM strings",
+            "CREATE TABLE extra (value)",
+            "PRAGMA user_version = 3",
+        ] {
+            assert!(pack.connection.execute_batch(write).is_err(), "{write}");
+        }
+        pack.verify().unwrap();
+        assert_eq!(
+            pack.file_digest().unwrap(),
+            <[u8; 32]>::from(sha2::Sha256::digest(&bytes))
+        );
+    }
+
+    #[test]
     fn packs_keep_the_absolute_path_they_opened() {
         // Unit tests run in the package directory, so this path is relative.
         let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
@@ -1940,7 +2134,9 @@ mod tests {
             .join(directory.path().file_name().unwrap())
             .join(written.path.file_name().unwrap());
         let pack = Pack::open(&relative).unwrap();
-        let path = pack.path.as_ref().unwrap();
+        let super::Source::File(path) = &pack.source else {
+            panic!("a pack opened from a path has a file source");
+        };
         assert!(path.is_absolute(), "{}", path.display());
         pack.verify().unwrap();
     }

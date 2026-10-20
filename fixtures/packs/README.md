@@ -1,8 +1,10 @@
 # Pack reader conformance fixtures
 
 Every pack reader runs these fixtures: the Rust reader in
-`crates/tilewright-pack/tests/conformance`, and the Go reader in
-`go/twpack/conformance_test.go`. They are the content pack compiled from
+`crates/tilewright-pack/tests/conformance`, opening each pack both as a
+file and from its bytes, the Go reader in `go/twpack/conformance_test.go`,
+and the WebAssembly reader, the Rust reader compiled for the browser, in
+`packages/tilewright-pack/test/conformance.test.js`. They are the content pack compiled from
 `fixtures/basic`, named by its digest, and broken copies of it. Each broken
 copy breaks one rule of [PACK.md](../../docs/spec/PACK.md) section 3, and
 `manifest.json` gives the error code ([PACK.md](../../docs/spec/PACK.md)
@@ -55,8 +57,7 @@ Reads are `chunk` (`plane`, `layer`, `cx`, `cy`), `string` (`id`),
 `object_location` (`uid`), which reads a uid's `object_uids` row, `object`
 (`uid`), which also decodes the row's chunk and checks that the object at
 its index has the uid, and `plane` (`id`), `zone` (`plane`, `id`), `anchor`
-(`plane`, `id`) and `definition` (`type`, `id`). The Rust reader has no single read of a plane,
-zone, anchor or definition, so it skips those four; the Go reader runs them
+(`plane`, `id`) and `definition` (`type`, `id`). Every reader runs them
 all. A read of a row that does not exist succeeds and finds nothing.
 
 `pack.io` and `pack.not_a_file` have no fixture, since a missing file or a

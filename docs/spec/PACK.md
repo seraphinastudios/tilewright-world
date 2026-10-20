@@ -126,7 +126,9 @@ Packs are untrusted input. Readers check a value's type and size in SQL before
 loading it, and never load a whole table into memory. Readers:
 
 - open the file read-only and immutable, with SQLite's defensive mode on and
-  untrusted schemas disabled;
+  untrusted schemas disabled. A reader may instead open a pack from its
+  bytes, as the browser does: it copies them into a read-only database in
+  memory and checks them as it checks a file;
 - reject the file unless its schema is exactly section 1, its
   `application_id` is `"TWP1"`, its `user_version` is 2, and `meta` holds
   exactly the keys of section 1, as text of at most 64 MiB for `profile` and
@@ -165,8 +167,9 @@ strings, the chunk a uid's row names) is checked by a full verification.
   trailing bytes.
 
 Readers also have a pack-size limit, which the caller sets and which is 8 GiB
-by default. A file longer than the limit is rejected before SQLite opens it,
-and again once it is open, by its `page_count × 4096`. A full verification
+by default. A file longer than the limit, or bytes more than it, are rejected
+before SQLite opens or copies them, and again once open, by their
+`page_count × 4096`. A full verification
 checks the pages against it before its integrity check, and hashing the file
 fails as soon as it has read more than the limit, even if the file has grown
 since it was opened. Verification never uses a higher limit than the one the
@@ -196,7 +199,10 @@ A full verification also:
   the name is 64 hex digits, which must be the lowercase digest. The digest
   is computed from the file at the pack's path when the check runs, so it
   binds to the path, not to the file the database connection opened; packs
-  are content-addressed files opened from directories the caller controls;
+  are content-addressed files opened from directories the caller controls.
+  A pack opened from bytes has no name: its caller may give the expected
+  digest instead, which verification compares with the SHA-256 of the copy
+  the database reads;
 - checks that string IDs are exactly `1..=count` in byte order of their
   values, and every string is UTF-8 text of at most 1 MiB without NUL;
 - checks that plane, zone, anchor, stairwell and definition keys are
@@ -281,7 +287,7 @@ fails with, and every reader in this repository runs them.
 | `pack.reference` | A chunk record names a target that does not exist or is out of range. |
 | `pack.object_uid` | An `object_uids` row is invalid, or the table does not index exactly the uids of the chunk records. |
 | `pack.integrity` | SQLite's integrity check failed. |
-| `pack.digest` | The file's SHA-256 does not match its name. |
+| `pack.digest` | The file's SHA-256 does not match its name, or a pack opened from bytes does not have the digest its caller expects. |
 | `pack.decode_budget` | The chunks decode to more than the verification budget. |
 
 Text that is not UTF-8 in a value a reader loads gets the code of that
