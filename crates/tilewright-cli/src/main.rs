@@ -304,13 +304,14 @@ fn inspect(path: &Path, limits: tilewright_pack::VerifyLimits) -> Result<String,
     );
     let _ = writeln!(
         output,
-        "planes: {}\nzones: {}\nanchors: {}\nstairwells: {}\nchunks: {}\nobjects: {}\ndefinitions: {}\nstrings: {}\nverified: yes",
+        "planes: {}\nzones: {}\nanchors: {}\nstairwells: {}\nchunks: {}\nobjects: {}\nobject_uids: {}\ndefinitions: {}\nstrings: {}\nverified: yes",
         summary.planes,
         summary.zones,
         summary.anchors,
         summary.stairwells,
         summary.chunks,
         summary.objects,
+        summary.object_uids,
         summary.definitions,
         summary.strings
     );

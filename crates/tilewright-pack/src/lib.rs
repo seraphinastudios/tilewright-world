@@ -20,13 +20,13 @@ mod read;
 
 pub use chunk::{
     CHUNK_ENCODING, ChunkData, DecodeError, FieldRecord, MAXIMUM_CHUNK_BYTES, MAXIMUM_DEPTH,
-    MAXIMUM_RECORD_BYTES, ObjectRecord, PortalRecord, ZSTD_LEVEL, decode_chunk, decode_record,
-    encode_chunk, encode_record,
+    MAXIMUM_RECORD_BYTES, ObjectRecord, PortalRecord, RECORD_VERSION, ZSTD_LEVEL, decode_chunk,
+    decode_record, encode_chunk, encode_record,
 };
 pub use compile::{COMPILER, Written, compile, write_pack};
 pub use read::{
-    DEFAULT_MAXIMUM_DECODED_BYTES, DEFAULT_MAXIMUM_PACK_BYTES, Pack, StairwellTile, Summary,
-    VerifyLimits,
+    DEFAULT_MAXIMUM_DECODED_BYTES, DEFAULT_MAXIMUM_PACK_BYTES, MAXIMUM_OBJECT_INDEX, Pack,
+    StairwellTile, Summary, UidLocation, VerifyLimits,
 };
 
 use std::fmt;
@@ -38,7 +38,7 @@ pub const FORMAT: &str = "tilewright.pack/1";
 pub const APPLICATION_ID: i32 = 0x5457_5031;
 
 /// SQLite `user_version` of a pack of this format.
-pub const USER_VERSION: i32 = 1;
+pub const USER_VERSION: i32 = 2;
 
 /// Every `meta` key, in byte order. A pack has exactly these.
 pub const META_KEYS: [&str; 7] = [
@@ -52,7 +52,7 @@ pub const META_KEYS: [&str; 7] = [
 ];
 
 /// The pack tables, by name, exactly as created.
-pub const SCHEMA_TABLES: [(&str, &str); 9] = [
+pub const SCHEMA_TABLES: [(&str, &str); 10] = [
     (
         "meta",
         "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID",
@@ -88,6 +88,10 @@ pub const SCHEMA_TABLES: [(&str, &str); 9] = [
     (
         "definitions",
         "CREATE TABLE definitions (type TEXT NOT NULL, id TEXT NOT NULL, document TEXT NOT NULL, PRIMARY KEY (type, id)) WITHOUT ROWID",
+    ),
+    (
+        "object_uids",
+        "CREATE TABLE object_uids (uid TEXT PRIMARY KEY, plane TEXT NOT NULL, layer INTEGER NOT NULL, cx INTEGER NOT NULL, cy INTEGER NOT NULL, object INTEGER NOT NULL) WITHOUT ROWID",
     ),
 ];
 

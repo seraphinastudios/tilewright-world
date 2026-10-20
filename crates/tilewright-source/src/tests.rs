@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 use super::{
-    FieldValue, LoadOptions, PlaneKind, Portal, Projection, StairwellDirection, StairwellStep,
-    load, load_with,
+    FieldValue, LoadOptions, ObjectLocation, PlaneKind, Portal, Projection, StairwellDirection,
+    StairwellStep, load, load_with,
 };
 use std::{
     fs,
@@ -626,7 +626,11 @@ fn boundary_chunks_load_and_the_next_ones_are_rejected() {
     let copy = workspace();
     let root = copy.path();
     let layer = root.join("planes/vault/layers/0");
-    let text = fs::read_to_string(layer.join("0_0.jsonc")).unwrap();
+    // Copies of the vault's chunk, without its object's uid, which is
+    // unique in the world.
+    let text = fs::read_to_string(layer.join("0_0.jsonc"))
+        .unwrap()
+        .replace("\"uid\": \"vault.chest\", ", "");
     for (cx, cy) in [(EDGE, 0), (-EDGE, 0), (0, EDGE), (0, -EDGE)] {
         fs::write(
             layer.join(format!("{cx}_{cy}.jsonc")),
@@ -1679,5 +1683,148 @@ fn every_key_of_a_spec_is_checked() {
             .map(|(code, _, _)| code)
             .collect();
         assert_eq!(found, expected, "{spec}");
+    }
+}
+
+const VAULT_CHUNK: &str = "planes/vault/layers/0/0_0.jsonc";
+
+#[test]
+fn object_uids_are_indexed_at_every_depth_and_plane() {
+    let world = load(&fixture()).expect("the fixture is valid");
+    let location = |plane: &str, chunk: (i32, i64, i64), path: &[usize]| ObjectLocation {
+        plane: plane.to_owned(),
+        chunk,
+        path: path.to_vec(),
+    };
+    let expected = [
+        (
+            "o.k3vq7zr2mxa5d6wfh4pnyt2cgu",
+            location("overworld", (0, 0, 0), &[4, 1, 0]),
+        ),
+        ("ruin.north_wall", location("overworld", (0, 0, 0), &[1])),
+        ("vault.chest", location("vault", (0, 0, 0), &[0])),
+        ("village.chest", location("overworld", (0, 0, 0), &[4])),
+        (
+            "village.chest.small",
+            location("overworld", (0, 0, 0), &[4, 1]),
+        ),
+    ];
+    assert_eq!(
+        world
+            .object_uids()
+            .iter()
+            .map(|(uid, location)| (uid.as_str(), location.clone()))
+            .collect::<Vec<_>>(),
+        expected
+    );
+    for (uid, location) in &expected {
+        assert_eq!(world.object_location(uid), Some(location));
+        let object = world.object(uid).expect("indexed objects resolve");
+        assert_eq!(object.uid.as_deref(), Some(*uid));
+    }
+    let coin = world.object("o.k3vq7zr2mxa5d6wfh4pnyt2cgu").unwrap();
+    assert_eq!(coin.at, None);
+    assert_eq!(coin.fields, [("count".to_owned(), FieldValue::Integer(1))]);
+    assert_eq!(world.object("village.chest").unwrap().at, Some([2, 2]));
+    assert!(world.object("nothing").is_none());
+    assert!(world.object_location("nothing").is_none());
+    // Objects without a uid are not indexed.
+    let chunk = &world.planes()["overworld"].chunks[&(0, 0, 0)];
+    assert_eq!(chunk.objects[0].uid, None);
+    assert_eq!(chunk.object(&[4, 0]).unwrap().uid, None);
+    assert!(chunk.object(&[]).is_none());
+    assert!(chunk.object(&[4, 2]).is_none());
+    assert!(chunk.object(&[6]).is_none());
+}
+
+#[test]
+fn duplicate_object_uids_are_reported_where_they_repeat() {
+    // On another plane, in the same chunk, and in an inventory.
+    for (path, from, to) in [
+        (
+            VAULT_CHUNK,
+            "\"uid\": \"vault.chest\"",
+            "\"uid\": \"village.chest\"",
+        ),
+        (
+            CHUNK,
+            "{\"at\": [7, 0], \"proto\": \"tree\"}",
+            "{\"uid\": \"ruin.north_wall\", \"at\": [7, 0], \"proto\": \"tree\"}",
+        ),
+        (
+            CHUNK,
+            "{\"proto\": \"coin\", \"fields\": {\"count\": 3}}",
+            "{\"uid\": \"village.chest.small\", \"proto\": \"coin\", \"fields\": {\"count\": 3}}",
+        ),
+    ] {
+        let copy = workspace();
+        edit(copy.path(), path, from, to);
+        let diagnostics = load(copy.path()).expect_err("a uid is used twice");
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        let diagnostic = &diagnostics[0];
+        assert_eq!(
+            (diagnostic.code, diagnostic.path.as_str()),
+            ("ref.duplicate", path)
+        );
+        assert!(
+            diagnostic
+                .message
+                .ends_with(&format!("is already used by an object in {CHUNK}")),
+            "{diagnostic}"
+        );
+    }
+
+    // The second object to claim a uid, in document order, is the one
+    // reported: here the inventory entry after its holder.
+    let copy = workspace();
+    edit(
+        copy.path(),
+        CHUNK,
+        "{\"proto\": \"coin\", \"fields\": {\"count\": 3}}",
+        "{\"uid\": \"village.chest\", \"proto\": \"coin\", \"fields\": {\"count\": 3}}",
+    );
+    let found = problems(copy.path());
+    let line = fs::read_to_string(copy.path().join(CHUNK))
+        .unwrap()
+        .lines()
+        .position(|line| line.contains("\"uid\": \"village.chest\", \"proto\": \"coin\""))
+        .unwrap()
+        + 1;
+    assert_eq!(found, [("ref.duplicate", CHUNK.to_owned(), line)]);
+}
+
+#[test]
+fn object_uids_are_identifiers_of_at_most_128_bytes() {
+    let longest = format!("a{}", "0".repeat(127));
+    let copy = workspace();
+    edit(
+        copy.path(),
+        VAULT_CHUNK,
+        "\"uid\": \"vault.chest\"",
+        &format!("\"uid\": \"{longest}\""),
+    );
+    let world = load(copy.path()).expect("a 128-byte uid is valid");
+    assert!(world.object(&longest).is_some());
+    for (uid, code) in [
+        (format!("\"{longest}0\""), "shape.identifier"),
+        ("\"\"".to_owned(), "shape.identifier"),
+        ("\"Vault.Chest\"".to_owned(), "shape.identifier"),
+        ("\"_runtime\"".to_owned(), "shape.identifier"),
+        ("\"vault chest\"".to_owned(), "shape.identifier"),
+        ("7".to_owned(), "shape.type"),
+        ("null".to_owned(), "shape.type"),
+    ] {
+        let copy = workspace();
+        edit(
+            copy.path(),
+            VAULT_CHUNK,
+            "\"uid\": \"vault.chest\"",
+            &format!("\"uid\": {uid}"),
+        );
+        let found: Vec<_> = problems(copy.path())
+            .into_iter()
+            .map(|(code, path, _)| (code, path))
+            .collect();
+        assert_eq!(found, [(code, VAULT_CHUNK.to_owned())], "{uid}");
     }
 }

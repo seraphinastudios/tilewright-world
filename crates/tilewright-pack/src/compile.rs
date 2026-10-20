@@ -224,6 +224,10 @@ pub(crate) fn check_chunk_shape(chunk: &Chunk, ground_layers: usize) -> Result<(
 
 /// The bytes an object's own part of a record takes, inventory excluded.
 fn encoded_size(object: &Object) -> usize {
+    let uid = object
+        .uid
+        .as_ref()
+        .map_or(0, |uid| uid.len().saturating_add(1));
     let portal: usize = match object.portal {
         Some(Portal::Location { .. }) => 25,
         Some(Portal::Anchor { .. }) => 9,
@@ -247,6 +251,7 @@ fn encoded_size(object: &Object) -> usize {
         .map_or(0, |text| text.len().saturating_add(4));
     let inventory = if object.inventory.is_empty() { 0 } else { 4 };
     (15 + portal + inventory)
+        .saturating_add(uid)
         .saturating_add(fields)
         .saturating_add(custom)
 }
@@ -330,7 +335,12 @@ pub(crate) fn object_record(
         .iter()
         .map(|item| object_record(item, layers, strings, depth + 1, budget))
         .collect::<Result<_, _>>()?;
+    let uid = match &object.uid {
+        Some(uid) => Some(identifier(uid)?.to_owned()),
+        None => None,
+    };
     Ok(ObjectRecord {
+        uid,
         tile,
         proto: strings.id(&object.proto)?,
         layer,
@@ -405,6 +415,41 @@ fn chunk_record(
             .collect::<Result<_, _>>()?,
         palette,
     })
+}
+
+/// An `object_uids` row by uid, so rows are inserted in primary-key order:
+/// the plane, layer and chunk coordinates of the object's chunk, and its
+/// index in the chunk record's depth-first order.
+pub(crate) type UidRows<'w> = BTreeMap<&'w str, (&'w str, i32, i64, i64, i64)>;
+
+/// Adds the uids of a chunk's objects, at every depth, to `rows`. The chunk
+/// has been encoded, which bounds its inventories' depth. The model is
+/// public, so uniqueness is checked here rather than assumed.
+pub(crate) fn collect_uids<'w>(
+    rows: &mut UidRows<'w>,
+    plane: &'w str,
+    (layer, cx, cy): (i32, i64, i64),
+    chunk: &'w Chunk,
+) -> Result<(), Error> {
+    let mut index: i64 = 0;
+    // Objects in the record's order: each before its inventory entries.
+    let mut levels = vec![chunk.objects.iter()];
+    while let Some(level) = levels.last_mut() {
+        let Some(object) = level.next() else {
+            levels.pop();
+            continue;
+        };
+        if let Some(uid) = &object.uid
+            && rows
+                .insert(identifier(uid)?, (plane, layer, cx, cy, index))
+                .is_some()
+        {
+            return Err(Error::Invalid(format!("two objects have uid {uid}")));
+        }
+        index += 1;
+        levels.push(object.inventory.iter());
+    }
+    Ok(())
 }
 
 /// A stairwell step's row: its stairwell, its index in the stairwell, and
@@ -539,6 +584,7 @@ pub fn compile(world: &World) -> Result<Vec<u8>, Error> {
         let mut chunks = connection.prepare(
             "INSERT INTO chunks (plane, layer, cx, cy, encoding, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )?;
+        let mut uids = UidRows::new();
         for (id, plane) in world.planes() {
             planes.execute(params![
                 id,
@@ -564,11 +610,19 @@ pub fn compile(world: &World) -> Result<Vec<u8>, Error> {
                 ])?;
             }
             insert_stairwells(&connection, id, plane)?;
-            for ((layer, cx, cy), chunk) in &plane.chunks {
+            for (key, chunk) in &plane.chunks {
+                let (layer, cx, cy) = *key;
                 let record = chunk_record(chunk, &layers, &strings)?;
                 let data = encode_chunk(&record).map_err(|error| Error::Invalid(error.0))?;
                 chunks.execute(params![id, layer, cx, cy, CHUNK_ENCODING, data])?;
+                collect_uids(&mut uids, id, *key, chunk)?;
             }
+        }
+        let mut object_uids = connection.prepare(
+            "INSERT INTO object_uids (uid, plane, layer, cx, cy, object) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )?;
+        for (uid, (plane, layer, cx, cy, object)) in uids {
+            object_uids.execute(params![uid, plane, layer, cx, cy, object])?;
         }
         let mut definitions = connection
             .prepare("INSERT INTO definitions (type, id, document) VALUES (?1, ?2, ?3)")?;

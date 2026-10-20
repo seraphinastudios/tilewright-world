@@ -10,7 +10,10 @@ use crate::{
     read::Reader,
     schema::{References, Target, read_fields},
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 use tilewright_jsonc::Value;
 
 /// Deepest inventory nesting accepted.
@@ -151,6 +154,7 @@ pub(crate) fn read_chunk(
         let mut context = ObjectContext {
             profile,
             plane: address.plane,
+            path: Arc::from(path),
             size: address.size,
             references,
         };
@@ -335,6 +339,8 @@ fn read_heights<'a>(reader: &Reader<'a>, value: &'a Value, chunk_size: u16) -> O
 struct ObjectContext<'p, 'r> {
     profile: &'p Profile,
     plane: &'p str,
+    /// The chunk's path, kept with each uid its objects claim.
+    path: Arc<str>,
     size: u16,
     references: &'r mut References,
 }
@@ -349,6 +355,7 @@ fn read_object<'a>(
     let entry = reader.object(
         value,
         &[
+            "uid",
             "at",
             "proto",
             "layer",
@@ -360,6 +367,24 @@ fn read_object<'a>(
             "custom",
         ],
     )?;
+    // The uid is claimed before the object's inventory is read, so of two
+    // objects that share one, the first in document order keeps it.
+    let mut uid_ok = true;
+    let uid = match entry.get("uid") {
+        Some(value) => {
+            let uid = reader.identifier(value)?;
+            if let Some(first) = context.references.claim_uid(&uid, &context.path) {
+                reader.report(
+                    value.span(),
+                    Code::Duplicate,
+                    format!("object uid \"{uid}\" is already used by an object in {first}"),
+                );
+                uid_ok = false;
+            }
+            Some(uid)
+        }
+        None => None,
+    };
     let at = if depth == 0 {
         let at_value = reader.required(entry, "at")?;
         let [x, y] = reader.coordinates(at_value)?;
@@ -442,7 +467,8 @@ fn read_object<'a>(
         }
     }
     let custom = reader.custom(entry);
-    Some(Object {
+    uid_ok.then_some(Object {
+        uid,
         at,
         proto,
         layer,
