@@ -101,8 +101,7 @@ its own, so a maintenance release never displaces a release of `main`.
 | Build the npm package | ubuntu-24.04 | `contents: read` | `tools/build-wasm.sh`, then `npm pack` at the release version (only when `packages/tilewright-pack/package.json` exists) |
 | Package release assets | ubuntu-24.04 | `contents: read` | `tools/release/package.py assemble`: archives, license bundles, the source archive and `SHA256SUMS`; checks that all five platforms compiled the fixture to the same pack |
 | Attest build provenance | ubuntu-24.04 | `contents: read`, `id-token: write`, `attestations: write` | Verifies the assets, then `actions/attest-build-provenance` for every asset and each bare binary |
-| Publish the GitHub release | ubuntu-24.04 | `contents: write` | Creates the tag at the commit (creating a ref fails if it exists), publishes the release on it with every asset at once, then checks that it is immutable, that its tag points at the commit, and that GitHub's asset digests equal `SHA256SUMS` |
-| Tag the Go module | ubuntu-24.04 | `contents: write` | Creates `go/vX.Y.Z` at the commit, or accepts it if it is already there |
+| Publish the GitHub release | ubuntu-24.04 | `contents: write` | Creates `vX.Y.Z` and `go/vX.Y.Z` at the commit in one atomic push, which fails if either exists elsewhere. Then it publishes the release on the tag with every asset at once, and checks that the release is immutable, that both tags point at the commit, and that GitHub's asset digests equal `SHA256SUMS`. |
 | Publish to npm | ubuntu-24.04 | `contents: read`, `attestations: read`, `id-token: write`, environment `npm` | Publishes the release's npm tarball for a release from `main`; skipped unless npm publication is on |
 
 The build runners are `ubuntu-24.04` (x86_64 Linux), `ubuntu-24.04-arm`
@@ -184,6 +183,16 @@ The pipeline changes no settings. It relies on:
 - **The Actions allowlist**, for checkout, setup-node, upload-artifact,
   download-artifact and attest-build-provenance.
 
+Repository writers are trusted. Anyone who can push a branch can run
+workflow code of their own with `contents: write` and create tags and
+releases outside this pipeline, and no workflow file can prevent that.
+What tells pipeline releases apart is their provenance: verify it against
+`release.yml@refs/heads/main` as shown above, as npm publication does.
+Closing the gap fully needs a ruleset that lets only a dedicated GitHub
+App create `refs/tags/v*` and `refs/tags/go/v*`, with the app's credential
+in an environment limited to `main`, and `release.yml` creating tags and
+releases with that credential instead of `GITHUB_TOKEN`.
+
 Only the default branch is protected by rulesets. A maintenance branch
 `MAJOR.MINOR.x` is not, so any writer could push a release to one.
 Releases therefore come only from `main`: a maintenance branch plans its
@@ -254,20 +263,18 @@ source releases (its `docs/CRATE-RELEASE.md`):
 - **Anything before "Publish the GitHub release"**: nothing was published.
   Fix the cause. The next merge releases everything since the last
   release, or re-run the failed jobs.
-- **"Publish the GitHub release" failed before publishing**: the tag may
-  exist, but it has no release. Delete any draft release left behind, then
+- **"Publish the GitHub release" failed before publishing**: the tags may
+  exist, but the release does not. Delete any draft release left behind, then
   re-run the failed jobs within 30 days, while the run's artifacts last.
-  The re-run accepts a tag the failed attempt created at the same commit.
-  The ruleset keeps such a tag from being deleted, so the plan job of every
+  The re-run accepts tags the failed attempt created at the same commit.
+  The ruleset keeps such tags from being deleted, so the plan job of every
   later run on that branch stops until that release is published.
 - **"Publish the GitHub release" failed its checks after publishing**: the
   release exists. Do not delete it. Read the error, fix the cause (for
   example, turn immutable releases back on), then re-run the failed jobs:
   the re-run skips publishing, checks the existing release again, and goes
-  on to the Go tag and npm. A release that came out mutable stays as it is
+  on to npm. A release that came out mutable stays as it is
   for the owner to review.
-- **"Tag the Go module" failed**: re-run it. It creates the tag or accepts
-  the one already at the commit.
 - **"Publish to npm" failed**: re-run it. It checks the release again and
   publishes from the release's commit. If npm already has that version, the
   publication succeeded earlier.
