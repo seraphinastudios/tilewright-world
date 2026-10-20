@@ -672,15 +672,25 @@ impl Plan {
                     "a component of the path ends in a dot or a space, which Windows drops from a name; nothing was written",
                 ));
             }
-            if let Some(other) = seen.insert(file.path.to_ascii_lowercase(), &file.path) {
-                return Some(problem(
-                    &file.path,
-                    Code::Path,
-                    format!(
-                        "{} and {other} differ only in case, which some file systems do not tell apart; nothing was written",
-                        file.path
-                    ),
-                ));
+            // Every prefix, so that two directories made for different files
+            // cannot be one.
+            for (end, _) in file
+                .path
+                .match_indices('/')
+                .chain(std::iter::once((file.path.len(), "")))
+            {
+                let prefix = &file.path[..end];
+                if let Some(other) = seen.insert(prefix.to_ascii_lowercase(), prefix)
+                    && other != prefix
+                {
+                    return Some(problem(
+                        &file.path,
+                        Code::Path,
+                        format!(
+                            "{prefix} and {other} differ only in case, which some file systems do not tell apart; nothing was written"
+                        ),
+                    ));
+                }
             }
         }
         None

@@ -414,6 +414,12 @@ impl Directory {
         let Some(directory) = label(&self.0, "security.selinux")? else {
             return Ok(());
         };
+        // A thread that sets the label of what it makes (`setfscreatecon`)
+        // gives both names that label; the staged file's is checked when
+        // it is written.
+        if selinux::creates_as_set().map_err(Refused::Io)? {
+            return Ok(());
+        }
         // A labelled tree whose policy cannot be asked, as in a container
         // that hides the SELinux file system, is refused, not guessed at.
         let given = selinux::compute_create(&directory, staged).map_err(Refused::Io)?;
@@ -680,6 +686,16 @@ pub(crate) mod selinux {
             .rposition(|byte| !matches!(byte, b'\0' | b'\n'))
             .map_or(0, |last| last + 1);
         &label[..end]
+    }
+
+    /// Whether this thread sets the label of the files it makes itself
+    /// (`setfscreatecon`), so that no rule of the policy applies to them.
+    pub(super) fn creates_as_set() -> io::Result<bool> {
+        match fs::read("/proc/thread-self/attr/fscreate") {
+            Ok(label) => Ok(!trimmed(&label).is_empty()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     /// The label the policy gives a regular file this thread makes as

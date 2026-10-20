@@ -805,6 +805,23 @@ fn files_whose_paths_differ_only_in_case_are_not_published() {
         has(&failure.problems, "tx.path", "differ only in case"),
         "{failure:#?}"
     );
+    // So do two directories on the way to different files.
+    let plan = planned(
+        root,
+        &transaction(
+            r#"{"op": "test", "path": "defs/kind/a.jsonc", "pointer": [], "absent": true},
+    {"op": "test", "path": "defs/KIND/b.jsonc", "pointer": [], "absent": true}"#,
+        ),
+    );
+    let failure = plan.publish().unwrap_err();
+    assert!(
+        has(
+            &failure.problems,
+            "tx.path",
+            "defs/kind and defs/KIND differ only in case"
+        ),
+        "{failure:#?}"
+    );
 }
 
 #[test]
