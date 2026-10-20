@@ -48,7 +48,11 @@ export type ModuleSource =
   | string
   | Request
   | Response
-  | Promise<Response>;
+  /**
+   * A promise of the module's bytes, compiled module or `Response`. A URL,
+   * string or `Request` is fetched only when given directly.
+   */
+  | Promise<BufferSource | WebAssembly.Module | Response>;
 
 /**
  * Loads the WebAssembly module once; later calls return the same promise.
