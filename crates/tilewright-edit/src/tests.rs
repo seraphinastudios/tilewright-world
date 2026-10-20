@@ -2604,3 +2604,29 @@ fn a_plan_with_more_problems_than_reported_says_so() {
         &found[..3]
     );
 }
+
+#[test]
+fn publish_time_terrain_conflicts_past_the_limit_say_so() {
+    let tree = copy();
+    let root = tree.path();
+    let profile = root.join("profile/profile.jsonc");
+    let original = fs::read_to_string(&profile).unwrap();
+    let wider = original.replace(
+        "\"ground_layers\": [\"floor\", \"mask\"]",
+        "\"ground_layers\": [\"floor\", \"mask\", \"effect\"]",
+    );
+    fs::write(&profile, &wider).unwrap();
+    let operation = r#"{"op": "terrain.set", "plane": "overworld", "layer": 0, "grid": "effect", "cells": [{"at": [0, 0], "value": null}]}"#;
+    let plan = planned(
+        root,
+        &transaction(&vec![operation; limits::DIAGNOSTICS + 1].join(",\n    ")),
+    );
+    fs::write(&profile, &original).unwrap();
+    let failure = plan.publish().unwrap_err();
+    assert_eq!(failure.problems.len(), limits::DIAGNOSTICS);
+    assert!(
+        has(&failure.problems, "tx.limit", "the rest are not reported"),
+        "{:#?}",
+        &failure.problems[..2]
+    );
+}

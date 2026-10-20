@@ -573,6 +573,43 @@ fn check_again(root: &SourceRoot, files: &[FileChange]) -> Result<(), Vec<Diagno
 }
 
 impl Plan {
+    /// Validates the tree with the plan's files again, and its terrain
+    /// addresses against it, since files the plan did not read may have
+    /// changed since it was made.
+    fn validate_again(&self, root: &SourceRoot) -> Result<(), Vec<Diagnostic>> {
+        let world = tilewright_source::load_edited_in(root, &self.load, &self.overlay())?;
+        let limit = crate::limits::DIAGNOSTICS;
+        let mut problems: Vec<Diagnostic> = self
+            .terrain
+            .iter()
+            .filter_map(|(plane, grid, at)| {
+                crate::terrain_problem(&world, plane, grid).map(|message| Diagnostic {
+                    message,
+                    ..at.clone()
+                })
+            })
+            .take(limit)
+            .collect();
+        // The last place goes to a note that there are more.
+        if problems.len() == limit {
+            problems.truncate(limit - 1);
+            let name = problems[0].path.clone();
+            problems.push(diagnostic::file(
+                &name,
+                Code::Limit.as_str(),
+                format!(
+                    "more than {} problems; the rest are not reported",
+                    limit - 1
+                ),
+            ));
+        }
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(problems)
+        }
+    }
+
     /// Writes the plan's files. The root's lock is held throughout. Every
     /// file the plan touched or consulted must still be as it was planned,
     /// and the tree with the plan's files must still validate, since files
@@ -624,25 +661,7 @@ impl Plan {
             hook();
         }
 
-        let checked = check_again(root, &self.files).and_then(|()| {
-            let world = tilewright_source::load_edited_in(root, &self.load, &self.overlay())?;
-            let problems: Vec<Diagnostic> = self
-                .terrain
-                .iter()
-                .filter_map(|(plane, grid, at)| {
-                    crate::terrain_problem(&world, plane, grid).map(|message| Diagnostic {
-                        message,
-                        ..at.clone()
-                    })
-                })
-                .take(crate::limits::DIAGNOSTICS)
-                .collect();
-            if problems.is_empty() {
-                Ok(())
-            } else {
-                Err(problems)
-            }
-        });
+        let checked = check_again(root, &self.files).and_then(|()| self.validate_again(root));
         // Last, as close to publishing as can be: the access the staged
         // files were given must still be what it came from.
         let checked = checked.and_then(|()| check_access(&mut directories, &known));
