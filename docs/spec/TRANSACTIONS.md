@@ -86,10 +86,11 @@ transaction out records every file it read, created or checked for absence
   is that identifier. `["zones", {"id": "island"}, "name"]` names a zone's
   name whatever its position. An object target, `"object": {"plane",
   "layer", "at", "index"}` or `"object": {"uid"}`, takes the place of
-  `"path"` and makes the pointer relative to the object. That pointer names a part of the object: it is
-  not empty and does not start with `at`, which is the object's tile, and an
-  `insert` inserts into a part of the object, so its pointer has a step
-  before the index. A `set` adds a member to the object itself.
+  `"path"` and makes the pointer relative to the object. That pointer names
+  a part of the object: it is not empty and does not start with `at`, which
+  is the object's tile, and an `insert` inserts into a part of the object,
+  so its pointer has a step before the index. A `set` adds a member to the
+  object itself.
 
 Values in operations are written exactly as they appear in the transaction,
 comments and spacing included, and keys exactly as spelled there.

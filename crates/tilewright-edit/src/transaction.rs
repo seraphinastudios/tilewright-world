@@ -940,7 +940,7 @@ impl<'a> Shape<'a> {
         if let Some(at) = expect.member("at") {
             self.shape(
                 at.key_span,
-                "the tile comes from the address; leave out \"at\"",
+                "expect names what the object is, not where it is; leave out \"at\"",
             );
             usable = false;
         }
