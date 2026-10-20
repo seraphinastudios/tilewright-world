@@ -81,8 +81,10 @@ const I64 = [-(2n ** 63n), 2n ** 63n - 1n];
 const U64 = [0n, 2n ** 64n - 1n];
 const DEFAULT_MAX_PACK_BYTES = 8n * 2n ** 30n;
 
-// Rows a listing reads at a time.
+// What a listing reads at a time: at most 64 rows, and no more once their
+// keys and documents reach 1 MiB, so a page of large documents is one row.
 const PAGE = 64;
+const PAGE_BYTES = 2 ** 20;
 
 // wasm-bindgen converts numbers to 32-bit integers silently, so each is
 // checked here: an integer number or bigint within the parameter's range.
@@ -226,8 +228,9 @@ export class Pack {
       if (page.length === 0) {
         return;
       }
-      yield* page;
+      // The key is taken before the caller sees, and may change, the rows.
       after = keyOf(page[page.length - 1]);
+      yield* page;
     }
   }
 
@@ -285,7 +288,7 @@ export class Pack {
 
   planes() {
     return this.#rows(
-      (reader, after) => reader.planes(after, PAGE),
+      (reader, after) => reader.planes(after, PAGE, PAGE_BYTES),
       (plane) => plane.id,
     );
   }
@@ -299,7 +302,7 @@ export class Pack {
   zones(plane) {
     text(plane, "plane");
     return this.#rows(
-      (reader, after) => reader.zones(plane, after, PAGE),
+      (reader, after) => reader.zones(plane, after, PAGE, PAGE_BYTES),
       (zone) => zone.id,
     );
   }
@@ -313,7 +316,7 @@ export class Pack {
   anchors(plane) {
     text(plane, "plane");
     return this.#rows(
-      (reader, after) => reader.anchors(plane, after, PAGE),
+      (reader, after) => reader.anchors(plane, after, PAGE, PAGE_BYTES),
       (anchor) => anchor.id,
     );
   }
@@ -327,7 +330,7 @@ export class Pack {
   stairwells(plane) {
     text(plane, "plane");
     return this.#rows(
-      (reader, after) => reader.stairwells(plane, after, PAGE),
+      (reader, after) => reader.stairwells(plane, after, PAGE, PAGE_BYTES),
       (stairwell) => stairwell.id,
     );
   }
@@ -350,7 +353,7 @@ export class Pack {
       text(type, "type");
     }
     return this.#rows(
-      (reader, after) => reader.definitions(type, after?.[0], after?.[1], PAGE),
+      (reader, after) => reader.definitions(type, after?.[0], after?.[1], PAGE, PAGE_BYTES),
       (definition) => [definition.type, definition.id],
     );
   }
@@ -358,7 +361,7 @@ export class Pack {
   layers(plane) {
     text(plane, "plane");
     return this.#rows(
-      (reader, after) => reader.layers(plane, after, PAGE),
+      (reader, after) => reader.layers(plane, after, PAGE, PAGE_BYTES),
       (layer) => layer,
     );
   }
@@ -367,7 +370,7 @@ export class Pack {
     text(plane, "plane");
     int(layer, "layer", I32);
     return this.#rows(
-      (reader, after) => reader.chunkKeys(plane, layer, after?.[0], after?.[1], PAGE),
+      (reader, after) => reader.chunkKeys(plane, layer, after?.[0], after?.[1], PAGE, PAGE_BYTES),
       (key) => [BigInt(key.cx), BigInt(key.cy)],
     );
   }

@@ -27,7 +27,7 @@ try {
       }
     }
   }
-  console.log(profile.render_layers, pack.definitions("proto").length, "prototypes");
+  console.log(profile.render_layers, Array.from(pack.definitions("proto")).length, "prototypes");
 } catch (error) {
   if (error instanceof PackError) {
     console.error(error.code, error.message); // such as pack.digest
@@ -84,9 +84,9 @@ released too.
 Reads are synchronous. Each checks the shape and bounds of what it loads and
 throws a `PackError` with the code of the rule a stored value breaks; a read
 of something the pack does not have returns `undefined`. Listings, the
-plural methods below, are iterators that read 64 rows at a time in key
-order, so walking a large table holds one page; use `Array.from` for an
-array. Whether the
+plural methods below, are iterators that read a page at a time in key
+order: 64 rows, or fewer once their keys and documents reach 1 MiB. Walking
+a large table therefore holds one page; use `Array.from` for an array. Whether the
 targets a row names exist (a chunk's strings, a zone's parent, the chunk a
 uid's row names) is what `verify()` checks.
 

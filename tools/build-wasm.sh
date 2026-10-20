@@ -8,7 +8,8 @@
 # wasm-bindgen command whose version matches the crate in Cargo.lock. Both
 # are pinned below. Their release archives are downloaded once into
 # ${TILEWRIGHT_WASM_TOOLS:-${XDG_CACHE_HOME:-~/.cache}/tilewright-world/wasm-tools},
-# and checked by SHA-256 and unpacked into target/wasm-tools on every run.
+# and on every run checked by SHA-256 and unpacked into a directory of the
+# run's own under target/wasm-tools.
 # Set CC_wasm32_unknown_unknown and AR_wasm32_unknown_unknown to use another
 # clang with the WebAssembly target instead of wasi-sdk.
 set -euo pipefail
@@ -71,20 +72,19 @@ sha256() {
   fi
 }
 
-# This run's tools, unpacked afresh into the checkout's own target
-# directory. The path stays the same between runs, so Cargo does not
-# rebuild the C code for a new compiler path.
-unpacked=${repository}/target/wasm-tools
-rm -rf -- "${unpacked}"
-mkdir -p "${unpacked}"
+# This run's own directory, removed when it exits: builds running at the
+# same time in one checkout never share tools or output in progress.
+mkdir -p "${repository}/target/wasm-tools"
+run=$(mktemp -d "${repository}/target/wasm-tools/run.XXXXXX")
+trap 'rm -rf -- "${run}"' EXIT
 
-# Unpacks the release archive <name>.tar.gz as ${unpacked}/<name>. The
-# archive is downloaded once into ${tools}; on every run it is copied out,
-# and the copy is checked against its pinned SHA-256 before it is unpacked,
-# so a changed cache is never run.
+# Unpacks the release archive <name>.tar.gz as ${run}/<name>. The archive
+# is downloaded once into ${tools}; on every run it is copied out, and the
+# copy is checked against its pinned SHA-256 before it is unpacked, so a
+# changed cache is never run.
 install() {
   local name=$1 url=$2 expected=$3
-  local archive=${tools}/${name}.tar.gz copy=${unpacked}/${name}.tar.gz
+  local archive=${tools}/${name}.tar.gz copy=${run}/${name}.tar.gz
   if [[ -f ${archive} ]]; then
     cp "${archive}" "${copy}"
   else
@@ -108,9 +108,19 @@ install() {
     cp "${copy}" "${partial}"
     mv "${partial}" "${archive}"
   fi
-  mkdir "${unpacked}/${name}"
-  tar -xzf "${copy}" -C "${unpacked}/${name}" --strip-components 1
+  mkdir "${run}/${name}"
+  tar -xzf "${copy}" -C "${run}/${name}" --strip-components 1
   rm -- "${copy}"
+}
+
+# Replaces `target` with `source` in one rename, so a reader of `target`
+# sees one whole file or the other.
+publish() {
+  local source=$1 target=$2 partial
+  partial=$(mktemp "$(dirname "${target}")/.$(basename "${target}").XXXXXX")
+  cp "${source}" "${partial}"
+  chmod 644 "${partial}"
+  mv -f "${partial}" "${target}"
 }
 
 if [[ -z ${CC_wasm32_unknown_unknown-} || -z ${AR_wasm32_unknown_unknown-} ]]; then
@@ -118,8 +128,22 @@ if [[ -z ${CC_wasm32_unknown_unknown-} || -z ${AR_wasm32_unknown_unknown-} ]]; t
   install "${wasi_sdk}" \
     "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${wasi_sdk_release}/${wasi_sdk}.tar.gz" \
     "${wasi_sdk_sha256}"
-  export CC_wasm32_unknown_unknown=${unpacked}/${wasi_sdk}/bin/clang
-  export AR_wasm32_unknown_unknown=${unpacked}/${wasi_sdk}/bin/llvm-ar
+  # Cargo rebuilds the C code when the compiler's path changes, so the
+  # compiler is called through wrappers whose path names only the pinned
+  # version. They run this run's copy, which the environment names.
+  export TILEWRIGHT_WASI_SDK=${run}/${wasi_sdk}
+  wrappers=${repository}/target/wasm-tools/${wasi_sdk}
+  mkdir -p "${wrappers}"
+  for tool in clang llvm-ar; do
+    wrapper=${run}/${tool}
+    # shellcheck disable=SC2016 # The wrapper expands these when it runs.
+    printf '#!/bin/sh\nexec "${TILEWRIGHT_WASI_SDK:?}/bin/%s" "$@"\n' "${tool}" >"${wrapper}"
+    chmod 755 "${wrapper}"
+    publish "${wrapper}" "${wrappers}/${tool}"
+    chmod 755 "${wrappers}/${tool}"
+  done
+  export CC_wasm32_unknown_unknown=${wrappers}/clang
+  export AR_wasm32_unknown_unknown=${wrappers}/llvm-ar
 fi
 wasm_bindgen=wasm-bindgen-${wasm_bindgen_version}-${wasm_bindgen_platform}
 install "${wasm_bindgen}" \
@@ -128,10 +152,17 @@ install "${wasm_bindgen}" \
 
 # Paths of this machine stay out of the module, so builds of one commit on
 # different machines match: Rust panic locations and C file names name the
-# repository and the Cargo home by fixed prefixes.
+# repository and the Cargo home by fixed prefixes. The C flags are parsed
+# as shell words, so paths with spaces stay whole.
 cargo_home=${CARGO_HOME:-${HOME}/.cargo}
+quoted() {
+  local escaped=${1//\'/\'\\\'\'}
+  printf "'%s'" "${escaped}"
+}
 export CARGO_ENCODED_RUSTFLAGS="--remap-path-prefix=${repository}=/tilewright-world"$'\x1f'"--remap-path-prefix=${cargo_home}=/cargo"
-export CFLAGS_wasm32_unknown_unknown="-ffile-prefix-map=${repository}=/tilewright-world -ffile-prefix-map=${cargo_home}=/cargo"
+export CC_SHELL_ESCAPED_FLAGS=1
+CFLAGS_wasm32_unknown_unknown="-ffile-prefix-map=$(quoted "${repository}")=/tilewright-world -ffile-prefix-map=$(quoted "${cargo_home}")=/cargo"
+export CFLAGS_wasm32_unknown_unknown
 
 if [[ ${check} == true ]]; then
   # Only the reader's own crates: their dependencies are linted for the
@@ -140,16 +171,20 @@ if [[ ${check} == true ]]; then
     --package tilewright-pack --package tilewright-pack-wasm --no-deps -- -D warnings
 fi
 cargo build --locked --target wasm32-unknown-unknown --profile wasm --package tilewright-pack-wasm
+cp target/wasm32-unknown-unknown/wasm/tilewright_pack_wasm.wasm "${run}/module.wasm"
 
-rm -rf -- "${package}/wasm"
-"${unpacked}/${wasm_bindgen}/wasm-bindgen" \
+"${run}/${wasm_bindgen}/wasm-bindgen" \
   --target web \
   --no-typescript \
   --remove-name-section \
   --remove-producers-section \
-  --out-dir "${package}/wasm" \
+  --out-dir "${run}/out" \
   --out-name tilewright_pack \
-  target/wasm32-unknown-unknown/wasm/tilewright_pack_wasm.wasm
+  "${run}/module.wasm"
+mkdir -p "${package}/wasm"
+for file in tilewright_pack_bg.wasm tilewright_pack.js; do
+  publish "${run}/out/${file}" "${package}/wasm/${file}"
+done
 
 wasm=${package}/wasm/tilewright_pack_bg.wasm
 echo "tools/build-wasm.sh: ${wasm}: $(wc -c <"${wasm}" | tr -d ' ') bytes, $(gzip -9 -c "${wasm}" | wc -c | tr -d ' ') gzipped" >&2

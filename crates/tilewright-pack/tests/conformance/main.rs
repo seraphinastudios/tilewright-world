@@ -422,6 +422,7 @@ fn rows_read_back(pack: &Pack, valid: &Value) {
                 Page {
                     after: after.as_deref(),
                     limit: 1,
+                    bytes: usize::MAX,
                 },
                 visit,
             )

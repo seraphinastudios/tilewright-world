@@ -1,6 +1,8 @@
 // Copyright 2026 Seraphina Studios
 // SPDX-License-Identifier: MIT
 
+/// <reference lib="esnext.disposable" />
+
 /** Every code a rejected pack is reported with (docs/spec/PACK.md section 4). */
 export type PackErrorCode =
   | "pack.io"
@@ -248,19 +250,22 @@ export function openPack(bytes: ArrayBufferView | ArrayBufferLike, options?: Ope
  * read of something the pack does not have returns `undefined`. `verify`
  * checks the whole pack, including that the targets reads name exist.
  *
- * Listings are iterators that read 64 rows at a time, in key order, so a
- * walk over a large table holds one page. A page is read when the iterator
+ * Listings are iterators that read a page at a time, in key order: 64 rows,
+ * or fewer once their keys and documents reach 1 MiB, so a walk over a
+ * large table holds one page. A page is read when the iterator
  * reaches it, so closing the pack ends the walk with an error.
  */
 export class Pack {
   private constructor();
   /** Whether `close` has released the pack; reads then throw. */
   readonly closed: boolean;
-  /**
-   * Releases the pack's memory now rather than when it is collected. Where
-   * the runtime has `Symbol.dispose`, it closes the pack too.
-   */
+  /** Releases the pack's memory now rather than when it is collected. */
   close(): void;
+  /**
+   * `close`, for `using pack = openPack(...)`. It is defined where the
+   * runtime has `Symbol.dispose`.
+   */
+  [Symbol.dispose](): void;
 
   /** Row counts; `objects` is 0. */
   summary(): Summary;

@@ -208,7 +208,7 @@ test("listings read a page at a time from the last key", async () => {
     const calls = [];
     Reader.prototype[name] = function (...args) {
       calls.push(args);
-      args[args.length - 1] = 1;
+      args[args.length - 2] = 1;
       return read.apply(this, args);
     };
     try {
@@ -218,6 +218,27 @@ test("listings read a page at a time from the last key", async () => {
     }
     assert.equal(calls.length, all.length + 1, name);
   }
+  // So does a byte budget the first row reaches.
+  const definitions = Reader.prototype.definitions;
+  let pages = 0;
+  Reader.prototype.definitions = function (...args) {
+    pages += 1;
+    args[args.length - 1] = 1;
+    return definitions.apply(this, args);
+  };
+  try {
+    assert.equal([...pack.definitions()].length, 12);
+  } finally {
+    Reader.prototype.definitions = definitions;
+  }
+  assert.equal(pages, 13);
+  // The walk keeps its place when the caller changes the rows it is given.
+  const changed = [];
+  for (const plane of pack.planes()) {
+    changed.push(plane.id);
+    plane.id = "";
+  }
+  assert.deepEqual(changed, ["overworld", "vault"]);
   // A listing is lazy: nothing is read until it is iterated, and a pack
   // closed meanwhile ends it with an error.
   const planes = pack.planes();

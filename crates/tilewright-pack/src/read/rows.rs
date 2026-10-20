@@ -312,11 +312,12 @@ fn definition(row: &Row<'_>) -> Result<Definition, Error> {
     })
 }
 
-/// Which rows of a listing to visit: at most `limit` of them, after the
-/// row whose key is `after`, in the listing's key order. A listing reads a
-/// page with one query that starts at `after` in the table's primary key,
-/// so a caller can walk a table a page at a time, holding one page, and
-/// resume from the last key it saw.
+/// Which rows of a listing to visit: those after the row whose key is
+/// `after`, in the listing's key order, at most `limit` of them, and no
+/// more once their text reaches `bytes`. A listing reads a page with one
+/// query that starts at `after` in the table's primary key, so a caller can
+/// walk a table a page at a time, holding one page, and resume from the
+/// last key it saw.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Page<K> {
     /// The key of the last row already seen, or `None` to start at the
@@ -324,6 +325,10 @@ pub struct Page<K> {
     pub after: Option<K>,
     /// The most rows to visit.
     pub limit: usize,
+    /// The text to visit: the page stops after the row that brings the
+    /// bytes of its rows' keys and documents to this, so it always visits a
+    /// row when there is one, and holds less than this and one row.
+    pub bytes: usize,
 }
 
 impl<K> Page<K> {
@@ -333,6 +338,7 @@ impl<K> Page<K> {
         Self {
             after: None,
             limit: usize::MAX,
+            bytes: usize::MAX,
         }
     }
 }
@@ -401,25 +407,32 @@ impl Pack {
         rows.next()?.map(read).transpose()
     }
 
-    /// Calls `visit` with each row of a listing, read with `read`. Keys must
-    /// rise strictly from `after`, as a table's primary key does; a page
-    /// that does not move forward is an invalid table, `code`'s error, so
-    /// walking a table page by page always ends.
+    /// Calls `visit` with each row of a listing, read with `read`, until the
+    /// sizes `keyed` gives the rows reach `bytes`. Keys, which `keyed` also
+    /// gives, must rise strictly from `after`, as a table's primary key
+    /// does; a page that does not move forward is an invalid table,
+    /// `code`'s error, so walking a table page by page always ends.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each listing gives its query, page, row reader, key and code"
+    )]
     fn walk<T, K: Ord>(
         &self,
         (sql, values): (String, Vec<types::Value>),
         after: Option<K>,
+        bytes: usize,
         read: impl Fn(&Row<'_>) -> Result<T, Error>,
-        key: impl Fn(&T) -> K,
+        keyed: impl Fn(&T) -> (K, usize),
         code: ErrorCode,
         visit: &mut dyn FnMut(T) -> Result<(), Error>,
     ) -> Result<(), Error> {
         let mut statement = self.connection.prepare(&sql)?;
         let mut rows = statement.query(rusqlite::params_from_iter(values))?;
         let mut last = after;
+        let mut total: usize = 0;
         while let Some(row) = rows.next()? {
             let value = read(row)?;
-            let next = key(&value);
+            let (next, size) = keyed(&value);
             if last.as_ref().is_some_and(|last| *last >= next) {
                 return Err(Error::Rejected(
                     code,
@@ -428,6 +441,10 @@ impl Pack {
             }
             last = Some(next);
             visit(value)?;
+            total = total.saturating_add(size);
+            if total >= bytes {
+                break;
+            }
         }
         Ok(())
     }
@@ -473,8 +490,12 @@ impl Pack {
         self.walk(
             listing.finish("ORDER BY id", page.limit),
             page.after.map(str::to_owned),
+            page.bytes,
             plane,
-            |plane| plane.id.clone(),
+            |plane| {
+                let size = plane.id.len() + plane.kind.len() + plane.document.len();
+                (plane.id.clone(), size)
+            },
             ErrorCode::Plane,
             visit,
         )
@@ -510,8 +531,13 @@ impl Pack {
         self.walk(
             Self::in_plane(&zone_columns(), "zones", true, plane, page),
             page.after.map(str::to_owned),
+            page.bytes,
             zone,
-            |zone| zone.id.clone(),
+            |zone| {
+                let parent = zone.parent.as_ref().map_or(0, String::len);
+                let size = zone.plane.len() + zone.id.len() + parent + zone.document.len();
+                (zone.id.clone(), size)
+            },
             ErrorCode::Zone,
             visit,
         )
@@ -563,8 +589,9 @@ impl Pack {
         self.walk(
             Self::in_plane(&anchor_columns(), "anchors", false, plane, page),
             page.after.map(str::to_owned),
+            page.bytes,
             anchor_row,
-            |anchor| anchor.id.clone(),
+            |anchor| (anchor.id.clone(), anchor.plane.len() + anchor.id.len()),
             ErrorCode::Anchor,
             visit,
         )
@@ -587,8 +614,14 @@ impl Pack {
         self.walk(
             Self::in_plane(&columns, "stairwells", true, plane, page),
             page.after.map(str::to_owned),
+            page.bytes,
             stairwell_row,
-            |stairwell| stairwell.id.clone(),
+            |stairwell| {
+                let steps: usize = stairwell.steps.iter().map(|step| step.proto.len()).sum();
+                let custom = stairwell.custom.as_ref().map_or(0, String::len);
+                let size = stairwell.id.len() + steps + custom + stairwell.canonical.len();
+                (stairwell.id.clone(), size)
+            },
             ErrorCode::Stairwell,
             visit,
         )
@@ -640,8 +673,12 @@ impl Pack {
             listing.finish("ORDER BY type, id", page.limit),
             page.after
                 .map(|(kind, id)| (kind.to_owned(), id.to_owned())),
+            page.bytes,
             definition,
-            |definition| (definition.kind.clone(), definition.id.clone()),
+            |definition| {
+                let size = definition.kind.len() + definition.id.len() + definition.document.len();
+                ((definition.kind.clone(), definition.id.clone()), size)
+            },
             ErrorCode::Definition,
             visit,
         )
@@ -669,8 +706,9 @@ impl Pack {
             // in order instead of collecting the layers first.
             listing.finish("GROUP BY layer ORDER BY layer", page.limit),
             page.after,
+            page.bytes,
             |row| layer(row, 0, "chunk", ErrorCode::Chunk),
-            |layer| *layer,
+            |layer| (*layer, 0),
             ErrorCode::Chunk,
             visit,
         )
@@ -705,13 +743,14 @@ impl Pack {
         self.walk(
             listing.finish("ORDER BY cx, cy", page.limit),
             page.after,
+            page.bytes,
             |row| {
                 Ok((
                     chunk_coordinate(row, 0, ErrorCode::Chunk)?,
                     chunk_coordinate(row, 1, ErrorCode::Chunk)?,
                 ))
             },
-            |key| *key,
+            |key| (*key, 0),
             ErrorCode::Chunk,
             &mut |(cx, cy)| visit(cx, cy),
         )
@@ -777,6 +816,7 @@ mod tests {
                     Page {
                         after: text(after),
                         limit,
+                        bytes: usize::MAX,
                     },
                     visit,
                 )
@@ -791,6 +831,7 @@ mod tests {
                     Page {
                         after: text(after),
                         limit,
+                        bytes: usize::MAX,
                     },
                     visit,
                 )
@@ -805,6 +846,7 @@ mod tests {
                     Page {
                         after: text(after),
                         limit,
+                        bytes: usize::MAX,
                     },
                     visit,
                 )
@@ -819,6 +861,7 @@ mod tests {
                     Page {
                         after: text(after),
                         limit,
+                        bytes: usize::MAX,
                     },
                     visit,
                 )
@@ -838,6 +881,7 @@ mod tests {
                     Page {
                         after: pair(after),
                         limit,
+                        bytes: usize::MAX,
                     },
                     visit,
                 )
@@ -852,6 +896,7 @@ mod tests {
                     Page {
                         after: pair(after),
                         limit,
+                        bytes: usize::MAX,
                     },
                     visit,
                 )
@@ -866,6 +911,7 @@ mod tests {
                     Page {
                         after: after.copied(),
                         limit,
+                        bytes: usize::MAX,
                     },
                     visit,
                 )
@@ -881,6 +927,7 @@ mod tests {
                     Page {
                         after: after.copied(),
                         limit,
+                        bytes: usize::MAX,
                     },
                     &mut |cx, cy| visit((cx, cy)),
                 )
@@ -893,15 +940,57 @@ mod tests {
             Page {
                 after: Some("~"),
                 limit: 5,
+                bytes: usize::MAX,
             },
             Page {
                 after: None,
                 limit: 0,
+                bytes: usize::MAX,
             },
         ] {
             pack.visit_planes(page, &mut |_| panic!("{page:?} is empty"))
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn pages_stop_at_their_byte_budget() {
+        let pack = pack();
+        let read = |after: Option<&(String, String)>, bytes| {
+            let mut rows = Vec::new();
+            let page = Page {
+                after: pair(after),
+                limit: usize::MAX,
+                bytes,
+            };
+            pack.visit_definitions(None, page, &mut |row| {
+                rows.push(row);
+                Ok(())
+            })
+            .unwrap();
+            rows
+        };
+        let all = read(None, usize::MAX);
+        // A budget of one byte reads one row a page, and the rows still
+        // all come, in order.
+        let mut walked: Vec<super::Definition> = Vec::new();
+        loop {
+            let after = walked
+                .last()
+                .map(|last| (last.kind.clone(), last.id.clone()));
+            let page = read(after.as_ref(), 1);
+            assert!(page.len() <= 1);
+            if page.is_empty() {
+                break;
+            }
+            walked.extend(page);
+        }
+        assert_eq!(walked, all);
+        // A page stops after the row whose text reaches the budget.
+        let size = |row: &super::Definition| row.kind.len() + row.id.len() + row.document.len();
+        let two = size(&all[0]) + size(&all[1]);
+        assert_eq!(read(None, two).len(), 2);
+        assert_eq!(read(None, two + 1).len(), 3);
     }
 
     #[test]
@@ -916,8 +1005,9 @@ mod tests {
             .walk(
                 descending,
                 None,
+                usize::MAX,
                 plane,
-                |plane| plane.id.clone(),
+                |plane| (plane.id.clone(), 0),
                 ErrorCode::Plane,
                 &mut |_| Ok(()),
             )
@@ -929,8 +1019,9 @@ mod tests {
             .walk(
                 listing.finish("ORDER BY id", usize::MAX),
                 Some("vault".to_owned()),
+                usize::MAX,
                 plane,
-                |plane| plane.id.clone(),
+                |plane| (plane.id.clone(), 0),
                 ErrorCode::Plane,
                 &mut |_| Ok(()),
             )

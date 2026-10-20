@@ -1386,6 +1386,7 @@ fn stairwells_layer_heights_and_list_fields_compile_and_read_back() {
     let page = Page {
         after: Some("cave.chute"),
         limit: 1,
+        bytes: usize::MAX,
     };
     pack.visit_stairwells("overworld", page, &mut |stairwell| {
         paged.push(stairwell.id);

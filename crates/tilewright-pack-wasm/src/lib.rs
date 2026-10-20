@@ -323,11 +323,13 @@ fn listed<T>(
     Ok(rows.into())
 }
 
-/// A page of a listing: at most `limit` rows after `after`.
-fn page<K>(after: Option<K>, limit: u32) -> Page<K> {
+/// A page of a listing: at most `limit` rows after `after`, stopping after
+/// the row whose text reaches `bytes`.
+fn page<K>(after: Option<K>, limit: u32, bytes: u32) -> Page<K> {
     Page {
         after,
         limit: usize::try_from(limit).unwrap_or(usize::MAX),
+        bytes: usize::try_from(bytes).unwrap_or(usize::MAX),
     }
 }
 
@@ -402,9 +404,12 @@ impl Reader {
         clippy::needless_pass_by_value,
         reason = "wasm-bindgen passes optional strings by value"
     )]
-    pub fn planes(&self, after: Option<String>, limit: u32) -> Found {
+    pub fn planes(&self, after: Option<String>, limit: u32, bytes: u32) -> Found {
         listed(
-            |visit| self.pack.visit_planes(page(after.as_deref(), limit), visit),
+            |visit| {
+                self.pack
+                    .visit_planes(page(after.as_deref(), limit, bytes), visit)
+            },
             plane,
         )
     }
@@ -417,11 +422,11 @@ impl Reader {
         clippy::needless_pass_by_value,
         reason = "wasm-bindgen passes optional strings by value"
     )]
-    pub fn zones(&self, plane: &str, after: Option<String>, limit: u32) -> Found {
+    pub fn zones(&self, plane: &str, after: Option<String>, limit: u32, bytes: u32) -> Found {
         listed(
             |visit| {
                 self.pack
-                    .visit_zones(plane, page(after.as_deref(), limit), visit)
+                    .visit_zones(plane, page(after.as_deref(), limit, bytes), visit)
             },
             zone,
         )
@@ -435,11 +440,11 @@ impl Reader {
         clippy::needless_pass_by_value,
         reason = "wasm-bindgen passes optional strings by value"
     )]
-    pub fn anchors(&self, plane: &str, after: Option<String>, limit: u32) -> Found {
+    pub fn anchors(&self, plane: &str, after: Option<String>, limit: u32, bytes: u32) -> Found {
         listed(
             |visit| {
                 self.pack
-                    .visit_anchors(plane, page(after.as_deref(), limit), visit)
+                    .visit_anchors(plane, page(after.as_deref(), limit, bytes), visit)
             },
             anchor,
         )
@@ -455,11 +460,11 @@ impl Reader {
         clippy::needless_pass_by_value,
         reason = "wasm-bindgen passes optional strings by value"
     )]
-    pub fn stairwells(&self, plane: &str, after: Option<String>, limit: u32) -> Found {
+    pub fn stairwells(&self, plane: &str, after: Option<String>, limit: u32, bytes: u32) -> Found {
         listed(
             |visit| {
                 self.pack
-                    .visit_stairwells(plane, page(after.as_deref(), limit), visit)
+                    .visit_stairwells(plane, page(after.as_deref(), limit, bytes), visit)
             },
             |found| stairwell(plane, found),
         )
@@ -492,20 +497,24 @@ impl Reader {
         after_type: Option<String>,
         after_id: Option<String>,
         limit: u32,
+        bytes: u32,
     ) -> Found {
         let after = after_type.as_deref().zip(after_id.as_deref());
         listed(
             |visit| {
                 self.pack
-                    .visit_definitions(kind.as_deref(), page(after, limit), visit)
+                    .visit_definitions(kind.as_deref(), page(after, limit, bytes), visit)
             },
             definition,
         )
     }
 
-    pub fn layers(&self, plane: &str, after: Option<i32>, limit: u32) -> Found {
+    pub fn layers(&self, plane: &str, after: Option<i32>, limit: u32, bytes: u32) -> Found {
         listed(
-            |visit| self.pack.visit_layers(plane, page(after, limit), visit),
+            |visit| {
+                self.pack
+                    .visit_layers(plane, page(after, limit, bytes), visit)
+            },
             |layer: &i32| (*layer).into(),
         )
     }
@@ -518,14 +527,17 @@ impl Reader {
         after_x: Option<i64>,
         after_y: Option<i64>,
         limit: u32,
+        bytes: u32,
     ) -> Found {
         let after = after_x.zip(after_y);
         listed(
             |visit| {
-                self.pack
-                    .visit_chunk_keys(plane, layer, page(after, limit), &mut |cx, cy| {
-                        visit((cx, cy))
-                    })
+                self.pack.visit_chunk_keys(
+                    plane,
+                    layer,
+                    page(after, limit, bytes),
+                    &mut |cx, cy| visit((cx, cy)),
+                )
             },
             |(cx, cy): &(i64, i64)| object(&[("cx", integer(*cx)), ("cy", integer(*cy))]),
         )
