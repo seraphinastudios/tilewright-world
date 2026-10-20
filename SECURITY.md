@@ -22,16 +22,15 @@ local process changing the tree at the same time can race. Sources are
 local checkouts, so a race needs a local attacker.
 
 Applying a transaction writes, renames and removes files beneath the root
-through the same confinement. A transaction moves content between the
-files it changes, so a source tree is one unit of access: publishing
-requires the files it changes and every directory above them to be
-reachable by the same users (the classes that may read each file and
-search each directory, the group where only it may, and the owner where
-not everyone may, refusing a mode
-that lets others read what it denies the group or the owner), gives the files
-it writes that same access, and deletes a file only if its inverse would
-make it again for the same users: an empty file is staged beside it as the
-inverse would make it, and checked. What else holds depends on the
+through the same confinement. A transaction moves content between the files
+it changes, so a source tree is one unit of access: publishing requires the
+files it changes and every directory above them to be reachable by the same
+users (the classes that may read each file and search each directory, the
+group where only it may, and the owner where not everyone may, refusing a
+mode that lets others read what it denies the group or the owner), gives the
+files it writes that same access, and deletes a file only if its inverse
+would make it again for the same users: an empty file is staged beside it as
+the inverse would make it, and checked. What else holds depends on the
 platform:
 
 - **Linux** keeps every guarantee. Every operation goes through the
