@@ -538,10 +538,14 @@ pub fn plan(
     transaction: &Transaction,
     options: &Options,
 ) -> Result<Plan, Vec<Diagnostic>> {
-    // The edited world's diagnostics are a transaction's too.
+    // The edited world's diagnostics are a transaction's too, and the
+    // loader's note of those it dropped takes the last place.
     let options = &Options {
         load: LoadOptions {
-            maximum_diagnostics: options.load.maximum_diagnostics.min(limits::DIAGNOSTICS),
+            maximum_diagnostics: options
+                .load
+                .maximum_diagnostics
+                .min(limits::DIAGNOSTICS - 1),
             ..options.load
         },
         ..*options

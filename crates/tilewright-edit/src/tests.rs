@@ -2447,3 +2447,23 @@ fn readable_by_group(root: &Path) {
     }
     walk(root);
 }
+
+#[test]
+fn the_edited_world_reports_at_most_the_diagnostic_limit() {
+    let tree = copy();
+    for index in 0..limits::DIAGNOSTICS + 100 {
+        fs::write(
+            tree.path().join(format!("defs/proto/bad{index}.jsonc")),
+            "{\"format\": \"tilewright.def/1\", \"type\": \"proto\"}\n",
+        )
+        .unwrap();
+    }
+    let found = problems(
+        tree.path(),
+        &transaction(
+            r#"{"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["title"], "value": "Changed"}"#,
+        ),
+    );
+    assert_eq!(found.len(), limits::DIAGNOSTICS, "{:#?}", &found[..3]);
+    assert!(found.iter().any(|problem| problem.code == "source.budget"));
+}

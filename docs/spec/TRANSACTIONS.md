@@ -307,8 +307,8 @@ two that differ, and nothing is written. A file written where a file is
 keeps that file's mode and group. A new file takes the mode of the
 directory above it without the execute bits, and its group, and a new
 directory the mode and group of the directory above it. A group the user
-may not give is an error where the group's members alone may read, and
-otherwise is left as the new file got it, which changes no reader. The owner of
+may not give is an error, since the group bits would otherwise apply to
+another group. The owner of
 every file written is the user applying, who could read them all. A file
 whose bytes end as they began is not written. Restoring after a failure
 gives every file back the mode and group it had. Other extended

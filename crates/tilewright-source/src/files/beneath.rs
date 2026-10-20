@@ -393,16 +393,13 @@ fn access_of(stat: &Stat) -> Access {
 
 /// Gives an open file or directory the mode and group of `access`: the
 /// group first, since changing it may clear the set-group bit. A group the
-/// user may not give is an error only where the group's members alone,
-/// besides the owner, may read; elsewhere it does not change who may.
+/// user may not give is an error, since the group bits would otherwise
+/// apply to another group.
 fn set_access(fd: impl AsFd, access: &Access) -> Result<(), Refused> {
     let stat = fstat(&fd).map_err(|errno| Refused::Io(errno.into()))?;
     if stat.st_gid != access.group {
-        match fchown(&fd, None, Some(Gid::from_raw(access.group))) {
-            Ok(()) => {}
-            Err(Errno::PERM) if !access.group_reads_alone() => {}
-            Err(errno) => return Err(Refused::Io(errno.into())),
-        }
+        fchown(&fd, None, Some(Gid::from_raw(access.group)))
+            .map_err(|errno| Refused::Io(errno.into()))?;
     }
     fchmod(&fd, Mode::from_raw_mode(access.mode)).map_err(|errno| Refused::Io(errno.into()))
 }
