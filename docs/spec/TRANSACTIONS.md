@@ -236,31 +236,44 @@ Publishing a carried-out transaction:
 2. writes each new file beside its target as `.<name>.tilewright-tmp`,
    created fresh (whatever was at that name is removed first, so a link or
    hard link there is never written through), with the target's
-   permissions, and synced;
+   permissions, and synced; a failure removes every staging file it wrote
+   and the directories it created;
 3. reads every file the transaction touched or consulted again and compares
-   it with the files it was carried out on; a difference removes the staged
-   files and is a `tx.conflict`, with nothing written;
+   it with the files it was carried out on, then validates the tree with
+   the transaction's files again, since files it did not touch may have
+   changed since it was carried out: two transactions that are valid alone
+   can be invalid together. A difference is a `tx.conflict`, and a result
+   that no longer validates is reported with the loader's diagnostics; in
+   both cases the staged files are removed and nothing is written;
 4. renames each staged file over its target and removes each deleted file,
-   in path order;
-5. syncs every directory it changed and removes directories it emptied.
+   in path order. Before a deleted file is removed, any staging file beside
+   it goes, so that a failure there leaves the file;
+5. removes the staging files left beside any file the transaction touched or
+   consulted, removes the directories deleting files emptied, and syncs
+   every directory whose entries changed.
 
 Each rename and removal is atomic, but there is no atomic publication of
 several files. If a step of 4 fails, the files already published are
-restored from the transaction's copy of them, the staged files are removed,
-and the error names any file that could not be restored. If the process
-stops during step 4 (a crash or power loss), some files have the new bytes
-and the others the old ones, and staging files may remain; the loader
-rejects a staging file below `planes/` or `defs/`, so the tree fails
-validation until it is repaired. To repair it, apply the inverse, which the
-command line writes before step 1: the files the interrupted apply published
-are restored, the others already match and are left alone, and the staging
-files beside the files it touches are replaced or removed. The source tree's
-version control is the other way back. Validation while carrying out
-ignores the staging files beside the files a transaction changes.
+restored from the transaction's copy of them and the directories involved
+are synced, the staged files and created directories are removed, and the
+error names any file that could not be restored. If only syncing in step 5
+fails, every file was published: the error says the transaction was applied
+but may not be durable. If the process stops during step 4 (a crash or power
+loss), some files have the new bytes and the others the old ones, and
+staging files may remain; the loader rejects a staging file below `planes/`
+or `defs/`, so the tree fails validation until it is repaired. To repair
+it, apply the inverse, which the command line writes before step 1: the
+files the interrupted apply published are restored, the others already
+match and are left alone, and the staging files beside every file it names
+are removed. The source tree's version control is the other way back.
+Carrying out ignores the staging files beside every file a transaction
+touches or consults.
 
 Staging names, `.<name>.tilewright-tmp`, are reserved beside source files.
 Other platforms than Unix check each path component for links before use and
-have no lock; a process changing the tree at the same moment can race them.
+have no lock; a process changing the tree at the same moment can race them,
+as can a program other than the toolkit on any platform: the lock only
+orders applies.
 
 ## 10. Canonical layout
 
@@ -284,9 +297,13 @@ FORMAT.md section 3 and these, while they are read and carried out:
 | Index in a pointer or address | 250,000 |
 | `before`, `after`, `separator` or `colon` | 4,096 bytes |
 | Terrain cells | 1,000,000 |
-| Bytes read from touched files | 1 GiB |
+| Bytes read from touched files | 256 MiB |
 | Work: bytes parsed or compared and items scanned | 4 GiB |
 | Diagnostics reported | 1,000 |
+
+Carrying out stops at the first operation past the work budget or the
+diagnostic limit, and messages describe a value over 4 KiB by its kind and
+size rather than render it.
 
 Each touched file must be within the 64 MiB document limit after every edit.
 The sealed transaction and the inverse must themselves be valid transactions
@@ -321,4 +338,5 @@ tilewright tx apply TRANSACTION ROOT INVERSE
 (`A`), modify (`M`) and delete (`D`), or with `--json` an object with each
 file's change and digests. `rebase` writes the transaction replayed on the
 tree as it is to `OUTPUT`. `apply` writes the inverse to `INVERSE`, then
-publishes. Neither replaces an existing file.
+publishes. Neither replaces an existing file, and neither writes into the
+source tree's `world.jsonc`, `profile/`, `planes/` or `defs/`.

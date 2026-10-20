@@ -567,7 +567,7 @@ fn a_failed_publish_restores_what_it_published() {
     let plan = planned(root, &tx);
     for step in 0..3 {
         publish::FAIL_STEP.with(|fail| fail.set(Some(step)));
-        let found = plan.publish().unwrap_err();
+        let found = plan.publish().unwrap_err().problems;
         publish::FAIL_STEP.with(|fail| fail.set(None));
         assert!(
             found[0]
@@ -603,7 +603,7 @@ fn a_file_changed_during_publish_stops_it() {
     publish::BEFORE_CHECK.with(|hook| {
         *hook.borrow_mut() = Some(Box::new(move || fs::write(&hook_path, &hook_text).unwrap()));
     });
-    let found = plan.publish().unwrap_err();
+    let found = plan.publish().unwrap_err().problems;
     assert!(
         has(&found, "tx.conflict", "nothing was written"),
         "{found:#?}"
@@ -631,7 +631,7 @@ fn another_holder_of_the_lock_stops_a_publish() {
     let source = SourceRoot::new(root);
     let lock = source.lock().unwrap();
     if cfg!(unix) {
-        let found = plan.publish().unwrap_err();
+        let found = plan.publish().unwrap_err().problems;
         assert!(has(&found, "tx.conflict", "lock"), "{found:#?}");
     }
     drop(lock);
@@ -708,6 +708,15 @@ fn the_inverse_recovers_an_interrupted_apply() {
         partial
             .path()
             .join("planes/overworld/layers/3/.0_0.jsonc.tilewright-tmp"),
+        "staged",
+    )
+    .unwrap();
+    // A file the apply staged but never published is already restored; its
+    // staging file is removed too.
+    fs::write(
+        partial
+            .path()
+            .join("planes/overworld/.plane.jsonc.tilewright-tmp"),
         "staged",
     )
     .unwrap();
@@ -907,4 +916,259 @@ fn transactions_are_bounded() {
             "more than 100000 operations",
         ),
     ]);
+}
+
+#[test]
+fn canonical_layout_is_bounded_and_stable() {
+    use render::Node;
+    let short = Node::Object(vec![("a".to_owned(), Node::Array(vec![Node::integer(1)]))]);
+    assert_eq!(short.layout(""), "{\"a\": [1]}");
+    assert_eq!(short.file(), "{\n  \"a\": [1]\n}\n");
+    let numbers = Node::Array((0..40).map(Node::integer).collect());
+    assert!(
+        !numbers.layout("").contains('\n'),
+        "arrays of numbers stay on one line"
+    );
+    let strings = Node::Array(
+        (0..40)
+            .map(|index| Node::String(format!("s{index}")))
+            .collect(),
+    );
+    assert!(strings.layout("  ").contains("\n    \"s1\",\n"));
+    // Deep nesting renders in time linear in its size.
+    let mut deep = Node::String("x".repeat(1 << 20));
+    for _ in 0..60 {
+        deep = Node::Array(vec![deep]);
+    }
+    let text = deep.file();
+    assert!(text.len() > 1 << 20);
+    assert_eq!(text.matches('[').count(), 60);
+    assert_eq!(
+        Node::Array(vec![Node::String("\u{1}\"".to_owned())]).layout(""),
+        "[\"\\u0001\\\"\"]"
+    );
+}
+
+#[test]
+fn every_splice_parses_and_its_inverse_is_exact() {
+    use splice::{Insertion, Sequence, insert, remove};
+    use tilewright_jsonc::Document;
+    let containers = [
+        "[]",
+        "[ ]",
+        "[\n]",
+        "[1]",
+        "[ 1 ]",
+        "[1,2]",
+        "[1, 2, 3]",
+        "[\n  1,\n  2\n]",
+        "[\r\n  1,\r\n  2\r\n]",
+        "[ // c\n 1 /* d */, // e\n 2 // f\n]",
+        "[/* a */1/* b */,/* c */2/* d */]",
+        "{}",
+        "{\"a\": 1}",
+        "{\"a\":1,\"b\":2}",
+        "{\n  // x\n  \"a\" : 1,\n  \"b\": 2 /* y */\n}",
+    ];
+    let limits = Limits::default();
+    for source in containers {
+        let document = Document::parse(source, &limits).unwrap();
+        let root = document.root();
+        let length = Sequence::of(root).unwrap().len();
+        let object = root.as_object().is_some();
+        for index in 0..=length {
+            let insertion = Insertion {
+                key: object.then_some(("new", "\"new\"")),
+                value: "{\"z\": [9]}",
+                layout: None,
+                colon: None,
+            };
+            let inserted = insert(source, root, index, &insertion).unwrap();
+            let edited = Document::parse(inserted.text.as_str(), &limits)
+                .unwrap_or_else(|error| panic!("{source:?} at {index}: {error}"));
+            let restored = remove(&inserted.text, edited.root(), index, Some(&inserted.region))
+                .unwrap_or_else(|error| panic!("{source:?} at {index}: {error}"));
+            assert_eq!(restored.text, source, "insert at {index}");
+        }
+        for index in 0..length {
+            let removed = remove(source, root, index, None).unwrap();
+            let edited = Document::parse(removed.text.as_str(), &limits)
+                .unwrap_or_else(|error| panic!("{source:?} without {index}: {error}"));
+            let key = removed.key.as_ref().map(|(key, _)| key.clone());
+            let decoded = key.as_ref().map(|key| {
+                Document::parse(key.as_str(), &limits)
+                    .unwrap()
+                    .root()
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            });
+            let insertion = Insertion {
+                key: decoded.as_deref().zip(key.as_deref()),
+                value: &removed.value,
+                layout: Some(removed.layout.clone()),
+                colon: removed.key.as_ref().map(|(_, colon)| colon.as_str()),
+            };
+            let restored = insert(&removed.text, edited.root(), index, &insertion)
+                .unwrap_or_else(|error| panic!("{source:?} without {index}: {error}"));
+            assert_eq!(restored.text, source, "remove at {index}");
+        }
+    }
+}
+
+#[test]
+fn work_is_metered_and_planning_stops_at_the_budget() {
+    let tree = copy();
+    let root = tree.path();
+    // A large value that every test compares against.
+    let line = format!("\"{}\"", "x".repeat(512 << 10));
+    let big = format!("[\n{}\n]", [line.as_str(); 16].join(",\n"));
+    apply(
+        root,
+        &transaction(&format!(
+            r#"{{"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["custom"], "value": {{"example.org/big": {big}}}}}"#
+        )),
+    );
+    let test = r#"{"op": "test", "path": "planes/overworld/plane.jsonc", "pointer": ["custom", "example.org/big"], "value": "x"}"#;
+    let tests = vec![test; 2_000];
+    let started = std::time::Instant::now();
+    let found = problems(root, &transaction(&tests.join(",\n    ")));
+    assert!(
+        has(&found, "tx.limit", "units of work"),
+        "{:#?}",
+        &found[..3]
+    );
+    assert!(found.len() <= limits::DIAGNOSTICS + 1);
+    assert!(
+        found
+            .iter()
+            .filter(|problem| problem.code == "tx.conflict")
+            .all(|problem| problem
+                .message
+                .contains(&format!("array of {} bytes", big.len()))),
+        "large values are described, not rendered"
+    );
+    assert!(started.elapsed() < std::time::Duration::from_mins(1));
+}
+
+#[test]
+fn the_result_is_validated_again_under_the_lock() {
+    let tree = copy();
+    let root = tree.path();
+    // Valid alone: remove a loot table and every reference it can see.
+    let remove = transaction(
+        r#"{"op": "document.delete", "path": "defs/loot/chest_common.jsonc"},
+    {"op": "remove", "object": {"plane": "overworld", "layer": 0, "at": [2, 2], "index": 0}, "pointer": ["fields", "loot"]},
+    {"op": "remove", "object": {"plane": "vault", "layer": 0, "at": [1, 1], "index": 0}, "pointer": ["fields", "loot"]}"#,
+    );
+    // Valid alone: a new reference to it, in a file the other does not read.
+    let reference = transaction(
+        r#"{"op": "object.insert", "plane": "overworld", "layer": 2, "at": [0, 0], "object": {"proto": "chest", "fields": {"loot": "chest_common"}}}"#,
+    );
+    let removing = planned(root, &remove);
+    apply(root, &reference);
+    let before = snapshot(root);
+    let failure = removing.publish().unwrap_err();
+    assert!(!failure.applied);
+    assert!(
+        failure
+            .problems
+            .iter()
+            .any(|problem| problem.code == "ref.unresolved"),
+        "{failure:#?}"
+    );
+    assert_eq!(snapshot(root), before, "nothing was written");
+}
+
+#[test]
+fn a_blocked_deletion_keeps_its_file() {
+    let tree = copy();
+    let root = tree.path();
+    let tx = transaction(
+        r#"{"op": "set", "path": "defs/proto/tree.jsonc", "pointer": ["fields", "face"], "value": "oak.png"},
+    {"op": "document.delete", "path": "defs/recipe/chest.jsonc"}"#,
+    );
+    let plan = planned(root, &tx);
+    // Something that cannot be removed sits at the deleted file's staging
+    // name.
+    fs::create_dir(root.join("defs/recipe/.chest.jsonc.tilewright-tmp")).unwrap();
+    let before = snapshot(root);
+    let failure = plan.publish().unwrap_err();
+    assert!(!failure.applied);
+    assert!(
+        failure.problems[0].message.contains("restored"),
+        "{failure:#?}"
+    );
+    assert_eq!(snapshot(root), before);
+    assert!(root.join("defs/recipe/chest.jsonc").exists());
+}
+
+#[test]
+fn a_failed_stage_leaves_nothing_behind() {
+    let tree = copy();
+    let root = tree.path();
+    let folders = directories(root);
+    let tx = transaction(
+        r#"{"op": "object.insert", "plane": "overworld", "layer": 9, "at": [0, 0], "object": {"proto": "tree"}},
+    {"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["title"], "value": "Changed"}"#,
+    );
+    let plan = planned(root, &tx);
+    let obstacle = root.join("planes/overworld/.plane.jsonc.tilewright-tmp");
+    fs::create_dir(&obstacle).unwrap();
+    let failure = plan.publish().unwrap_err();
+    assert!(!failure.applied, "{failure:#?}");
+    fs::remove_dir(&obstacle).unwrap();
+    assert!(!root.join("planes/overworld/layers/9").exists());
+    assert_eq!(directories(root), folders);
+    assert_eq!(snapshot(root), snapshot(&fixture()));
+}
+
+#[test]
+fn a_sync_failure_after_publishing_reports_the_result_applied() {
+    let tree = copy();
+    let root = tree.path();
+    let tx = transaction(
+        r#"{"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["title"], "value": "Changed"}"#,
+    );
+    let plan = planned(root, &tx);
+    publish::FAIL_SYNC.with(|fail| fail.set(true));
+    let failure = plan.publish().unwrap_err();
+    publish::FAIL_SYNC.with(|fail| fail.set(false));
+    assert!(failure.applied, "{failure:#?}");
+    assert!(
+        failure
+            .to_string()
+            .contains("applied, but not made durable")
+    );
+    assert!(read(root, "planes/overworld/plane.jsonc").contains("\"Changed\""));
+}
+
+#[test]
+fn names_cannot_carry_other_separators() {
+    let tree = copy();
+    let source = SourceRoot::new(tree.path());
+    for path in [
+        "defs\\proto",
+        "c:x.jsonc",
+        "defs/a\\..\\b.jsonc",
+        "defs/x\u{0}.jsonc",
+    ] {
+        assert!(
+            matches!(
+                source.read(path, 1024),
+                Err(tilewright_source::AccessError::Path(_))
+            ),
+            "{path}"
+        );
+    }
+    let directory = source.directory("defs", false).unwrap().unwrap();
+    for name in ["..\\outside", "C:\\outside", "a/b", "stream:x"] {
+        assert!(
+            matches!(
+                directory.write(name, "x", b"x"),
+                Err(tilewright_source::AccessError::Path(_))
+            ),
+            "{name}"
+        );
+    }
 }

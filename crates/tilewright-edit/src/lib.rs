@@ -13,8 +13,11 @@
 //! span edit, the result is validated with the normal loader, and nothing is
 //! written. The [`Plan`] holds the edited files, the validated world, the
 //! transaction sealed with base and result digests, and its exact inverse.
-//! [`Plan::publish`] writes it: it stages each file beside its target,
-//! checks the base again, and renames the staged files into place.
+//! [`Plan::publish`] writes it: under the root's lock it stages each file
+//! beside its target, checks the files and validates the result again, and
+//! renames the staged files into place, restoring what it published if a
+//! later step fails. Each file changes atomically; the set of files does
+//! not, so the inverse is also the way to repair an interrupted apply.
 //!
 //! ```no_run
 //! use std::path::Path;
@@ -25,7 +28,7 @@
 //! let plan = plan(Path::new("content"), &transaction, &Options::default())
 //!     .map_err(|problems| problems.len())?;
 //! std::fs::write("undo.jsonc", plan.inverse()).unwrap();
-//! plan.publish().map_err(|problems| problems.len())?;
+//! plan.publish().map_err(|error| error.problems.len())?;
 //! # Ok::<(), usize>(())
 //! ```
 
@@ -38,6 +41,7 @@ mod splice;
 mod terrain;
 mod transaction;
 
+pub use publish::PublishError;
 pub use transaction::{Digests, FORMAT, Transaction};
 
 use engine::{Failure, Primitive, Workspace};
@@ -48,7 +52,7 @@ use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
 };
-use tilewright_jsonc::{Document, Limits};
+use tilewright_jsonc::{Document, Limits, write_json_string};
 use tilewright_source::{Diagnostic, LoadOptions, Overlay, SourceRoot, World};
 
 /// Bounds on a transaction, enforced while it is read and carried out.
@@ -67,7 +71,7 @@ pub mod limits {
     /// Largest index in a pointer or address.
     pub const INDEX: usize = 250_000;
     /// Most bytes read from the files a transaction touches.
-    pub const READ_BYTES: u64 = 1 << 30;
+    pub const READ_BYTES: u64 = 256 << 20;
     /// Most work while editing, in bytes parsed or compared and items
     /// scanned: each edit parses its file again, and finding an object or
     /// an `{"id": ...}` entry scans its array.
@@ -147,6 +151,7 @@ pub fn digest(text: Option<&str>) -> Option<[u8; 32]> {
 #[derive(Debug)]
 pub struct Plan {
     root: PathBuf,
+    load: LoadOptions,
     files: Vec<FileChange>,
     world: World,
     sealed: String,
@@ -216,6 +221,25 @@ pub fn staging_name(name: &str) -> String {
     format!(".{name}.tilewright-tmp")
 }
 
+/// The tree as the plan leaves it, over the files on disk: its changed
+/// files, and no staging file beside any file it touched or consulted.
+fn overlay(files: &[FileChange]) -> Overlay {
+    let mut overlay = Overlay::new();
+    for file in files {
+        if file.is_changed() {
+            overlay.insert(file.path.clone(), file.after.clone());
+        }
+        overlay.insert(staging_path(&file.path), None);
+    }
+    overlay
+}
+
+impl Plan {
+    pub(crate) fn overlay(&self) -> Overlay {
+        overlay(&self.files)
+    }
+}
+
 /// The staging path of `path`.
 fn staging_path(path: &str) -> String {
     match path.rsplit_once('/') {
@@ -268,7 +292,7 @@ fn check_base(
             workspace
                 .entries
                 .get(path)
-                .and_then(|entry| entry.current.as_deref()),
+                .and_then(|entry| entry.current.text()),
         );
         if found == *expected {
             continue;
@@ -327,7 +351,7 @@ fn check_recorded(
         let computed: Digests = workspace
             .entries
             .iter()
-            .map(|(path, entry)| (path.clone(), digest(entry.current.as_deref())))
+            .map(|(path, entry)| (path.clone(), digest(entry.current.text())))
             .collect();
         let differing: BTreeSet<&String> = computed
             .keys()
@@ -376,12 +400,21 @@ pub fn plan(
     let mut chunks = BTreeSet::new();
     if problems.found.is_empty() {
         for operation in &transaction.operations {
+            // Past the work budget or the diagnostic limit, carrying on
+            // could only cost more; what is reported already rejects it.
+            if workspace.exhausted() || problems.found.len() >= limits::DIAGNOSTICS {
+                break;
+            }
             let finished = operation
                 .action
                 .document_path()
                 .is_some_and(|path| done.contains(path));
             if finished {
                 continue;
+            }
+            if let Err(failure) = workspace.charge(1) {
+                problems.report(operation.span, failure);
+                break;
             }
             if let Err(failures) =
                 operations::run(&mut workspace, transaction, operation, &mut chunks)
@@ -413,33 +446,32 @@ pub fn plan(
         .map(|(path, entry)| FileChange {
             path: path.clone(),
             before: entry.base.clone(),
-            after: entry.current.clone(),
+            after: entry.current.text().map(str::to_owned),
         })
         .collect();
-    let mut overlay = Overlay::new();
-    for file in files.iter().filter(|file| file.is_changed()) {
-        overlay.insert(file.path.clone(), file.after.clone());
-        overlay.insert(staging_path(&file.path), None);
-    }
-    let world = tilewright_source::load_edited(root, &options.load, &overlay)?;
+    let world = tilewright_source::load_edited(root, &options.load, &overlay(&files))?;
     let sealed = seal(transaction, &files);
-    let inverse = inverse(&workspace);
+    let too_large = |what: &str, detail: &str| {
+        vec![diagnostic::file(
+            &transaction.name,
+            Code::Limit.as_str(),
+            format!(
+                "the {what} would exceed the limits of a transaction{detail}; split the transaction"
+            ),
+        )]
+    };
+    let inverse = inverse(&workspace).map_err(|TooLarge| too_large("inverse", ""))?;
     for (text, what) in [(&sealed, "sealed transaction"), (&inverse, "inverse")] {
         if let Err(found) = Transaction::parse(&transaction.name, text.as_str()) {
             let detail = found
                 .first()
                 .map_or_else(String::new, |problem| format!(": {}", problem.message));
-            return Err(vec![diagnostic::file(
-                &transaction.name,
-                Code::Limit.as_str(),
-                format!(
-                    "the {what} would exceed the limits of a transaction{detail}; split the transaction"
-                ),
-            )]);
+            return Err(too_large(what, &detail));
         }
     }
     Ok(Plan {
         root: root.to_path_buf(),
+        load: options.load,
         files,
         world,
         sealed,
@@ -526,14 +558,66 @@ fn pointer_text(pointer: &[Step]) -> String {
     format!("[{}]", steps.join(", "))
 }
 
-/// One inverse operation as a line of the inverse transaction.
-fn operation_text(path: &str, primitive: &Primitive) -> String {
-    let path = json_string(path);
+/// Text built up to a limit, so that output an untrusted transaction makes
+/// can never grow past the size of a transaction.
+struct Bounded {
+    text: String,
+    limit: usize,
+}
+
+/// The output went past its limit.
+struct TooLarge;
+
+impl Bounded {
+    fn push(&mut self, text: &str) -> Result<(), TooLarge> {
+        if self.text.len().saturating_add(text.len()) > self.limit {
+            return Err(TooLarge);
+        }
+        self.text.push_str(text);
+        Ok(())
+    }
+
+    /// Appends `text` as a JSON string, checking the limit as it goes.
+    fn push_json(&mut self, text: &str) -> Result<(), TooLarge> {
+        self.push("\"")?;
+        let mut escaped = String::new();
+        for (index, character) in text.char_indices() {
+            escaped.clear();
+            write_json_string(&text[index..index + character.len_utf8()], &mut escaped);
+            self.push(&escaped[1..escaped.len() - 1])?;
+        }
+        self.push("\"")
+    }
+
+    fn pointer(&mut self, pointer: &[Step]) -> Result<(), TooLarge> {
+        self.push(&pointer_text(pointer))
+    }
+}
+
+/// Writes one inverse operation of the file at `path`.
+fn write_operation(
+    output: &mut Bounded,
+    path: &str,
+    primitive: &Primitive,
+) -> Result<(), TooLarge> {
+    output.push("{\"op\": ")?;
+    let kind = match primitive {
+        Primitive::Set { .. } => "set",
+        Primitive::Insert { .. } => "insert",
+        Primitive::Remove { .. } => "remove",
+        Primitive::Create { .. } => "document.create",
+        Primitive::Delete => "document.delete",
+    };
+    output.push_json(kind)?;
+    output.push(", \"path\": ")?;
+    output.push_json(path)?;
     match primitive {
-        Primitive::Set { pointer, value } => format!(
-            "{{\"op\": \"set\", \"path\": {path}, \"pointer\": {}, \"value\": {value}}}",
-            pointer_text(pointer)
-        ),
+        Primitive::Set { pointer, value } => {
+            output.push(", \"pointer\": ")?;
+            output.pointer(pointer)?;
+            output.push(", \"value\": ")?;
+            output.push(value)?;
+        }
         Primitive::Insert {
             pointer,
             index,
@@ -543,81 +627,95 @@ fn operation_text(path: &str, primitive: &Primitive) -> String {
         } => {
             let mut full = pointer.clone();
             full.push(Step::Index(*index));
-            let key = key.as_ref().map_or_else(String::new, |(key, colon)| {
-                format!(", \"key\": {key}, \"colon\": {}", json_string(colon))
-            });
-            format!(
-                "{{\"op\": \"insert\", \"path\": {path}, \"pointer\": {}{key}, \"value\": {value}, \"before\": {}, \"after\": {}}}",
-                pointer_text(&full),
-                json_string(&layout.before),
-                json_string(&layout.after)
-            )
+            output.push(", \"pointer\": ")?;
+            output.pointer(&full)?;
+            if let Some((key, colon)) = key {
+                output.push(", \"key\": ")?;
+                output.push(key)?;
+                output.push(", \"colon\": ")?;
+                output.push_json(colon)?;
+            }
+            output.push(", \"value\": ")?;
+            output.push(value)?;
+            output.push(", \"before\": ")?;
+            output.push_json(&layout.before)?;
+            output.push(", \"after\": ")?;
+            output.push_json(&layout.after)?;
         }
-        Primitive::Remove { pointer, separator } => format!(
-            "{{\"op\": \"remove\", \"path\": {path}, \"pointer\": {}, \"separator\": {}}}",
-            pointer_text(pointer),
-            json_string(separator)
-        ),
-        Primitive::Create { text } => format!(
-            "{{\"op\": \"document.create\", \"path\": {path}, \"text\": {}}}",
-            json_string(text)
-        ),
-        Primitive::Delete => format!("{{\"op\": \"document.delete\", \"path\": {path}}}"),
+        Primitive::Remove { pointer, separator } => {
+            output.push(", \"pointer\": ")?;
+            output.pointer(pointer)?;
+            output.push(", \"separator\": ")?;
+            output.push_json(separator)?;
+        }
+        Primitive::Create { text } => {
+            output.push(", \"text\": ")?;
+            output.push_json(text)?;
+        }
+        Primitive::Delete => {}
     }
+    output.push("}")
 }
 
 /// The exact inverse of the workspace's edits: per changed file, in path
 /// order, its edits undone last to first. A file the transaction created is
-/// deleted, and one it deleted is created again with its text.
-fn inverse(workspace: &Workspace<'_>) -> String {
+/// deleted, and one it deleted is created again with its text. Building it
+/// stops as soon as it would be larger than a transaction may be.
+fn inverse(workspace: &Workspace<'_>) -> Result<String, TooLarge> {
     let changed: Vec<(&String, &engine::Entry)> = workspace
         .entries
         .iter()
-        .filter(|(_, entry)| entry.base != entry.current)
+        .filter(|(_, entry)| entry.is_changed())
         .collect();
-    let mut operations = Vec::new();
-    for (path, entry) in &changed {
-        match (&entry.base, &entry.current) {
-            (None, _) => operations.push(operation_text(path, &Primitive::Delete)),
-            (Some(text), None) => {
-                operations.push(operation_text(
-                    path,
-                    &Primitive::Create { text: text.clone() },
-                ));
-            }
-            (Some(_), Some(_)) => operations.extend(
-                entry
-                    .inverse
-                    .iter()
-                    .rev()
-                    .map(|primitive| operation_text(path, primitive)),
-            ),
-        }
-    }
     let base = digests_node(
         changed
             .iter()
-            .map(|(path, entry)| (path.as_str(), digest(entry.current.as_deref()))),
+            .map(|(path, entry)| (path.as_str(), digest(entry.current.text()))),
     );
     let result = digests_node(
         changed
             .iter()
             .map(|(path, entry)| (path.as_str(), digest(entry.base.as_deref()))),
     );
-    let mut text = String::from("{\n  \"format\": ");
-    text.push_str(&json_string(FORMAT));
-    text.push_str(",\n  \"base\": ");
-    text.push_str(&base.layout("  "));
-    text.push_str(",\n  \"result\": ");
-    text.push_str(&result.layout("  "));
-    if operations.is_empty() {
-        text.push_str(",\n  \"operations\": []\n}\n");
-    } else {
-        text.push_str(",\n  \"operations\": [\n    ");
-        text.push_str(&operations.join(",\n    "));
-        text.push_str("\n  ]\n}\n");
+    let mut output = Bounded {
+        text: String::new(),
+        limit: Limits::default().max_input_bytes,
+    };
+    output.push("{\n  \"format\": ")?;
+    output.push_json(FORMAT)?;
+    output.push(",\n  \"base\": ")?;
+    output.push(&base.layout("  "))?;
+    output.push(",\n  \"result\": ")?;
+    output.push(&result.layout("  "))?;
+    output.push(",\n  \"operations\": [")?;
+    let mut first = true;
+    for (path, entry) in &changed {
+        let mut write = |primitive: &Primitive| -> Result<(), TooLarge> {
+            output.push(if first { "\n    " } else { ",\n    " })?;
+            first = false;
+            write_operation(&mut output, path, primitive)
+        };
+        match (&entry.base, entry.current.text()) {
+            (None, _) => write(&Primitive::Delete)?,
+            (Some(text), None) => {
+                // The text is written straight from the entry, not copied.
+                output.push(if first { "\n    " } else { ",\n    " })?;
+                first = false;
+                output.push("{\"op\": \"document.create\", \"path\": ")?;
+                output.push_json(path)?;
+                output.push(", \"text\": ")?;
+                output.push_json(text)?;
+                output.push("}")?;
+            }
+            (Some(_), Some(_)) => {
+                for primitive in entry.inverse.iter().rev() {
+                    write(primitive)?;
+                }
+            }
+        }
     }
-    text
+    output.push(if first { "]\n}\n" } else { "\n  ]\n}\n" })?;
+    Ok(output.text)
 }
 
 #[cfg(test)]

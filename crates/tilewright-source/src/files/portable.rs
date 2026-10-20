@@ -165,11 +165,19 @@ impl Directory {
             .create_new(true)
             .open(&path)
             .map_err(Refused::Io)?;
-        if let Some(permissions) = permissions {
-            file.set_permissions(permissions).map_err(Refused::Io)?;
+        let written = (|| {
+            if let Some(permissions) = permissions {
+                file.set_permissions(permissions).map_err(Refused::Io)?;
+            }
+            file.write_all(bytes).map_err(Refused::Io)?;
+            file.sync_all().map_err(Refused::Io)
+        })();
+        if written.is_err() {
+            // A partial file is not left behind.
+            drop(file);
+            let _ = fs::remove_file(&path);
         }
-        file.write_all(bytes).map_err(Refused::Io)?;
-        file.sync_all().map_err(Refused::Io)
+        written
     }
 
     pub(crate) fn rename(&self, from: &str, to: &str) -> Result<(), Refused> {

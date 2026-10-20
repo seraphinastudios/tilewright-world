@@ -1,23 +1,56 @@
 // Copyright 2026 Seraphina Studios
 // SPDX-License-Identifier: MIT
 
-//! Writing a plan: stage every new file beside its target, check the base
-//! again under the root's lock, then rename the staged files into place and
-//! remove deleted ones. A failure while publishing restores the files
-//! already published from the plan's copies.
+//! Writing a plan: under the root's lock, stage every new file beside its
+//! target, check the files and validate the result again, then rename the
+//! staged files into place and remove deleted ones. A failure while
+//! publishing restores the files already published from the plan's copies.
 
 use crate::{Code, FileChange, Plan, diagnostic, digest, staging_name};
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 use tilewright_source::{AccessError, Diagnostic, SourceDirectory, SourceRoot};
 
 #[cfg(test)]
 thread_local! {
     /// Fails the publish step with this index, for tests.
     pub(crate) static FAIL_STEP: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
-    /// Runs after staging and before the base is checked again, for tests.
+    /// Runs after staging and before the files are checked again, for tests.
     pub(crate) static BEFORE_CHECK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         std::cell::RefCell::new(None);
+    /// Fails every directory sync, for tests.
+    pub(crate) static FAIL_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
+
+/// Why publishing did not finish.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublishError {
+    /// Whether every file was published. When it was, only making the
+    /// result durable failed: the tree holds the transaction's result.
+    /// When it was not, the tree holds the files as they were, except any
+    /// that the problems name as not restored.
+    pub applied: bool,
+    pub problems: Vec<Diagnostic>,
+}
+
+impl fmt::Display for PublishError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let state = if self.applied {
+            "applied, but not made durable"
+        } else {
+            "not applied"
+        };
+        write!(formatter, "the transaction was {state}")?;
+        for problem in &self.problems {
+            write!(formatter, "; {problem}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for PublishError {}
 
 fn split(path: &str) -> (&str, &str) {
     path.rsplit_once('/').unwrap_or(("", path))
@@ -35,12 +68,21 @@ fn io(path: &str, error: &AccessError) -> Vec<Diagnostic> {
     problem(path, code, error.to_string())
 }
 
+fn not_applied(problems: Vec<Diagnostic>) -> PublishError {
+    PublishError {
+        applied: false,
+        problems,
+    }
+}
+
 /// The directories of a publish, opened once each.
 struct Directories<'r> {
     root: &'r SourceRoot,
     open: BTreeMap<String, SourceDirectory>,
     /// Directories this publish created, in creation order.
     created: Vec<String>,
+    /// Directories whose entries changed, to sync.
+    changed: BTreeSet<String>,
 }
 
 impl Directories<'_> {
@@ -57,6 +99,7 @@ impl Directories<'_> {
                     if self.root.directory(&prefix, false)?.is_none() {
                         self.root.directory(&prefix, true)?;
                         self.created.push(prefix.clone());
+                        self.changed.insert(split(&prefix).0.to_owned());
                     }
                 }
             }
@@ -72,7 +115,7 @@ impl Directories<'_> {
 
     /// Removes the directories this publish created, if they are empty.
     fn remove_created(&mut self) {
-        for path in self.created.drain(..).rev() {
+        for path in std::mem::take(&mut self.created).into_iter().rev() {
             self.open.remove(&path);
             let (parent, name) = split(&path);
             if let Ok(Some(parent)) = self.root.directory(parent, false) {
@@ -87,6 +130,7 @@ impl Directories<'_> {
         let mut current = split(path).0.to_owned();
         while current.contains('/') {
             self.open.remove(&current);
+            self.changed.remove(&current);
             let (parent, name) = split(&current);
             let removed = matches!(
                 self.root.directory(parent, false),
@@ -95,8 +139,31 @@ impl Directories<'_> {
             if !removed {
                 break;
             }
+            self.changed.insert(parent.to_owned());
             current = parent.to_owned();
         }
+    }
+
+    /// Syncs every directory whose entries changed.
+    fn sync(&mut self) -> Vec<Diagnostic> {
+        let mut failures = Vec::new();
+        for path in std::mem::take(&mut self.changed) {
+            #[cfg(test)]
+            if FAIL_SYNC.with(std::cell::Cell::get) {
+                failures.extend(problem(&path, Code::Io, "injected sync failure"));
+                continue;
+            }
+            match self.get(&path, false) {
+                Ok(Some(directory)) => {
+                    if let Err(error) = directory.sync() {
+                        failures.extend(io(&path, &error));
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => failures.extend(io(&path, &error)),
+            }
+        }
+        failures
     }
 }
 
@@ -106,16 +173,18 @@ fn stage(directory: &SourceDirectory, path: &str, text: &str) -> Result<(), Acce
     directory.write(&staging_name(name), name, text.as_bytes())
 }
 
-/// Stages every new file; on failure removes what was staged.
+/// Stages every new file. On failure removes every staging file it wrote,
+/// the failed one included, and the directories it created.
 fn stage_all<'f>(
     directories: &mut Directories<'_>,
     changed: &[&'f FileChange],
-) -> Result<Vec<&'f str>, Vec<Diagnostic>> {
+) -> Result<Vec<&'f str>, PublishError> {
     let mut staged = Vec::new();
     for file in changed {
         let Some(text) = &file.after else {
             continue;
         };
+        staged.push(file.path.as_str());
         let result =
             directories
                 .get(split(&file.path).0, true)
@@ -126,9 +195,8 @@ fn stage_all<'f>(
         if let Err(error) = result {
             discard(directories, &staged);
             directories.remove_created();
-            return Err(io(&file.path, &error));
+            return Err(not_applied(io(&file.path, &error)));
         }
-        staged.push(file.path.as_str());
     }
     Ok(staged)
 }
@@ -156,60 +224,33 @@ fn check_again(root: &SourceRoot, files: &[FileChange]) -> Result<(), Vec<Diagno
     Ok(())
 }
 
-/// Syncs every directory the publish changed, the parents of the ones it
-/// created included, and removes those deleting files emptied.
-fn finish(
-    directories: &mut Directories<'_>,
-    changed: &[&FileChange],
-) -> Result<(), Vec<Diagnostic>> {
-    let mut failures = Vec::new();
-    let parents: Vec<String> = directories
-        .created
-        .iter()
-        .map(|path| split(path).0.to_owned())
-        .collect();
-    for parent in parents {
-        if let Err(error) = directories.get(&parent, false) {
-            failures.extend(io(&parent, &error));
-        }
-    }
-    for (path, directory) in &directories.open {
-        if let Err(error) = directory.sync() {
-            failures.extend(io(path, &error));
-        }
-    }
-    for file in changed {
-        if file.after.is_none() {
-            directories.prune(&file.path);
-        }
-    }
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(failures)
-    }
-}
-
 impl Plan {
-    /// Writes the plan's files. The root's lock is held throughout; every
-    /// file the plan touched or consulted must still be as it was planned.
+    /// Writes the plan's files. The root's lock is held throughout. Every
+    /// file the plan touched or consulted must still be as it was planned,
+    /// and the tree with the plan's files must still validate, since files
+    /// the plan did not touch may have changed since it was made.
     ///
     /// # Errors
-    /// Returns a `tx.conflict` diagnostic, with nothing written, when a
-    /// file changed since planning or another edit holds the lock, and
-    /// `tx.io` or `tx.path` ones when writing fails. A failure after files
-    /// were published restores them; the diagnostic names any that could
-    /// not be restored.
-    pub fn publish(&self) -> Result<(), Vec<Diagnostic>> {
+    /// Returns a [`PublishError`]. With nothing written: a `tx.conflict`
+    /// diagnostic when a file changed or another edit holds the lock, the
+    /// loader's diagnostics when the result no longer validates, and `tx.io`
+    /// or `tx.path` ones when staging fails. A failure while renaming
+    /// restores the files already published and names any it could not.
+    /// A failure to sync after every file was published is reported with
+    /// `applied` set.
+    pub fn publish(&self) -> Result<(), PublishError> {
         let root = SourceRoot::new(&self.root);
-        let _lock = root.lock().map_err(|error| match error {
-            AccessError::Locked => problem(".", Code::Conflict, error.to_string()),
-            other => io(".", &other),
+        let _lock = root.lock().map_err(|error| {
+            not_applied(match error {
+                AccessError::Locked => problem(".", Code::Conflict, error.to_string()),
+                other => io(".", &other),
+            })
         })?;
         let mut directories = Directories {
             root: &root,
             open: BTreeMap::new(),
             created: Vec::new(),
+            changed: BTreeSet::new(),
         };
         let changed: Vec<&FileChange> =
             self.files.iter().filter(|file| file.is_changed()).collect();
@@ -220,41 +261,84 @@ impl Plan {
             hook();
         }
 
-        if let Err(problems) = check_again(&root, &self.files) {
+        let checked = check_again(&root, &self.files).and_then(|()| {
+            tilewright_source::load_edited(&self.root, &self.load, &self.overlay()).map(|_| ())
+        });
+        if let Err(problems) = checked {
             discard(&mut directories, &staged);
             directories.remove_created();
-            return Err(problems);
+            return Err(not_applied(problems));
         }
         let mut published: Vec<&FileChange> = Vec::new();
         for (step, file) in changed.iter().enumerate() {
             let (parent, name) = split(&file.path);
-            let result = publish_one(&mut directories, parent, name, file.after.is_some(), step);
+            let result = publish_one(
+                &mut directories,
+                parent,
+                name,
+                file.after.is_some(),
+                step,
+                &mut published,
+                file,
+            );
             if let Err(error) = result {
-                let unrestored = roll_back(&mut directories, &published);
+                let mut unrestored = roll_back(&mut directories, &published);
                 discard(&mut directories, &staged);
                 directories.remove_created();
+                unrestored.extend(
+                    directories
+                        .sync()
+                        .into_iter()
+                        .map(|failure| failure.to_string()),
+                );
                 let message = if unrestored.is_empty() {
                     format!("{error}; every file published before it was restored")
                 } else {
                     format!(
-                        "{error}; these files could not be restored: {}; apply the inverse to restore them",
+                        "{error}; restoring failed for: {}; apply the inverse to restore the rest",
                         unrestored.join(", ")
                     )
                 };
-                return Err(problem(&file.path, Code::Io, message));
+                return Err(not_applied(problem(&file.path, Code::Io, message)));
             }
-            published.push(file);
         }
-        finish(&mut directories, &changed)
+        // Staging files left beside the files of this plan by an earlier,
+        // interrupted apply go too.
+        for file in &self.files {
+            let (parent, name) = split(&file.path);
+            if let Ok(Some(directory)) = directories.get(parent, false)
+                && directory.remove_file(&staging_name(name)).unwrap_or(false)
+            {
+                directories.changed.insert(parent.to_owned());
+            }
+        }
+        for file in &changed {
+            if file.after.is_none() {
+                directories.prune(&file.path);
+            }
+        }
+        let failures = directories.sync();
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(PublishError {
+                applied: true,
+                problems: failures,
+            })
+        }
     }
 }
 
-fn publish_one(
+/// Publishes one file: renames its staged text into place, or removes it.
+/// The file is recorded as published as soon as its target changed.
+fn publish_one<'f>(
     directories: &mut Directories<'_>,
     parent: &str,
     name: &str,
     write: bool,
     step: usize,
+    published: &mut Vec<&'f FileChange>,
+    file: &'f FileChange,
 ) -> Result<(), AccessError> {
     #[cfg(test)]
     if FAIL_STEP.with(std::cell::Cell::get) == Some(step) {
@@ -268,12 +352,16 @@ fn publish_one(
         return Err(AccessError::Unexpected(parent.to_owned()));
     };
     if write {
-        directory.rename(&staging_name(name), name)
+        directory.rename(&staging_name(name), name)?;
     } else {
+        // A staging file left by an interrupted apply goes first, so that
+        // failing to remove it leaves the target untouched.
+        directory.remove_file(&staging_name(name))?;
         directory.remove_file(name)?;
-        // A staging file left by an interrupted apply goes too.
-        directory.remove_file(&staging_name(name)).map(|_| ())
     }
+    published.push(file);
+    directories.changed.insert(parent.to_owned());
+    Ok(())
 }
 
 /// Removes the staging files of `staged`.
@@ -306,6 +394,7 @@ fn roll_back(directories: &mut Directories<'_>, published: &[&FileChange]) -> Ve
                     .map(|_| ())
             }),
         };
+        directories.changed.insert(parent.to_owned());
         if restored.is_err() {
             unrestored.push(file.path.clone());
         }

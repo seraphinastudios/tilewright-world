@@ -1,6 +1,6 @@
 [package]
 name = "tilewright-edit"
-description = "Lossless, deterministic transactions over Tilewright world sources: structural edits, preview, atomic apply and inverse plans"
+description = "Lossless, deterministic transactions over Tilewright world sources: structural edits, preview, staged apply with rollback and inverse plans"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

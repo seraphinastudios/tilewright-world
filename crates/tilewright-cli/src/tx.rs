@@ -123,6 +123,35 @@ fn preview(transaction: &Path, root: &Path, json: bool) -> Result<String, Failur
     Ok(output)
 }
 
+/// Refuses an output inside the source tree's documents, where it would
+/// itself become a stray source file.
+fn outside(root: &Path, path: &Path) -> Result<(), Failure> {
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let (Ok(root), Ok(parent), Some(name)) =
+        (root.canonicalize(), parent.canonicalize(), path.file_name())
+    else {
+        return Ok(());
+    };
+    let documents = ["planes", "defs", "profile"].map(std::ffi::OsStr::new);
+    let inside = parent.join(name).strip_prefix(&root).is_ok_and(|relative| {
+        relative == Path::new("world.jsonc")
+            || relative
+                .components()
+                .next()
+                .is_some_and(|first| documents.contains(&first.as_os_str()))
+    });
+    if inside {
+        return Err(Failure::message(format!(
+            "{} is inside the source tree's documents; write it elsewhere",
+            shown(path)
+        )));
+    }
+    Ok(())
+}
+
 fn write(path: &Path, text: &str) -> Result<(), Failure> {
     tilewright_edit::write_new(path, text).map_err(|error| {
         Failure::message(format!(
@@ -134,6 +163,7 @@ fn write(path: &Path, text: &str) -> Result<(), Failure> {
 }
 
 fn rebase(transaction: &Path, root: &Path, output: &Path) -> Result<String, Failure> {
+    outside(root, output)?;
     let transaction = read(transaction, false)?;
     let plan = plan(&transaction, root, true, false)?;
     write(output, plan.sealed())?;
@@ -147,16 +177,24 @@ fn rebase(transaction: &Path, root: &Path, output: &Path) -> Result<String, Fail
 }
 
 fn apply(transaction: &Path, root: &Path, inverse: &Path) -> Result<String, Failure> {
+    outside(root, inverse)?;
     let plan = plan(&read(transaction, false)?, root, false, false)?;
     // The inverse is durable before any file changes, so an interrupted
     // apply can be undone with it.
     write(inverse, plan.inverse())?;
-    plan.publish().map_err(|problems| Failure {
-        output: diagnostics_text(&problems, false),
-        message: format!(
-            "the transaction was not applied; {} problem(s)",
-            problems.len()
-        ),
+    plan.publish().map_err(|error| Failure {
+        output: diagnostics_text(&error.problems, false),
+        message: if error.applied {
+            format!(
+                "the transaction was applied, but not made durable; {} problem(s)",
+                error.problems.len()
+            )
+        } else {
+            format!(
+                "the transaction was not applied; {} problem(s)",
+                error.problems.len()
+            )
+        },
     })?;
     Ok(format!(
         "{}applied; the inverse is in {}\n",
@@ -320,6 +358,16 @@ mod tests {
             conflict.output
         );
         assert!(!Path::new(&path("undo2.jsonc")).exists());
+
+        let inside = Path::new(&root).join("planes/overworld/undo.jsonc");
+        let inside_text = inside.display().to_string();
+        let refused = run(&["tx", "apply", &path("undo.jsonc"), &root, &inside_text]).unwrap_err();
+        assert!(
+            refused.message.contains("inside the source tree"),
+            "{}",
+            refused.message
+        );
+        assert!(!inside.exists());
 
         run(&[
             "tx",

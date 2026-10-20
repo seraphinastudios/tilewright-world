@@ -18,8 +18,12 @@ use tilewright_jsonc::{Document, Limits, Span, Value};
 /// Failures of one operation, each at a span of the transaction.
 pub(crate) type Failures = Vec<(Span, Failure)>;
 
-/// A short form of a value for messages.
+/// A short form of a value for messages. A large value is described, not
+/// rendered, so a message costs little whatever the value's size.
 pub(crate) fn shown(document: &Document, value: &Value) -> String {
+    if value.span().len() > 4_096 {
+        return format!("{} of {} bytes", value.kind(), value.span().len());
+    }
     let mut text = document.canonical(value);
     if text.len() > 120 {
         let mut end = 117;
@@ -152,9 +156,9 @@ fn check_object(
     address: &ObjectAddress,
 ) -> Outcome<()> {
     for member in transaction.value(expect).as_object().unwrap_or_default() {
-        let wanted = transaction.document.canonical(&member.value);
         let found = object.get(&member.key);
-        if found.map(|value| document.canonical(value)).as_deref() != Some(wanted.as_str()) {
+        if !found.is_some_and(|value| equal(document, value, &transaction.document, &member.value))
+        {
             return Err(Failure::conflict(format!(
                 "object {} on {} has {} {}, expected {}",
                 address.index,
@@ -308,6 +312,12 @@ fn target(workspace: &mut Workspace<'_>, target: &Target) -> Outcome<(String, Ve
     }
 }
 
+/// Whether two values have equal canonical JSON. Values of different kinds
+/// differ without rendering either.
+fn equal(document: &Document, value: &Value, other_document: &Document, other: &Value) -> bool {
+    value.kind() == other.kind() && document.canonical(value) == other_document.canonical(other)
+}
+
 /// Checks that the value at `steps` equals the transaction's `expect`.
 fn check_value(
     workspace: &mut Workspace<'_>,
@@ -317,12 +327,15 @@ fn check_value(
     expect: Span,
 ) -> Outcome<()> {
     let wanted = transaction.value(expect);
-    workspace.charge(wanted.span().len())?;
+    // Comparing canonical forms walks both values, so both are charged.
+    let found_size = {
+        let document = workspace.document(path)?;
+        splice::find(document.root(), steps).map_or(0, |found| found.span().len())
+    };
+    workspace.charge(wanted.span().len().saturating_add(found_size))?;
     let document = workspace.document(path)?;
     match splice::find(document.root(), steps) {
-        Some(found) if document.canonical(found) == transaction.document.canonical(wanted) => {
-            Ok(())
-        }
+        Some(found) if equal(document, found, &transaction.document, wanted) => Ok(()),
         found => Err(Failure::conflict(format!(
             "{path} {} is {}, expected {}",
             describe(steps),

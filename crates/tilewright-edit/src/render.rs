@@ -104,18 +104,55 @@ impl Node {
         output
     }
 
+    /// Whether the one-line form takes at most `room` bytes, which it
+    /// reduces; counting stops as soon as it does not, so checking costs
+    /// at most `room` whatever the value's size.
+    fn fits(&self, room: &mut usize) -> bool {
+        fn take(bytes: usize, room: &mut usize) -> bool {
+            *room = match room.checked_sub(bytes) {
+                Some(left) => left,
+                None => return false,
+            };
+            true
+        }
+        fn string(text: &str, room: &mut usize) -> bool {
+            take(2, room)
+                && text.chars().all(|character| {
+                    let mut escaped = String::new();
+                    write_json_string(&character.to_string(), &mut escaped);
+                    take(escaped.len() - 2, room)
+                })
+        }
+        match self {
+            Self::Scalar(text) => take(text.len(), room),
+            Self::String(text) => string(text, room),
+            Self::Array(items) => {
+                take(2, room)
+                    && items
+                        .iter()
+                        .enumerate()
+                        .all(|(index, item)| (index == 0 || take(2, room)) && item.fits(room))
+            }
+            Self::Object(members) => {
+                take(2, room)
+                    && members.iter().enumerate().all(|(index, (key, value))| {
+                        (index == 0 || take(2, room))
+                            && string(key, room)
+                            && take(2, room)
+                            && value.fits(room)
+                    })
+            }
+        }
+    }
+
     fn write(&self, indent: &str, expand: bool, output: &mut String) {
-        let mut inline = String::new();
-        self.inline(&mut inline);
         let scalars = match self {
             Self::Array(items) => items.iter().all(|item| matches!(item, Self::Scalar(_))),
             Self::Object(members) => members.is_empty(),
             Self::Scalar(_) | Self::String(_) => true,
         };
-        let empty = matches!(self, Self::Array(items) if items.is_empty())
-            || matches!(self, Self::Object(members) if members.is_empty());
-        if empty || scalars || (!expand && inline.len() <= INLINE_WIDTH) {
-            output.push_str(&inline);
+        if scalars || (!expand && self.fits(&mut INLINE_WIDTH.clone())) {
+            self.inline(output);
             return;
         }
         let inner = format!("{indent}  ");

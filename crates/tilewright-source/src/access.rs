@@ -4,8 +4,9 @@
 //! Confined access to the files of a source tree, for tools that edit it.
 //!
 //! This is the loader's own path confinement: paths are root-relative and
-//! `/`-separated, with no empty, `.` or `..` component, and nothing beneath
-//! the root is followed if it is a symbolic link. On Unix every
+//! `/`-separated, with no empty, `.` or `..` component and no `\`, `:` or
+//! NUL in any component, and nothing beneath the root is followed if it is
+//! a symbolic link. On Unix every
 //! component is opened through its parent's directory handle without
 //! following links, and writes, renames and removals act on names inside a
 //! directory opened that way, so a link swapped in at any moment is never
@@ -18,7 +19,8 @@ use std::{fmt, io::Read as _, path::Path};
 /// Why a path beneath the root could not be used.
 #[derive(Debug)]
 pub enum AccessError {
-    /// The path has an empty, `.` or `..` component, or a name has a `/`.
+    /// The path has an empty, `.` or `..` component, or a component with
+    /// `\`, `:` or NUL; or a name has a `/`.
     Path(String),
     /// A symbolic link at this prefix of the path.
     Link(String),
@@ -69,13 +71,14 @@ fn checked(path: &str) -> Result<Vec<&str>, AccessError> {
 }
 
 /// Whether `name` can name an entry of a directory: not empty, `.` or `..`,
-/// and without `/` or NUL.
+/// and without `/`, `\`, `:` or NUL, so that no platform reads it as more
+/// than one component, a drive or a stream.
 fn checked_name(name: &str) -> Result<&str, AccessError> {
     if name.is_empty()
         || name == "."
         || name == ".."
         || name.len() > 255
-        || name.contains(['/', '\0'])
+        || name.contains(['/', '\\', ':', '\0'])
     {
         Err(AccessError::Path(name.to_owned()))
     } else {

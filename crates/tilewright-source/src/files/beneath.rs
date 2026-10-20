@@ -259,12 +259,19 @@ impl Directory {
             | OFlags::NOCTTY;
         let fd = openat(&self.0, name, flags, Mode::from_raw_mode(0o666))
             .map_err(|errno| classify(self.0.as_fd(), name, errno, &[name]))?;
-        if let Some(permissions) = permissions {
-            fchmod(&fd, permissions).map_err(|errno| Refused::Io(errno.into()))?;
+        let written = (|| {
+            if let Some(permissions) = permissions {
+                fchmod(&fd, permissions).map_err(|errno| Refused::Io(errno.into()))?;
+            }
+            let mut file = std::fs::File::from(fd);
+            file.write_all(bytes).map_err(Refused::Io)?;
+            file.sync_all().map_err(Refused::Io)
+        })();
+        if written.is_err() {
+            // A partial file is not left behind.
+            let _ = self.remove_file(name);
         }
-        let mut file = std::fs::File::from(fd);
-        file.write_all(bytes).map_err(Refused::Io)?;
-        file.sync_all().map_err(Refused::Io)
+        written
     }
 
     /// Renames `from` to `to` in this directory, replacing `to`.

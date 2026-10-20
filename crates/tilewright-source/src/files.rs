@@ -22,7 +22,11 @@ use crate::{
     diagnostic::{Diagnostics, Positions},
 };
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, io::Read as _, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::Read as _,
+    path::Path,
+};
 use tilewright_jsonc::{Document, ErrorCode};
 
 /// Why a path beneath the root could not be used.
@@ -247,24 +251,28 @@ impl<'o> Tree<'o> {
     pub fn list(&mut self, path: &str) -> Vec<Entry> {
         let mut entries = self.list_disk(path);
         // Overlay files replace, add or remove entries; a directory that
-        // holds an overlay file is listed.
+        // holds an overlay file is listed. Names are looked up in sets, so
+        // merging costs a logarithm per entry.
         let mut added: BTreeMap<&str, EntryKind> = BTreeMap::new();
-        let mut removed = Vec::new();
+        let mut removed = BTreeSet::new();
         for (rest, value) in overlay_beneath(self.overlay, path) {
             match (rest.split_once('/'), value) {
                 (None, Some(_)) => {
                     added.insert(rest, EntryKind::File);
                 }
-                (None, None) => removed.push(rest),
+                (None, None) => {
+                    removed.insert(rest);
+                }
                 (Some((directory, _)), Some(_)) => {
                     added.entry(directory).or_insert(EntryKind::Directory);
                 }
                 (Some(_), None) => {}
             }
         }
-        entries.retain(|entry| !removed.contains(&entry.name.as_str()));
+        entries.retain(|entry| !removed.contains(entry.name.as_str()));
+        let present: BTreeSet<String> = entries.iter().map(|entry| entry.name.clone()).collect();
         for (name, kind) in added {
-            if !entries.iter().any(|entry| entry.name == name) {
+            if !present.contains(name) {
                 self.entries += 1;
                 if self.entries > self.options.maximum_entries {
                     self.exhaust(path);

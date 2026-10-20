@@ -76,14 +76,37 @@ pub(crate) enum Primitive {
     Delete,
 }
 
+/// The current state of a touched file: absent, text, or text parsed. A
+/// parsed document holds its text, so the text is kept once.
+pub(crate) enum Current {
+    Absent,
+    Text(String),
+    Parsed(Document),
+}
+
+impl Current {
+    pub fn text(&self) -> Option<&str> {
+        match self {
+            Self::Absent => None,
+            Self::Text(text) => Some(text),
+            Self::Parsed(document) => Some(document.source()),
+        }
+    }
+}
+
 /// One touched file.
 pub(crate) struct Entry {
     /// The file as read, `None` when absent.
     pub base: Option<String>,
-    pub current: Option<String>,
-    parsed: Option<Document>,
+    pub current: Current,
     /// Inverses of the edits made, in the order they were made.
     pub inverse: Vec<Primitive>,
+}
+
+impl Entry {
+    pub fn is_changed(&self) -> bool {
+        self.base.as_deref() != self.current.text()
+    }
 }
 
 pub(crate) struct Workspace<'r> {
@@ -109,56 +132,63 @@ impl<'r> Workspace<'r> {
 
     /// The entry of `path`, reading the file the first time.
     fn entry(&mut self, path: &str) -> Outcome<&mut Entry> {
-        if !self.entries.contains_key(path) {
-            if self.entries.len() >= limits::FILES {
-                return Err(Failure::limit(format!(
-                    "the transaction touches more than {} files",
-                    limits::FILES
-                )));
-            }
-            let limit = u64::try_from(limits().max_input_bytes).unwrap_or(u64::MAX);
-            let bytes = self
-                .root
-                .read(path, limit)
-                .map_err(|error| Failure::access(&error))?;
-            let base = match bytes {
-                Some(bytes) => {
-                    self.read_bytes += u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-                    if self.read_bytes > limits::READ_BYTES {
-                        return Err(Failure::limit(format!(
-                            "the touched files hold more than {} bytes",
-                            limits::READ_BYTES
-                        )));
-                    }
-                    Some(String::from_utf8(bytes).map_err(|_| {
-                        Failure::conflict(format!("{path} is not UTF-8 and cannot be edited"))
-                    })?)
+        let count = self.entries.len();
+        let root = self.root;
+        match self.entries.entry(path.to_owned()) {
+            std::collections::btree_map::Entry::Occupied(entry) => Ok(entry.into_mut()),
+            std::collections::btree_map::Entry::Vacant(vacant) => {
+                if count >= limits::FILES {
+                    return Err(Failure::limit(format!(
+                        "the transaction touches more than {} files",
+                        limits::FILES
+                    )));
                 }
-                None => None,
-            };
-            self.entries.insert(
-                path.to_owned(),
-                Entry {
-                    current: base.clone(),
+                let limit = u64::try_from(limits().max_input_bytes).unwrap_or(u64::MAX);
+                let bytes = root
+                    .read(path, limit)
+                    .map_err(|error| Failure::access(&error))?;
+                let base = match bytes {
+                    Some(bytes) => {
+                        self.read_bytes += u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+                        if self.read_bytes > limits::READ_BYTES {
+                            return Err(Failure::limit(format!(
+                                "the touched files hold more than {} bytes",
+                                limits::READ_BYTES
+                            )));
+                        }
+                        Some(String::from_utf8(bytes).map_err(|_| {
+                            Failure::conflict(format!("{path} is not UTF-8 and cannot be edited"))
+                        })?)
+                    }
+                    None => None,
+                };
+                let current = base.clone().map_or(Current::Absent, Current::Text);
+                Ok(vacant.insert(Entry {
                     base,
-                    parsed: None,
+                    current,
                     inverse: Vec::new(),
-                },
-            );
+                }))
+            }
         }
-        Ok(self.entries.get_mut(path).unwrap_or_else(|| unreachable!()))
+    }
+
+    /// Whether the work budget is spent; nothing more can be carried out.
+    pub fn exhausted(&self) -> bool {
+        self.work > limits::WORK
     }
 
     pub fn exists(&mut self, path: &str) -> Outcome<bool> {
-        Ok(self.entry(path)?.current.is_some())
+        Ok(self.entry(path)?.current.text().is_some())
     }
 
     /// Counts work against the editing budget: bytes parsed or compared,
     /// and items scanned.
     pub fn charge(&mut self, units: usize) -> Outcome<()> {
+        // Every charge costs at least one unit, so even operations on a
+        // document already parsed use up the budget.
         self.work = self
             .work
-            .saturating_add(u64::try_from(units).unwrap_or(u64::MAX));
+            .saturating_add(u64::try_from(units.max(1)).unwrap_or(u64::MAX));
         if self.work > limits::WORK {
             return Err(Failure::limit(format!(
                 "the transaction needs more than {} units of work: bytes parsed or compared and items scanned",
@@ -170,43 +200,38 @@ impl<'r> Workspace<'r> {
 
     /// The parsed current document of `path`.
     pub fn document(&mut self, path: &str) -> Outcome<&Document> {
-        let length = {
-            let entry = self.entry(path)?;
-            if entry.parsed.is_some() {
-                0
-            } else {
-                entry
-                    .current
-                    .as_ref()
-                    .ok_or_else(|| Failure::conflict(format!("{path} does not exist")))?
-                    .len()
-            }
+        let length = match &self.entry(path)?.current {
+            Current::Absent => return Err(Failure::conflict(format!("{path} does not exist"))),
+            Current::Text(text) => text.len(),
+            Current::Parsed(_) => 0,
         };
-        if length > 0 {
-            self.charge(length)?;
-        }
+        self.charge(length)?;
         let entry = self.entry(path)?;
-        if entry.parsed.is_none() {
-            let text = entry.current.clone().unwrap_or_default();
-            entry.parsed = Some(Document::parse(text, &limits()).map_err(|error| {
+        if let Current::Text(text) = &entry.current {
+            let document = Document::parse(text.as_str(), &limits()).map_err(|error| {
                 Failure::conflict(format!(
                     "{path} is not valid JSONC ({error}); it cannot be edited"
                 ))
-            })?);
+            })?;
+            entry.current = Current::Parsed(document);
         }
-        Ok(entry.parsed.as_ref().unwrap_or_else(|| unreachable!()))
+        match &entry.current {
+            Current::Parsed(document) => Ok(document),
+            Current::Absent | Current::Text(_) => {
+                Err(Failure::conflict(format!("{path} cannot be edited")))
+            }
+        }
     }
 
     /// Replaces the text of `path`, which must parse, and records the
     /// inverses of the edit.
     fn commit(&mut self, path: &str, text: String, inverse: Vec<Primitive>) -> Outcome<()> {
         self.charge(text.len())?;
-        let document = Document::parse(text.clone(), &limits()).map_err(|error| {
+        let document = Document::parse(text, &limits()).map_err(|error| {
             Failure::conflict(format!("the edit leaves {path} invalid ({error})"))
         })?;
         let entry = self.entry(path)?;
-        entry.current = Some(text);
-        entry.parsed = Some(document);
+        entry.current = Current::Parsed(document);
         entry.inverse.extend(inverse);
         Ok(())
     }
@@ -222,10 +247,11 @@ impl<'r> Workspace<'r> {
     /// Deletes `path` and returns its text.
     pub fn delete(&mut self, path: &str) -> Outcome<String> {
         let entry = self.entry(path)?;
-        let Some(text) = entry.current.take() else {
-            return Err(Failure::conflict(format!("{path} does not exist")));
+        let text = match std::mem::replace(&mut entry.current, Current::Absent) {
+            Current::Absent => return Err(Failure::conflict(format!("{path} does not exist"))),
+            Current::Text(text) => text,
+            Current::Parsed(document) => document.source().to_owned(),
         };
-        entry.parsed = None;
         entry.inverse.push(Primitive::Create { text: text.clone() });
         Ok(text)
     }

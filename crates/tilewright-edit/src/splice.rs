@@ -300,8 +300,8 @@ pub(crate) fn separator_fits(separator: &str, index: usize, length: usize) -> bo
 }
 
 /// The region that replaces item `index` and its neighbouring regions when
-/// no separator is given. The comments before an item go with it; others
-/// stay.
+/// no separator is given. The comments between the item and the commas
+/// that separate it from its neighbours go with it; others stay.
 fn inferred_separator(source: &str, sequence: &Sequence, index: usize) -> String {
     let length = sequence.len();
     let region = |at: usize| &source[sequence.region(at).start..sequence.region(at).end];

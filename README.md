@@ -21,8 +21,8 @@ game-specific code.
 - [Content pack](docs/spec/PACK.md): the SQLite pack and the binary chunk
   encoding.
 - [Transactions](docs/spec/TRANSACTIONS.md): reviewable edits addressed by
-  identity, with structural operations, preconditions, rebasing, atomic
-  apply and exact inverses.
+  identity, with structural operations, preconditions, rebasing, a staged
+  apply that rolls back on failure, and exact inverses.
 
 All three are drafts until format 1.0 is frozen.
 
@@ -33,7 +33,7 @@ All three are drafts until format 1.0 is frozen.
 | `tilewright-jsonc` | Strict, lossless, bounded JSONC parser with byte spans, span edits and canonical JSON output |
 | `tilewright-source` | Loads and validates a source tree into a typed world model, reporting every problem with file, span and a stable code |
 | `tilewright-pack` | Deterministic pack compiler, the `twc1+zstd` chunk codec, and a verifying pack reader |
-| `tilewright-edit` | Transactions: lossless structural edits, preview, rebase, atomic apply and inverses |
+| `tilewright-edit` | Transactions: lossless structural edits, preview, rebase, staged apply with rollback, and inverses |
 | `tilewright-cli` | The `tilewright` command |
 
 ## Command line
