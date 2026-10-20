@@ -307,6 +307,37 @@ impl Directory {
         set_access(&self.0, access)
     }
 
+    /// The mandatory access control labels of the file `name`, its
+    /// `security.selinux` and `security.SMACK64` attributes; `None` when
+    /// there is no file.
+    pub(crate) fn labels(&self, name: &str) -> Result<Option<Vec<u8>>, Refused> {
+        let flags =
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC | OFlags::NOCTTY;
+        let fd = match openat(&self.0, name, flags, Mode::empty()) {
+            Ok(fd) => fd,
+            Err(Errno::NOENT) => return Ok(None),
+            Err(errno) => return Err(classify(self.0.as_fd(), name, errno, &[name])),
+        };
+        #[cfg(target_os = "linux")]
+        {
+            let mut labels = Vec::new();
+            for attribute in ["security.selinux", "security.SMACK64"] {
+                labels.extend(attribute.as_bytes());
+                labels.push(b'=');
+                if let Some(value) = attribute_value(&fd, attribute)? {
+                    labels.extend(value);
+                }
+                labels.push(b'\n');
+            }
+            Ok(Some(labels))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            drop(fd);
+            Ok(Some(Vec::new()))
+        }
+    }
+
     /// Writes a new file `name` holding `bytes` and syncs it. Whatever was
     /// at `name` is removed first, so a link or a second hard link there is
     /// never written through. With `access`, the file is its owner's alone
@@ -454,6 +485,21 @@ fn has_any(fd: impl AsFd, names: &[&str]) -> Result<bool, Refused> {
         }
     }
     Ok(false)
+}
+
+/// The value of the extended attribute `name`, if the file has it, of at
+/// most 4 KiB.
+#[cfg(target_os = "linux")]
+fn attribute_value(fd: impl AsFd, name: &str) -> Result<Option<Vec<u8>>, Refused> {
+    let mut value = vec![0_u8; 4096];
+    match rustix::fs::fgetxattr(&fd, name, &mut value[..]) {
+        Ok(length) => {
+            value.truncate(length);
+            Ok(Some(value))
+        }
+        Err(Errno::NODATA | Errno::NOTSUP) => Ok(None),
+        Err(errno) => Err(Refused::Io(errno.into())),
+    }
 }
 
 /// Removes the POSIX access control list a new file got from its

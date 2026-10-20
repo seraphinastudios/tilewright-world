@@ -198,6 +198,14 @@ impl Directory {
             .map_err(Refused::Io)
     }
 
+    /// Labels are not read here: `Some` and empty for a file that exists.
+    pub(crate) fn labels(&self, name: &str) -> Result<Option<Vec<u8>>, Refused> {
+        Ok(self
+            .entry(name)?
+            .filter(fs::Metadata::is_file)
+            .map(|_| Vec::new()))
+    }
+
     pub(crate) fn set_own_access(&self, access: &Access) -> Result<(), Refused> {
         let current = fs::metadata(&self.0).map_err(Refused::Io)?.permissions();
         fs::set_permissions(&self.0, permissions_of(access, &current)).map_err(Refused::Io)

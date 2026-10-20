@@ -350,6 +350,9 @@ struct Known {
     /// A new file takes the mode of the nearest, without the execute bits,
     /// and its group, and a new directory its mode and group.
     directories: BTreeMap<String, Access>,
+    /// The mandatory access control labels the changed files that were
+    /// there share, which every file written must get too.
+    labels: Option<Vec<u8>>,
 }
 
 impl Known {
@@ -418,6 +421,28 @@ fn survey(
             Err(error) => Err(error),
         }
         .map_err(|error| io(&file.path, &error))?;
+        if existing.is_some() {
+            let labels = match directories.get(parent, None) {
+                Ok(Some(directory)) => directory.labels(name),
+                Ok(None) => Ok(None),
+                Err(error) => Err(error),
+            }
+            .map_err(|error| io(&file.path, &error))?;
+            match (&known.labels, labels) {
+                (None, labels) => known.labels = labels,
+                (Some(expected), Some(found)) if *expected != found => {
+                    return Err(problem(
+                        &file.path,
+                        Code::Io,
+                        format!(
+                            "{} has other security labels than another file the transaction changes; they must have the same",
+                            file.path
+                        ),
+                    ));
+                }
+                _ => {}
+            }
+        }
         known.files.insert(file.path.clone(), existing);
         // Each directory above, up to the root or one already read.
         let mut directory = parent;
@@ -469,7 +494,7 @@ fn check_access(directories: &mut Directories<'_>, known: &Known) -> Result<(), 
         problem(
             shown(path),
             Code::Conflict,
-            "its permissions or owner changed while the transaction was being applied; nothing was written",
+            "its permissions, owner or labels changed while the transaction was being applied; nothing was written",
         )
     };
     for (path, before) in &known.files {
@@ -482,6 +507,18 @@ fn check_access(directories: &mut Directories<'_>, known: &Known) -> Result<(), 
         .map_err(|error| io(path, &error))?;
         if now != *before {
             return Err(changed(path));
+        }
+        // A file's labels must still be the ones the others share.
+        if before.is_some() {
+            let labels = match directories.get(parent, None) {
+                Ok(Some(directory)) => directory.labels(name),
+                Ok(None) => Ok(None),
+                Err(error) => Err(error),
+            }
+            .map_err(|error| io(path, &error))?;
+            if labels != known.labels {
+                return Err(changed(path));
+            }
         }
     }
     for (path, before) in &known.directories {
@@ -524,9 +561,22 @@ fn stage_all<'f>(
         let result = directories
             .get(parent, known.new_directory(&file.path))
             .and_then(|directory| {
-                directory
-                    .ok_or_else(|| AccessError::Unexpected(file.path.clone()))?
-                    .write(&staging_name(name), access.as_ref(), text.as_bytes())
+                let directory =
+                    directory.ok_or_else(|| AccessError::Unexpected(file.path.clone()))?;
+                directory.write(&staging_name(name), access.as_ref(), text.as_bytes())?;
+                // The new inode's labels come from the system's policy; a
+                // file may not end up with others than the files it joins.
+                match (&known.labels, directory.labels(&staging_name(name))?) {
+                    (Some(expected), Some(found)) if *expected != found => {
+                        Err(AccessError::Io(
+                            file.path.clone(),
+                            std::io::Error::other(
+                                "it would get other security labels than the files the transaction changes have",
+                            ),
+                        ))
+                    }
+                    _ => Ok(()),
+                }
             });
         if let Err(error) = result {
             discard(directories, &staged);

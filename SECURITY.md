@@ -27,8 +27,9 @@ so changing the tree cannot redirect it. A transaction moves content
 between the files it changes, so a source tree is one unit of access:
 publishing requires the files it changes and every directory above them to
 have the same readers (read bits, and group where only it may read) and
-no access control list, refuses otherwise, and gives the files it writes
-that same access. Other platforms either cannot reach files through
+no access control list, and the changed files the same mandatory access
+control labels (SELinux, Smack), refuses otherwise, and gives the files it
+writes that same access, refusing a file the system would label otherwise. Other platforms either cannot reach files through
 handles or cannot be checked for access control lists the same way, so
 applying is refused there; previewing and rebasing work everywhere. As
 with verifying packs, applying transactions in a tree that others can

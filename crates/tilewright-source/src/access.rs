@@ -252,6 +252,15 @@ impl SourceDirectory {
             .map_err(|error| refused(&self.path, error))
     }
 
+    /// The mandatory access control labels of the file `name` (on Linux,
+    /// its `security.selinux` and `security.SMACK64` attributes), to compare
+    /// with another file's; `None` when there is no file there.
+    pub fn labels(&self, name: &str) -> Result<Option<Vec<u8>>, AccessError> {
+        self.directory
+            .labels(checked_name(name)?)
+            .map_err(|error| refused(&self.entry(name), error))
+    }
+
     /// Gives this directory the mode and group of `access`.
     pub fn set_own_access(&self, access: &Access) -> Result<(), AccessError> {
         self.directory

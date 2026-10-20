@@ -308,7 +308,10 @@ keeps that file's mode and group. A new file takes the mode of the
 directory above it without the execute bits, and its group, and a new
 directory the mode and group of the directory above it. A group the user
 may not give is an error, since the group bits would otherwise apply to
-another group. The owner of
+another group. The changed files that are there must also have the same
+mandatory access control labels (on Linux, their `security.selinux` and
+`security.SMACK64` attributes), and every file written must get those
+labels from the system's policy; otherwise publishing is refused. The owner of
 every file written is the user applying, who could read them all. A file
 whose bytes end as they began is not written. Restoring after a failure
 gives every file back the mode and group it had. Other extended
