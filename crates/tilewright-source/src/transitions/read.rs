@@ -173,6 +173,23 @@ fn pattern_key(key: &str) -> Option<u8> {
     if canonical { key.parse().ok() } else { None }
 }
 
+/// Whether `pattern` may be a key of a transition's `tiles`: one its model
+/// produces for its draw. Where the draw or the model is invalid, and has
+/// been reported, the key is checked against every value the other allows,
+/// so a key that no transition could have is still reported.
+fn possible(draw: Option<Draw>, model: Option<Model>, pattern: u8) -> bool {
+    let draws = draw
+        .as_ref()
+        .map_or(&[Draw::Inside, Draw::Outside][..], std::slice::from_ref);
+    let models = model.as_ref().map_or(
+        &[Model::None, Model::Sides, Model::Corners, Model::Blob][..],
+        std::slice::from_ref,
+    );
+    draws
+        .iter()
+        .any(|draw| models.iter().any(|model| model.produces(*draw, pattern)))
+}
+
 /// What a transition reads its `with` against.
 struct Terrains<'t> {
     /// Terrain indexes by ID.
@@ -320,11 +337,8 @@ fn read_transition<'a>(
         let mut tiles = BTreeMap::new();
         let mut ok = true;
         for member in members {
-            let pattern = pattern_key(&member.key).filter(|pattern| match (draw, model) {
-                (Some(draw), Some(model)) => model.produces(draw, *pattern),
-                // Checked once the draw and model are known.
-                _ => true,
-            });
+            let pattern =
+                pattern_key(&member.key).filter(|pattern| possible(draw, model, *pattern));
             // The tile is checked whatever its key, so every problem is
             // reported at once.
             let tile = read_pattern(reader, references, &member.value);
@@ -336,7 +350,17 @@ fn read_transition<'a>(
                         model.as_str(),
                         draw.as_str()
                     ),
-                    _ => format!("\"{}\" is not a pattern", member.key),
+                    (Some(draw), None) => format!(
+                        "\"{}\" is not a pattern of any model drawn {}",
+                        member.key,
+                        draw.as_str()
+                    ),
+                    (None, Some(model)) => format!(
+                        "\"{}\" is not a pattern of the {} model",
+                        member.key,
+                        model.as_str()
+                    ),
+                    (None, None) => format!("\"{}\" is not a pattern", member.key),
                 };
                 reader.report(member.key_span, Code::Range, message);
                 ok = false;
@@ -465,9 +489,12 @@ pub(crate) fn read_transitions(
                     ok = false;
                     continue;
                 };
+                // A prototype is claimed whether or not it resolves, so a
+                // repeat is reported in the same load as a missing one.
                 if proto(&reader, references, item).is_none() {
                     ok = false;
-                } else if let Some(&other) = by_proto.get(&name) {
+                }
+                if let Some(&other) = by_proto.get(&name) {
                     let owner = ids
                         .get(other)
                         .and_then(Option::as_deref)

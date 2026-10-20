@@ -1346,3 +1346,64 @@ fn the_resolver_matches_the_definition() {
         }
     }
 }
+
+#[test]
+fn a_bad_draw_or_model_does_not_hide_other_problems() {
+    let found = |document: &str| -> Vec<String> {
+        let directory = tempfile::tempdir().unwrap();
+        copy_tree(&fixture(), directory.path());
+        fs::write(directory.path().join(TRANSITIONS), document).unwrap();
+        load(directory.path())
+            .unwrap_err()
+            .into_iter()
+            .map(|diagnostic| diagnostic.message)
+            .collect()
+    };
+    let expect = |messages: &[String], wanted: &str| {
+        assert!(
+            messages.iter().any(|message| message == wanted),
+            "{wanted}: {messages:?}"
+        );
+    };
+    // An outside transition never draws pattern 0, whatever its model.
+    let messages = found(&document(
+        &SIDES
+            .replace("\"sides\"", "\"hex\"")
+            .replace("\"1\":", "\"0\":"),
+    ));
+    expect(
+        &messages,
+        "model must be \"none\", \"sides\", \"corners\" or \"blob\"",
+    );
+    expect(
+        &messages,
+        "\"0\" is not a pattern of any model drawn outside",
+    );
+    // No sides pattern is above 15, whatever the draw.
+    let messages = found(&document(
+        &SIDES
+            .replace("\"outside\"", "\"aside\"")
+            .replace("\"1\":", "\"16\":"),
+    ));
+    expect(&messages, "draw must be \"inside\" or \"outside\"");
+    expect(&messages, "\"16\" is not a pattern of the sides model");
+    // A blob key that neither draw produces.
+    let messages = found(&document(
+        &SIDES
+            .replace("\"outside\"", "\"aside\"")
+            .replace("\"sides\"", "\"blob\"")
+            .replace("\"1\":", "\"3\":"),
+    ));
+    expect(&messages, "\"3\" is not a pattern of the blob model");
+    // Two terrains that claim one missing prototype: both problems at once.
+    let messages = found(
+        &document("")
+            .replace("[\"sand\"]", "[\"lava\"]")
+            .replace("[\"water\"]", "[\"lava\"]"),
+    );
+    expect(&messages, "no proto definition \"lava\"");
+    expect(
+        &messages,
+        "prototype \"lava\" already paints terrain \"water\"",
+    );
+}
