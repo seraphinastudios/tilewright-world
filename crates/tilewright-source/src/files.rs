@@ -647,16 +647,18 @@ mod tests {
                 let target = outside.path().join("target");
                 fs::write(&target, "outside").unwrap();
                 symlink(&target, directory.path().join("dir/staged")).unwrap();
-                dir.write("staged", "file.jsonc", b"new").unwrap();
+                dir.write("staged", None, b"new").unwrap();
                 assert_eq!(fs::read_to_string(&target).unwrap(), "outside");
                 fs::hard_link(&target, directory.path().join("dir/hard")).unwrap();
-                dir.write("hard", "file.jsonc", b"new").unwrap();
+                dir.write("hard", None, b"new").unwrap();
                 assert_eq!(fs::read_to_string(&target).unwrap(), "outside");
                 {
                     use std::os::unix::fs::PermissionsExt as _;
                     let file = directory.path().join("dir/file.jsonc");
                     fs::set_permissions(&file, fs::Permissions::from_mode(0o640)).unwrap();
-                    dir.write("moded", "file.jsonc", b"x").unwrap();
+                    let like = dir.permissions("file.jsonc").unwrap();
+                    assert!(dir.permissions("nope").unwrap().is_none());
+                    dir.write("moded", like.as_ref(), b"x").unwrap();
                     let mode = fs::metadata(directory.path().join("dir/moded"))
                         .unwrap()
                         .permissions()

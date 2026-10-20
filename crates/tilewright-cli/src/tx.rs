@@ -152,7 +152,8 @@ fn outside(root: &Path, path: &Path) -> Result<(), Failure> {
     Ok(())
 }
 
-fn write(path: &Path, text: &str) -> Result<(), Failure> {
+/// Writes a new file; returns whether its name is durable.
+fn write(path: &Path, text: &str) -> Result<bool, Failure> {
     tilewright_edit::write_new(path, text).map_err(|error| {
         Failure::message(format!(
             "cannot write {}: {}",
@@ -180,8 +181,8 @@ fn apply(transaction: &Path, root: &Path, inverse: &Path) -> Result<String, Fail
     outside(root, inverse)?;
     let plan = plan(&read(transaction, false)?, root, false, false)?;
     // The inverse is durable before any file changes, so an interrupted
-    // apply can be undone with it.
-    write(inverse, plan.inverse())?;
+    // apply can be undone with it, where the platform can make it so.
+    let inverse_durable = write(inverse, plan.inverse())?;
     let published = plan.publish().map_err(|error| Failure {
         output: diagnostics_text(&error.problems, false),
         message: if error.applied {
@@ -196,10 +197,10 @@ fn apply(transaction: &Path, root: &Path, inverse: &Path) -> Result<String, Fail
             )
         },
     })?;
-    let durable = if published.durable {
+    let durable = if published.durable && inverse_durable {
         ""
     } else {
-        " (this platform cannot sync directories, so the renames may not be durable yet)"
+        " (this platform cannot sync directories, so the inverse's name and the renames may not be durable yet)"
     };
     Ok(format!(
         "{}applied; the inverse is in {}{durable}\n",

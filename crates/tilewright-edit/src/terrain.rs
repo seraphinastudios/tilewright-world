@@ -626,6 +626,15 @@ pub(crate) fn set_cells(
     for cell in cells {
         let site = site(plane, layer, cell.at);
         let index = usize::from(site.local[1]) * SIDE + usize::from(site.local[0]);
+        if by_chunk.len() == limits::FILES && !by_chunk.contains_key(&site.path) {
+            return Err(vec![(
+                None,
+                Failure::limit(format!(
+                    "the operation touches more than {} chunks",
+                    limits::FILES
+                )),
+            )]);
+        }
         by_chunk
             .entry(site.path.clone())
             .or_insert_with(|| (site, Vec::new()))

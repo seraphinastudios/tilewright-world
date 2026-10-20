@@ -93,6 +93,8 @@ struct Directories<'r> {
     created: Vec<String>,
     /// Directories whose entries changed, to sync.
     changed: BTreeSet<String>,
+    /// The permissions of each deleted file, to restore it with.
+    deleted: BTreeMap<String, std::fs::Permissions>,
 }
 
 impl Directories<'_> {
@@ -127,25 +129,34 @@ impl Directories<'_> {
     fn remove_created(&mut self) {
         for path in std::mem::take(&mut self.created).into_iter().rev() {
             self.open.remove(&path);
+            self.changed.remove(&path);
             let (parent, name) = split(&path);
-            if let Ok(Some(parent)) = self.root.directory(parent, false) {
-                let _ = parent.remove_directory(name);
+            if let Ok(Some(directory)) = self.root.directory(parent, false)
+                && directory.remove_directory(name).unwrap_or(false)
+            {
+                self.changed.insert(parent.to_owned());
             }
         }
     }
 
     /// Removes the directories above a deleted file that are now empty,
-    /// up to the top-level directories.
-    fn prune(&mut self, path: &str) {
+    /// up to the top-level directories. Returns what could not be done; a
+    /// directory that is not empty is left, as it should be.
+    fn prune(&mut self, path: &str) -> Vec<Diagnostic> {
         let mut current = split(path).0.to_owned();
         while current.contains('/') {
             let (parent, name) = split(&current);
-            let removed = matches!(
-                self.root.directory(parent, false),
-                Ok(Some(directory)) if directory.remove_directory(name).unwrap_or(false)
-            );
-            if !removed {
-                break;
+            let removed =
+                self.root
+                    .directory(parent, false)
+                    .and_then(|directory| match directory {
+                        Some(directory) => directory.remove_directory(name),
+                        None => Ok(false),
+                    });
+            match removed {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(error) => return io(&current, &error),
             }
             // Only a directory that is gone leaves the set to sync.
             self.open.remove(&current);
@@ -153,6 +164,7 @@ impl Directories<'_> {
             self.changed.insert(parent.to_owned());
             current = parent.to_owned();
         }
+        Vec::new()
     }
 
     /// Syncs every directory whose entries changed. Returns the failures,
@@ -207,7 +219,9 @@ fn stage_all<'f>(
         if let Err(error) = result {
             discard(directories, &staged);
             directories.remove_created();
-            return Err(not_applied(io(&file.path, &error)));
+            let mut problems = io(&file.path, &error);
+            problems.extend(directories.sync().0);
+            return Err(not_applied(problems));
         }
     }
     Ok(staged)
@@ -263,6 +277,7 @@ impl Plan {
             open: BTreeMap::new(),
             created: Vec::new(),
             changed: BTreeSet::new(),
+            deleted: BTreeMap::new(),
         };
         let changed: Vec<&FileChange> =
             self.files.iter().filter(|file| file.is_changed()).collect();
@@ -276,9 +291,10 @@ impl Plan {
         let checked = check_again(&root, &self.files).and_then(|()| {
             tilewright_source::load_edited(&self.root, &self.load, &self.overlay()).map(|_| ())
         });
-        if let Err(problems) = checked {
+        if let Err(mut problems) = checked {
             discard(&mut directories, &staged);
             directories.remove_created();
+            problems.extend(directories.sync().0);
             return Err(not_applied(problems));
         }
         let mut published: Vec<&FileChange> = Vec::new();
@@ -337,7 +353,7 @@ impl Plan {
         }
         for file in &changed {
             if file.after.is_none() {
-                directories.prune(&file.path);
+                failures.extend(directories.prune(&file.path));
             }
         }
         let (synced, durable) = directories.sync();
@@ -379,9 +395,14 @@ fn publish_one<'f>(
         directory.rename(&staging_name(name), name)?;
     } else {
         // A staging file left by an interrupted apply goes first, so that
-        // failing to remove it leaves the target untouched.
+        // failing to remove it leaves the target untouched; the target's
+        // permissions are kept to restore it with.
         directory.remove_file(&staging_name(name))?;
+        let permissions = directory.permissions(name)?;
         directory.remove_file(name)?;
+        if let Some(permissions) = permissions {
+            directories.deleted.insert(file.path.clone(), permissions);
+        }
     }
     published.push(file);
     directories.changed.insert(parent.to_owned());
@@ -392,8 +413,10 @@ fn publish_one<'f>(
 fn discard(directories: &mut Directories<'_>, staged: &[&str]) {
     for path in staged {
         let (parent, name) = split(path);
-        if let Ok(Some(directory)) = directories.get(parent, false) {
-            let _ = directory.remove_file(&staging_name(name));
+        if let Ok(Some(directory)) = directories.get(parent, false)
+            && directory.remove_file(&staging_name(name)).unwrap_or(false)
+        {
+            directories.changed.insert(parent.to_owned());
         }
     }
 }
@@ -405,12 +428,24 @@ fn roll_back(directories: &mut Directories<'_>, published: &[&FileChange]) -> Ve
     for file in published.iter().rev() {
         let (parent, name) = split(&file.path);
         let restored = match &file.before {
-            Some(text) => directories.get(parent, true).and_then(|directory| {
-                let directory =
-                    directory.ok_or_else(|| AccessError::Unexpected(parent.to_owned()))?;
-                stage(directory, &file.path, text)?;
-                directory.rename(&staging_name(name), name)
-            }),
+            Some(text) => {
+                // A deleted file comes back with its own permissions; a
+                // replaced one keeps those of the file now in its place.
+                let permissions = directories.deleted.get(&file.path).cloned();
+                directories.get(parent, true).and_then(|directory| {
+                    let directory =
+                        directory.ok_or_else(|| AccessError::Unexpected(parent.to_owned()))?;
+                    match permissions {
+                        Some(permissions) => directory.write_with(
+                            &staging_name(name),
+                            Some(&permissions),
+                            text.as_bytes(),
+                        )?,
+                        None => stage(directory, &file.path, text)?,
+                    }
+                    directory.rename(&staging_name(name), name)
+                })
+            }
             None => directories.get(parent, false).and_then(|directory| {
                 directory
                     .ok_or_else(|| AccessError::Unexpected(parent.to_owned()))?

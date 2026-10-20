@@ -140,8 +140,7 @@ fn locate(workspace: &mut Workspace<'_>, address: &ObjectAddress) -> Outcome<(St
         return Err(missing());
     }
     let document = workspace.document(&site.path)?;
-    let (positions, length) = tile_objects(document, &site.path, site.local)?;
-    workspace.charge(length.unwrap_or(0))?;
+    let (positions, _) = tile_objects(document, &site.path, site.local)?;
     let position = *positions.get(address.index).ok_or_else(missing)?;
     Ok((site.path, position))
 }
@@ -205,7 +204,6 @@ fn insert_object(
     let document = workspace.document(&site.path)?;
     let (positions, length) = tile_objects(document, &site.path, site.local)?;
     let index = index.unwrap_or(positions.len());
-    let scanned = length.unwrap_or(0);
     if index > positions.len() {
         return Err(Failure::conflict(format!(
             "{} has {} object(s); index {index} is past the end",
@@ -229,7 +227,6 @@ fn insert_object(
         (None, Some(last)) => last + 1,
         (None, None) => length,
     };
-    workspace.charge(scanned)?;
     let insertion = Insertion {
         key: None,
         value: object,
@@ -245,12 +242,10 @@ fn insert_object(
 }
 
 /// The steps of a pointer in `document`, resolving `{"id": ...}`
-/// selectors, and the number of array items the selectors scanned. Every
-/// step but the last must exist.
-fn steps(document: &Document, path: &str, pointer: &[Segment]) -> Outcome<(Vec<Step>, usize)> {
+/// selectors. Every step but the last must exist.
+fn steps(document: &Document, path: &str, pointer: &[Segment]) -> Outcome<Vec<Step>> {
     let mut value = Some(document.root());
     let mut steps = Vec::with_capacity(pointer.len());
-    let mut scanned = 0;
     for (position, segment) in pointer.iter().enumerate() {
         let Some(current) = value else {
             return Err(Failure::conflict(format!(
@@ -258,19 +253,10 @@ fn steps(document: &Document, path: &str, pointer: &[Segment]) -> Outcome<(Vec<S
             )));
         };
         let step = match segment {
-            Segment::Key(key) => {
-                // A member lookup compares the key with each member's.
-                let members = current.as_object().map_or(0, <[_]>::len);
-                scanned += members.saturating_mul(key.len() + 1);
-                Step::Key(key.clone())
-            }
+            Segment::Key(key) => Step::Key(key.clone()),
             Segment::Index(index) => Step::Index(*index),
             Segment::Id(id) => {
                 let items = current.as_array().unwrap_or_default();
-                scanned += items
-                    .iter()
-                    .map(|item| item.as_object().map_or(0, <[_]>::len) + id.len() + 1)
-                    .sum::<usize>();
                 let mut matches = items.iter().enumerate().filter(|(_, item)| {
                     item.get("id").and_then(Value::as_str) == Some(id.as_str())
                 });
@@ -292,7 +278,7 @@ fn steps(document: &Document, path: &str, pointer: &[Segment]) -> Outcome<(Vec<S
         value = splice::find(current, std::slice::from_ref(&step));
         steps.push(step);
     }
-    Ok((steps, scanned))
+    Ok(steps)
 }
 
 fn describe(steps: &[Step]) -> String {
@@ -335,12 +321,6 @@ fn check_value(
     expect: Span,
 ) -> Outcome<()> {
     let wanted = transaction.value(expect);
-    // Comparing canonical forms walks both values, so both are charged.
-    let found_size = {
-        let document = workspace.document(path)?;
-        splice::find(document.root(), steps).map_or(0, |found| found.span().len())
-    };
-    workspace.charge(wanted.span().len().saturating_add(found_size))?;
     let document = workspace.document(path)?;
     match splice::find(document.root(), steps) {
         Some(found) if equal(document, found, &transaction.document, wanted) => Ok(()),
@@ -353,10 +333,6 @@ fn check_value(
     }
 }
 
-/// How many times an operation follows its pointer, at most: to resolve
-/// it, to check `expect`, and to edit.
-const LOOKUPS: usize = 5;
-
 /// The file of a target, and its steps with `pointer` after the target's
 /// own prefix.
 fn resolved(
@@ -367,9 +343,7 @@ fn resolved(
     let (path, mut full) = target(workspace, aim)?;
     full.extend(pointer.iter().cloned());
     let document = workspace.document(&path)?;
-    let (steps, scanned) = steps(document, &path, &full)?;
-    // An operation follows its pointer at most this many times.
-    workspace.charge(scanned.saturating_mul(LOOKUPS))?;
+    let steps = steps(document, &path, &full)?;
     Ok((path, steps))
 }
 
@@ -503,23 +477,6 @@ fn expected_object(
 ) -> Outcome<(String, [Step; 2], String)> {
     let (path, position) = locate(workspace, address)?;
     let pointer = [Step::Key("objects".to_owned()), Step::Index(position)];
-    // Comparing walks both objects, and each expected member is looked up
-    // among the object's members.
-    let size = {
-        let document = workspace.document(&path)?;
-        splice::find(document.root(), &pointer).map_or(0, |object| {
-            let members = object.as_object().map_or(0, <[_]>::len);
-            let lookups: usize = transaction
-                .value(expect)
-                .as_object()
-                .unwrap_or_default()
-                .iter()
-                .map(|member| members.saturating_mul(member.key.len() + 1))
-                .sum();
-            object.span().len().saturating_add(lookups)
-        })
-    };
-    workspace.charge(transaction.value(expect).span().len().saturating_add(size))?;
     let document = workspace.document(&path)?;
     let object = splice::find(document.root(), &pointer)
         .ok_or_else(|| Failure::conflict("the object is missing"))?;
@@ -600,9 +557,7 @@ fn document_operation(
             object,
         } => {
             let local = site(&tile.plane, tile.layer, tile.at).local;
-            let text = transaction.document.text(*object);
-            workspace.charge(text.len())?;
-            let object = with_tile(text, local)?;
+            let object = with_tile(transaction.document.text(*object), local)?;
             insert_object(workspace, tile, *index, &object)
         }
         Action::ObjectRemove { address, expect } => {
@@ -621,7 +576,6 @@ fn document_operation(
             let from = site(&address.tile.plane, address.tile.layer, address.tile.at).local;
             let local = site(&to.plane, to.layer, to.at).local;
             if local != from {
-                workspace.charge(moved.len())?;
                 moved = with_tile(&moved, local)?;
             }
             insert_object(workspace, to, *index, &moved)

@@ -8,7 +8,7 @@ use crate::{
     Code, limits,
     splice::{self, Insertion, Layout, Step},
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use tilewright_jsonc::{Document, Limits, Span, Value};
 use tilewright_source::{AccessError, SourceRoot};
 
@@ -94,6 +94,46 @@ impl Current {
     }
 }
 
+impl Primitive {
+    /// The bytes of text it holds.
+    fn size(&self) -> usize {
+        let pointer = |pointer: &[Step]| {
+            pointer
+                .iter()
+                .map(|step| match step {
+                    Step::Key(key) => key.len() + 4,
+                    Step::Index(_) => 8,
+                })
+                .fold(0, usize::saturating_add)
+        };
+        match self {
+            Self::Set {
+                pointer: steps,
+                value,
+            } => pointer(steps).saturating_add(value.len()),
+            Self::Insert {
+                pointer: steps,
+                key,
+                value,
+                layout,
+                ..
+            } => pointer(steps)
+                .saturating_add(value.len())
+                .saturating_add(
+                    key.as_ref()
+                        .map_or(0, |(key, colon)| key.len() + colon.len()),
+                )
+                .saturating_add(layout.before.len() + layout.after.len()),
+            Self::Remove {
+                pointer: steps,
+                separator,
+            } => pointer(steps).saturating_add(separator.len()),
+            Self::Create { text } => text.len(),
+            Self::Delete => 0,
+        }
+    }
+}
+
 /// One touched file.
 pub(crate) struct Entry {
     /// The file as read, `None` when absent.
@@ -109,11 +149,26 @@ impl Entry {
     }
 }
 
+/// The files a transaction touches, and its budgets.
+///
+/// Work is metered coarsely, so that no lookup needs metering of its own:
+/// an operation costs its own size, the whole size of each document it
+/// reads, once per operation, and the size of each edit it makes. Whatever
+/// an operation does within a document (finding values, scanning members
+/// and objects, comparing values) is bounded by a constant times the size
+/// of what it is charged.
 pub(crate) struct Workspace<'r> {
     root: &'r SourceRoot,
     pub entries: BTreeMap<String, Entry>,
     read_bytes: u64,
     work: u64,
+    /// The documents the current operation has been charged for.
+    charged: BTreeSet<String>,
+    /// Bytes of inverse text recorded so far.
+    inverse_bytes: u64,
+    /// A budget was exceeded, and the failure reported; nothing more is
+    /// carried out.
+    spent: bool,
 }
 
 fn limits() -> Limits {
@@ -127,7 +182,17 @@ impl<'r> Workspace<'r> {
             entries: BTreeMap::new(),
             read_bytes: 0,
             work: 0,
+            charged: BTreeSet::new(),
+            inverse_bytes: 0,
+            spent: false,
         }
+    }
+
+    /// Starts an operation of `size` bytes: it is charged its size, and
+    /// each document it reads is charged again.
+    pub fn begin(&mut self, size: usize) -> Outcome<()> {
+        self.charged.clear();
+        self.charge(size)
     }
 
     /// The entry of `path`, reading the file the first time.
@@ -151,15 +216,12 @@ impl<'r> Workspace<'r> {
                         limits::READ_BYTES
                     ))
                 };
-                if self.read_bytes >= limits::READ_BYTES {
-                    return Err(spent());
-                }
                 let file_limit = u64::try_from(limits().max_input_bytes).unwrap_or(u64::MAX);
-                let left = limits::READ_BYTES - self.read_bytes;
+                let left = limits::READ_BYTES.saturating_sub(self.read_bytes);
                 let bytes = match root.read(path, file_limit.min(left)) {
                     Ok(bytes) => bytes,
                     Err(AccessError::TooLarge(_)) if left < file_limit => {
-                        self.read_bytes = limits::READ_BYTES;
+                        self.spent = true;
                         return Err(spent());
                     }
                     Err(error) => return Err(Failure::access(&error)),
@@ -183,28 +245,46 @@ impl<'r> Workspace<'r> {
         }
     }
 
-    /// Whether the work or read budget is spent; nothing more can be
-    /// carried out.
+    /// Whether a budget was exceeded, which was reported as the failure of
+    /// the operation that exceeded it; nothing more can be carried out.
     pub fn exhausted(&self) -> bool {
-        self.work > limits::WORK || self.read_bytes >= limits::READ_BYTES
+        self.spent
     }
 
     pub fn exists(&mut self, path: &str) -> Outcome<bool> {
         Ok(self.entry(path)?.current.text().is_some())
     }
 
-    /// Counts work against the editing budget: bytes parsed or compared,
-    /// and items scanned.
-    pub fn charge(&mut self, units: usize) -> Outcome<()> {
-        // Every charge costs at least one unit, so even operations on a
-        // document already parsed use up the budget.
+    /// Counts work against the budget. Every charge costs at least one
+    /// unit.
+    fn charge(&mut self, units: usize) -> Outcome<()> {
         self.work = self
             .work
             .saturating_add(u64::try_from(units.max(1)).unwrap_or(u64::MAX));
         if self.work > limits::WORK {
+            self.spent = true;
             return Err(Failure::limit(format!(
-                "the transaction needs more than {} units of work: bytes parsed or compared and items scanned",
+                "the transaction needs more than {} bytes of work: its operations, the documents each reads, and its edits",
                 limits::WORK
+            )));
+        }
+        Ok(())
+    }
+
+    /// Records inverse text; the inverse must fit in a transaction.
+    fn record(&mut self, inverse: &[Primitive]) -> Outcome<()> {
+        let bytes: usize = inverse
+            .iter()
+            .map(Primitive::size)
+            .fold(0, usize::saturating_add);
+        self.inverse_bytes = self
+            .inverse_bytes
+            .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
+        let limit = u64::try_from(limits().max_input_bytes).unwrap_or(u64::MAX);
+        if self.inverse_bytes > limit {
+            self.spent = true;
+            return Err(Failure::limit(format!(
+                "the inverse would hold more than {limit} bytes; split the transaction"
             )));
         }
         Ok(())
@@ -215,9 +295,11 @@ impl<'r> Workspace<'r> {
         let length = match &self.entry(path)?.current {
             Current::Absent => return Err(Failure::conflict(format!("{path} does not exist"))),
             Current::Text(text) => text.len(),
-            Current::Parsed(_) => 0,
+            Current::Parsed(document) => document.source().len(),
         };
-        self.charge(length)?;
+        if self.charged.insert(path.to_owned()) {
+            self.charge(length)?;
+        }
         let entry = self.entry(path)?;
         if let Current::Text(text) = &entry.current {
             let document = Document::parse(text.as_str(), &limits()).map_err(|error| {
@@ -239,6 +321,7 @@ impl<'r> Workspace<'r> {
     /// inverses of the edit.
     fn commit(&mut self, path: &str, text: String, inverse: Vec<Primitive>) -> Outcome<()> {
         self.charge(text.len())?;
+        self.record(&inverse)?;
         let document = Document::parse(text, &limits()).map_err(|error| {
             Failure::conflict(format!("the edit leaves {path} invalid ({error})"))
         })?;
@@ -264,7 +347,9 @@ impl<'r> Workspace<'r> {
             Current::Text(text) => text,
             Current::Parsed(document) => document.source().to_owned(),
         };
-        entry.inverse.push(Primitive::Create { text: text.clone() });
+        let inverse = Primitive::Create { text: text.clone() };
+        entry.inverse.push(inverse.clone());
+        self.record(std::slice::from_ref(&inverse))?;
         Ok(text)
     }
 

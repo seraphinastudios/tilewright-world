@@ -172,6 +172,9 @@ chunks. In each chunk the grid is edited in place:
 - a grid whose palette has no free key of its `cell_width` is rewritten with
   `cell_width` 2 and only the entries it uses.
 
+The operation must name a plane of the edited world and a ground layer of
+its profile, `height` or `zone`, even when it leaves no content to write.
+
 ## 6. Carrying out
 
 Carrying out a transaction is pure and deterministic. It reads each file it
@@ -255,14 +258,16 @@ Publishing a carried-out transaction:
    it goes, so that a failure there leaves the file;
 5. removes the staging files left beside any file the transaction touched or
    consulted, removes the directories deleting files emptied, and syncs
-   every directory whose entries changed. A staging entry that cannot be
-   removed is reported, since the tree does not validate while it is there.
+   every directory whose entries changed. A staging entry or an emptied
+   directory that cannot be removed is reported, the former since the tree
+   does not validate while it is there.
 
 Each rename and removal is atomic, but there is no atomic publication of
 several files. If a step of 4 fails, the files already published are
-restored from the transaction's copy of them and the directories involved
-are synced, the staged files and created directories are removed, and the
-error names any file that could not be restored. If only step 5 fails,
+restored from the transaction's copy of them, a deleted file with its own
+permissions, the staged files and created directories are removed, the
+directories involved are synced, and the error names any file that could
+not be restored. Whenever nothing is published, the cleanup is synced too. If only step 5 fails,
 every file was published: the error says the transaction was applied, and
 what was left undone. If the process stops during step 4 (a crash or power
 loss), some files have the new bytes and the others the old ones, and
@@ -279,8 +284,8 @@ touches or consults.
 
 Staging names, `.<name>.tilewright-tmp`, are reserved beside source files.
 Other platforms than Unix check each path component for links before use,
-have no lock and cannot sync a directory: a publish there says that its
-renames may not be durable yet. A process changing the tree at the same
+have no lock and cannot sync a directory: a publish there, and the command
+line's write of the inverse, say that their names may not be durable yet. A process changing the tree at the same
 moment can race them, as can a program other than the toolkit on any
 platform: the lock only orders applies.
 
@@ -307,12 +312,16 @@ FORMAT.md section 3 and these, while they are read and carried out:
 | `before`, `after`, `separator` or `colon` | 4,096 bytes |
 | Terrain cells | 1,000,000 |
 | Bytes read from touched files | 256 MiB |
-| Work: bytes parsed or compared, and items and keys scanned | 4 GiB |
+| Work, in bytes: each operation's own size, the size of each document it reads (once per operation) and of each edit it makes | 4 GiB |
 | Diagnostics reported | 1,000 |
 
-A file is read only as far as the read allowance left, and carrying out
-stops as soon as the read or work budget is spent or the diagnostic limit
-is reached. Messages describe a value over 4 KiB by its kind and size
+Whatever an operation does within a document, finding values, scanning
+members or objects and comparing values, is bounded by a constant times
+the work it is charged, so no lookup is metered on its own. A file is read
+only as far as the read allowance left; the inverse's text is counted as
+operations run and must fit a transaction; one terrain operation names at
+most 10,000 chunks; and carrying out stops as soon as a budget is spent or
+the diagnostic limit is reached. Messages describe a value over 4 KiB by its kind and size
 rather than render it.
 
 Each touched file must be within the 64 MiB document limit after every edit.

@@ -152,12 +152,20 @@ impl Directory {
         }
     }
 
-    pub(crate) fn write(&self, name: &str, like: &str, bytes: &[u8]) -> Result<(), Refused> {
-        use std::io::Write as _;
-        let permissions = self
-            .entry(like)?
+    pub(crate) fn permissions(&self, name: &str) -> Result<Option<fs::Permissions>, Refused> {
+        Ok(self
+            .entry(name)?
             .filter(fs::Metadata::is_file)
-            .map(|metadata| metadata.permissions());
+            .map(|metadata| metadata.permissions()))
+    }
+
+    pub(crate) fn write(
+        &self,
+        name: &str,
+        permissions: Option<&fs::Permissions>,
+        bytes: &[u8],
+    ) -> Result<(), Refused> {
+        use std::io::Write as _;
         self.remove_file(name)?;
         let path = self.0.join(name);
         let mut file = fs::OpenOptions::new()
@@ -167,7 +175,8 @@ impl Directory {
             .map_err(Refused::Io)?;
         let written = (|| {
             if let Some(permissions) = permissions {
-                file.set_permissions(permissions).map_err(Refused::Io)?;
+                file.set_permissions(permissions.clone())
+                    .map_err(Refused::Io)?;
             }
             file.write_all(bytes).map_err(Refused::Io)?;
             file.sync_all().map_err(Refused::Io)

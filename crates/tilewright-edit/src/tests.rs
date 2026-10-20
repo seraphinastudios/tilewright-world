@@ -1050,7 +1050,7 @@ fn work_is_metered_and_planning_stops_at_the_budget() {
     let started = std::time::Instant::now();
     let found = problems(root, &transaction(&tests.join(",\n    ")));
     assert!(
-        has(&found, "tx.limit", "units of work"),
+        has(&found, "tx.limit", "bytes of work"),
         "{:#?}",
         &found[..3]
     );
@@ -1259,4 +1259,125 @@ fn a_stale_staging_entry_that_cannot_go_is_reported() {
             .ends_with(".plane.jsonc.tilewright-tmp")
     );
     assert!(read(root, "planes/overworld/zones.jsonc").contains("\"Wilds\""));
+}
+
+#[test]
+fn terrain_addresses_are_checked_when_nothing_is_written() {
+    let tree = copy();
+    let root = tree.path();
+    for (operations, message) in [
+        (
+            r#"{"op": "terrain.set", "plane": "nowhere", "layer": 0, "grid": "floor", "cells": [{"at": [0, 0], "value": null}]}"#,
+            "plane \"nowhere\" does not exist",
+        ),
+        (
+            r#"{"op": "terrain.set", "plane": "overworld", "layer": 5, "grid": "floro", "cells": [{"at": [0, 0], "value": null}]}"#,
+            "\"floro\" is not a grid",
+        ),
+    ] {
+        let found = problems(root, &transaction(operations));
+        assert!(has(&found, "tx.conflict", message), "{found:#?}");
+    }
+}
+
+#[test]
+fn one_operation_touches_a_bounded_number_of_chunks() {
+    let tree = copy();
+    let cells: Vec<String> = (0..=limits::FILES)
+        .map(|cx| format!("{{\"at\": [{}, 0], \"value\": 0}}", cx * 32))
+        .collect();
+    let tx = transaction(&format!(
+        r#"{{"op": "terrain.set", "plane": "overworld", "layer": 0, "grid": "height", "cells": [{}]}}"#,
+        cells.join(",\n")
+    ));
+    let found = problems(tree.path(), &tx);
+    assert!(
+        has(&found, "tx.limit", "more than 10000 chunks"),
+        "{found:#?}"
+    );
+}
+
+#[test]
+fn the_inverse_log_is_bounded_while_carrying_out() {
+    let tree = copy();
+    let root = tree.path();
+    // A large object, moved back and forth: each move keeps a copy of it
+    // for the inverse.
+    let line = format!("\"{}\"", "x".repeat(512 << 10));
+    let custom = [line.as_str(); 8].join(",\n");
+    let chunk = format!(
+        "{{\"format\": \"tilewright.chunk/1\", \"plane\": \"overworld\", \"layer\": 6, \"chunk\": [0, 0],\n \"objects\": [{{\"at\": [0, 0], \"proto\": \"tree\", \"custom\": {{\"example.org/big\": [\n{custom}\n]}}}}]}}\n"
+    );
+    fs::create_dir_all(root.join("planes/overworld/layers/6")).unwrap();
+    fs::write(root.join("planes/overworld/layers/6/0_0.jsonc"), chunk).unwrap();
+    let there = r#"{"op": "object.move", "plane": "overworld", "layer": 6, "at": [0, 0], "index": 0, "expect": {"proto": "tree"}, "to": {"at": [1, 0]}}"#;
+    let back = r#"{"op": "object.move", "plane": "overworld", "layer": 6, "at": [1, 0], "index": 0, "expect": {"proto": "tree"}, "to": {"at": [0, 0]}}"#;
+    let moves: Vec<&str> = (0..20)
+        .map(|step| if step % 2 == 0 { there } else { back })
+        .collect();
+    let found = problems(root, &transaction(&moves.join(",\n    ")));
+    assert!(
+        has(&found, "tx.limit", "the inverse would hold more than"),
+        "{found:#?}"
+    );
+    assert_eq!(found.len(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_rolled_back_deletion_keeps_its_permissions() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let tree = copy();
+    let root = tree.path();
+    let recipe = root.join("defs/recipe/chest.jsonc");
+    fs::set_permissions(&recipe, fs::Permissions::from_mode(0o600)).unwrap();
+    let tx = transaction(
+        r#"{"op": "document.delete", "path": "defs/recipe/chest.jsonc"},
+    {"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["title"], "value": "Changed"}"#,
+    );
+    let plan = planned(root, &tx);
+    publish::FAIL_STEP.with(|fail| fail.set(Some(1)));
+    let failure = plan.publish().unwrap_err();
+    publish::FAIL_STEP.with(|fail| fail.set(None));
+    assert!(!failure.applied);
+    let mode = fs::metadata(&recipe).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+    assert_eq!(snapshot(root), snapshot(&fixture()));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_directory_that_cannot_be_pruned_is_reported() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let tree = copy();
+    let root = tree.path();
+    apply(
+        root,
+        &transaction(
+            r#"{"op": "object.insert", "plane": "overworld", "layer": 7, "at": [0, 0], "object": {"proto": "tree"}}"#,
+        ),
+    );
+    let layers = root.join("planes/overworld/layers");
+    fs::set_permissions(&layers, fs::Permissions::from_mode(0o555)).unwrap();
+    // A user that can still write there (such as root) cannot see the
+    // failure.
+    let writable = fs::write(layers.join("probe"), "").is_ok();
+    let _ = fs::remove_file(layers.join("probe"));
+    let plan = planned(
+        root,
+        &transaction(
+            r#"{"op": "object.remove", "plane": "overworld", "layer": 7, "at": [0, 0], "index": 0, "expect": {"proto": "tree"}}"#,
+        ),
+    );
+    let outcome = plan.publish();
+    fs::set_permissions(&layers, fs::Permissions::from_mode(0o755)).unwrap();
+    if !writable {
+        let failure = outcome.unwrap_err();
+        assert!(failure.applied, "{failure:#?}");
+        assert!(
+            failure.problems[0].path.ends_with("layers/7"),
+            "{failure:#?}"
+        );
+    }
+    assert!(!root.join("planes/overworld/layers/7/0_0.jsonc").exists());
 }

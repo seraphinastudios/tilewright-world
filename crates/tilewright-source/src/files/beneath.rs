@@ -243,13 +243,27 @@ impl Directory {
     /// `name` is removed first, so a link or a second hard link there is
     /// never written through. The file takes the permissions of the regular
     /// file `like`, if there is one.
-    pub(crate) fn write(&self, name: &str, like: &str, bytes: &[u8]) -> Result<(), Refused> {
-        let permissions = match statat(&self.0, like, AtFlags::SYMLINK_NOFOLLOW) {
+    /// The permissions of the regular file `name`, if there is one.
+    pub(crate) fn permissions(&self, name: &str) -> Result<Option<std::fs::Permissions>, Refused> {
+        use std::os::unix::fs::PermissionsExt as _;
+        match statat(&self.0, name, AtFlags::SYMLINK_NOFOLLOW) {
             Ok(stat) if kind_of(FileType::from_raw_mode(stat.st_mode)) == RawKind::File => {
-                Some(Mode::from_raw_mode(stat.st_mode))
+                Ok(Some(std::fs::Permissions::from_mode(
+                    Mode::from_raw_mode(stat.st_mode).as_raw_mode(),
+                )))
             }
-            _ => None,
-        };
+            Ok(_) | Err(Errno::NOENT) => Ok(None),
+            Err(errno) => Err(Refused::Io(errno.into())),
+        }
+    }
+
+    pub(crate) fn write(
+        &self,
+        name: &str,
+        permissions: Option<&std::fs::Permissions>,
+        bytes: &[u8],
+    ) -> Result<(), Refused> {
+        use std::os::unix::fs::PermissionsExt as _;
         self.remove_file(name)?;
         let flags = OFlags::WRONLY
             | OFlags::CREATE
@@ -261,7 +275,8 @@ impl Directory {
             .map_err(|errno| classify(self.0.as_fd(), name, errno, &[name]))?;
         let written = (|| {
             if let Some(permissions) = permissions {
-                fchmod(&fd, permissions).map_err(|errno| Refused::Io(errno.into()))?;
+                fchmod(&fd, Mode::from_raw_mode(permissions.mode()))
+                    .map_err(|errno| Refused::Io(errno.into()))?;
             }
             let mut file = std::fs::File::from(fd);
             file.write_all(bytes).map_err(Refused::Io)?;

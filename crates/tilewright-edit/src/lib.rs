@@ -72,9 +72,10 @@ pub mod limits {
     pub const INDEX: usize = 250_000;
     /// Most bytes read from the files a transaction touches.
     pub const READ_BYTES: u64 = 256 << 20;
-    /// Most work while editing, in bytes parsed or compared and items
-    /// scanned: each edit parses its file again, and finding an object or
-    /// an `{"id": ...}` entry scans its array.
+    /// Most work, in bytes: each operation costs its own size, the size of
+    /// each document it reads, once per operation, and the size of each
+    /// edit it makes, which parses its file again. Whatever an operation
+    /// does within a document is bounded by a constant times these sizes.
     pub const WORK: u64 = 4 << 30;
     /// Most diagnostics reported for one transaction.
     pub const DIAGNOSTICS: usize = 1_000;
@@ -194,11 +195,12 @@ impl Plan {
 
 /// Writes `text` to a new file at `path` atomically: it is written beside
 /// the target, synced and renamed into place, and an existing file is never
-/// replaced.
+/// replaced. Returns whether the new name is durable too: `false` on
+/// platforms that cannot sync a directory, where only the file's bytes are.
 ///
 /// # Errors
 /// Fails if `path` exists or cannot be written.
-pub fn write_new(path: &Path, text: &str) -> std::io::Result<()> {
+pub fn write_new(path: &Path, text: &str) -> std::io::Result<bool> {
     use std::io::Write as _;
     let directory = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
@@ -211,8 +213,12 @@ pub fn write_new(path: &Path, text: &str) -> std::io::Result<()> {
         .persist_noclobber(path)
         .map_err(|error| error.error)?;
     #[cfg(unix)]
-    std::fs::File::open(directory)?.sync_all()?;
-    Ok(())
+    {
+        std::fs::File::open(directory)?.sync_all()?;
+        Ok(true)
+    }
+    #[cfg(not(unix))]
+    Ok(false)
 }
 
 /// The name of the file a file is staged in beside its target.
@@ -374,6 +380,43 @@ fn check_recorded(
     }
 }
 
+/// Checks that every terrain operation names a plane of the edited world
+/// and a grid of its profile. An edit that leaves no content writes nothing
+/// the loader could check, so its address is checked here.
+fn check_terrain_addresses(
+    transaction: &Transaction,
+    world: &World,
+) -> Result<(), Vec<Diagnostic>> {
+    let mut problems = Problems {
+        name: &transaction.name,
+        lines: diagnostic::Lines::new(transaction.text()),
+        found: Vec::new(),
+    };
+    let grids = &world.profile().ground_layers;
+    for operation in &transaction.operations {
+        if let transaction::Action::TerrainSet { plane, grid, .. } = &operation.action {
+            if !world.planes().contains_key(plane) {
+                problems.report(
+                    operation.span,
+                    Failure::conflict(format!("plane \"{plane}\" does not exist")),
+                );
+            } else if grid != "height" && grid != "zone" && !grids.contains(grid) {
+                problems.report(
+                    operation.span,
+                    Failure::conflict(format!(
+                        "\"{grid}\" is not a grid: name a ground layer of the profile, height or zone"
+                    )),
+                );
+            }
+        }
+    }
+    if problems.found.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.found)
+    }
+}
+
 /// Carries out `transaction` on the tree at `root` in memory and validates
 /// the result. Nothing is written.
 ///
@@ -412,7 +455,7 @@ pub fn plan(
             if finished {
                 continue;
             }
-            if let Err(failure) = workspace.charge(1) {
+            if let Err(failure) = workspace.begin(operation.span.len()) {
                 problems.report(operation.span, failure);
                 break;
             }
@@ -450,6 +493,7 @@ pub fn plan(
         })
         .collect();
     let world = tilewright_source::load_edited(root, &options.load, &overlay(&files))?;
+    check_terrain_addresses(transaction, &world)?;
     let sealed = seal(transaction, &files);
     let too_large = |what: &str, detail: &str| {
         vec![diagnostic::file(

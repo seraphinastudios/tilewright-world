@@ -176,8 +176,28 @@ impl SourceDirectory {
     /// through. The file takes the permissions of the regular file `like`,
     /// if there is one.
     pub fn write(&self, name: &str, like: &str, bytes: &[u8]) -> Result<(), AccessError> {
+        let permissions = self.permissions(like)?;
+        self.write_with(name, permissions.as_ref(), bytes)
+    }
+
+    /// Writes a new file `name` like [`SourceDirectory::write`], with the
+    /// given permissions, or the platform's default.
+    pub fn write_with(
+        &self,
+        name: &str,
+        permissions: Option<&std::fs::Permissions>,
+        bytes: &[u8],
+    ) -> Result<(), AccessError> {
         self.directory
-            .write(checked_name(name)?, checked_name(like)?, bytes)
+            .write(checked_name(name)?, permissions, bytes)
+            .map_err(|error| refused(&self.entry(name), error))
+    }
+
+    /// The permissions of the regular file `name`; `None` when there is no
+    /// regular file there.
+    pub fn permissions(&self, name: &str) -> Result<Option<std::fs::Permissions>, AccessError> {
+        self.directory
+            .permissions(checked_name(name)?)
             .map_err(|error| refused(&self.entry(name), error))
     }
 
