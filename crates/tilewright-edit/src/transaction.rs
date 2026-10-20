@@ -513,11 +513,18 @@ impl<'a> Shape<'a> {
             self.shape(value.span(), "expected a string or an array of strings");
             return None;
         };
+        // Every piece is checked; the text is whole only if each is a
+        // string.
         let mut text = String::new();
+        let mut whole = true;
         for piece in pieces {
-            text.push_str(self.string(piece)?);
+            match self.string(piece) {
+                Some(piece) if whole => text.push_str(piece),
+                Some(_) => {}
+                None => whole = false,
+            }
         }
-        Some(text)
+        whole.then_some(text)
     }
 
     /// A digest list: `[{"path", "sha256"}, ...]`, each path once, with
@@ -835,21 +842,22 @@ impl<'a> Shape<'a> {
     /// `proto` and not `at`.
     fn object_expect(&mut self, item: &'a Value) -> Option<Span> {
         let expect = self.required(item, "expect")?;
+        let mut usable = true;
         if !matches!(expect, Value::Object { .. }) || expect.get("proto").is_none() {
             self.shape(
                 expect.span(),
                 "expect must be an object that names at least the object's proto",
             );
-            return None;
+            usable = false;
         }
         if let Some(at) = expect.member("at") {
             self.shape(
                 at.key_span,
                 "the tile comes from the address; leave out \"at\"",
             );
-            return None;
+            usable = false;
         }
-        Some(expect.span())
+        usable.then(|| expect.span())
     }
 
     /// A pointer: keys, indexes and `{"id": ...}` selectors.
@@ -869,50 +877,57 @@ impl<'a> Shape<'a> {
             );
             return None;
         }
+        // Every step is checked; the pointer is whole only if each is
+        // valid.
         let mut segments = Vec::with_capacity(items.len());
+        let mut whole = true;
         for item in items {
-            segments.push(match item {
-                Value::String { value, .. } => Segment::Key(value.clone()),
-                Value::Integer { .. } => Segment::Index(self.index(item)?),
-                Value::Object { .. } => {
-                    let selector = self.object(item, &["id"])?;
-                    let id = self.required(selector, "id")?;
-                    Segment::Id(self.identifier(id)?)
-                }
+            let segment = match item {
+                Value::String { value, .. } => Some(Segment::Key(value.clone())),
+                Value::Integer { .. } => self.index(item).map(Segment::Index),
+                Value::Object { .. } => self
+                    .object(item, &["id"])
+                    .and_then(|selector| self.required(selector, "id"))
+                    .and_then(|id| self.identifier(id))
+                    .map(Segment::Id),
                 other => {
                     self.shape(
                         other.span(),
                         "a pointer step is a key, an index or {\"id\": ...}",
                     );
-                    return None;
+                    None
                 }
-            });
+            };
+            match segment {
+                Some(segment) => segments.push(segment),
+                None => whole = false,
+            }
         }
-        Some(segments)
+        whole.then_some(segments)
     }
 
-    /// The pointer of an operation, checked against its target: an object
-    /// target's pointer is not empty and does not start at `at`.
     /// The pointer of an operation, checked against its target: an object
     /// target's pointer is not empty and does not start at `at`. A target
     /// that failed its own checks does not stop the pointer's.
     fn target_pointer(&mut self, item: &'a Value, target: Option<&Target>) -> Option<Vec<Segment>> {
         let value = self.required(item, "pointer")?;
-        let pointer = self.pointer(value)?;
+        let pointer = self.pointer(value);
+        // Checked on the steps as written, so that a problem with a later
+        // step does not hide it.
         if let Some(Target::Object(_)) = target {
-            match pointer.first() {
-                None => {
+            match value.as_array().map(<[Value]>::first) {
+                Some(None) => {
                     self.shape(value.span(), "an object's pointer names a part of it");
                     return None;
                 }
-                Some(Segment::Key(key)) if key == "at" => {
+                Some(Some(first)) if first.as_str() == Some("at") => {
                     self.shape(value.span(), "move the object to change its tile");
                     return None;
                 }
-                Some(_) => {}
+                _ => {}
             }
         }
-        Some(pointer)
+        pointer
     }
 
     // Each of these checks every field before giving up on the operation,

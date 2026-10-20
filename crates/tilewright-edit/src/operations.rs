@@ -632,27 +632,26 @@ fn document_operation(
                 Content::Text(text) => text.clone(),
             };
             workspace.create(path, text)?;
-            // An explicit creation has its own provenance.
+            // A created file comes from the file it is like, or from none.
             match like {
-                Some(like) => workspace.renames.insert(path.clone(), like.clone()),
-                None => workspace.renames.remove(path),
-            };
+                Some(like) => workspace.lineage.derive(path, like),
+                None => workspace.lineage.forget(path),
+            }
             Ok(())
         }
-        Action::Delete { path } => workspace.delete(path).map(|_| ()),
+        Action::Delete { path } => {
+            workspace.delete(path)?;
+            workspace.lineage.forget(path);
+            Ok(())
+        }
         Action::Rename { path, to } => {
             if workspace.exists(to)? {
                 return Err(Failure::conflict(format!("{to} already exists")));
             }
             let text = workspace.delete(path)?;
             workspace.create(to, text)?;
-            // A chain of renames leads back to the file on disk.
-            let origin = workspace
-                .renames
-                .get(path)
-                .cloned()
-                .unwrap_or_else(|| path.clone());
-            workspace.renames.insert(to.clone(), origin);
+            workspace.lineage.derive(to, path);
+            workspace.lineage.forget(path);
             Ok(())
         }
         Action::ObjectInsert { .. } | Action::ObjectRemove { .. } | Action::ObjectMove { .. } => {

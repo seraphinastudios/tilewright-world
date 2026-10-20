@@ -29,9 +29,14 @@ fn kind_of(file_type: fs::FileType) -> RawKind {
 
 impl Root {
     /// The root, resolved to an absolute path once, so that a later change
-    /// of the working directory does not move it.
+    /// of the working directory does not move it. A path that cannot be
+    /// resolved yet, such as a missing one, is still made absolute.
     pub(crate) fn new(path: &Path) -> Self {
-        Self(fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
+        Self(
+            fs::canonicalize(path).unwrap_or_else(|_| {
+                std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+            }),
+        )
     }
 
     pub(crate) fn try_clone(&self) -> Self {

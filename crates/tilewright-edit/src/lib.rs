@@ -39,6 +39,7 @@
 
 mod diagnostic;
 mod engine;
+mod lineage;
 mod operations;
 mod publish;
 mod render;
@@ -160,9 +161,9 @@ pub struct Plan {
     /// The plane and grid of each terrain operation, checked again when
     /// publishing.
     terrain: Vec<(String, String)>,
-    /// Files created by renaming another, with the file each came from,
-    /// whose permissions it takes.
-    renames: BTreeMap<String, String>,
+    /// Where the files renamed or created like another came from, whose
+    /// permissions bound theirs.
+    lineage: lineage::Lineage,
     /// The root opened while planning; publishing and validating again
     /// use it, not the path.
     source: SourceRoot,
@@ -360,8 +361,12 @@ fn check_recorded(
     transaction: &Transaction,
     problems: &mut Problems<'_>,
 ) {
+    let full = |problems: &Problems<'_>| problems.found.len() >= limits::DIAGNOSTICS;
     if let Some((span, base)) = &transaction.base {
         for path in workspace.entries.keys() {
+            if full(problems) {
+                return;
+            }
             if !base.contains_key(path) {
                 problems.report(
                     *span,
@@ -371,6 +376,10 @@ fn check_recorded(
                 );
             }
         }
+    }
+    // Nothing more could be reported, so the result is not worth hashing.
+    if full(problems) {
+        return;
     }
     if let Some(result) = &transaction.result {
         let computed: Digests = workspace
@@ -384,25 +393,13 @@ fn check_recorded(
             .filter(|path| computed.get(*path) != result.get(*path))
             .collect();
         if !differing.is_empty() {
-            // The first few paths are named, and the rest counted.
-            let named: Vec<String> = differing
-                .iter()
-                .take(10)
-                .map(|path| diagnostic::quoted(path))
-                .collect();
-            let more = differing.len().saturating_sub(named.len());
-            let rest = if more > 0 {
-                format!(" and {more} more")
-            } else {
-                String::new()
-            };
             problems.report(
                 transaction.document.root().span(),
                 Failure {
                     code: Code::Result,
                     message: format!(
-                        "replaying the transaction gives other bytes than its result records for {}{rest}",
-                        named.join(", ")
+                        "replaying the transaction gives other bytes than its result records for {}",
+                        diagnostic::listed(differing.iter().map(|path| path.as_str()))
                     ),
                 },
             );
@@ -496,12 +493,12 @@ fn run_operations(
 }
 
 /// What publishing needs besides the files: the terrain addresses to check
-/// again, and the files created by renaming, with where each came from.
+/// again, and where the files renamed or created like another came from.
 fn publish_inputs(
     transaction: &Transaction,
     workspace: &Workspace<'_>,
     files: &[FileChange],
-) -> (Vec<(String, String)>, BTreeMap<String, String>) {
+) -> (Vec<(String, String)>, lineage::Lineage) {
     let terrain = transaction
         .operations
         .iter()
@@ -521,13 +518,9 @@ fn publish_inputs(
         .filter(|file| file.after.is_some())
         .map(|file| file.path.as_str())
         .collect();
-    let renames = workspace
-        .renames
-        .iter()
-        .filter(|(to, _)| present.contains(to.as_str()))
-        .map(|(to, from)| (to.clone(), from.clone()))
-        .collect();
-    (terrain, renames)
+    let mut lineage = workspace.lineage.clone();
+    lineage.retain(|path| present.contains(path));
+    (terrain, lineage)
 }
 
 /// Carries out `transaction` on the tree at `root` in memory and validates
@@ -616,14 +609,14 @@ pub fn plan(
             return Err(too_large(what, &detail));
         }
     }
-    let (terrain, renames) = publish_inputs(transaction, &workspace, &files);
+    let (terrain, lineage) = publish_inputs(transaction, &workspace, &files);
     // The plan keeps the very root it was carried out on.
     drop(workspace);
     Ok(Plan {
         root: root.to_path_buf(),
         name: transaction.name.clone(),
         terrain,
-        renames,
+        lineage,
         source,
         load: options.load,
         files,
@@ -845,19 +838,19 @@ fn write_operation(
     output.push("}")
 }
 
-/// The file each file was renamed to, by the file it came from, for the
-/// renamed files that exist at the end.
+/// A file each file was renamed or copied to, by the file it first came
+/// from, for the files that exist at the end.
 fn renamed_to<'w>(workspace: &'w Workspace<'_>) -> BTreeMap<&'w str, &'w str> {
     workspace
-        .renames
-        .iter()
+        .lineage
+        .origins()
         .filter(|(to, _)| {
             workspace
                 .entries
-                .get(to.as_str())
+                .get(*to)
                 .is_some_and(|entry| entry.current.text().is_some())
         })
-        .map(|(to, from)| (from.as_str(), to.as_str()))
+        .map(|(to, from)| (from, to))
         .collect()
 }
 

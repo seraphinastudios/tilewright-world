@@ -2040,3 +2040,105 @@ fn a_differing_result_names_ten_files_and_counts_the_rest() {
         "{found:#?}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn permissions_follow_chains_through_files_the_transaction_made() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let tree = copy();
+    let root = tree.path();
+    let mode = |path: &str| fs::metadata(root.join(path)).unwrap().permissions().mode() & 0o777;
+    let recipe = |id: &str| {
+        format!(
+            "{{\"format\": \"tilewright.def/1\", \"type\": \"recipe\", \"id\": \"{id}\", \"fields\": {{\"output\": \"chest\", \"ingredients\": [{{\"item\": \"coin\", \"count\": 1}}]}}}}"
+        )
+    };
+    fs::set_permissions(
+        root.join("defs/recipe/chest.jsonc"),
+        fs::Permissions::from_mode(0o640),
+    )
+    .unwrap();
+    // A file like one the transaction creates is like what that one is like.
+    apply(
+        root,
+        &transaction(&format!(
+            "{{\"op\": \"document.create\", \"path\": \"defs/recipe/a.jsonc\", \"document\": {}, \"like\": \"defs/recipe/chest.jsonc\"}},\n    {{\"op\": \"document.create\", \"path\": \"defs/recipe/b.jsonc\", \"document\": {}, \"like\": \"defs/recipe/a.jsonc\"}}",
+            recipe("a"),
+            recipe("b")
+        )),
+    );
+    assert_eq!(mode("defs/recipe/a.jsonc"), 0o640);
+    assert_eq!(mode("defs/recipe/b.jsonc"), 0o640);
+    // A file made from one that replaced another allows no more than either.
+    fs::set_permissions(
+        root.join("defs/proto/coin.jsonc"),
+        fs::Permissions::from_mode(0o604),
+    )
+    .unwrap();
+    apply(
+        root,
+        &transaction(&format!(
+            "{{\"op\": \"document.delete\", \"path\": \"defs/recipe/chest.jsonc\"}},\n    {{\"op\": \"document.create\", \"path\": \"defs/recipe/chest.jsonc\", \"document\": {}, \"like\": \"defs/proto/coin.jsonc\"}},\n    {{\"op\": \"document.create\", \"path\": \"defs/recipe/c.jsonc\", \"document\": {}, \"like\": \"defs/recipe/chest.jsonc\"}}",
+            recipe("chest"),
+            recipe("c")
+        )),
+    );
+    assert_eq!(mode("defs/recipe/chest.jsonc"), 0o600);
+    assert_eq!(mode("defs/recipe/c.jsonc"), 0o600);
+}
+
+#[test]
+fn pointers_pieces_and_expectations_report_every_problem() {
+    let found = Transaction::parse(
+        "t.jsonc",
+        wrap(
+            r#"{"op": "set", "path": "world.jsonc", "pointer": [-1, true, {"id": 1}], "value": 1},
+    {"op": "document.create", "path": "defs/x.jsonc", "text": [1, "a", 2]},
+    {"op": "object.remove", "object": {"plane": "p", "layer": 0, "at": [0, 0], "index": 0}, "expect": {"at": [0, 0]}}"#,
+        ),
+    )
+    .unwrap_err();
+    for (text, count) in [
+        ("is outside 0..=", 1),
+        ("a pointer step is", 1),
+        ("expected a string, found", 3),
+        ("names at least the object's proto", 1),
+        ("leave out \"at\"", 1),
+    ] {
+        let reported = found
+            .iter()
+            .filter(|problem| problem.message.contains(text))
+            .count();
+        assert_eq!(reported, count, "{text}: {found:#?}");
+    }
+}
+
+#[test]
+fn the_file_limit_stops_carrying_out() {
+    let tree = copy();
+    let mut operations: Vec<String> = (0..=limits::FILES)
+        .map(|index| {
+            format!(
+                "{{\"op\": \"test\", \"path\": \"defs/proto/n{index}.jsonc\", \"pointer\": [], \"absent\": true}}"
+            )
+        })
+        .collect();
+    // Past the limit, a failing operation on a file already read is not
+    // carried out.
+    operations.push(
+        r#"{"op": "test", "path": "defs/proto/n0.jsonc", "pointer": ["id"], "value": "x"}"#
+            .to_owned(),
+    );
+    let found = problems(tree.path(), &transaction(&operations.join(",\n    ")));
+    assert_eq!(found.len(), 1, "{:#?}", &found[..found.len().min(5)]);
+    assert!(has(&found, "tx.limit", "more than"), "{found:#?}");
+}
+
+#[test]
+fn long_lists_name_ten_and_count_the_rest() {
+    let names: Vec<String> = (0..12).map(|index| format!("f{index}")).collect();
+    let text = crate::diagnostic::listed(names.iter().map(String::as_str));
+    assert!(text.starts_with("\"f0\", \"f1\""), "{text}");
+    assert!(text.ends_with("\"f9\" and 2 more"), "{text}");
+    assert_eq!(crate::diagnostic::listed(["a"].into_iter()), "\"a\"");
+}

@@ -277,27 +277,28 @@ impl<'o> Tree<'o> {
         // holds an overlay file is listed. Names are looked up in sets, so
         // merging costs a logarithm per entry.
         let mut added: BTreeMap<&str, EntryKind> = BTreeMap::new();
-        // The names an overlay file replaces or removes.
-        let mut masked = BTreeSet::new();
+        let remaining = self.options.maximum_entries.saturating_sub(self.entries);
         for (rest, value) in overlay_beneath(self.overlay, path) {
             match (rest.split_once('/'), value) {
                 (None, Some(_)) => {
                     added.insert(rest, EntryKind::File);
-                    masked.insert(rest);
-                }
-                (None, None) => {
-                    masked.insert(rest);
                 }
                 (Some((directory, _)), Some(_)) => {
                     added.entry(directory).or_insert(EntryKind::Directory);
                 }
-                (Some(_), None) => {}
+                (_, None) => {}
+            }
+            // Each name added is counted once, here or on disk, so more
+            // names than the budget has left exhaust it whatever is there.
+            if added.len() > remaining {
+                self.exhaust(path);
+                return Vec::new();
             }
         }
         // An entry the overlay replaces or removes is not looked at at
         // all, so what is there on disk, a link, a special file or a
         // directory, is not reported.
-        let mut entries = self.list_disk(path, &masked);
+        let mut entries = self.list_disk(path);
         let present: BTreeSet<String> = entries.iter().map(|entry| entry.name.clone()).collect();
         for (name, kind) in added {
             if !present.contains(name) {
@@ -318,7 +319,8 @@ impl<'o> Tree<'o> {
 
     /// Lists a directory on disk. A directory that is missing on disk but
     /// holds overlay files is empty there.
-    fn list_disk(&mut self, path: &str, removed: &BTreeSet<&str>) -> Vec<Entry> {
+    fn list_disk(&mut self, path: &str) -> Vec<Entry> {
+        let overlay = self.overlay;
         let directory = match self.root.list(&components(path)) {
             Ok(directory) => directory,
             Err(Refused::Link(link)) => {
@@ -369,7 +371,7 @@ impl<'o> Tree<'o> {
                 ));
                 continue;
             };
-            if removed.contains(name.as_str()) {
+            if overlay.contains_key(&join(path, &name)) {
                 // The overlay's entry takes its place, and is counted then.
                 self.entries -= 1;
                 continue;

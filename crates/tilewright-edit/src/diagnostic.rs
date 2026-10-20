@@ -113,3 +113,17 @@ pub(crate) fn quoted(text: &str) -> String {
         format!("a string of {} bytes", text.len())
     }
 }
+
+/// The first ten of `items`, quoted and joined, and how many more there
+/// are, so that a list costs little however long.
+pub(crate) fn listed<'a>(items: impl ExactSizeIterator<Item = &'a str>) -> String {
+    use std::fmt::Write as _;
+    let total = items.len();
+    let named: Vec<String> = items.take(10).map(quoted).collect();
+    let more = total - named.len();
+    let mut text = named.join(", ");
+    if more > 0 {
+        let _ = write!(text, " and {more} more");
+    }
+    text
+}

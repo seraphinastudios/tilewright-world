@@ -6,6 +6,7 @@
 
 use crate::{
     Code, limits,
+    lineage::Lineage,
     splice::{self, Insertion, Layout, Step},
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -178,8 +179,8 @@ pub(crate) struct Workspace<'r> {
     journal_inverse_operations: usize,
     /// Files that were read but cannot be edited, with why.
     unreadable: BTreeMap<String, String>,
-    /// Files created by renaming another, with the file each came from.
-    pub renames: BTreeMap<String, String>,
+    /// Where the files renamed or created like another came from.
+    pub lineage: Lineage,
 }
 
 fn limits() -> Limits {
@@ -201,7 +202,7 @@ impl<'r> Workspace<'r> {
             journal_inverse_bytes: 0,
             journal_inverse_operations: 0,
             unreadable: BTreeMap::new(),
-            renames: BTreeMap::new(),
+            lineage: Lineage::default(),
         }
     }
 
@@ -248,6 +249,8 @@ impl<'r> Workspace<'r> {
             std::collections::btree_map::Entry::Occupied(entry) => Ok(entry.into_mut()),
             std::collections::btree_map::Entry::Vacant(vacant) => {
                 if count >= limits::FILES {
+                    // The transaction is rejected; carrying on is useless.
+                    self.spent = true;
                     return Err(Failure::limit(format!(
                         "the transaction touches more than {} files",
                         limits::FILES

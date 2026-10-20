@@ -6,7 +6,9 @@
 //! staged files into place and remove deleted ones. A failure while
 //! publishing restores the files already published from the plan's copies.
 
-use crate::{Code, FileChange, Plan, diagnostic, digest, staging_name, staging_path};
+use crate::{
+    Code, FileChange, Plan, diagnostic, digest, lineage::Lineage, staging_name, staging_path,
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -283,40 +285,80 @@ impl Directories<'_> {
     }
 }
 
-/// The permissions a written file gets, and keeps a note of the ones it had
-/// for rollback. A file written where a file is keeps that file's
-/// permissions; one renamed or created like another takes that file's,
-/// restricted to those of the file it replaces, if any; any other new file
-/// gets the platform's default (`None`). Access is never broader than
-/// either file's.
-fn permissions_for(
+/// The permissions found so far: of each path on disk, and of each step of
+/// the lineage, so that each is looked up once per publish.
+#[derive(Default)]
+struct Known {
+    paths: BTreeMap<String, Option<std::fs::Permissions>>,
+    steps: BTreeMap<usize, Option<std::fs::Permissions>>,
+}
+
+/// The permissions of the file at `path` on disk, if there is one.
+fn on_disk(
     directories: &mut Directories<'_>,
+    known: &mut Known,
     path: &str,
-    renames: &BTreeMap<String, String>,
 ) -> Result<Option<std::fs::Permissions>, AccessError> {
-    let mut of = |path: &str| {
-        let (parent, name) = split(path);
-        directories
-            .get(parent, false)
-            .and_then(|directory| match directory {
-                Some(directory) => directory.permissions(name),
-                None => Ok(None),
-            })
-    };
-    let existing = of(path)?;
-    let source = match renames.get(path) {
-        Some(from) => of(from)?,
+    if let Some(found) = known.paths.get(path) {
+        return Ok(found.clone());
+    }
+    let (parent, name) = split(path);
+    let found = match directories.get(parent, false)? {
+        Some(directory) => directory.permissions(name)?,
         None => None,
     };
+    known.paths.insert(path.to_owned(), found.clone());
+    Ok(found)
+}
+
+/// What both allow, where either may be unknown.
+fn both(
+    left: Option<std::fs::Permissions>,
+    right: Option<std::fs::Permissions>,
+) -> Option<std::fs::Permissions> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(narrowest(&left, &right)),
+        (left, right) => left.or(right),
+    }
+}
+
+/// The permissions a written file gets, and keeps a note of the ones it had
+/// for rollback. A file written where a file is keeps what that file
+/// allows. One renamed or created like another is also restricted to what
+/// each file of its chain allows on disk, so that access is never broader
+/// than any of theirs. With none of these on disk, a new file gets the
+/// platform's default (`None`).
+fn permissions_for(
+    directories: &mut Directories<'_>,
+    known: &mut Known,
+    path: &str,
+    lineage: &Lineage,
+) -> Result<Option<std::fs::Permissions>, AccessError> {
+    let existing = on_disk(directories, known, path)?;
     if let Some(existing) = &existing {
         directories
             .original
             .insert(path.to_owned(), existing.clone());
     }
-    Ok(match (existing, source) {
-        (Some(existing), Some(source)) => Some(narrowest(&existing, &source)),
-        (existing, source) => existing.or(source),
-    })
+    // Walk back to a step already known, then work forward: each step
+    // allows what its file on disk and the steps before it allow.
+    let mut pending = Vec::new();
+    let mut next = lineage.step(path);
+    let mut inherited = None;
+    while let Some(step) = next {
+        if let Some(found) = known.steps.get(&step) {
+            inherited.clone_from(found);
+            break;
+        }
+        pending.push(step);
+        next = lineage.at(step).1;
+    }
+    for step in pending.into_iter().rev() {
+        let own = on_disk(directories, known, lineage.at(step).0)?;
+        inherited = both(own, inherited);
+        known.steps.insert(step, inherited.clone());
+    }
+    Ok(both(existing, inherited))
 }
 
 /// Permissions that allow only what both allow.
@@ -345,9 +387,10 @@ fn stage(directory: &SourceDirectory, path: &str, text: &str) -> Result<(), Acce
 fn stage_all<'f>(
     directories: &mut Directories<'_>,
     changed: &[&'f FileChange],
-    renames: &BTreeMap<String, String>,
+    lineage: &Lineage,
 ) -> Result<Vec<&'f str>, PublishError> {
     let mut staged = Vec::new();
+    let mut known = Known::default();
     for file in changed {
         let Some(text) = &file.after else {
             continue;
@@ -357,12 +400,13 @@ fn stage_all<'f>(
         // directory may change even if the write fails.
         directories.changed.insert(split(&file.path).0.to_owned());
         let (parent, name) = split(&file.path);
-        let result = permissions_for(directories, &file.path, renames).and_then(|permissions| {
-            let directory = directories
-                .get(parent, true)?
-                .ok_or_else(|| AccessError::Unexpected(file.path.clone()))?;
-            directory.write_with(&staging_name(name), permissions.as_ref(), text.as_bytes())
-        });
+        let result =
+            permissions_for(directories, &mut known, &file.path, lineage).and_then(|permissions| {
+                let directory = directories
+                    .get(parent, true)?
+                    .ok_or_else(|| AccessError::Unexpected(file.path.clone()))?;
+                directory.write_with(&staging_name(name), permissions.as_ref(), text.as_bytes())
+            });
         if let Err(error) = result {
             discard(directories, &staged);
             directories.remove_created();
@@ -435,7 +479,7 @@ impl Plan {
         let mut changed: Vec<&FileChange> =
             self.files.iter().filter(|file| file.is_changed()).collect();
         changed.sort_by_key(|file| file.after.is_none());
-        let staged = stage_all(&mut directories, &changed, &self.renames)?;
+        let staged = stage_all(&mut directories, &changed, &self.lineage)?;
 
         #[cfg(test)]
         if let Some(hook) = BEFORE_CHECK.with(|hook| hook.borrow_mut().take()) {
@@ -483,7 +527,7 @@ impl Plan {
                 } else {
                     format!(
                         "{error}; restoring failed for: {}; apply the inverse to restore the rest",
-                        unrestored.join(", ")
+                        diagnostic::listed(unrestored.into_iter())
                     )
                 };
                 return directories.outcome(false, problem(&file.path, Code::Io, message));
@@ -564,7 +608,7 @@ fn discard(directories: &mut Directories<'_>, staged: &[&str]) {
 
 /// Restores published files from their text before; returns the paths
 /// that could not be restored.
-fn roll_back(directories: &mut Directories<'_>, published: &[&FileChange]) -> Vec<String> {
+fn roll_back<'f>(directories: &mut Directories<'_>, published: &[&'f FileChange]) -> Vec<&'f str> {
     let mut unrestored = Vec::new();
     for file in published.iter().rev() {
         let (parent, name) = split(&file.path);
@@ -595,7 +639,7 @@ fn roll_back(directories: &mut Directories<'_>, published: &[&FileChange]) -> Ve
         };
         directories.changed.insert(parent.to_owned());
         if restored.is_err() {
-            unrestored.push(file.path.clone());
+            unrestored.push(file.path.as_str());
             // A staging file the failed restore left goes, or is reported.
             directories.clean(&staging_path(&file.path), false);
         }

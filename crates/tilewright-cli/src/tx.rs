@@ -124,7 +124,8 @@ fn preview(transaction: &Path, root: &Path, json: bool) -> Result<String, Failur
 }
 
 /// Refuses an output inside the source tree's documents, where it would
-/// itself become a stray source file.
+/// itself become a stray source file, or at the name `world.jsonc` is
+/// staged in, which publishing replaces.
 fn outside(root: &Path, path: &Path) -> Result<(), Failure> {
     let parent = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
@@ -136,8 +137,10 @@ fn outside(root: &Path, path: &Path) -> Result<(), Failure> {
         return Ok(());
     };
     let documents = ["planes", "defs", "profile"].map(std::ffi::OsStr::new);
+    let staging = tilewright_edit::staging_name("world.jsonc");
     let inside = parent.join(name).strip_prefix(&root).is_ok_and(|relative| {
         relative == Path::new("world.jsonc")
+            || relative == Path::new(&staging)
             || relative
                 .components()
                 .next()
@@ -374,15 +377,19 @@ mod tests {
         );
         assert!(!Path::new(&path("undo2.jsonc")).exists());
 
-        let inside = Path::new(&root).join("planes/overworld/undo.jsonc");
-        let inside_text = inside.display().to_string();
-        let refused = run(&["tx", "apply", &path("undo.jsonc"), &root, &inside_text]).unwrap_err();
-        assert!(
-            refused.message.contains("inside the source tree"),
-            "{}",
-            refused.message
-        );
-        assert!(!inside.exists());
+        // Neither inside the documents nor where world.jsonc is staged.
+        for inside in ["planes/overworld/undo.jsonc", ".world.jsonc.tilewright-tmp"] {
+            let inside = Path::new(&root).join(inside);
+            let inside_text = inside.display().to_string();
+            let refused =
+                run(&["tx", "apply", &path("undo.jsonc"), &root, &inside_text]).unwrap_err();
+            assert!(
+                refused.message.contains("inside the source tree"),
+                "{}",
+                refused.message
+            );
+            assert!(!inside.exists());
+        }
 
         run(&[
             "tx",

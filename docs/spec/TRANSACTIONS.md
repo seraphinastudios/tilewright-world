@@ -227,13 +227,18 @@ the transaction changed, in path order:
 
 - `document.delete` for a file it created;
 - `document.create` with the exact `text` for a file it deleted, in pieces
-  of at most 128 KiB, one a line, and, for a file it renamed, `like` naming
-  the file it became, so that undoing the rename keeps the permissions;
+  of at most 128 KiB, one a line, and `like` naming a file renamed from it
+  or created like it, if one is left;
 - otherwise the exact inverse of each edit, last first: `set` with the old
   value's text, `insert` with the old item, key, colon and regions, `remove`
   with the old region. An old value or key, and each step of a pointer, is
   written on a line of its own, so no line of the inverse is longer than a
   line of the file.
+
+An inverse holds text, not permissions. A file it creates again `like`
+another allows no more than that file, which allows no more than the file
+did (section 9); any other file it creates again has the platform's
+default permissions.
 
 Its `base` is the changed files after the transaction, and its `result` the
 files before. Every operation of an inverse names one file by path, so its
@@ -274,13 +279,14 @@ elsewhere the absolute path it resolved to then. It:
    does not validate while it is there.
 
 A file written where a file is keeps that file's permissions. A file a
-rename made, or one created `like` another, takes the permissions of the
-file it came from as they are when publishing, and where it replaces a file
-(one the transaction deleted at that path), only what both allow: on Unix
-the mode bits both have, elsewhere read-only if either is. So no file
-allows more than the files it came from did. Any other new file has the
-platform's default. Restoring after a failure gives every file back the
-permissions it had.
+rename made, or one created `like` another, is also restricted to what the
+file it came from allows, as it is on disk when publishing, and, when the
+transaction made that file from another too, to what each file before it
+allows: on Unix to the mode bits all of them have, elsewhere to read-only
+if any is. So no file allows more than the files it came from did. Any
+other new file has the platform's default. A file whose bytes end as they
+began is not written, and keeps its permissions. Restoring after a failure
+gives every file back the permissions it had.
 
 Each rename and removal is atomic, but there is no atomic publication of
 several files. If a step of 4 fails, the files already published are
@@ -382,4 +388,5 @@ tilewright tx apply TRANSACTION ROOT INVERSE
 file's change and digests. `rebase` writes the transaction replayed on the
 tree as it is to `OUTPUT`. `apply` writes the inverse to `INVERSE`, then
 publishes. Neither replaces an existing file, and neither writes into the
-source tree's `world.jsonc`, `profile/`, `planes/` or `defs/`.
+source tree's `world.jsonc`, `profile/`, `planes/` or `defs/`, or at
+`.world.jsonc.tilewright-tmp`, where publishing stages `world.jsonc`.

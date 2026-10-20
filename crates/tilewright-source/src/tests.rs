@@ -1798,3 +1798,33 @@ fn diagnostics_of_many_files_share_one_cap() {
         "{found:?}"
     );
 }
+
+#[test]
+fn overlay_files_count_against_the_entry_budget() {
+    let root = workspace();
+    let mut overlay = Overlay::new();
+    for index in 0..10_000 {
+        overlay.insert(format!("defs/proto/x{index}.jsonc"), Some("{}".to_owned()));
+    }
+    let small = LoadOptions {
+        maximum_entries: 100,
+        ..LoadOptions::default()
+    };
+    let found = load_edited(root.path(), &small, &overlay).unwrap_err();
+    assert!(
+        found
+            .iter()
+            .any(|diagnostic| diagnostic.code == "source.budget"),
+        "{found:?}"
+    );
+    // Within the budget, the same names are listed.
+    let mut few = Overlay::new();
+    few.insert("defs/proto/x0.jsonc".to_owned(), Some("{}".to_owned()));
+    let found = load_edited(root.path(), &small, &few).unwrap_err();
+    assert!(
+        !found
+            .iter()
+            .any(|diagnostic| diagnostic.code == "source.budget"),
+        "{found:?}"
+    );
+}
