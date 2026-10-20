@@ -3,6 +3,7 @@
 const assert = require("node:assert/strict");
 const {
   INITIAL_VERSION,
+  MAINTENANCE_RELEASES,
   PRE_1_0,
   compareVersions,
   currentBranch,
@@ -14,6 +15,8 @@ const {
 
 // Until format 1.0, main releases minor versions, breaking or not.
 assert.equal(PRE_1_0, true);
+// Maintenance branches are unprotected, so they do not publish yet.
+assert.equal(MAINTENANCE_RELEASES, false);
 assert.equal(INITIAL_VERSION, "0.1.0");
 assert.equal(releaseForCommit("main", {type: "docs"}), "minor");
 assert.equal(releaseForCommit("main", {type: "fix"}), "minor");

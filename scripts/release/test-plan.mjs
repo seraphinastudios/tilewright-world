@@ -11,7 +11,7 @@ import {fileURLToPath} from "node:url";
 const scripts = dirname(fileURLToPath(import.meta.url));
 const repository = join(scripts, "../..");
 
-function fixture({pre10 = true} = {}) {
+function fixture({pre10 = true, maintenanceReleases = false} = {}) {
   const root = mkdtempSync(join(tmpdir(), "tilewright-world-plan-test-"));
   mkdirSync(join(root, "scripts/release"), {recursive: true});
   for (const name of ["plan.mjs", "release-rules.cjs"]) {
@@ -19,8 +19,14 @@ function fixture({pre10 = true} = {}) {
   }
   const policy = readFileSync(join(scripts, "release-policy.cjs"), "utf8");
   const marker = "const PRE_1_0 = true;";
+  const maintenanceMarker = "const MAINTENANCE_RELEASES = false;";
   assert.ok(policy.includes(marker), "the policy sets PRE_1_0");
-  writeFileSync(join(root, "scripts/release/release-policy.cjs"), pre10 ? policy : policy.replace(marker, "const PRE_1_0 = false;"));
+  assert.ok(policy.includes(maintenanceMarker), "the policy sets MAINTENANCE_RELEASES");
+  let adjusted = pre10 ? policy : policy.replace(marker, "const PRE_1_0 = false;");
+  if (maintenanceReleases) {
+    adjusted = adjusted.replace(maintenanceMarker, "const MAINTENANCE_RELEASES = true;");
+  }
+  writeFileSync(join(root, "scripts/release/release-policy.cjs"), adjusted);
   symlinkSync(join(scripts, "node_modules"), join(root, "scripts/release/node_modules"), "dir");
   copyFileSync(join(repository, ".releaserc.json"), join(root, ".releaserc.json"));
   const git = (...args) => execFileSync("git", args, {cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"]}).trim();
@@ -146,7 +152,22 @@ check("a revert releases", {
   },
 });
 
-check("maintenance branches release patches", {
+check("maintenance branches plan but do not publish while unprotected", {
+  run({git, commit, plan}) {
+    git("tag", "v0.1.0");
+    git("checkout", "--quiet", "-b", "0.1.x");
+    commit("fix: backport");
+    for (const trigger of ["push", "workflow_dispatch"]) {
+      const planned = plan("0.1.x", trigger);
+      assert.equal(planned.version, "0.1.1");
+      assert.equal(planned.publish, false);
+      assert.match(planned.reason, /maintenance branches are off/);
+    }
+  },
+});
+
+check("maintenance branches release patches once turned on", {
+  options: {maintenanceReleases: true},
   run({git, commit, plan}) {
     git("tag", "v0.1.0");
     git("checkout", "--quiet", "-b", "0.1.x");
@@ -162,6 +183,7 @@ check("maintenance branches release patches", {
 });
 
 check("a maintenance branch counts from its own line", {
+  options: {maintenanceReleases: true},
   run({git, commit, plan}) {
     git("tag", "v0.1.0");
     git("checkout", "--quiet", "-b", "0.1.x");

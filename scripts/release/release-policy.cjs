@@ -13,6 +13,13 @@ const RELEASE_RANK = {patch: 1, minor: 2, major: 3};
 // The version of the first release, which has no earlier tag to count from.
 const INITIAL_VERSION = "0.1.0";
 
+// Maintenance branches are not protected by a ruleset the way main is, so
+// any writer could push a release to one. Until they are protected like
+// main, a maintenance branch only plans its releases and never publishes
+// them. To turn their releases on, protect MAJOR.MINOR.x like main, set
+// this to true and add the branch pattern to release.yml's push trigger.
+const MAINTENANCE_RELEASES = false;
+
 // Releases stay at 0.x until world format 1.0 is frozen. Until then a
 // breaking change bumps the minor version, which Cargo and Go both treat as
 // incompatible for 0.x versions. The pull request that freezes format 1.0
@@ -143,6 +150,7 @@ function planVersion({branch, lastTag, level, pre10 = PRE_1_0}) {
 module.exports = {
   INITIAL_VERSION,
   MAINTENANCE_BRANCH,
+  MAINTENANCE_RELEASES,
   PRE_1_0,
   RELEASE_TAG,
   compareVersions,

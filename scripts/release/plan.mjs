@@ -87,6 +87,8 @@ if (version === null) {
     : "no commit calls for a release";
 } else if (trigger === "pull_request") {
   reason = "a pull request only checks the release build";
+} else if (maintenance && !policy.MAINTENANCE_RELEASES) {
+  reason = "releases from maintenance branches are off until those branches are protected like main";
 } else if (firstRelease && trigger !== "workflow_dispatch") {
   reason = "the first release is started by hand: run the Release workflow on " + branch;
 } else {

@@ -54,7 +54,8 @@ configures the commit analyzer with it, as in the other two repositories:
 - Every release from `main` bumps the minor version. Patch versions belong
   to maintenance branches named `MAJOR.MINOR.x`. A maintenance branch can
   only release patches of its own line, so a `feat` or breaking commit there
-  stops the release.
+  stops the release. Releases from maintenance branches are off for now
+  (see "Repository settings it relies on").
 - A squash merge's commit message is the pull request's Conventional
   Commits title. A commit without a type releases nothing.
 - The first release is `0.1.0`. Releases stay at `0.x` until world format
@@ -73,9 +74,10 @@ configures the commit analyzer with it, as in the other two repositories:
 
 | Event | What runs |
 | --- | --- |
-| Push to `main` or `MAJOR.MINOR.x` | The plan job. If the commits since the last release call for one, the whole release. |
+| Push to `main` | The plan job. If the commits since the last release call for one, the whole release. |
 | Push before any `vX.Y.Z` tag exists | The plan job only, which says the first release has to be started by hand. Merging never cuts the first release. |
-| Run workflow (`workflow_dispatch`) on `main` or a maintenance branch | The same as a push, except that it can also cut the first release |
+| Run workflow (`workflow_dispatch`) on `main` | The same as a push, except that it can also cut the first release |
+| Run workflow on a maintenance branch `MAJOR.MINOR.x` | The plan job only, which says what it would release; publishing from maintenance branches is off |
 | Pull request that changes the release workflows, `scripts/release/`, `tools/release/`, `tools/build-wasm.sh`, `packages/tilewright-pack/`, `rust-toolchain.toml`, `Cargo.lock` or a `Cargo.toml` | The tests, plan, five builds, npm build and packaging under the version `0.0.0-check.N` (N is the pull request number), as a check. Nothing is attested or published. |
 
 To cut the first release, run the Release workflow on `main`, either from
@@ -183,10 +185,14 @@ The pipeline changes no settings. It relies on:
   download-artifact and attest-build-provenance.
 
 Only the default branch is protected by rulesets. A maintenance branch
-`MAJOR.MINOR.x` is not, so a release from one is only as trustworthy as
-the pushes to that branch. Before using maintenance branches, protect
-`[0-9]*.[0-9]*.x` with the same rules as `main`. Until then, only releases
-from `main` are published to npm.
+`MAJOR.MINOR.x` is not, so any writer could push a release to one.
+Releases therefore come only from `main`: a maintenance branch plans its
+release but never publishes it. To turn maintenance releases on, protect
+`[0-9]*.[0-9]*.x` with the same rulesets as `main`, then, in one pull
+request, set `MAINTENANCE_RELEASES` to `true` in
+`scripts/release/release-policy.cjs` and add the branch pattern to the push
+trigger in `release.yml`. npm publication stays limited to `main` either
+way.
 
 ## Turning on npm publication
 
