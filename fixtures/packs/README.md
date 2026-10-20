@@ -35,8 +35,9 @@ changes is a reader change.
 - `valid`: packs that open and verify, with what reading them returns: the
   verification summary, every `meta` value, the layer height, every string
   in ID order, every plane, zone, anchor, stairwell, stairwell step and
-  definition row, and for each chunk its palette as strings, its object
-  count (inventories included) and the SHA-256 of its rendering (below).
+  definition row, every `object_uids` row, and for each chunk its palette
+  as strings, its object count (inventories included) and the SHA-256 of
+  its rendering (below).
 - `cases`: one object per broken pack:
   - `file` and `rule`, what the copy breaks;
   - `open_limits`: `max_pack_bytes` to open with, when not the default;
@@ -50,9 +51,11 @@ changes is a reader change.
 
 Reads are `chunk` (`plane`, `layer`, `cx`, `cy`), `string` (`id`),
 `stairwell` (`plane`, `id`), `stairwell_step` (`plane`, `layer`, `x`, `y`),
-`layer_height` and `profile`, which both check the whole stored profile, and
-`plane` (`id`), `zone` (`plane`, `id`), `anchor` (`plane`, `id`) and
-`definition` (`type`, `id`). The Rust reader has no single read of a plane,
+`layer_height` and `profile`, which both check the whole stored profile,
+`object_location` (`uid`), which reads a uid's `object_uids` row, `object`
+(`uid`), which also decodes the row's chunk and checks that the object at
+its index has the uid, and `plane` (`id`), `zone` (`plane`, `id`), `anchor`
+(`plane`, `id`) and `definition` (`type`, `id`). The Rust reader has no single read of a plane,
 zone, anchor or definition, so it skips those four; the Go reader runs them
 all. A read of a row that does not exist succeeds and finds nothing.
 
@@ -77,8 +80,8 @@ object <depth> <tile> <proto> <layer> <sub_layer> <z>
 Grids are row-major, and a line whose list is empty ends in the space after
 its word. Each object, in record order with its inventory entries after it
 at one more depth (0 for a chunk's own objects), has its `object` line, then
-`portal location <plane> <layer> <x> <y>` or `portal anchor <plane>
-<anchor>` if it has a portal, then one line per field in order, then
+`uid <uid>` if it has a uid, then `portal location <plane> <layer> <x> <y>`
+or `portal anchor <plane> <anchor>` if it has a portal, then one line per field in order, then
 `custom <canonical JSON>` if it has custom data. An inventory entry's tile
 is 65535. A field line is `field <name ID> ` and then `null`,
 `bool true`, `bool false`, `integer <value>`, `number <16 lowercase hex

@@ -41,6 +41,9 @@ fn render_object(object: &ObjectRecord, depth: usize, output: &mut String) {
         object.sub_layer,
         object.z
     );
+    if let Some(uid) = &object.uid {
+        let _ = writeln!(output, "uid {uid}");
+    }
     match &object.portal {
         Some(PortalRecord::Location { plane, layer, x, y }) => {
             let _ = writeln!(output, "portal location {plane} {layer} {x} {y}");

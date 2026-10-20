@@ -132,6 +132,9 @@ type Summary struct {
 	// Objects counts the objects in every chunk, inventories included; only
 	// Verify counts them.
 	Objects uint64
+	// ObjectUIDs counts the rows of object_uids: the objects that have a
+	// uid.
+	ObjectUIDs uint64
 }
 
 // Summary returns the pack's row counts.
@@ -148,6 +151,7 @@ func (p *Pack) Summary(ctx context.Context) (Summary, error) {
 		{"stairwells", &summary.Stairwells},
 		{"chunks", &summary.Chunks},
 		{"definitions", &summary.Definitions},
+		{"object_uids", &summary.ObjectUIDs},
 	} {
 		var value int64
 		if err := p.conn.QueryRowContext(ctx, "SELECT count(*) FROM "+count.table).Scan(&value); err != nil {
@@ -225,6 +229,81 @@ func (p *Pack) Chunk(ctx context.Context, plane string, layer int32, cx, cy int6
 		return nil, false, err
 	}
 	return chunk, true, nil
+}
+
+// MaxObjectIndex is the largest object index an object_uids row may hold.
+// Every object takes more than one byte of a record of at most
+// MaxRecordBytes, so every index is below it.
+const MaxObjectIndex = MaxRecordBytes - 1
+
+// UIDLocation is where the object with a uid is: its chunk, and its index
+// in the chunk record's depth-first order (see Chunk.Object).
+type UIDLocation struct {
+	Plane  string
+	Layer  int32
+	CX, CY int64
+	Index  int
+}
+
+// objectLocationSQL reads the object_uids row of uid ?1, each column NULL
+// when out of bounds.
+func objectLocationSQL() string {
+	low, high := int64(-(MaxSafeInteger / formatChunkSize)), int64((MaxSafeInteger-formatChunkSize+1)/formatChunkSize)
+	return "SELECT " + boundedIdentifier("plane") + ", " + boundedInteger("layer", -1<<31, 1<<31-1) + ", " +
+		boundedInteger("cx", low, high) + ", " + boundedInteger("cy", low, high) + ", " +
+		boundedInteger("object", 0, MaxObjectIndex) + " FROM object_uids WHERE uid = ?1"
+}
+
+// ObjectLocation returns where the object with uid is, from its object_uids
+// row, and whether the pack has the uid. Like every single read, it checks
+// the shape and bounds of what it loads; whether the row agrees with the
+// chunk records is checked by Verify, or for this one object by Object.
+func (p *Pack) ObjectLocation(ctx context.Context, uid string) (UIDLocation, bool, error) {
+	if !isIdentifier(uid) {
+		return UIDLocation{}, false, nil
+	}
+	var plane sql.NullString
+	var layer, cx, cy, index sql.NullInt64
+	err := p.conn.QueryRowContext(ctx, objectLocationSQL(), uid).Scan(&plane, &layer, &cx, &cy, &index)
+	if errors.Is(err, sql.ErrNoRows) {
+		return UIDLocation{}, false, nil
+	}
+	if err != nil {
+		return UIDLocation{}, false, sqliteError(ctx, err)
+	}
+	if plane, err = nullableText(plane, CodeObjectUID); err != nil {
+		return UIDLocation{}, false, err
+	}
+	if !plane.Valid || !isIdentifier(plane.String) || !layer.Valid || !cx.Valid || !cy.Valid || !index.Valid {
+		return UIDLocation{}, false, reject(CodeObjectUID,
+			"an object_uids row's plane is not an identifier, or its layer, chunk or index is out of range")
+	}
+	return UIDLocation{
+		Plane: plane.String, Layer: int32(layer.Int64), CX: cx.Int64, CY: cy.Int64, Index: int(index.Int64),
+	}, true, nil
+}
+
+// Object returns the object with uid and where it is, and whether the pack
+// has the uid. It decodes the object's chunk, as Chunk does, and fails
+// unless the object at the row's index has uid.
+func (p *Pack) Object(ctx context.Context, uid string) (UIDLocation, *Object, bool, error) {
+	location, found, err := p.ObjectLocation(ctx, uid)
+	if err != nil || !found {
+		return UIDLocation{}, nil, false, err
+	}
+	chunk, found, err := p.Chunk(ctx, location.Plane, location.Layer, location.CX, location.CY)
+	if err != nil {
+		return UIDLocation{}, nil, false, err
+	}
+	var object *Object
+	if found {
+		object = chunk.Object(location.Index)
+	}
+	if object == nil || object.UID != uid {
+		return UIDLocation{}, nil, false, reject(CodeObjectUID,
+			"the object_uids row of "+uid+" does not name an object with that uid")
+	}
+	return location, object, true, nil
 }
 
 // ChunkKey is the position of a chunk in its plane and layer.

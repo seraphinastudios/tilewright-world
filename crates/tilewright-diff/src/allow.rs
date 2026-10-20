@@ -200,14 +200,8 @@ impl Allowlist {
                     values.push((text, value.span()));
                 }
                 let (kind_text, kind_span) = values[0];
-                let kind = Kind::parse(kind_text).ok_or_else(|| {
-                    fail(
-                        kind_span,
-                        "shape.range",
-                        "kind must be anchor, definition, plane, render_layer, stairwell or zone"
-                            .into(),
-                    )
-                })?;
+                let kind = Kind::parse(kind_text)
+                    .ok_or_else(|| fail(kind_span, "shape.range", kinds_message()))?;
                 for (id, span) in &values[1..] {
                     if !kind.is_id(id) {
                         return Err(fail(*span, "shape.identifier", id_form(kind)));
@@ -290,12 +284,28 @@ fn closed(
     }
 }
 
+/// The message for a kind that is not one of [`Kind::ALL`], which it lists.
+fn kinds_message() -> String {
+    let names: Vec<&str> = Kind::ALL.iter().map(|kind| kind.as_str()).collect();
+    match names.split_last() {
+        Some((last, rest)) => format!("kind must be {} or {last}", rest.join(", ")),
+        None => "kind must be a known kind".to_owned(),
+    }
+}
+
 /// How IDs of `kind` are written.
 fn id_form(kind: Kind) -> String {
     let form = match kind {
         Kind::Definition => "<type>/<id>",
-        Kind::Plane | Kind::RenderLayer => "an identifier",
+        Kind::Object | Kind::Plane | Kind::RenderLayer => "an identifier",
         Kind::Anchor | Kind::Stairwell | Kind::Zone => "<plane>/<id>",
     };
-    format!("a {kind} ID is {form}, with identifiers matching ^[a-z0-9][a-z0-9_.-]{{0,127}}$")
+    let article = if kind.as_str().starts_with(['a', 'e', 'i', 'o', 'u']) {
+        "an"
+    } else {
+        "a"
+    };
+    format!(
+        "{article} {kind} ID is {form}, with identifiers matching ^[a-z0-9][a-z0-9_.-]{{0,127}}$"
+    )
 }

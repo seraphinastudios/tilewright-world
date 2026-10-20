@@ -70,6 +70,9 @@ const (
 	// CodeReference: a chunk record names a target that does not exist or
 	// is out of range.
 	CodeReference Code = "pack.reference"
+	// CodeObjectUID: an object_uids row is invalid, or the table does not
+	// index exactly the uids of the chunk records.
+	CodeObjectUID Code = "pack.object_uid"
 	// CodeIntegrity: SQLite's integrity check failed.
 	CodeIntegrity Code = "pack.integrity"
 	// CodeDigest: the file's SHA-256 does not match its name.
@@ -87,7 +90,7 @@ func Codes() []Code {
 		CodeString, CodeStringIDs, CodePlane, CodeZone, CodeAnchor,
 		CodeStairwell, CodeStairwellStep, CodeDefinition, CodeChunk,
 		CodeChunkEncoding, CodeChunkData, CodeChunkRecord, CodeReference,
-		CodeIntegrity, CodeDigest, CodeDecodeBudget,
+		CodeObjectUID, CodeIntegrity, CodeDigest, CodeDecodeBudget,
 	}
 }
 

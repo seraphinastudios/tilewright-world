@@ -150,12 +150,16 @@ fn objects_are_inserted_removed_moved_and_edited_losslessly() {
     let objects = r#"  "objects": [
     {"at": [7, 0], "proto": "tree"},
     {"at": [7, 0], "proto": "wall"},
-    {"at": [15, 0], "proto": "wall", "layer": "wall", "fields": {"name": "New wall", "tags": ["ruin", "north"]}},
-    {"at": [2, 2], "proto": "chest", "fields": {"locked": true, "loot": "chest_common"},
+    {"uid": "ruin.north_wall", "at": [15, 0], "proto": "wall", "layer": "wall", "fields": {"name": "New wall", "tags": ["ruin", "north"]}},
+    // Uids are identifiers, unique in the whole world. A tool may generate
+    // them, such as the random one of the inner chest's coin.
+    {"uid": "village.chest", "at": [2, 2], "proto": "chest", "fields": {"locked": true, "loot": "chest_common"},
      "inventory": [
        {"proto": "coin", "fields": {"count": 3}},
        {"proto": "coin"},
-       {"proto": "chest", "inventory": [{"proto": "coin", "fields": {"count": 1}}]}
+       {"uid": "village.chest.small", "proto": "chest", "inventory": [
+         {"uid": "o.k3vq7zr2mxa5d6wfh4pnyt2cgu", "proto": "coin", "fields": {"count": 1}}
+       ]}
      ]},
     {"at": [3, 3], "proto": "stairs_down", "portal": {"plane": "vault", "layer": 0, "at": [1, 1]},
      "custom": {"example.org/notes": {"reviewed": true}}},
@@ -2687,4 +2691,57 @@ fn a_file_at_its_result_is_skipped_only_when_nothing_is_checked_first() {
     let sealed = Transaction::parse("sealed.jsonc", plan.sealed()).unwrap();
     let found = problems(root, &sealed);
     assert!(has(&found, "tx.conflict", ""), "{found:#?}");
+}
+
+#[test]
+fn objects_keep_their_uids_through_insert_remove_and_move() {
+    let tree = copy();
+    let root = tree.path();
+    let after = round_trip(
+        root,
+        &transaction(
+            r#"{"op": "object.insert", "plane": "overworld", "layer": 0, "at": [20, 20], "object": {"uid": "orchard.apple", "proto": "tree"}},
+    {"op": "object.move", "plane": "overworld", "layer": 0, "at": [15, 0], "index": 0, "expect": {"uid": "ruin.north_wall", "proto": "wall"}, "to": {"at": [40, 0]}},
+    {"op": "object.remove", "plane": "vault", "layer": 0, "at": [1, 1], "index": 0, "expect": {"uid": "vault.chest", "proto": "chest"}}"#,
+        ),
+    );
+    let text = |path: &str| String::from_utf8(after[path].clone()).unwrap();
+    let chunk = text(CHUNK);
+    // The object is written as given, after its tile.
+    assert!(
+        chunk.contains(r#"{"at": [20, 20], "uid": "orchard.apple", "proto": "tree"}"#),
+        "{chunk}"
+    );
+    assert!(!chunk.contains("ruin.north_wall"), "{chunk}");
+    // The moved object keeps its uid, the rest of it as written, at its
+    // tile in the new chunk.
+    let moved = text("planes/overworld/layers/0/1_0.jsonc");
+    assert!(
+        moved.contains(r#"{"uid": "ruin.north_wall", "at": [8, 0], "proto": "wall""#),
+        "{moved}"
+    );
+    assert!(!text("planes/vault/layers/0/0_0.jsonc").contains("vault.chest"));
+    // round_trip checked that the inverse brings every uid back, byte for
+    // byte.
+}
+
+#[test]
+fn a_transaction_that_would_repeat_a_uid_is_rejected() {
+    let tree = copy();
+    let root = tree.path();
+    // A new object, or one inside another's inventory, with a uid the world
+    // has: the loader's world-wide check rejects the result.
+    for operation in [
+        r#"{"op": "object.insert", "plane": "vault", "layer": 0, "at": [2, 2], "object": {"uid": "village.chest", "proto": "chest"}}"#,
+        r#"{"op": "insert", "object": {"plane": "overworld", "layer": 0, "at": [2, 2], "index": 0}, "pointer": ["inventory", 0], "value": {"uid": "vault.chest", "proto": "coin"}}"#,
+    ] {
+        let found = problems(root, &transaction(operation));
+        assert!(
+            found
+                .iter()
+                .any(|problem| problem.code == "ref.duplicate" && problem.message.contains("uid")),
+            "{found:#?}"
+        );
+    }
+    assert_eq!(snapshot(root), snapshot(&fixture()));
 }

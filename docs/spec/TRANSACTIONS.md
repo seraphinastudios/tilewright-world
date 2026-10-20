@@ -72,8 +72,11 @@ transaction out records every file it read, created or checked for absence
   elsewhere in the chunk do not move it. Operations that remove or move an
   object name what they expect it to be, so that an object that moved or
   changed is a conflict, not an edit of another object. An object address
-  with any other key is an error; a later version may add stable object
-  identities as a second form.
+  with any other key is an error; addressing an object by its `uid`
+  (FORMAT.md) is planned as a second form. An object keeps every member as
+  written, its `uid` included, when it is moved, and an inverse restores it
+  byte for byte; a transaction that would leave two objects with one `uid`
+  fails validation with the loader's `ref.duplicate`.
 - **Values** are a document and a `"pointer"`: an array of steps, each a key
   (a string), an array index (an integer from 0 to 250,000) or
   `{"id": "<identifier>"}`, the one array item that is an object whose `id`

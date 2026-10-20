@@ -12,10 +12,11 @@ use std::collections::BTreeMap;
 
 /// The order kinds are paired in: planes first, so that zones, anchors and
 /// stairwells of a renamed plane pair with those of its new ID.
-const PAIRING_ORDER: [Kind; 6] = [
+const PAIRING_ORDER: [Kind; 7] = [
     Kind::Plane,
     Kind::Anchor,
     Kind::Definition,
+    Kind::Object,
     Kind::RenderLayer,
     Kind::Stairwell,
     Kind::Zone,
@@ -56,31 +57,13 @@ pub fn diff(old: &Snapshot, new: &Snapshot, allowlist: &Allowlist) -> Report {
             fresh.remove(to);
         }
         // Otherwise, a removed and an added ID pair when they are the only
-        // two with the same scope and content.
-        let mut groups = Groups::new();
-        for (id, fingerprint) in &gone {
-            let scope = kind.scope(id);
-            let scope = if kind.in_plane() {
-                planes.get(scope).copied().unwrap_or(scope)
-            } else {
-                scope
-            };
-            groups.entry((scope, fingerprint)).or_default().0.push(id);
-        }
-        for (id, fingerprint) in &fresh {
-            groups
-                .entry((kind.scope(id), fingerprint))
-                .or_default()
-                .1
-                .push(id);
-        }
-        for (from, to) in groups.into_values().filter_map(|group| match group {
-            (from, to) if from.len() == 1 && to.len() == 1 => Some((from[0], to[0])),
-            _ => None,
-        }) {
-            gone.remove(from);
-            fresh.remove(to);
-            pairs.push((from, to, Basis::Content));
+        // two with the same scope and content, for kinds that pair so.
+        if kind.pairs_by_content() {
+            for (from, to) in content_pairs(kind, &gone, &fresh, &planes) {
+                gone.remove(from);
+                fresh.remove(to);
+                pairs.push((from, to, Basis::Content));
+            }
         }
         if kind == Kind::Plane {
             planes = pairs.iter().map(|(from, to, _)| (*from, *to)).collect();
@@ -88,14 +71,14 @@ pub fn diff(old: &Snapshot, new: &Snapshot, allowlist: &Allowlist) -> Report {
         removed.extend(gone.into_keys().map(|id| Removed {
             kind,
             id: id.to_owned(),
-            allowed: allowed(kind, id, allowlist, new),
+            allowed: allowed(kind, id, allowlist, old, new),
         }));
         renamed.extend(pairs.into_iter().map(|(from, to, basis)| Renamed {
             kind,
             from: from.to_owned(),
             to: to.to_owned(),
             basis,
-            allowed: allowed(kind, from, allowlist, new),
+            allowed: allowed(kind, from, allowlist, old, new),
         }));
         added.extend(fresh.into_keys().map(|id| Added {
             kind,
@@ -133,15 +116,60 @@ pub fn diff(old: &Snapshot, new: &Snapshot, allowlist: &Allowlist) -> Report {
     }
 }
 
+/// The removed and added IDs of `kind` that are the only two with their
+/// scope and content. `planes` maps renamed planes to their new IDs, so the
+/// IDs of a renamed plane are in its new plane.
+fn content_pairs<'a>(
+    kind: Kind,
+    gone: &BTreeMap<&'a str, &'a Fingerprint>,
+    fresh: &BTreeMap<&'a str, &'a Fingerprint>,
+    planes: &BTreeMap<&'a str, &'a str>,
+) -> Vec<(&'a str, &'a str)> {
+    let mut groups = Groups::new();
+    for (id, fingerprint) in gone {
+        let scope = kind.scope(id);
+        let scope = if kind.in_plane() {
+            planes.get(scope).copied().unwrap_or(scope)
+        } else {
+            scope
+        };
+        groups.entry((scope, fingerprint)).or_default().0.push(id);
+    }
+    for (id, fingerprint) in fresh {
+        groups
+            .entry((kind.scope(id), fingerprint))
+            .or_default()
+            .1
+            .push(id);
+    }
+    groups
+        .into_values()
+        .filter_map(|group| match group {
+            (from, to) if from.len() == 1 && to.len() == 1 => Some((from[0], to[0])),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Whether the allowlist accepts the removal of `id`: an entry removes it,
 /// or renames it to an ID of the new world; or, for a zone, anchor or
 /// stairwell of a removed plane, the plane's entry removes the plane, or
-/// renames it to a plane of the new world that has the same local ID.
-fn allowed(kind: Kind, id: &str, allowlist: &Allowlist, new: &Snapshot) -> bool {
+/// renames it to a plane of the new world that has the same local ID; or,
+/// for an object uid whose object was on a removed plane, the plane's entry
+/// removes the plane.
+fn allowed(kind: Kind, id: &str, allowlist: &Allowlist, old: &Snapshot, new: &Snapshot) -> bool {
     match allowlist.get(kind, id) {
         Some(Intent::Remove) => return true,
         Some(Intent::Rename(to)) if new.contains(kind, to) => return true,
         _ => {}
+    }
+    if kind == Kind::Object {
+        // A uid is the world's, not its plane's, so a renamed plane keeps
+        // its objects' uids and accepts no removal of one.
+        return old.object_plane(id).is_some_and(|plane| {
+            !new.contains(Kind::Plane, plane)
+                && matches!(allowlist.get(Kind::Plane, plane), Some(Intent::Remove))
+        });
     }
     let Some((plane, local)) = id.split_once('/').filter(|_| kind.in_plane()) else {
         return false;

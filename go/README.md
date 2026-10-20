@@ -81,6 +81,10 @@ frozen. Releases are cut separately from this module's development.
 - `Zone`, `Zones`, `Anchor`, `Anchors`, `Stairwell`, `Stairwells` and
   `StairwellStep` read zones, anchors and stairwells.
 - `Definition`, `Definitions` and `DefinitionsOfType` read definitions.
+- `ObjectLocation` finds where the object with a uid is from its
+  `object_uids` row, and `Object` also decodes its chunk and returns the
+  object, checking that the object at the row's index has the uid.
+  `Chunk.Object(index)` returns an object by its depth-first index.
 - `Verify(ctx, limits)` checks the whole pack and counts its objects;
   `FileDigest` hashes the file.
 
@@ -114,7 +118,8 @@ The reader follows section 3 of PACK.md, as the Rust reader does:
 
 Single reads check the shape and bounds of what they load. Whether the
 targets a row or record names exist (a chunk's strings and prototypes, a
-plane's default zone, a zone's parent, a step's stairwell) is checked by
+plane's default zone, a zone's parent, a step's stairwell, the chunk a
+uid's row names) is checked by
 `Verify`, which is the full verification of PACK.md, including the integrity
 check and the file name digest.
 

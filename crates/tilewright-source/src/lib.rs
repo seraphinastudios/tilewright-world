@@ -35,6 +35,7 @@ mod profile;
 mod read;
 mod schema;
 mod stairwell;
+mod uid;
 
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 use tilewright_jsonc::Limits;
@@ -103,6 +104,7 @@ pub struct World {
     profile: Profile,
     planes: BTreeMap<String, Plane>,
     definitions: BTreeMap<(String, String), Definition>,
+    object_uids: BTreeMap<String, ObjectLocation>,
     source_digest: [u8; 32],
 }
 
@@ -129,6 +131,42 @@ impl World {
     pub const fn source_digest(&self) -> [u8; 32] {
         self.source_digest
     }
+
+    /// Every object uid of the world, with where its object is. Uids are
+    /// unique in the whole world, so a uid alone names one object.
+    #[must_use]
+    pub const fn object_uids(&self) -> &BTreeMap<String, ObjectLocation> {
+        &self.object_uids
+    }
+
+    /// Where the object with `uid` is.
+    #[must_use]
+    pub fn object_location(&self, uid: &str) -> Option<&ObjectLocation> {
+        self.object_uids.get(uid)
+    }
+
+    /// The object with `uid`.
+    #[must_use]
+    pub fn object(&self, uid: &str) -> Option<&Object> {
+        let location = self.object_uids.get(uid)?;
+        self.planes
+            .get(&location.plane)?
+            .chunks
+            .get(&location.chunk)?
+            .object(&location.path)
+    }
+}
+
+/// Where an object is: its chunk, and its place in the chunk.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ObjectLocation {
+    pub plane: String,
+    /// The chunk's key in [`Plane::chunks`]: `(layer, cx, cy)`.
+    pub chunk: (i32, i64, i64),
+    /// The object's index in the chunk's `objects`, then, for an inventory
+    /// entry, its index in the inventory of each object down to it. A
+    /// top-level object's path has one index.
+    pub path: Vec<usize>,
 }
 
 /// The game profile.
@@ -368,9 +406,57 @@ pub struct Chunk {
     pub objects: Vec<Object>,
 }
 
+impl Chunk {
+    /// The object at `path`: an index into `objects`, then one into the
+    /// inventory of each object down to it, as in [`ObjectLocation::path`].
+    #[must_use]
+    pub fn object(&self, path: &[usize]) -> Option<&Object> {
+        let (first, rest) = path.split_first()?;
+        rest.iter()
+            .try_fold(self.objects.get(*first)?, |object, index| {
+                object.inventory.get(*index)
+            })
+    }
+
+    /// Every object of the chunk, inventory entries included, in
+    /// depth-first order: each object comes before its inventory entries,
+    /// and those before the object after it. An object's position in this
+    /// order is its index in the chunk (`docs/spec/FORMAT.md` section 7).
+    #[must_use]
+    pub fn depth_first(&self) -> DepthFirst<'_> {
+        DepthFirst {
+            levels: vec![self.objects.iter()],
+        }
+    }
+}
+
+/// The objects of a chunk in depth-first order; see [`Chunk::depth_first`].
+#[derive(Clone, Debug)]
+pub struct DepthFirst<'c> {
+    /// The objects left at each depth, outermost first.
+    levels: Vec<std::slice::Iter<'c, Object>>,
+}
+
+impl<'c> Iterator for DepthFirst<'c> {
+    type Item = &'c Object;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let level = self.levels.last_mut()?;
+            if let Some(object) = level.next() {
+                self.levels.push(object.inventory.iter());
+                return Some(object);
+            }
+            self.levels.pop();
+        }
+    }
+}
+
 /// A placed object or an inventory entry.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Object {
+    /// The object's stable ID, unique in the world.
+    pub uid: Option<String>,
     /// Chunk-local tile; `None` for inventory entries.
     pub at: Option<[u16; 2]>,
     pub proto: String,
@@ -539,10 +625,12 @@ fn load_tree(tree: &mut files::Tree, diagnostics: &mut Diagnostics) -> Option<Wo
     for plane in plane::read_planes(tree, &profile, &plane_ids, &mut references, diagnostics) {
         planes.insert(plane.id.clone(), plane);
     }
+    let object_uids = uid::index(&planes);
     Some(World {
         profile,
         planes,
         definitions,
+        object_uids,
         source_digest: [0; 32],
     })
 }

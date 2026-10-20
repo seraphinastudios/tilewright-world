@@ -20,14 +20,16 @@ pub const MAXIMUM_RECORD_BYTES: usize = 16 * 1024 * 1024;
 pub const MAXIMUM_CHUNK_BYTES: usize = MAXIMUM_RECORD_BYTES + (MAXIMUM_RECORD_BYTES >> 8);
 /// Deepest inventory nesting accepted.
 pub const MAXIMUM_DEPTH: usize = 16;
+/// The `version` of a `twc1` record of this format.
+pub const RECORD_VERSION: u16 = 2;
 
 const MAGIC: &[u8; 4] = b"TWC1";
-const VERSION: u16 = 1;
 const NO_TILE: u16 = u16::MAX;
 const FLAG_PORTAL: u8 = 1;
 const FLAG_FIELDS: u8 = 2;
 const FLAG_CUSTOM: u8 = 4;
 const FLAG_INVENTORY: u8 = 8;
+const FLAG_UID: u8 = 16;
 
 /// A decoded chunk. Strings are IDs into the pack's `strings` table.
 #[derive(Clone, Debug, PartialEq)]
@@ -44,8 +46,33 @@ pub struct ChunkData {
     pub objects: Vec<ObjectRecord>,
 }
 
+impl ChunkData {
+    /// The object at `index` in the record's depth-first order, where each
+    /// object comes before its inventory entries and the first top-level
+    /// object is 0: the `object` column of `object_uids`.
+    #[must_use]
+    pub fn object(&self, index: usize) -> Option<&ObjectRecord> {
+        let mut remaining = index;
+        let mut levels = vec![self.objects.iter()];
+        while let Some(level) = levels.last_mut() {
+            let Some(object) = level.next() else {
+                levels.pop();
+                continue;
+            };
+            if remaining == 0 {
+                return Some(object);
+            }
+            remaining -= 1;
+            levels.push(object.inventory.iter());
+        }
+        None
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObjectRecord {
+    /// The object's uid, an identifier unique in the pack.
+    pub uid: Option<String>,
     /// `y * chunk_size + x`; `None` for inventory entries.
     pub tile: Option<u16>,
     pub proto: u32,
@@ -131,7 +158,7 @@ pub fn encode_record(chunk: &ChunkData) -> Result<Vec<u8>, DecodeError> {
     )?;
     let mut output = Vec::with_capacity(16 + grids);
     output.extend_from_slice(MAGIC);
-    output.extend_from_slice(&VERSION.to_le_bytes());
+    output.extend_from_slice(&RECORD_VERSION.to_le_bytes());
     output.extend_from_slice(&chunk.chunk_size.to_le_bytes());
     output.push(u8::try_from(chunk.ground.len()).or_else(|_| invalid("too many ground layers"))?);
     output.push(0);
@@ -246,6 +273,20 @@ fn field_block_bytes(fields: &[(u32, FieldRecord)]) -> usize {
     })
 }
 
+/// The flags byte of an object record: which optional parts follow.
+fn flags(object: &ObjectRecord) -> u8 {
+    [
+        (object.uid.is_some(), FLAG_UID),
+        (object.portal.is_some(), FLAG_PORTAL),
+        (!object.fields.is_empty(), FLAG_FIELDS),
+        (object.custom.is_some(), FLAG_CUSTOM),
+        (!object.inventory.is_empty(), FLAG_INVENTORY),
+    ]
+    .iter()
+    .filter(|(present, _)| *present)
+    .fold(0, |flags, (_, flag)| flags | flag)
+}
+
 fn encode_object(
     output: &mut Vec<u8>,
     object: &ObjectRecord,
@@ -255,13 +296,19 @@ fn encode_object(
     if depth > MAXIMUM_DEPTH {
         return invalid("inventory nesting too deep");
     }
-    // The fixed part is 15 bytes; a portal adds its kind and fields.
+    // The fixed part is 15 bytes; a uid adds its length byte and text, and
+    // a portal its kind and fields.
+    let uid = match &object.uid {
+        Some(uid) if crate::is_identifier(uid) => 1 + uid.len(),
+        Some(_) => return invalid("a uid is not an identifier"),
+        None => 0,
+    };
     let portal = match object.portal {
         Some(PortalRecord::Location { .. }) => 25,
         Some(PortalRecord::Anchor { .. }) => 9,
         None => 0,
     };
-    room(output, 15 + portal)?;
+    room(output, 15 + uid + portal)?;
     let tile = match (object.tile, depth) {
         (Some(tile), 0) if usize::from(tile) < cells => tile,
         (None, depth) if depth > 0 => NO_TILE,
@@ -272,20 +319,12 @@ fn encode_object(
     output.extend_from_slice(&object.layer.to_le_bytes());
     output.extend_from_slice(&object.sub_layer.to_le_bytes());
     output.extend_from_slice(&object.z.to_le_bytes());
-    let mut flags = 0;
-    if object.portal.is_some() {
-        flags |= FLAG_PORTAL;
+    output.push(flags(object));
+    if let Some(uid) = &object.uid {
+        // An identifier is 1 to 128 bytes, so its length fits the byte.
+        output.push(u8::try_from(uid.len()).or_else(|_| invalid("a uid is too long"))?);
+        output.extend_from_slice(uid.as_bytes());
     }
-    if !object.fields.is_empty() {
-        flags |= FLAG_FIELDS;
-    }
-    if object.custom.is_some() {
-        flags |= FLAG_CUSTOM;
-    }
-    if !object.inventory.is_empty() {
-        flags |= FLAG_INVENTORY;
-    }
-    output.push(flags);
     match &object.portal {
         Some(PortalRecord::Location { plane, layer, x, y }) => {
             output.push(0);
@@ -455,6 +494,15 @@ impl<'a> Cursor<'a> {
         Ok(count)
     }
 
+    /// A uid: a length byte, then that many bytes of an identifier.
+    fn uid(&mut self) -> Result<String, DecodeError> {
+        let length = usize::from(self.u8()?);
+        match std::str::from_utf8(self.take(length)?) {
+            Ok(uid) if crate::is_identifier(uid) => Ok(uid.to_owned()),
+            _ => invalid("a uid is not an identifier"),
+        }
+    }
+
     fn text(&mut self) -> Result<String, DecodeError> {
         let length = self.count(1)?;
         String::from_utf8(self.take(length)?.to_vec()).or_else(|_| invalid("text is not UTF-8"))
@@ -484,7 +532,7 @@ fn decode_record_with(
     if cursor.take(4)? != MAGIC {
         return invalid("bad magic");
     }
-    if cursor.u16()? != VERSION {
+    if cursor.u16()? != RECORD_VERSION {
         return invalid("unsupported version");
     }
     let chunk_size = cursor.u16()?;
@@ -544,6 +592,40 @@ fn decode_record_with(
     Ok(chunk)
 }
 
+/// A field block: a nonzero count, then each field's name and value.
+fn decode_fields(cursor: &mut Cursor<'_>) -> Result<Vec<(u32, FieldRecord)>, DecodeError> {
+    let count = usize::from(cursor.u16()?);
+    if count == 0 || count * 5 > cursor.remaining() {
+        return invalid("bad field count");
+    }
+    let mut fields = Vec::with_capacity(count);
+    for _ in 0..count {
+        let name = cursor.u32()?;
+        let value = match cursor.u8()? {
+            0 => FieldRecord::Null,
+            1 => FieldRecord::Bool(false),
+            2 => FieldRecord::Bool(true),
+            3 => FieldRecord::Integer(cursor.i64()?),
+            4 => {
+                let number = cursor.f64()?;
+                if !number.is_finite() {
+                    return invalid("numbers must be finite");
+                }
+                FieldRecord::Number(number)
+            }
+            5 => FieldRecord::String(cursor.u32()?),
+            6 => {
+                let text = cursor.text()?;
+                check_json(&text, true)?;
+                FieldRecord::Json(text)
+            }
+            _ => return invalid("unknown field tag"),
+        };
+        fields.push((name, value));
+    }
+    Ok(fields)
+}
+
 fn decode_object(
     cursor: &mut Cursor<'_>,
     cells: usize,
@@ -563,9 +645,14 @@ fn decode_object(
     let sub_layer = cursor.i16()?;
     let z = cursor.i32()?;
     let flags = cursor.u8()?;
-    if flags & !(FLAG_PORTAL | FLAG_FIELDS | FLAG_CUSTOM | FLAG_INVENTORY) != 0 {
+    if flags & !(FLAG_PORTAL | FLAG_FIELDS | FLAG_CUSTOM | FLAG_INVENTORY | FLAG_UID) != 0 {
         return invalid("unknown object flags");
     }
+    let uid = if flags & FLAG_UID == 0 {
+        None
+    } else {
+        Some(cursor.uid()?)
+    };
     let portal = if flags & FLAG_PORTAL == 0 {
         None
     } else {
@@ -583,37 +670,11 @@ fn decode_object(
             _ => return invalid("unknown portal kind"),
         })
     };
-    let mut fields = Vec::new();
-    if flags & FLAG_FIELDS != 0 {
-        let count = usize::from(cursor.u16()?);
-        if count == 0 || count * 5 > cursor.remaining() {
-            return invalid("bad field count");
-        }
-        for _ in 0..count {
-            let name = cursor.u32()?;
-            let value = match cursor.u8()? {
-                0 => FieldRecord::Null,
-                1 => FieldRecord::Bool(false),
-                2 => FieldRecord::Bool(true),
-                3 => FieldRecord::Integer(cursor.i64()?),
-                4 => {
-                    let number = cursor.f64()?;
-                    if !number.is_finite() {
-                        return invalid("numbers must be finite");
-                    }
-                    FieldRecord::Number(number)
-                }
-                5 => FieldRecord::String(cursor.u32()?),
-                6 => {
-                    let text = cursor.text()?;
-                    check_json(&text, true)?;
-                    FieldRecord::Json(text)
-                }
-                _ => return invalid("unknown field tag"),
-            };
-            fields.push((name, value));
-        }
-    }
+    let fields = if flags & FLAG_FIELDS == 0 {
+        Vec::new()
+    } else {
+        decode_fields(cursor)?
+    };
     let custom = if flags & FLAG_CUSTOM == 0 {
         None
     } else {
@@ -622,6 +683,7 @@ fn decode_object(
         Some(text)
     };
     let mut object = ObjectRecord {
+        uid,
         tile,
         proto,
         layer,

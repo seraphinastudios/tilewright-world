@@ -180,14 +180,21 @@ func (p *Pack) verifyContents(ctx context.Context, maxDecoded uint64) (Summary, 
 	if checked != summary.Chunks {
 		return Summary{}, reject(CodeChunk, "a chunk names an unknown plane")
 	}
+	// Each object with a uid matched the row of its uid, which names only
+	// that object, so the rows the objects matched are distinct; with as
+	// many rows as such objects, no row is left over and no two objects
+	// share a uid.
+	if targets.uids != summary.ObjectUIDs {
+		return Summary{}, reject(CodeObjectUID, "object_uids holds a uid that no object has")
+	}
 	summary.Objects = objects
 	return summary, nil
 }
 
-// chunkPassSQL streams every chunk with its plane's chunk size, in
-// primary-key order.
+// chunkPassSQL streams every chunk with its plane's chunk size and its key,
+// in primary-key order.
 func chunkPassSQL() string {
-	return "SELECT p.id, p.chunk_size, " + chunkDataSQL() +
+	return "SELECT p.id, p.chunk_size, c.layer, c.cx, c.cy, " + chunkDataSQL() +
 		" FROM chunks c JOIN planes p ON p.id = c.plane ORDER BY c.plane, c.layer, c.cx, c.cy"
 }
 
@@ -209,9 +216,9 @@ func (p *Pack) checkChunks(ctx context.Context, targets *targets, groundLayers i
 	var decoded uint64
 	for rows.Next() {
 		var plane string
-		var chunkSize int64
+		var chunkSize, layer, cx, cy int64
 		var value any
-		if err := rows.Scan(&plane, &chunkSize, &value); err != nil {
+		if err := rows.Scan(&plane, &chunkSize, &layer, &cx, &cy, &value); err != nil {
 			return 0, 0, sqliteError(ctx, err)
 		}
 		// The frame records its decoded size, so the budget is checked
@@ -233,7 +240,7 @@ func (p *Pack) checkChunks(ctx context.Context, targets *targets, groundLayers i
 		}
 		// Objects are checked as they decode rather than kept, so memory
 		// stays bounded by the record, not by the objects it holds.
-		targets.enter(plane)
+		targets.enter(plane, [3]int64{layer, cx, cy})
 		chunk, err := decodeChunk(data, func(object *Object) error {
 			objects++
 			return targets.check(object)
@@ -317,6 +324,16 @@ func (p *Pack) checkRows(ctx context.Context) error {
 		{
 			fmt.Sprintf("SELECT count(*) FROM definitions WHERE %s OR %s", notIdentifier("type"), notIdentifier("id")),
 			CodeDefinition, "a definition type or ID is not an identifier",
+		},
+		{
+			// The row's chunk exists, so its plane, layer and position are
+			// valid too.
+			fmt.Sprintf("SELECT count(*) FROM object_uids u WHERE %s "+
+				"OR typeof(u.layer) != 'integer' OR typeof(u.cx) != 'integer' OR typeof(u.cy) != 'integer' "+
+				"OR typeof(u.object) != 'integer' OR u.object NOT BETWEEN 0 AND %d "+
+				"OR NOT EXISTS (SELECT 1 FROM chunks c WHERE c.plane = u.plane AND c.layer = u.layer AND c.cx = u.cx AND c.cy = u.cy)",
+				notIdentifier("u.uid"), MaxObjectIndex),
+			CodeObjectUID, "an object_uids row has an invalid uid or index, or names a missing chunk",
 		},
 	}
 	for _, check := range checks {
@@ -632,6 +649,13 @@ type targets struct {
 	// ownAnchors the lookups relative to it.
 	current           string
 	zones, ownAnchors map[uint32]bool
+	// uidRow is the object_uids row of uid ?1. chunk is the layer and
+	// position of the chunk being checked, index the depth-first index of
+	// its next object, and uids the objects with a uid checked so far.
+	uidRow *sql.Stmt
+	chunk  [3]int64
+	index  int64
+	uids   uint64
 }
 
 func newTargets(ctx context.Context, conn *sql.Conn, strings uint32, renderLayers int) (*targets, error) {
@@ -650,6 +674,7 @@ func newTargets(ctx context.Context, conn *sql.Conn, strings uint32, renderLayer
 		{&t.hasAnchor, "SELECT EXISTS (SELECT 1 FROM strings n JOIN anchors a ON a.id = n.value " +
 			"WHERE n.id = ?3 AND a.plane = CASE WHEN ?1 = 0 THEN ?2 ELSE (SELECT value FROM strings WHERE id = ?1) END)"},
 		{&t.value, "SELECT value FROM strings WHERE id = ?1"},
+		{&t.uidRow, "SELECT plane, layer, cx, cy, object FROM object_uids WHERE uid = ?1"},
 	} {
 		prepared, err := conn.PrepareContext(ctx, statement.query)
 		if err != nil {
@@ -662,7 +687,7 @@ func newTargets(ctx context.Context, conn *sql.Conn, strings uint32, renderLayer
 }
 
 func (t *targets) close() {
-	for _, statement := range []*sql.Stmt{t.isPlane, t.isProto, t.isZone, t.hasAnchor, t.value} {
+	for _, statement := range []*sql.Stmt{t.isPlane, t.isProto, t.isZone, t.hasAnchor, t.value, t.uidRow} {
 		if statement != nil {
 			_ = statement.Close()
 		}
@@ -681,14 +706,41 @@ func (t *targets) string(id uint32) bool {
 	return id >= 1 && id <= t.strings
 }
 
-// enter starts checking chunks of plane, dropping lookups relative to the
-// previous one.
-func (t *targets) enter(plane string) {
+// enter starts checking the chunk of plane at chunk (layer, cx, cy),
+// dropping lookups relative to the previous plane.
+func (t *targets) enter(plane string, chunk [3]int64) {
 	if t.current != plane {
 		t.current = plane
 		clear(t.zones)
 		clear(t.ownAnchors)
 	}
+	t.chunk = chunk
+	t.index = 0
+}
+
+// uid checks that an object's uid has the object_uids row that names the
+// object: the current chunk and the object's index in it. checkRows has
+// checked every row's columns, so the row loads within their bounds.
+func (t *targets) uid(object *Object) error {
+	index := t.index
+	t.index++
+	if object.UID == "" {
+		return nil
+	}
+	t.uids++
+	var plane string
+	var layer, cx, cy, found int64
+	err := t.uidRow.QueryRowContext(t.ctx, object.UID).Scan(&plane, &layer, &cx, &cy, &found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return reject(CodeObjectUID, "the object_uids row of "+object.UID+" does not name its object")
+	}
+	if err != nil {
+		return sqliteError(t.ctx, err)
+	}
+	if plane != t.current || [3]int64{layer, cx, cy} != t.chunk || found != index {
+		return reject(CodeObjectUID, "the object_uids row of "+object.UID+" does not name its object")
+	}
+	return nil
 }
 
 func (t *targets) proto(id uint32) (bool, error) {
@@ -785,6 +837,9 @@ func (t *targets) portal(portal *Portal) (bool, error) {
 }
 
 func (t *targets) check(object *Object) error {
+	if err := t.uid(object); err != nil {
+		return err
+	}
 	ok, err := t.proto(object.Proto)
 	if err != nil {
 		return err

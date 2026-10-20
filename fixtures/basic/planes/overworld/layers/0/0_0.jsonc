@@ -154,13 +154,17 @@
   },
   "objects": [
     {"at": [7, 0], "proto": "tree"},
-    {"at": [15, 0], "proto": "wall", "layer": "wall", "fields": {"name": "Old wall", "tags": ["ruin", "north"]}},
+    {"uid": "ruin.north_wall", "at": [15, 0], "proto": "wall", "layer": "wall", "fields": {"name": "Old wall", "tags": ["ruin", "north"]}},
     {"at": [12, 12], "proto": "tree", "sub_layer": 1, "z": 4},
     {"at": [9, 4], "proto": "stairs_down", "portal": {"anchor": "cave.entrance"}},
-    {"at": [2, 2], "proto": "chest", "fields": {"locked": true, "loot": "chest_common"},
+    // Uids are identifiers, unique in the whole world. A tool may generate
+    // them, such as the random one of the inner chest's coin.
+    {"uid": "village.chest", "at": [2, 2], "proto": "chest", "fields": {"locked": true, "loot": "chest_common"},
      "inventory": [
        {"proto": "coin", "fields": {"count": 3}},
-       {"proto": "chest", "inventory": [{"proto": "coin", "fields": {"count": 1}}]}
+       {"uid": "village.chest.small", "proto": "chest", "inventory": [
+         {"uid": "o.k3vq7zr2mxa5d6wfh4pnyt2cgu", "proto": "coin", "fields": {"count": 1}}
+       ]}
      ]},
     {"at": [3, 3], "proto": "stairs_down", "portal": {"plane": "vault", "layer": 0, "at": [1, 1]},
      "custom": {"example.org/notes": {"reviewed": true}}}

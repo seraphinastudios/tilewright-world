@@ -46,6 +46,7 @@ type manifestRead struct {
 	CY    int64           `json:"cy"`
 	X     int64           `json:"x"`
 	Y     int64           `json:"y"`
+	UID   string          `json:"uid"`
 	Error *Code           `json:"error"`
 }
 
@@ -113,7 +114,15 @@ type manifestValid struct {
 		ID       string `json:"id"`
 		Document string `json:"document"`
 	} `json:"definitions"`
-	Chunks []manifestChunk `json:"chunks"`
+	Chunks     []manifestChunk `json:"chunks"`
+	ObjectUIDs []struct {
+		UID    string `json:"uid"`
+		Plane  string `json:"plane"`
+		Layer  int32  `json:"layer"`
+		CX     int64  `json:"cx"`
+		CY     int64  `json:"cy"`
+		Object int    `json:"object"`
+	} `json:"object_uids"`
 }
 
 type manifest struct {
@@ -198,6 +207,10 @@ func (r manifestRead) run(ctx context.Context, t *testing.T, pack *Pack) error {
 		_, _, err = pack.Anchor(ctx, r.Plane, r.textID(t))
 	case "definition":
 		_, _, err = pack.Definition(ctx, r.Type, r.textID(t))
+	case "object_location":
+		_, _, err = pack.ObjectLocation(ctx, r.UID)
+	case "object":
+		_, _, _, err = pack.Object(ctx, r.UID)
 	default:
 		t.Fatalf("unknown read %q", r.Op)
 	}
@@ -252,6 +265,9 @@ func render(chunk *Chunk) string {
 	var object func(*Object, int)
 	object = func(o *Object, depth int) {
 		fmt.Fprintf(&output, "object %d %d %d %d %d %d\n", depth, o.Tile, o.Proto, o.Layer, o.SubLayer, o.Z)
+		if o.UID != "" {
+			fmt.Fprintf(&output, "uid %s\n", o.UID)
+		}
 		if p := o.Portal; p != nil {
 			if p.Kind == PortalLocation {
 				fmt.Fprintf(&output, "portal location %d %d %d %d\n", p.Plane, p.Layer, p.X, p.Y)
@@ -328,6 +344,7 @@ func TestTheValidPacksReadBackAsTheManifestLists(t *testing.T) {
 				"strings": summary.Strings, "planes": summary.Planes, "zones": summary.Zones,
 				"anchors": summary.Anchors, "stairwells": summary.Stairwells, "chunks": summary.Chunks,
 				"definitions": summary.Definitions, "objects": summary.Objects,
+				"object_uids": summary.ObjectUIDs,
 			}
 			if fmt.Sprint(counts) != fmt.Sprint(valid.Summary) {
 				t.Errorf("summary %v, expected %v", counts, valid.Summary)
@@ -440,6 +457,13 @@ func TestTheValidPacksReadBackAsTheManifestLists(t *testing.T) {
 			}
 			if !slices.Equal(keys, expectedKeys) {
 				t.Errorf("chunk keys %v, expected %v", keys, expectedKeys)
+			}
+			for _, row := range valid.ObjectUIDs {
+				expected := UIDLocation{Plane: row.Plane, Layer: row.Layer, CX: row.CX, CY: row.CY, Index: row.Object}
+				location, object, ok, err := pack.Object(ctx, row.UID)
+				if err != nil || !ok || location != expected || object.UID != row.UID {
+					t.Errorf("object %s: %+v %v %v, expected %+v", row.UID, location, ok, err, expected)
+				}
 			}
 		})
 	}

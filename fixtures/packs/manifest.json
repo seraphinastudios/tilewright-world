@@ -24,13 +24,14 @@
     "pack.chunk_data",
     "pack.chunk_record",
     "pack.reference",
+    "pack.object_uid",
     "pack.integrity",
     "pack.digest",
     "pack.decode_budget"
   ],
   "valid": [
     {
-      "file": "ebb9690c844a6ff564da78cb86a363c05adf68f615ec6dbdc50b721025192fab.twpack",
+      "file": "5830e26e449a1f0d0c786b32801b7ed68e351777db5f586532478cb4384844b2.twpack",
       "summary": {
         "strings": 22,
         "planes": 2,
@@ -39,7 +40,8 @@
         "stairwells": 3,
         "chunks": 5,
         "definitions": 12,
-        "objects": 11
+        "objects": 11,
+        "object_uids": 5
       },
       "meta": {
         "chunk_encoding": "twc1+zstd",
@@ -48,7 +50,7 @@
         "profile": "{\"format\":\"tilewright.profile/1\",\"id\":\"example\",\"version\":\"1.0.0\",\"projection\":{\"kind\":\"isometric\",\"tile_width\":48,\"tile_height\":24},\"render_layers\":[\"floor\",\"mask\",\"item\",\"wall\",\"living\",\"effect\"],\"ground_layers\":[\"floor\",\"mask\"],\"definition_types\":{\"proto\":{\"schema\":\"schema/proto.jsonc\"},\"loot\":{\"schema\":\"schema/loot.jsonc\"},\"recipe\":{\"schema\":\"schema/recipe.jsonc\"}},\"object_fields\":\"schema/object-fields.jsonc\",\"zone_properties\":\"schema/zone-properties.jsonc\",\"layer_height\":50,\"movement\":{\"max_step\":12,\"fall_unit\":50}}",
         "profile_id": "example",
         "profile_version": "1.0.0",
-        "source_digest": "6b8a3606b4975cf574fafd9f5513e8b0f72044b80690df772e51e6d301fa333b"
+        "source_digest": "2ae46b1363c68613d1bb144fea68497d5515d7261cd43817c44e7de5bf59a020"
       },
       "layer_height": 50,
       "strings": [
@@ -292,7 +294,7 @@
           "cy": 0,
           "palette": ["edge_n", "grass", "island", "sand", "village"],
           "objects": 9,
-          "render_sha256": "f2522f24cff43366e00c06b027eabf887d8ca15a40140a807459012465b3197a"
+          "render_sha256": "c3e9827680c20026c486fc9ee5c5b1dc02cb12b6e0b449f6f43effaed48a5079"
         },
         {
           "plane": "overworld",
@@ -310,8 +312,22 @@
           "cy": 0,
           "palette": ["cave_floor"],
           "objects": 1,
-          "render_sha256": "09f8ececfe499cb2efbfe6c0c8c13859f099490fdca6b66be750be96918fa7f2"
+          "render_sha256": "142fa24e16708e9b1606116c1f5aa11b41f5c28d4e7d0f0e0bb92c69ac68ba0f"
         }
+      ],
+      "object_uids": [
+        {
+          "uid": "o.k3vq7zr2mxa5d6wfh4pnyt2cgu",
+          "plane": "overworld",
+          "layer": 0,
+          "cx": 0,
+          "cy": 0,
+          "object": 7
+        },
+        {"uid": "ruin.north_wall", "plane": "overworld", "layer": 0, "cx": 0, "cy": 0, "object": 1},
+        {"uid": "vault.chest", "plane": "vault", "layer": 0, "cx": 0, "cy": 0, "object": 0},
+        {"uid": "village.chest", "plane": "overworld", "layer": 0, "cx": 0, "cy": 0, "object": 4},
+        {"uid": "village.chest.small", "plane": "overworld", "layer": 0, "cx": 0, "cy": 0, "object": 6}
       ]
     }
   ],
@@ -356,7 +372,11 @@
       "rule": "the application ID is not TWP1",
       "open": "pack.identity"
     },
-    {"file": "open-user-version.twpack", "rule": "the user version is not 1", "open": "pack.identity"},
+    {
+      "file": "open-user-version.twpack",
+      "rule": "the user version is 1, from before object uids, not 2",
+      "open": "pack.identity"
+    },
     {"file": "open-page-size.twpack", "rule": "the pages are 8192 bytes", "open": "pack.identity"},
     {
       "file": "open-free-pages.twpack",
@@ -414,13 +434,13 @@
     {
       "file": "open-too-large.twpack",
       "rule": "the file is one byte longer than the pack size limit",
-      "open_limits": {"max_pack_bytes": 45055},
+      "open_limits": {"max_pack_bytes": 49151},
       "open": "pack.too_large"
     },
     {
       "file": "verify-too-large.twpack",
       "rule": "verification's pack size limit is one byte less than the file",
-      "verify_limits": {"max_pack_bytes": 45055},
+      "verify_limits": {"max_pack_bytes": 49151},
       "verify": "pack.too_large"
     },
     {
@@ -1047,7 +1067,7 @@
         },
         {
           "op": "chunk",
-          "rule": "the version is 2",
+          "rule": "the version is 1, from before object uids",
           "plane": "vault",
           "layer": 0,
           "cx": 12,
@@ -1056,7 +1076,7 @@
         },
         {
           "op": "chunk",
-          "rule": "the chunk size is 0",
+          "rule": "the version is 3",
           "plane": "vault",
           "layer": 0,
           "cx": 13,
@@ -1065,7 +1085,7 @@
         },
         {
           "op": "chunk",
-          "rule": "the chunk size is 256",
+          "rule": "the chunk size is 0",
           "plane": "vault",
           "layer": 0,
           "cx": 14,
@@ -1074,7 +1094,7 @@
         },
         {
           "op": "chunk",
-          "rule": "the ground count is 9",
+          "rule": "the chunk size is 256",
           "plane": "vault",
           "layer": 0,
           "cx": 15,
@@ -1083,7 +1103,7 @@
         },
         {
           "op": "chunk",
-          "rule": "the reserved byte is 1",
+          "rule": "the ground count is 9",
           "plane": "vault",
           "layer": 0,
           "cx": 16,
@@ -1092,7 +1112,7 @@
         },
         {
           "op": "chunk",
-          "rule": "the palette length passes the record",
+          "rule": "the reserved byte is 1",
           "plane": "vault",
           "layer": 0,
           "cx": 17,
@@ -1101,7 +1121,7 @@
         },
         {
           "op": "chunk",
-          "rule": "the palette holds 0",
+          "rule": "the palette length passes the record",
           "plane": "vault",
           "layer": 0,
           "cx": 18,
@@ -1110,7 +1130,7 @@
         },
         {
           "op": "chunk",
-          "rule": "the palette descends",
+          "rule": "the palette holds 0",
           "plane": "vault",
           "layer": 0,
           "cx": 19,
@@ -1119,7 +1139,7 @@
         },
         {
           "op": "chunk",
-          "rule": "a ground cell is outside the palette",
+          "rule": "the palette descends",
           "plane": "vault",
           "layer": 0,
           "cx": 20,
@@ -1128,7 +1148,7 @@
         },
         {
           "op": "chunk",
-          "rule": "a zone cell is outside the palette",
+          "rule": "a ground cell is outside the palette",
           "plane": "vault",
           "layer": 0,
           "cx": 21,
@@ -1137,7 +1157,7 @@
         },
         {
           "op": "chunk",
-          "rule": "the record ends inside the grids",
+          "rule": "a zone cell is outside the palette",
           "plane": "vault",
           "layer": 0,
           "cx": 22,
@@ -1146,7 +1166,7 @@
         },
         {
           "op": "chunk",
-          "rule": "the object count passes the record",
+          "rule": "the record ends inside the grids",
           "plane": "vault",
           "layer": 0,
           "cx": 23,
@@ -1155,7 +1175,7 @@
         },
         {
           "op": "chunk",
-          "rule": "an object's tile is past the chunk",
+          "rule": "the object count passes the record",
           "plane": "vault",
           "layer": 0,
           "cx": 24,
@@ -1164,7 +1184,7 @@
         },
         {
           "op": "chunk",
-          "rule": "a top-level object has the inventory tile",
+          "rule": "an object's tile is past the chunk",
           "plane": "vault",
           "layer": 0,
           "cx": 25,
@@ -1173,7 +1193,7 @@
         },
         {
           "op": "chunk",
-          "rule": "an inventory entry has a tile",
+          "rule": "a top-level object has the inventory tile",
           "plane": "vault",
           "layer": 0,
           "cx": 26,
@@ -1182,7 +1202,7 @@
         },
         {
           "op": "chunk",
-          "rule": "an object has an unknown flag",
+          "rule": "an inventory entry has a tile",
           "plane": "vault",
           "layer": 0,
           "cx": 27,
@@ -1191,7 +1211,7 @@
         },
         {
           "op": "chunk",
-          "rule": "a portal has an unknown kind",
+          "rule": "an object has an unknown flag",
           "plane": "vault",
           "layer": 0,
           "cx": 28,
@@ -1200,7 +1220,7 @@
         },
         {
           "op": "chunk",
-          "rule": "an object flags fields but has none",
+          "rule": "a uid is empty",
           "plane": "vault",
           "layer": 0,
           "cx": 29,
@@ -1209,7 +1229,7 @@
         },
         {
           "op": "chunk",
-          "rule": "a field count passes the record",
+          "rule": "a uid has a capital letter",
           "plane": "vault",
           "layer": 0,
           "cx": 30,
@@ -1218,7 +1238,7 @@
         },
         {
           "op": "chunk",
-          "rule": "a field has an unknown tag",
+          "rule": "a uid starts with an underscore",
           "plane": "vault",
           "layer": 0,
           "cx": 31,
@@ -1227,7 +1247,7 @@
         },
         {
           "op": "chunk",
-          "rule": "a number field is NaN",
+          "rule": "a uid has a space",
           "plane": "vault",
           "layer": 0,
           "cx": 32,
@@ -1236,7 +1256,7 @@
         },
         {
           "op": "chunk",
-          "rule": "a number field is infinite",
+          "rule": "a uid has NUL",
           "plane": "vault",
           "layer": 0,
           "cx": 33,
@@ -1245,7 +1265,7 @@
         },
         {
           "op": "chunk",
-          "rule": "a JSON field is not canonical: it has a space",
+          "rule": "a uid is not UTF-8",
           "plane": "vault",
           "layer": 0,
           "cx": 34,
@@ -1254,7 +1274,7 @@
         },
         {
           "op": "chunk",
-          "rule": "a JSON field is a number",
+          "rule": "a uid is 129 bytes",
           "plane": "vault",
           "layer": 0,
           "cx": 35,
@@ -1263,7 +1283,7 @@
         },
         {
           "op": "chunk",
-          "rule": "a JSON field is a string",
+          "rule": "a uid's length passes the record",
           "plane": "vault",
           "layer": 0,
           "cx": 36,
@@ -1272,7 +1292,7 @@
         },
         {
           "op": "chunk",
-          "rule": "a JSON field is not JSON",
+          "rule": "a portal has an unknown kind",
           "plane": "vault",
           "layer": 0,
           "cx": 37,
@@ -1281,7 +1301,7 @@
         },
         {
           "op": "chunk",
-          "rule": "a JSON field has a trailing comma",
+          "rule": "an object flags fields but has none",
           "plane": "vault",
           "layer": 0,
           "cx": 38,
@@ -1290,7 +1310,7 @@
         },
         {
           "op": "chunk",
-          "rule": "a JSON field repeats a key",
+          "rule": "a field count passes the record",
           "plane": "vault",
           "layer": 0,
           "cx": 39,
@@ -1299,7 +1319,7 @@
         },
         {
           "op": "chunk",
-          "rule": "a JSON field escapes a slash",
+          "rule": "a field has an unknown tag",
           "plane": "vault",
           "layer": 0,
           "cx": 40,
@@ -1308,7 +1328,7 @@
         },
         {
           "op": "chunk",
-          "rule": "a JSON field escapes a letter",
+          "rule": "a number field is NaN",
           "plane": "vault",
           "layer": 0,
           "cx": 41,
@@ -1317,7 +1337,7 @@
         },
         {
           "op": "chunk",
-          "rule": "a JSON field escapes a control character in uppercase",
+          "rule": "a number field is infinite",
           "plane": "vault",
           "layer": 0,
           "cx": 42,
@@ -1326,7 +1346,7 @@
         },
         {
           "op": "chunk",
-          "rule": "a JSON field escapes a newline as \\u000a",
+          "rule": "a JSON field is not canonical: it has a space",
           "plane": "vault",
           "layer": 0,
           "cx": 43,
@@ -1335,7 +1355,7 @@
         },
         {
           "op": "chunk",
-          "rule": "a JSON field holds NUL",
+          "rule": "a JSON field is a number",
           "plane": "vault",
           "layer": 0,
           "cx": 44,
@@ -1344,7 +1364,7 @@
         },
         {
           "op": "chunk",
-          "rule": "a JSON field holds a raw tab",
+          "rule": "a JSON field is a string",
           "plane": "vault",
           "layer": 0,
           "cx": 45,
@@ -1353,7 +1373,7 @@
         },
         {
           "op": "chunk",
-          "rule": "a JSON field is not UTF-8",
+          "rule": "a JSON field is not JSON",
           "plane": "vault",
           "layer": 0,
           "cx": 46,
@@ -1362,7 +1382,7 @@
         },
         {
           "op": "chunk",
-          "rule": "a JSON field has an integer past the source format's range",
+          "rule": "a JSON field has a trailing comma",
           "plane": "vault",
           "layer": 0,
           "cx": 47,
@@ -1371,7 +1391,7 @@
         },
         {
           "op": "chunk",
-          "rule": "a JSON field has a number that is not finite",
+          "rule": "a JSON field repeats a key",
           "plane": "vault",
           "layer": 0,
           "cx": 48,
@@ -1380,7 +1400,7 @@
         },
         {
           "op": "chunk",
-          "rule": "a JSON field has a number with a leading zero",
+          "rule": "a JSON field escapes a slash",
           "plane": "vault",
           "layer": 0,
           "cx": 49,
@@ -1389,7 +1409,7 @@
         },
         {
           "op": "chunk",
-          "rule": "a JSON field nests 65 deep",
+          "rule": "a JSON field escapes a letter",
           "plane": "vault",
           "layer": 0,
           "cx": 50,
@@ -1398,7 +1418,7 @@
         },
         {
           "op": "chunk",
-          "rule": "a JSON field has a comment",
+          "rule": "a JSON field escapes a control character in uppercase",
           "plane": "vault",
           "layer": 0,
           "cx": 51,
@@ -1407,7 +1427,7 @@
         },
         {
           "op": "chunk",
-          "rule": "a JSON field starts with a byte-order mark",
+          "rule": "a JSON field escapes a newline as \\u000a",
           "plane": "vault",
           "layer": 0,
           "cx": 52,
@@ -1416,7 +1436,7 @@
         },
         {
           "op": "chunk",
-          "rule": "custom data is an array",
+          "rule": "a JSON field holds NUL",
           "plane": "vault",
           "layer": 0,
           "cx": 53,
@@ -1425,7 +1445,7 @@
         },
         {
           "op": "chunk",
-          "rule": "custom data has a key that is not a namespace",
+          "rule": "a JSON field holds a raw tab",
           "plane": "vault",
           "layer": 0,
           "cx": 54,
@@ -1434,7 +1454,7 @@
         },
         {
           "op": "chunk",
-          "rule": "custom data is not canonical: it has a space",
+          "rule": "a JSON field is not UTF-8",
           "plane": "vault",
           "layer": 0,
           "cx": 55,
@@ -1443,7 +1463,7 @@
         },
         {
           "op": "chunk",
-          "rule": "custom data's length passes the record",
+          "rule": "a JSON field has an integer past the source format's range",
           "plane": "vault",
           "layer": 0,
           "cx": 56,
@@ -1452,7 +1472,7 @@
         },
         {
           "op": "chunk",
-          "rule": "an object flags an inventory but has none",
+          "rule": "a JSON field has a number that is not finite",
           "plane": "vault",
           "layer": 0,
           "cx": 57,
@@ -1461,7 +1481,7 @@
         },
         {
           "op": "chunk",
-          "rule": "inventories nest 17 deep",
+          "rule": "a JSON field has a number with a leading zero",
           "plane": "vault",
           "layer": 0,
           "cx": 58,
@@ -1470,7 +1490,7 @@
         },
         {
           "op": "chunk",
-          "rule": "a byte follows the objects",
+          "rule": "a JSON field nests 65 deep",
           "plane": "vault",
           "layer": 0,
           "cx": 59,
@@ -1479,10 +1499,91 @@
         },
         {
           "op": "chunk",
-          "rule": "the record ends inside an object",
+          "rule": "a JSON field has a comment",
           "plane": "vault",
           "layer": 0,
           "cx": 60,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "a JSON field starts with a byte-order mark",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 61,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "custom data is an array",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 62,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "custom data has a key that is not a namespace",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 63,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "custom data is not canonical: it has a space",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 64,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "custom data's length passes the record",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 65,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "an object flags an inventory but has none",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 66,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "inventories nest 17 deep",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 67,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "a byte follows the objects",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 68,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "the record ends inside an object",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 69,
           "cy": 0,
           "error": "pack.chunk_record"
         }
@@ -1664,6 +1765,132 @@
         {"op": "chunk", "plane": "overworld", "layer": 0, "cx": 0, "cy": 0, "error": null}
       ],
       "verify": "pack.reference"
+    },
+    {
+      "file": "uid-row-index.twpack",
+      "rule": "a uid's row names another object of its chunk",
+      "reads": [
+        {"op": "object_location", "uid": "village.chest", "error": null},
+        {"op": "object", "uid": "village.chest", "error": "pack.object_uid"}
+      ],
+      "verify": "pack.object_uid"
+    },
+    {
+      "file": "uid-row-past.twpack",
+      "rule": "a uid's row names an index past its chunk's objects",
+      "reads": [
+        {"op": "object_location", "uid": "village.chest", "error": null},
+        {"op": "object", "uid": "village.chest", "error": "pack.object_uid"}
+      ],
+      "verify": "pack.object_uid"
+    },
+    {
+      "file": "uid-row-chunk.twpack",
+      "rule": "a uid's row names a chunk that does not exist",
+      "reads": [
+        {"op": "object_location", "uid": "village.chest", "error": null},
+        {"op": "object", "uid": "village.chest", "error": "pack.object_uid"}
+      ],
+      "verify": "pack.object_uid"
+    },
+    {
+      "file": "uid-row-other-chunk.twpack",
+      "rule": "a uid's row names an existing chunk other than its object's",
+      "reads": [
+        {"op": "object", "uid": "village.chest", "error": "pack.object_uid"}
+      ],
+      "verify": "pack.object_uid"
+    },
+    {
+      "file": "uid-row-missing.twpack",
+      "rule": "an object's uid has no row",
+      "reads": [
+        {"op": "object_location", "uid": "vault.chest", "error": null},
+        {"op": "object", "uid": "vault.chest", "error": null}
+      ],
+      "verify": "pack.object_uid"
+    },
+    {
+      "file": "uid-row-extra.twpack",
+      "rule": "a row's uid is no object's: it names an object without one",
+      "reads": [
+        {"op": "object_location", "uid": "zz.extra", "error": null},
+        {"op": "object", "uid": "zz.extra", "error": "pack.object_uid"}
+      ],
+      "verify": "pack.object_uid"
+    },
+    {
+      "file": "uid-row-uid.twpack",
+      "rule": "a row's uid is not an identifier",
+      "reads": [
+        {"op": "object_location", "uid": "Village.chest", "error": null}
+      ],
+      "verify": "pack.object_uid"
+    },
+    {"file": "uid-row-uid-nul.twpack", "rule": "a row's uid holds NUL", "verify": "pack.object_uid"},
+    {
+      "file": "uid-row-plane.twpack",
+      "rule": "a row's plane is not an identifier",
+      "reads": [
+        {"op": "object_location", "uid": "village.chest", "error": "pack.object_uid"}
+      ],
+      "verify": "pack.object_uid"
+    },
+    {
+      "file": "uid-row-plane-utf8.twpack",
+      "rule": "a row's plane is text that is not UTF-8",
+      "reads": [
+        {"op": "object_location", "uid": "village.chest", "error": "pack.object_uid"}
+      ],
+      "verify": "pack.object_uid"
+    },
+    {
+      "file": "uid-row-layer.twpack",
+      "rule": "a row's layer is past 32 bits",
+      "reads": [
+        {"op": "object_location", "uid": "village.chest", "error": "pack.object_uid"}
+      ],
+      "verify": "pack.object_uid"
+    },
+    {
+      "file": "uid-row-cx.twpack",
+      "rule": "a row's chunk position puts tiles past the source format's range",
+      "reads": [
+        {"op": "object_location", "uid": "village.chest", "error": "pack.object_uid"}
+      ],
+      "verify": "pack.object_uid"
+    },
+    {
+      "file": "uid-row-object.twpack",
+      "rule": "a row's index is past 16,777,215",
+      "reads": [
+        {"op": "object_location", "uid": "village.chest", "error": "pack.object_uid"}
+      ],
+      "verify": "pack.object_uid"
+    },
+    {
+      "file": "uid-row-object-real.twpack",
+      "rule": "a row's index is not an integer",
+      "reads": [
+        {"op": "object_location", "uid": "village.chest", "error": "pack.object_uid"}
+      ],
+      "verify": "pack.object_uid"
+    },
+    {
+      "file": "uid-record-repeated.twpack",
+      "rule": "a record repeats a uid that another plane's object has",
+      "reads": [
+        {"op": "chunk", "plane": "vault", "layer": 0, "cx": 0, "cy": 0, "error": null}
+      ],
+      "verify": "pack.object_uid"
+    },
+    {
+      "file": "uid-record-dropped.twpack",
+      "rule": "a record drops a uid that its row still names",
+      "reads": [
+        {"op": "chunk", "plane": "vault", "layer": 0, "cx": 0, "cy": 0, "error": null}
+      ],
+      "verify": "pack.object_uid"
     }
   ]
 }

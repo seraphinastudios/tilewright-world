@@ -157,6 +157,14 @@ fn layer_height_op() -> J {
     J::object([("op", J::from("layer_height"))])
 }
 
+fn object_location_op(uid: &str) -> J {
+    J::object([("op", J::from("object_location")), ("uid", J::from(uid))])
+}
+
+fn object_op(uid: &str) -> J {
+    J::object([("op", J::from("object")), ("uid", J::from(uid))])
+}
+
 /// Runs SQL on a pack copy, then rebuilds it without free pages.
 fn sql(path: &Path, sql: &str) {
     let connection = Connection::open(path).unwrap();
@@ -252,6 +260,7 @@ pub fn generate(directory: &Path, source: &Path) -> String {
     document_cases(&mut base);
     chunk_cases(&mut base);
     reference_cases(&mut base);
+    uid_cases(&mut base);
     let valid = valid_entry(&written.path, &valid_name);
     let codes = ErrorCode::ALL
         .iter()
@@ -324,8 +333,8 @@ fn open_cases(base: &mut Base<'_>, length: u64) {
         ),
         (
             "open-user-version",
-            "the user version is not 1",
-            "PRAGMA user_version = 2",
+            "the user version is 1, from before object uids, not 2",
+            "PRAGMA user_version = 1",
         ),
         (
             "open-page-size",
@@ -1203,7 +1212,7 @@ impl Raw {
     fn new(floor: u32, objects: &[Vec<u8>]) -> Self {
         let cells = 32 * 32;
         let mut header = b"TWC1".to_vec();
-        header.extend_from_slice(&1_u16.to_le_bytes());
+        header.extend_from_slice(&2_u16.to_le_bytes());
         header.extend_from_slice(&32_u16.to_le_bytes());
         header.extend_from_slice(&[2, 0]);
         header.extend_from_slice(&1_u32.to_le_bytes());
@@ -1243,6 +1252,13 @@ fn field(name: u32, tag: u8, payload: &[u8]) -> Vec<u8> {
     output.extend_from_slice(&name.to_le_bytes());
     output.push(tag);
     output.extend_from_slice(payload);
+    output
+}
+
+/// A uid as a record holds it: its length byte, then its bytes.
+fn uid_bytes(value: &[u8]) -> Vec<u8> {
+    let mut output = vec![u8::try_from(value.len()).unwrap()];
+    output.extend_from_slice(value);
     output
 }
 
@@ -1335,8 +1351,11 @@ fn chunk_cases(base: &mut Base<'_>) {
     raw("the magic is not TWC1", &|raw| {
         raw.header[0] = b'X';
     });
-    raw("the version is 2", &|raw| {
-        raw.header[4] = 2;
+    raw("the version is 1, from before object uids", &|raw| {
+        raw.header[4] = 1;
+    });
+    raw("the version is 3", &|raw| {
+        raw.header[4] = 3;
     });
     raw("the chunk size is 0", &|raw| {
         raw.header[6..8].copy_from_slice(&0_u16.to_le_bytes());
@@ -1392,7 +1411,38 @@ fn chunk_cases(base: &mut Base<'_>) {
         .concat();
     });
     raw("an object has an unknown flag", &|raw| {
-        raw.objects = [1_u32.to_le_bytes().to_vec(), object(0, chest, 16, &[])].concat();
+        raw.objects = [1_u32.to_le_bytes().to_vec(), object(0, chest, 32, &[])].concat();
+    });
+    for (rule, uid) in [
+        ("a uid is empty", &b""[..]),
+        ("a uid has a capital letter", b"Chest"),
+        ("a uid starts with an underscore", b"_chest"),
+        ("a uid has a space", b"a chest"),
+        ("a uid has NUL", b"chest\0"),
+        ("a uid is not UTF-8", b"chest\xff"),
+    ] {
+        let uid = uid.to_vec();
+        raw(rule, &|raw| {
+            raw.objects = [
+                1_u32.to_le_bytes().to_vec(),
+                object(0, chest, 16, &uid_bytes(&uid)),
+            ]
+            .concat();
+        });
+    }
+    raw("a uid is 129 bytes", &|raw| {
+        raw.objects = [
+            1_u32.to_le_bytes().to_vec(),
+            object(0, chest, 16, &uid_bytes(&b"a".repeat(129))),
+        ]
+        .concat();
+    });
+    raw("a uid's length passes the record", &|raw| {
+        raw.objects = [
+            1_u32.to_le_bytes().to_vec(),
+            object(0, chest, 16, &[200, b'a']),
+        ]
+        .concat();
     });
     raw("a portal has an unknown kind", &|raw| {
         raw.objects = [
@@ -1569,14 +1619,23 @@ fn chunk_cases(base: &mut Base<'_>) {
                 )
                 .unwrap();
         }
+        // The control record's uids, at depths 0 and 2, are indexed.
+        connection
+            .execute_batch(
+                "INSERT INTO object_uids VALUES ('control.chest', 'vault', 0, 1, 0, 0); \
+                 INSERT INTO object_uids VALUES ('control.chest.inner', 'vault', 0, 1, 0, 2);",
+            )
+            .unwrap();
         connection.execute_batch("VACUUM").unwrap();
     });
 }
 
 /// An object with every feature, whose targets all exist in the fixture,
-/// that every reader must accept: a location portal, a field of every tag,
-/// canonical JSON with escapes, non-ASCII text, an exponent, a negative
-/// zero and an underflowing number, custom data, and an inventory two deep.
+/// that every reader must accept: a uid, a location portal, a field of
+/// every tag, canonical JSON with escapes, non-ASCII text, an exponent, a
+/// negative zero and an underflowing number, custom data, and an inventory
+/// two deep whose innermost entry has a uid of its own. The case that holds
+/// it indexes both uids.
 fn control_object(base: &Base<'_>) -> Vec<u8> {
     let chest = base.id("chest");
     let json = "[-0,1.5e3,\"\\u001f\\n\\\"\\\\\u{e9}\u{2028}\u{7f}\",{\"a\":[]},true,null]";
@@ -1608,14 +1667,26 @@ fn control_object(base: &Base<'_>) -> Vec<u8> {
         "{\"example.org/tool\":{\"note\":\"\\t\u{1F600}\"},\"example.org\":1e-400}".as_bytes(),
     );
     let mut inner = 1_u32.to_le_bytes().to_vec();
-    inner.extend_from_slice(&object(0xFFFF, chest, 2, &item_fields));
+    inner.extend_from_slice(&object(
+        0xFFFF,
+        chest,
+        2 | 16,
+        &[uid_bytes(b"control.chest.inner"), item_fields].concat(),
+    ));
     let mut inventory = 1_u32.to_le_bytes().to_vec();
     inventory.extend_from_slice(&object(0xFFFF, chest, 8, &inner));
     object(
         5,
         chest,
-        1 | 2 | 4 | 8,
-        &[portal, block, custom, inventory].concat(),
+        1 | 2 | 4 | 8 | 16,
+        &[
+            uid_bytes(b"control.chest"),
+            portal,
+            block,
+            custom,
+            inventory,
+        ]
+        .concat(),
     )
 }
 
@@ -1779,6 +1850,7 @@ fn reference_cases(base: &mut Base<'_>) {
             {
                 let mut chunk = vault.clone();
                 let mut item = chunk.objects[0].clone();
+                item.uid = None;
                 item.tile = None;
                 item.proto = island;
                 chunk.objects[0].inventory = vec![item];
@@ -1899,6 +1971,144 @@ fn reference_cases(base: &mut Base<'_>) {
     }
 }
 
+/// Broken object uids: `object_uids` rows that are malformed or disagree
+/// with the chunk records, and records whose uids the table does not index.
+#[allow(clippy::too_many_lines)]
+fn uid_cases(base: &mut Base<'_>) {
+    let found = None;
+    let rejected = Some(ErrorCode::ObjectUid);
+    for (name, rule, change, reads) in [
+        (
+            "uid-row-index",
+            "a uid's row names another object of its chunk",
+            "UPDATE object_uids SET object = 5 WHERE uid = 'village.chest'",
+            vec![
+                (object_location_op("village.chest"), found),
+                (object_op("village.chest"), rejected),
+            ],
+        ),
+        (
+            "uid-row-past",
+            "a uid's row names an index past its chunk's objects",
+            "UPDATE object_uids SET object = 9 WHERE uid = 'village.chest'",
+            vec![
+                (object_location_op("village.chest"), found),
+                (object_op("village.chest"), rejected),
+            ],
+        ),
+        (
+            "uid-row-chunk",
+            "a uid's row names a chunk that does not exist",
+            "UPDATE object_uids SET cx = 3 WHERE uid = 'village.chest'",
+            vec![
+                (object_location_op("village.chest"), found),
+                (object_op("village.chest"), rejected),
+            ],
+        ),
+        (
+            "uid-row-other-chunk",
+            "a uid's row names an existing chunk other than its object's",
+            "UPDATE object_uids SET plane = 'vault' WHERE uid = 'village.chest'",
+            vec![(object_op("village.chest"), rejected)],
+        ),
+        (
+            "uid-row-missing",
+            "an object's uid has no row",
+            "DELETE FROM object_uids WHERE uid = 'vault.chest'",
+            vec![
+                (object_location_op("vault.chest"), found),
+                (object_op("vault.chest"), found),
+            ],
+        ),
+        (
+            "uid-row-extra",
+            "a row's uid is no object's: it names an object without one",
+            "INSERT INTO object_uids VALUES ('zz.extra', 'overworld', 0, 0, 0, 0)",
+            vec![
+                (object_location_op("zz.extra"), found),
+                (object_op("zz.extra"), rejected),
+            ],
+        ),
+        (
+            "uid-row-uid",
+            "a row's uid is not an identifier",
+            "UPDATE object_uids SET uid = 'Village.chest' WHERE uid = 'village.chest'",
+            vec![(object_location_op("Village.chest"), found)],
+        ),
+        (
+            "uid-row-uid-nul",
+            "a row's uid holds NUL",
+            "UPDATE object_uids SET uid = 'village.chest' || char(0) WHERE uid = 'village.chest'",
+            vec![],
+        ),
+        (
+            "uid-row-plane",
+            "a row's plane is not an identifier",
+            "UPDATE object_uids SET plane = 'Overworld' WHERE uid = 'village.chest'",
+            vec![(object_location_op("village.chest"), rejected)],
+        ),
+        (
+            "uid-row-plane-utf8",
+            "a row's plane is text that is not UTF-8",
+            "UPDATE object_uids SET plane = CAST(x'ff' AS TEXT) WHERE uid = 'village.chest'",
+            vec![(object_location_op("village.chest"), rejected)],
+        ),
+        (
+            "uid-row-layer",
+            "a row's layer is past 32 bits",
+            "UPDATE object_uids SET layer = 2147483648 WHERE uid = 'village.chest'",
+            vec![(object_location_op("village.chest"), rejected)],
+        ),
+        (
+            "uid-row-cx",
+            "a row's chunk position puts tiles past the source format's range",
+            "UPDATE object_uids SET cx = 281474976710656 WHERE uid = 'village.chest'",
+            vec![(object_location_op("village.chest"), rejected)],
+        ),
+        (
+            "uid-row-object",
+            "a row's index is past 16,777,215",
+            "UPDATE object_uids SET object = 16777216 WHERE uid = 'village.chest'",
+            vec![(object_location_op("village.chest"), rejected)],
+        ),
+        (
+            "uid-row-object-real",
+            "a row's index is not an integer",
+            "UPDATE object_uids SET object = 4.5 WHERE uid = 'village.chest'",
+            vec![(object_location_op("village.chest"), rejected)],
+        ),
+    ] {
+        let mut case = Case::new(format!("{name}.twpack"), rule).verify(ErrorCode::ObjectUid);
+        for (op, error) in reads {
+            case = case.read(op, error);
+        }
+        base.add(case, |path| sql(path, change));
+    }
+    let vault = base.chunk("vault", 0, 0, 0);
+    for (name, rule, uid) in [
+        (
+            "uid-record-repeated",
+            "a record repeats a uid that another plane's object has",
+            Some("village.chest"),
+        ),
+        (
+            "uid-record-dropped",
+            "a record drops a uid that its row still names",
+            None,
+        ),
+    ] {
+        let mut chunk = vault.clone();
+        chunk.objects[0].uid = uid.map(str::to_owned);
+        let data = encode_chunk(&chunk).unwrap();
+        base.add(
+            Case::new(format!("{name}.twpack"), rule)
+                .read(chunk_op("vault", 0, 0, 0), None)
+                .verify(ErrorCode::ObjectUid),
+            |path| set_chunk(path, "vault", 0, 0, 0, &data),
+        );
+    }
+}
+
 /// The valid pack's expected contents, read straight from its tables.
 #[allow(clippy::too_many_lines)]
 fn valid_entry(path: &Path, name: &str) -> J {
@@ -1996,6 +2206,7 @@ fn valid_entry(path: &Path, name: &str) -> J {
                 ("chunks", J::from(summary.chunks)),
                 ("definitions", J::from(summary.definitions)),
                 ("objects", J::from(summary.objects)),
+                ("object_uids", J::from(summary.object_uids)),
             ]),
         ),
         ("meta", J::Object(meta)),
@@ -2047,5 +2258,12 @@ fn valid_entry(path: &Path, name: &str) -> J {
             ),
         ),
         ("chunks", J::Array(chunks)),
+        (
+            "object_uids",
+            rows(
+                "SELECT uid, plane, layer, cx, cy, object FROM object_uids ORDER BY uid",
+                &["uid", "plane", "layer", "cx", "cy", "object"],
+            ),
+        ),
     ])
 }
