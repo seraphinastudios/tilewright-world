@@ -88,6 +88,7 @@ jobs:
       - name: Plan
         id: plan
         env:
+          GH_TOKEN: ${{ github.token }}
           EVENT: ${{ github.event_name }}
           BRANCH: ${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}
           PULL_REQUEST: ${{ github.event.pull_request.number }}
@@ -104,6 +105,14 @@ jobs:
             echo '```'
           } >>"${GITHUB_STEP_SUMMARY}"
           echo "::notice title=Release plan::$(jq -r .reason "${plan}")"
+          # A release tag is created before its release is published. If a
+          # run failed in between, finish that release before any newer one,
+          # which would otherwise count from a tag that has no release.
+          previous=$(jq -r '.previous_tag // empty' "${plan}")
+          if [[ -n ${previous} ]] && ! gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${previous}" >/dev/null; then
+            echo "::error::${previous}, the latest release tag on ${BRANCH}, has no published release. Re-run the failed jobs of the run that created it first; see docs/RELEASING.md."
+            exit 1
+          fi
           publish=$(jq -r .publish "${plan}")
           if [[ ${EVENT} == pull_request ]]; then
             # A check build under a version that can never be released.
@@ -396,8 +405,10 @@ jobs:
       # The tag is created first, as a plain ref to the revision. Creating a
       # ref fails if it exists, so the release cannot end up on a tag that
       # someone else created at another commit. A re-run accepts the tag a
-      # failed attempt left at the revision, as long as it has no release.
+      # failed attempt left at the revision, and a release that attempt
+      # already published, which the last step checks like a new one.
       - name: Create the tag
+        id: tag
         run: |
           set -euo pipefail
           if ! gh api --method POST "repos/${GH_REPO}/git/refs" -f "ref=refs/tags/${TAG}" \
@@ -407,19 +418,23 @@ jobs:
               echo "::error::${TAG} exists and does not point at ${REVISION}"
               exit 1
             fi
-            if gh api "repos/${GH_REPO}/releases/tags/${TAG}" >/dev/null 2>&1; then
-              echo "::error::${TAG} already has a release"
-              exit 1
-            fi
-            echo "::notice::${TAG} already points at ${REVISION}; publishing its release"
+            echo "::notice::${TAG} already points at ${REVISION}"
+          fi
+          if gh api "repos/${GH_REPO}/releases/tags/${TAG}" >/dev/null 2>&1; then
+            echo "::notice::${TAG} is already published; checking it"
+            echo "published=true" >>"${GITHUB_OUTPUT}"
+          else
+            echo "published=false" >>"${GITHUB_OUTPUT}"
           fi
 
       - name: Write the release notes
+        if: steps.tag.outputs.published != 'true'
         run: bash tools/release/notes.sh dist/release/assets >"${RUNNER_TEMP}/notes.md"
 
       # gh creates a draft, uploads every asset, then publishes it. With
       # immutable releases on, publishing locks the tag and the assets.
       - name: Publish
+        if: steps.tag.outputs.published != 'true'
         run: |
           set -euo pipefail
           options=(--verify-tag --title "${TAG}" --notes-file "${RUNNER_TEMP}/notes.md"

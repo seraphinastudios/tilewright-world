@@ -93,7 +93,7 @@ its own, so a maintenance release never displaces a release of `main`.
 
 | Job | Runner | Permissions | Does |
 | --- | --- | --- | --- |
-| Plan release | ubuntu-24.04 | `contents: read` | Runs the policy, planner and packaging tests, then `scripts/release/plan.mjs`, which finds the last release tag the branch contains, analyzes the commits since it, and decides the version and whether to publish |
+| Plan release | ubuntu-24.04 | `contents: read` | Runs the policy, planner and packaging tests, then `scripts/release/plan.mjs`, which finds the last release tag the branch contains, analyzes the commits since it, and decides the version and whether to publish. Stops if that last tag has no published release. |
 | Revalidate | ubuntu-24.04 | `contents: read` | Runs `validate.yml`, so `tools/validate.sh`, on the released commit |
 | Build TARGET | one per platform | `contents: read` | `tools/release/build.sh`: builds with the pinned toolchain and `--locked`, then runs the binary to validate, compile and verify `fixtures/basic` |
 | Build the npm package | ubuntu-24.04 | `contents: read` | `tools/build-wasm.sh`, then `npm pack` at the release version (only when `packages/tilewright-pack/package.json` exists) |
@@ -252,12 +252,14 @@ source releases (its `docs/CRATE-RELEASE.md`):
   exist, but it has no release. Delete any draft release left behind, then
   re-run the failed jobs within 30 days, while the run's artifacts last.
   The re-run accepts a tag the failed attempt created at the same commit.
-  The ruleset keeps such a tag from being deleted, and the next release
-  counts from it, so do not leave it without its release.
+  The ruleset keeps such a tag from being deleted, so the plan job of every
+  later run on that branch stops until that release is published.
 - **"Publish the GitHub release" failed its checks after publishing**: the
-  release exists. Do not delete it. Read the error, for example immutable
-  releases being off, and fix the setting. A release that came out mutable
-  stays as it is for the owner to review.
+  release exists. Do not delete it. Read the error, fix the cause (for
+  example, turn immutable releases back on), then re-run the failed jobs:
+  the re-run skips publishing, checks the existing release again, and goes
+  on to the Go tag and npm. A release that came out mutable stays as it is
+  for the owner to review.
 - **"Tag the Go module" failed**: re-run it. It creates the tag or accepts
   the one already at the commit.
 - **"Publish to npm" failed**: re-run it. It checks the release again and
