@@ -22,6 +22,12 @@ cmp "${pack}" "${second}/$(basename "${pack}")"
 cargo run --locked --quiet --package tilewright-cli -- inspect "${pack}"
 # A source tree and the pack compiled from it hold the same IDs.
 cargo run --locked --quiet --package tilewright-cli -- diff fixtures/basic "${pack}"
+# So does the terrain fixture, whose packs hold tiles its transitions derive.
+cargo run --locked --quiet --package tilewright-cli -- validate fixtures/terrain
+cargo run --locked --quiet --package tilewright-cli -- compile fixtures/terrain "${first}/terrain"
+cargo run --locked --quiet --package tilewright-cli -- compile fixtures/terrain "${second}/terrain"
+terrain=$(find "${first}/terrain" -name '*.twpack')
+cmp "${terrain}" "${second}/terrain/$(basename "${terrain}")"
 
 # A transaction replays to the same bytes in separate processes, applies,
 # and its inverse restores the fixture byte for byte.
