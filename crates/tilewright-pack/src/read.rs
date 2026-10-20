@@ -31,6 +31,9 @@ use tilewright_source::{
     StairwellStep,
 };
 
+mod identities;
+pub use identities::Identity;
+
 /// The page size of every pack.
 const PAGE_SIZE: i64 = 4096;
 

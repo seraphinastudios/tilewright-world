@@ -12,11 +12,12 @@ always produce byte-identical packs. It builds the database in memory in one
 transaction, inserting rows in primary-key order, runs `VACUUM`, which leaves
 no free pages, verifies the result as section 3 describes, and writes the
 serialized database. The file uses `page_size = 4096`,
-`application_id = 0x54575031` (`"TWP1"`) and `user_version = 1`.
+`application_id = 0x54575031` (`"TWP1"`) and `user_version = 2`. Version 2
+added object uids: the `object_uids` table and version 2 chunk records.
 
 ## 1. Tables
 
-The schema is exactly these nine tables, with no indexes, views or triggers
+The schema is exactly these ten tables, with no indexes, views or triggers
 beyond SQLite's automatic ones:
 
 ```sql
@@ -29,6 +30,7 @@ CREATE TABLE stairwells (plane TEXT NOT NULL, id TEXT NOT NULL, document TEXT NO
 CREATE TABLE stairwell_steps (plane TEXT NOT NULL, layer INTEGER NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, stairwell TEXT NOT NULL, step INTEGER NOT NULL, proto TEXT NOT NULL, PRIMARY KEY (plane, layer, x, y)) WITHOUT ROWID;
 CREATE TABLE chunks (plane TEXT NOT NULL, layer INTEGER NOT NULL, cx INTEGER NOT NULL, cy INTEGER NOT NULL, encoding TEXT NOT NULL, data BLOB NOT NULL, PRIMARY KEY (plane, layer, cx, cy)) WITHOUT ROWID;
 CREATE TABLE definitions (type TEXT NOT NULL, id TEXT NOT NULL, document TEXT NOT NULL, PRIMARY KEY (type, id)) WITHOUT ROWID;
+CREATE TABLE object_uids (uid TEXT PRIMARY KEY, plane TEXT NOT NULL, layer INTEGER NOT NULL, cx INTEGER NOT NULL, cy INTEGER NOT NULL, object INTEGER NOT NULL) WITHOUT ROWID;
 ```
 
 `meta` holds exactly:
@@ -55,6 +57,14 @@ layer and plane coordinates, the stairwell's ID, the step's index in the
 stairwell's `steps` from 0, and its prototype ID. The documents are
 authoritative; `stairwell_steps` indexes exactly their steps.
 
+`object_uids` holds one row per object that has a uid, at any depth: the
+uid, the plane, layer and chunk coordinates of the object's chunk, and
+`object`, the object's index in its chunk (FORMAT.md section 7), which is
+its position in the chunk record's depth-first order (section 2). A reader
+finds the object a uid names with one primary-key lookup and one chunk
+decode, without scanning any table. The chunk records are authoritative;
+`object_uids` indexes exactly their uids.
+
 `strings` interns every string that chunk records reference: prototype IDs,
 ground and zone palette values, field names, string field values, and portal
 plane and anchor IDs. IDs run from 1 in byte order of the values; 0 means
@@ -69,7 +79,7 @@ fits. All integers are little-endian.
 
 ```text
 magic         4 bytes  "TWC1"
-version       u16      1
+version       u16      2
 chunk_size    u16      N, 1..=255
 ground_count  u8       G, the profile's ground layer count (at most 8)
 reserved      u8       0
@@ -90,7 +100,8 @@ proto         u32      string ID
 layer         u16      render layer index + 1, 0 = prototype default
 sub_layer     i16
 z             i32
-flags         u8       bit 0 portal, bit 1 fields, bit 2 custom, bit 3 inventory; other bits 0
+flags         u8       bit 0 portal, bit 1 fields, bit 2 custom, bit 3 inventory, bit 4 uid; other bits 0
+[uid]         u8 length L (1..=128), then L bytes: the object's uid, an identifier
 [portal]      u8 kind, then
               kind 0, location: u32 plane string ID (0 = same plane), i32 layer, i64 x, i64 y
               kind 1, anchor:   u32 plane string ID (0 = same plane), u32 anchor string ID
@@ -103,8 +114,11 @@ A field value is a tag byte and payload: `0` null, `1` false, `2` true,
 `3` i64, `4` finite f64, `5` string (u32 string ID), `6` JSON (u32 byte
 length + canonical JSON) for arrays and objects, which includes every value
 of a `list` or `object` field. `custom` is canonical JSON
-for an object. Objects appear in source order; inventories nest at most 16
-deep.
+for an object. Objects appear in source order, each followed by its
+inventory, so a record lists a chunk's objects in depth-first order;
+inventories nest at most 16 deep. The optional parts of an object follow
+its flags in the order above. Version 1 records had no uids; readers accept
+only version 2.
 
 ## 3. Reading
 
@@ -114,7 +128,7 @@ loading it, and never load a whole table into memory. Readers:
 - open the file read-only and immutable, with SQLite's defensive mode on and
   untrusted schemas disabled;
 - reject the file unless its schema is exactly section 1, its
-  `application_id` is `"TWP1"`, its `user_version` is 1, and `meta` holds
+  `application_id` is `"TWP1"`, its `user_version` is 2, and `meta` holds
   exactly the keys of section 1, as text of at most 64 MiB for `profile` and
   1 KiB for the others, names this format and encoding, and has a lowercase
   hex `source_digest`, its pages are 4096 bytes, it has no free pages
@@ -129,15 +143,23 @@ loading it, and never load a whole table into memory. Readers:
   source format's shape or disagrees with its row, even when reading a
   single stairwell, and a step row whose stairwell or prototype is not an
   identifier, even when reading a single step;
+- reject an `object_uids` row whose plane is not an identifier, whose layer
+  is not a 32-bit integer, whose chunk coordinates are not integers that
+  keep every tile of the chunk within the source format's integer range, or
+  whose `object` is not an integer from 0 to 16,777,215 (every object takes
+  more than one byte of a record of at most 16 MiB), even when reading a
+  single row; and, when reading the object a uid names, reject the row if
+  the object at its index is not there or has another uid;
 - check the whole stored profile, as a full verification does, before
   reporting its `layer_height`.
 
 A single read checks the shape and bounds of what it loads. Whether the
 targets it names exist (a step's stairwell or prototype, a chunk's
-strings) is checked by a full verification.
+strings, the chunk a uid's row names) is checked by a full verification.
 - reject chunk records with an unknown version, flags or tags, out-of-range
   tiles, palette indexes or sizes, a palette that is not nonzero and strictly
-  ascending, embedded JSON that is not canonical or not the required shape
+  ascending, a uid that is not an identifier, embedded JSON that is not
+  canonical or not the required shape
   (custom data is an object whose keys are domain-qualified namespaces), data
   that is not exactly one zstd frame, a decompressed size above 16 MiB, or
   trailing bytes.
@@ -213,4 +235,12 @@ A full verification also:
   chunk's plane, that field names match the field-name pattern and appear
   once per object, and that integer field values are within
   ±9,007,199,254,740,991, looking each target up once rather than loading
-  the tables.
+  the tables;
+- checks that every `object_uids` row has a uid that is an identifier,
+  integer layer and chunk coordinates that name a chunk, and an `object`
+  from 0 to 16,777,215; that each object with a uid, at any depth, is the
+  one its uid's row names, the row's chunk and index being the object's;
+  and, after the chunks, that the table has as many rows as there are
+  objects with uids. Each such object costs one primary-key lookup. Two
+  objects with one uid would need its one row to name both, so this also
+  checks that uids are unique in the pack.

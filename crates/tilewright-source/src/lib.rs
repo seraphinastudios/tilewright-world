@@ -413,6 +413,39 @@ impl Chunk {
                 object.inventory.get(*index)
             })
     }
+
+    /// Every object of the chunk, inventory entries included, in
+    /// depth-first order: each object comes before its inventory entries,
+    /// and those before the object after it. An object's position in this
+    /// order is its index in the chunk (`docs/spec/FORMAT.md` section 7).
+    #[must_use]
+    pub fn depth_first(&self) -> DepthFirst<'_> {
+        DepthFirst {
+            levels: vec![self.objects.iter()],
+        }
+    }
+}
+
+/// The objects of a chunk in depth-first order; see [`Chunk::depth_first`].
+#[derive(Clone, Debug)]
+pub struct DepthFirst<'c> {
+    /// The objects left at each depth, outermost first.
+    levels: Vec<std::slice::Iter<'c, Object>>,
+}
+
+impl<'c> Iterator for DepthFirst<'c> {
+    type Item = &'c Object;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let level = self.levels.last_mut()?;
+            if let Some(object) = level.next() {
+                self.levels.push(object.inventory.iter());
+                return Some(object);
+            }
+            self.levels.pop();
+        }
+    }
 }
 
 /// A placed object or an inventory entry.

@@ -17,7 +17,7 @@ Every tile has one address, `(plane, layer, x, y)`.
 | Plane | A continuous world: a tile grid that can grow in any direction. |
 | Layer | An integer floor of a plane. `0` is the surface; negative layers are below, positive above. With the profile's `layer_height`, layers stack vertically (section 5). |
 | Chunk | A fixed square of one layer, `chunk_size` × `chunk_size` tiles (32 in version 1). Storage, streaming and diff unit only: a chunk has no header and no links. |
-| Object | An instance of a prototype defined by the profile, placed on a tile, with optional field overrides and an inventory. |
+| Object | An instance of a prototype defined by the profile, placed on a tile, with optional field overrides, an inventory and a uid: a stable ID unique in the world. |
 | Zone | A named area painted per tile and layer, with a parent. Zones carry properties such as display name, music or rules, as declared by the profile. |
 | Portal | An object property that targets a location or an anchor. |
 | Anchor | A stable named location referenced by scripts, quests, portals and respawn points. |
@@ -192,7 +192,7 @@ replaces the exact byte span of the values it changes.
     {"at": [7, 0], "proto": "tree_1"},
     {"at": [15, 0], "proto": "wall_1", "layer": "wall", "fields": {"name": "Old wall"}},
     {"at": [9, 4], "proto": "stairs_down", "portal": {"layer": -1, "at": [105, 1188]}},
-    {"at": [2, 2], "proto": "chest", "inventory": [{"proto": "coin", "fields": {"count": 3}}]}
+    {"uid": "village.chest", "at": [2, 2], "proto": "chest", "inventory": [{"proto": "coin", "fields": {"count": 3}}]}
   ]
 }
 ```
@@ -220,6 +220,7 @@ Objects:
 
 | Key | Meaning |
 | --- | --- |
+| `uid` | Optional stable ID of the object, unique in the world (below). |
 | `at` | Chunk-local `[x, y]`; required on top-level objects, absent in inventories. |
 | `proto` | Prototype ID; required. |
 | `layer` | Render layer name; defaults to the prototype's layer. |
@@ -233,6 +234,37 @@ Objects:
 Object order is significant: objects on the same tile keep their listed order,
 which is their stacking order within a layer and sub-layer. A multi-tile
 object appears once, at its head tile; the prototype defines its footprint.
+An object's *index* in its chunk is its position in depth-first order: the
+chunk's objects in list order, each followed by its inventory entries in
+the same order, before the next object. In the example above, the chest is
+index 3 and its coin index 4.
+
+Object uids:
+
+- `uid` names one object for good, so that saves, scripts and tools can
+  refer to it whatever its tile, its place in a list or its container. It
+  is optional and allowed on top-level objects and inventory entries
+  alike. A multi-tile object is one entry, so it has one uid. Terrain cells
+  and stairwell steps are not objects and have none.
+- A uid is an identifier (section 2): 1 to 128 bytes. No identifier is
+  reserved. A string that is not an identifier, such as one with a capital
+  letter or a leading `_`, can never be a uid, so a game may name objects
+  it creates at runtime that way without meeting an authored uid.
+- Uids are unique in the whole world: no two objects share one, in any
+  plane, layer, chunk or inventory. A uid names its object without naming a
+  plane, and the object keeps it when it moves to another tile, chunk,
+  plane or container. Each object that repeats a uid an object read before
+  it already has is a `ref.duplicate` error.
+- A uid is never reused in one world: once its object is removed, no other
+  object is given it, since saves may still name it. A tool that copies an
+  object gives the copy a new uid or none. One revision of a world cannot
+  show reuse, so validators do not check it; `tilewright diff`
+  ([DIFF.md](DIFF.md)) reports uids that a change removes.
+- Tools that assign uids should make them independent of the object's
+  place and of each other, such as 128 random bits in lowercase base32
+  after a short prefix (`o.k3vq7zr2mxa5d6wfh4pnyt2cgu`), so that uids
+  assigned on different branches do not collide. Authors may also write
+  readable ones, such as `village.chest`.
 
 ## 8. Zones: `planes/<plane>/zones.jsonc`
 
@@ -446,8 +478,9 @@ document matches its section's shape and the profile's schemas, at every
 level of `list` and `object` fields, every reference resolves (profile,
 schemas, planes, zones, anchors, prototypes, references, portal targets,
 stairwell steps), file names match content, every stairwell's steps
-connect, no tile holds two stairwell steps, and no two zones, anchors,
-stairwells, planes or definitions share an ID. Validators report every error
+connect, no tile holds two stairwell steps, no two zones, anchors,
+stairwells, planes or definitions share an ID, and no two objects of the
+world share a uid. Validators report every error
 with file, byte span, line, column and a stable code, up to a limit they
 state (10,000 by default in the reference loader); past it they report one
 `source.budget` diagnostic instead of the rest:

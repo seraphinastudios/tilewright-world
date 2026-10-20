@@ -431,14 +431,8 @@ pub(crate) fn collect_uids<'w>(
     (layer, cx, cy): (i32, i64, i64),
     chunk: &'w Chunk,
 ) -> Result<(), Error> {
-    let mut index: i64 = 0;
-    // Objects in the record's order: each before its inventory entries.
-    let mut levels = vec![chunk.objects.iter()];
-    while let Some(level) = levels.last_mut() {
-        let Some(object) = level.next() else {
-            levels.pop();
-            continue;
-        };
+    // Depth-first order is the order of the chunk's record.
+    for (index, object) in (0_i64..).zip(chunk.depth_first()) {
         if let Some(uid) = &object.uid
             && rows
                 .insert(identifier(uid)?, (plane, layer, cx, cy, index))
@@ -446,8 +440,6 @@ pub(crate) fn collect_uids<'w>(
         {
             return Err(Error::Invalid(format!("two objects have uid {uid}")));
         }
-        index += 1;
-        levels.push(object.inventory.iter());
     }
     Ok(())
 }
