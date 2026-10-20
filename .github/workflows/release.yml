@@ -92,10 +92,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           EVENT: ${{ github.event_name }}
-          BRANCH: ${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}
+          BASE_REF: ${{ github.base_ref }}
           PULL_REQUEST: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
+          # The branch from the full ref: a dispatch may name a tag, and a
+          # tag called "main" must not pass for the branch.
+          if [[ ${EVENT} == pull_request ]]; then
+            BRANCH=${BASE_REF}
+          elif [[ ${GITHUB_REF} == refs/heads/* ]]; then
+            BRANCH=${GITHUB_REF#refs/heads/}
+          else
+            echo "::error::releases run from a branch, not ${GITHUB_REF}"
+            exit 1
+          fi
           plan="${RUNNER_TEMP}/plan.json"
           TILEWRIGHT_RELEASE_TRIGGER=${EVENT} TILEWRIGHT_RELEASE_BRANCH=${BRANCH} \
             node scripts/release/plan.mjs >"${plan}"
@@ -328,7 +338,7 @@ jobs:
   attest:
     name: Attest build provenance
     needs: [plan, validate, package]
-    if: ${{ !cancelled() && needs.plan.outputs.publish == 'true' && needs.validate.result == 'success' && needs.package.result == 'success' }}
+    if: ${{ !cancelled() && needs.plan.outputs.publish == 'true' && github.ref_type == 'branch' && needs.validate.result == 'success' && needs.package.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -369,7 +379,7 @@ jobs:
   release:
     name: Publish the GitHub release
     needs: [plan, attest]
-    if: ${{ !cancelled() && needs.plan.outputs.publish == 'true' && needs.attest.result == 'success' }}
+    if: ${{ !cancelled() && needs.plan.outputs.publish == 'true' && github.ref_type == 'branch' && needs.attest.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -468,7 +478,7 @@ jobs:
   go-tag:
     name: Tag the Go module
     needs: [plan, release]
-    if: ${{ !cancelled() && needs.plan.outputs.publish == 'true' && needs.release.result == 'success' }}
+    if: ${{ !cancelled() && needs.plan.outputs.publish == 'true' && github.ref_type == 'branch' && needs.release.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -500,7 +510,7 @@ jobs:
     # to true; see docs/RELEASING.md. Only releases from main are published,
     # and the npm environment admits only main. Publishing in the release's
     # own run gives npm's provenance the release's commit.
-    if: ${{ !cancelled() && needs.plan.outputs.publish == 'true' && needs.plan.outputs.npm == 'true' && needs.plan.outputs.branch == 'main' && needs.release.result == 'success' && vars.TILEWRIGHT_NPM_PUBLISH == 'true' }}
+    if: ${{ !cancelled() && needs.plan.outputs.publish == 'true' && needs.plan.outputs.npm == 'true' && needs.plan.outputs.branch == 'main' && github.ref == 'refs/heads/main' && needs.release.result == 'success' && vars.TILEWRIGHT_NPM_PUBLISH == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: npm
