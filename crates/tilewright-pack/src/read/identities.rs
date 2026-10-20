@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 //! Listing the identities a pack holds, for tools that compare IDs: its
-//! planes, zones, anchors, stairwells and definitions, and the addresses of
-//! its chunks.
+//! render layers, planes, zones, anchors, stairwells and definitions, and
+//! the addresses of its chunks.
 
 use super::{
     bounded_identifier, bounded_text, maximum_document_bytes, stored_document, stored_stairwell,
@@ -11,7 +11,7 @@ use super::{
 };
 use crate::{Error, Pack, is_identifier};
 use rusqlite::Row;
-use tilewright_jsonc::MAX_SAFE_INTEGER;
+use tilewright_jsonc::{MAX_SAFE_INTEGER, Value};
 use tilewright_source::CHUNK_SIZE;
 
 /// One identity of a pack, as [`Pack::visit_identities`] lists it.
@@ -19,6 +19,11 @@ use tilewright_source::CHUNK_SIZE;
 /// document, or a zone's or stairwell's entry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Identity<'a> {
+    /// A render layer of the profile and its position in `render_layers`.
+    RenderLayer {
+        name: &'a str,
+        position: usize,
+    },
     Plane {
         id: &'a str,
         document: &'a str,
@@ -124,12 +129,14 @@ impl Pack {
         Ok(())
     }
 
-    /// Calls `visit` with every plane, zone, stairwell, definition and
-    /// anchor, and then with the address of every chunk: table by table in
-    /// that order, each table in primary-key order. One stored document is
-    /// held at a time.
+    /// Calls `visit` with every render layer of the profile, in the
+    /// profile's order, then with every plane, zone, stairwell, definition
+    /// and anchor, and then with the address of every chunk: table by table
+    /// in that order, each table in primary-key order. One stored document
+    /// is held at a time.
     ///
-    /// Like [`Pack::chunk`], it checks the shape and bounds of what it
+    /// The stored profile is checked first, as a full verification checks
+    /// it. Like [`Pack::chunk`], it then checks the shape and bounds of what it
     /// loads: keys are identifiers, documents are canonical JSON of objects
     /// whose identity agrees with their row, stairwells have the source
     /// format's shape, layers and positions are integers within the
@@ -147,6 +154,23 @@ impl Pack {
         let disagrees =
             |what: String| Error::Invalid(format!("the document of {what} disagrees with its row"));
         let key = bounded_identifier;
+
+        // The whole profile is checked, so its render layers are 1 to
+        // 65,534 unique identifiers.
+        self.profile_layers()?;
+        let profile = stored_document(self.meta("profile")?, "the stored profile")?;
+        let layers = profile
+            .root()
+            .get("render_layers")
+            .and_then(Value::as_array)
+            .ok_or_else(|| Error::Invalid("the stored profile lists no render layers".into()))?;
+        for (position, layer) in layers.iter().enumerate() {
+            let name = layer
+                .as_str()
+                .ok_or_else(|| Error::Invalid("a render layer is not a string".into()))?;
+            visit(Identity::RenderLayer { name, position })?;
+        }
+        drop(profile);
 
         self.each_row(
             &format!("SELECT {}, {document} FROM planes ORDER BY id", key("id")),
@@ -307,6 +331,9 @@ mod tests {
         let mut listed = Vec::new();
         Pack::open(path)?.visit_identities(&mut |identity| {
             listed.push(match identity {
+                Identity::RenderLayer { name, position } => {
+                    format!("render_layer {name} {position}")
+                }
                 Identity::Plane { id, document } => format!("plane {id} {document}"),
                 Identity::Zone {
                     plane,
@@ -343,6 +370,9 @@ mod tests {
     fn identities_list_every_row_in_order_with_its_source_document() {
         let world = world();
         let mut expected = Vec::new();
+        for (position, name) in world.profile().render_layers.iter().enumerate() {
+            expected.push(format!("render_layer {name} {position}"));
+        }
         for (id, plane) in world.planes() {
             expected.push(format!("plane {id} {}", plane.canonical));
         }
@@ -443,6 +473,18 @@ mod tests {
                 "canonical",
             ),
             ("UPDATE chunks SET layer = 'x' WHERE layer = 1", "32-bit"),
+            (
+                "UPDATE meta SET value = '{\"render_layers\":[]}' WHERE key = 'profile'",
+                "profile",
+            ),
+            (
+                "UPDATE meta SET value = replace(value, '\"effect\"]', '\"effect\",\"floor\"]') WHERE key = 'profile'",
+                "render_layers",
+            ),
+            (
+                "UPDATE meta SET value = '2.0.0' WHERE key = 'profile_version'",
+                "profile_version",
+            ),
             (
                 "UPDATE chunks SET cx = 281474976710656 WHERE plane = 'vault'",
                 "chunk coordinate",

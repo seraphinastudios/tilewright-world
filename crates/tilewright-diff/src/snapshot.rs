@@ -11,7 +11,7 @@ use std::{
     fmt::Write as _,
     ops::Bound,
 };
-use tilewright_jsonc::{Document, Limits as ParseLimits, Value, write_json_string};
+use tilewright_jsonc::{Document, Limits as ParseLimits, write_json_string};
 use tilewright_pack::{Identity, Pack};
 use tilewright_source::World;
 
@@ -66,7 +66,9 @@ impl Snapshot {
         let profile = world.profile();
         let mut builder = Builder::new(*limits);
         let mut read = || -> Result<(), String> {
-            builder.render_layers(profile.render_layers.iter().map(String::as_str))?;
+            for (position, name) in profile.render_layers.iter().enumerate() {
+                builder.render_layer(name, position)?;
+            }
             for (id, plane) in world.planes() {
                 builder.plane(id, &plane.canonical)?;
                 for (zone, entry) in &plane.zones {
@@ -108,26 +110,12 @@ impl Snapshot {
     /// Returns [`Error::TooManyIds`] past the limit, or [`Error::Pack`] if
     /// SQLite fails or a row or the stored profile is invalid.
     pub fn from_pack(pack: &Pack, limits: &Limits) -> Result<Self, Error> {
-        let invalid = |message: String| Error::Pack(tilewright_pack::Error::Invalid(message));
-        let meta = |key: &str| -> Result<String, Error> {
-            pack.meta(key)
-                .map_err(Error::Pack)?
-                .ok_or_else(|| invalid(format!("the pack has no {key}")))
-        };
-        let profile = Document::parse(meta("profile")?, &canonical_limits())
-            .map_err(|_| invalid("the stored profile is not JSON".into()))?;
-        let render_layers: Vec<&str> = profile
-            .root()
-            .get("render_layers")
-            .and_then(Value::as_array)
-            .and_then(|items| items.iter().map(Value::as_str).collect())
-            .ok_or_else(|| invalid("the stored profile has no render_layers list".into()))?;
         let mut builder = Builder::new(*limits);
-        let read = builder.render_layers(render_layers.into_iter());
-        builder.check()?;
-        read.map_err(invalid)?;
+        // The visit checks the stored profile before anything else, and
+        // with it the profile ID and version read below.
         let read = pack.visit_identities(&mut |identity| {
             match identity {
+                Identity::RenderLayer { name, position } => builder.render_layer(name, position),
                 Identity::Plane { id, document } => builder.plane(id, document),
                 Identity::Zone {
                     plane,
@@ -159,6 +147,13 @@ impl Snapshot {
         });
         builder.check()?;
         read.map_err(Error::Pack)?;
+        let meta = |key: &str| -> Result<String, Error> {
+            pack.meta(key).map_err(Error::Pack)?.ok_or_else(|| {
+                Error::Pack(tilewright_pack::Error::Invalid(format!(
+                    "the pack has no {key}"
+                )))
+            })
+        };
         Ok(builder.finish(Side {
             input: Input::Pack,
             profile: meta("profile_id")?,
@@ -246,18 +241,15 @@ impl Builder {
         Ok(())
     }
 
-    /// Render layers stand in for their content with their position in the
+    /// A render layer stands in for its content with its position in the
     /// profile's list.
-    fn render_layers<'a>(&mut self, layers: impl Iterator<Item = &'a str>) -> Result<(), String> {
-        for (index, layer) in layers.enumerate() {
-            self.admit()?;
-            if !is_identifier(layer) {
-                return Err("a render layer is not an identifier".into());
-            }
-            let fingerprint = Sha256::digest(index.to_string()).into();
-            self.insert(Kind::RenderLayer, layer.to_owned(), fingerprint)?;
+    fn render_layer(&mut self, name: &str, position: usize) -> Result<(), String> {
+        self.admit()?;
+        if !is_identifier(name) {
+            return Err("a render layer is not an identifier".into());
         }
-        Ok(())
+        let fingerprint = Sha256::digest(position.to_string()).into();
+        self.insert(Kind::RenderLayer, name.to_owned(), fingerprint)
     }
 
     fn plane(&mut self, id: &str, document: &str) -> Result<(), String> {
