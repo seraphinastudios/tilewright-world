@@ -30,7 +30,8 @@ use std::{
 use tilewright_platform::windows::{self as os, Open, Status};
 use windows_sys::{
     Wdk::Storage::FileSystem::{
-        FILE_CREATE, FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_IF,
+        FILE_CREATE, FILE_DELETE_ON_CLOSE, FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN,
+        FILE_OPEN_IF,
     },
     Win32::{
         Foundation::{
@@ -44,11 +45,10 @@ use windows_sys::{
             SE_SELF_RELATIVE,
         },
         Storage::FileSystem::{
-            DELETE, FILE_ADD_FILE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_ENCRYPTED,
-            FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
-            FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
-            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, READ_CONTROL,
-            SYNCHRONIZE,
+            DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_ENCRYPTED, FILE_ATTRIBUTE_READONLY,
+            FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_GENERIC_READ,
+            FILE_GENERIC_WRITE, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+            FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, READ_CONTROL, SYNCHRONIZE,
         },
     },
 };
@@ -57,6 +57,9 @@ use windows_sys::{
 /// entries and read its attributes and security.
 const DIRECTORY_ACCESS: u32 =
     FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | READ_CONTROL;
+/// The name of the lock file in the root, reserved.
+pub(crate) const LOCK_NAME: &str = ".tilewright.lock";
+
 /// Others may read, write, rename and delete what a handle is open on, as
 /// on Unix.
 const SHARE_ALL: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
@@ -327,22 +330,43 @@ impl Root {
         }
     }
 
-    /// Takes an exclusive lock on the root directory, held until the
-    /// returned lock is dropped; `None` when another holds it. The lock is
-    /// a handle on the root that asks for write access and shares it with
-    /// no other handle, so a second one is refused.
+    /// Takes an exclusive lock on the root, held until the returned lock is
+    /// dropped; `None` when another holds it. The lock is the file
+    /// [`LOCK_NAME`] in the root, created afresh, shared with no other
+    /// handle and deleted when the lock is dropped, or by the system if the
+    /// process stops. (A handle on the root directory that shares write
+    /// access with no one would also refuse the renames into the root that
+    /// publishing makes.) A file already there that no one holds is refused,
+    /// not taken over, since it may be anyone's.
     pub(crate) fn lock(&self) -> Result<Option<Lock>, Refused> {
+        let root = self.root()?;
         match open(
-            self.root()?,
-            "",
-            FILE_ADD_FILE,
-            FILE_SHARE_READ | FILE_SHARE_DELETE,
-            FILE_OPEN,
-            FILE_DIRECTORY_FILE,
+            root,
+            LOCK_NAME,
+            DELETE | FILE_READ_ATTRIBUTES,
+            0,
+            FILE_CREATE,
+            FILE_NON_DIRECTORY_FILE | FILE_DELETE_ON_CLOSE,
         ) {
-            Ok(handle) => Ok(Some(Lock(handle))),
+            Ok(handle) => return Ok(Some(Lock(handle))),
+            Err(Status(STATUS_OBJECT_NAME_COLLISION)) => {}
+            Err(status) => return Err(Refused::Io(status.io_error())),
+        }
+        // Something is there: a lock another holds cannot be opened even
+        // to look at it.
+        match open(root, LOCK_NAME, DELETE, 0, FILE_OPEN, 0) {
             Err(Status(STATUS_SHARING_VIOLATION)) => Ok(None),
+            Err(status) if missing(status) => Err(Refused::Io(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "the lock was released while it was taken; try again",
+            ))),
             Err(status) => Err(Refused::Io(status.io_error())),
+            Ok(_) => Err(Refused::Io(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "{LOCK_NAME} is in the root but no edit holds it; remove it if it is not wanted"
+                ),
+            ))),
         }
     }
 

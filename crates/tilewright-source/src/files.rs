@@ -1080,14 +1080,28 @@ mod windows_tests {
         let directory = tree();
         let root = Root::new(directory.path());
         let other = Root::new(directory.path());
+        let lock_file = directory.path().join(super::windows::LOCK_NAME);
         let held = root.lock().unwrap();
         assert!(held.is_some());
         assert!(other.lock().unwrap().is_none());
-        // Others may still read the tree.
+        // Others may still read the tree, and a file renamed into the root
+        // may replace another.
         assert_eq!(other.kind(&["dir"]).unwrap(), Found::Directory);
         assert!(Root::new(directory.path()).list(&[]).unwrap().count() > 0);
+        let base = root.directory(&[], false).unwrap();
+        base.write(".world.jsonc.tilewright-tmp", None, b"{}")
+            .unwrap();
+        base.write("world.jsonc", None, b"old").unwrap();
+        base.rename(".world.jsonc.tilewright-tmp", "world.jsonc")
+            .unwrap();
+        // The lock file goes with the lock.
         drop(held);
+        assert!(!lock_file.exists());
         assert!(other.lock().unwrap().is_some());
+        // One that no edit holds is not taken over.
+        fs::write(&lock_file, "someone's").unwrap();
+        assert!(matches!(root.lock(), Err(Refused::Io(_))));
+        assert_eq!(fs::read_to_string(&lock_file).unwrap(), "someone's");
     }
 
     #[test]

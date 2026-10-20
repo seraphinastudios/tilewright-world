@@ -270,8 +270,9 @@ Publishing a carried-out transaction works on the root it was carried out
 on: the directory opened then, whatever its path names later. It:
 
 1. takes the source root's exclusive lock (an advisory `flock` of the root
-   directory; on Windows a handle on it that asks for write access and
-   shares it with no other), so two applies cannot interleave, and reads
+   directory; on Windows the file `.tilewright.lock` in the root, created
+   afresh, shared with no one and deleted when released, even by a process
+   that stops), so two applies cannot interleave, and reads
    the permissions of the files it changes and of the directories above
    them (below);
 2. writes each new file beside its target as `.<name>.tilewright-tmp`,
@@ -390,7 +391,9 @@ source tree's version control is the other way back.
 Carrying out ignores whatever is at the staging name beside every file a
 transaction touches or consults, a link or special file included.
 
-Staging names, `.<name>.tilewright-tmp`, are reserved beside source files.
+Staging names, `.<name>.tilewright-tmp`, are reserved beside source files,
+and on Windows `.tilewright.lock` in the root; publishing there refuses to
+take a lock file that no apply holds rather than remove it.
 A program other than the toolkit changing the tree at the same moment can
 race a publish: the lock only orders applies. Windows cannot sync a
 directory, so a publish there reports that it was not made durable, and

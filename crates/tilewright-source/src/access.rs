@@ -263,11 +263,11 @@ impl SourceRoot {
     /// Takes the root's exclusive lock, held until the returned value is
     /// dropped. It fails at once with [`AccessError::Locked`] if another
     /// holder, in this process or another, has it. On Unix it is an
-    /// advisory `flock` of the root directory; on Windows a handle on the
-    /// root directory that asks for write access and shares it with no
-    /// one, so it also fails while another program has the root directory
-    /// open for writing. Elsewhere there is no lock and this always
-    /// succeeds.
+    /// advisory `flock` of the root directory; on Windows the file
+    /// `.tilewright.lock` in the root, created afresh, shared with no one
+    /// and deleted when the lock is released or its process stops, so a
+    /// file by that name that no one holds is an error. Elsewhere there is
+    /// no lock and this always succeeds.
     pub fn lock(&self) -> Result<SourceLock, AccessError> {
         match self.root.lock() {
             Ok(Some(lock)) => Ok(SourceLock(lock)),

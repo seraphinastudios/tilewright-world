@@ -49,8 +49,8 @@ replaces did not have.
   replacement or an inverse would not get, is refused. Publishing never
   changes a list. A list protected from inheritance, a mandatory integrity
   label, a central access policy, encryption or a read-only file is
-  refused. The lock is a handle on the root directory that shares write
-  access with no one.
+  refused. The lock is a file in the root, `.tilewright.lock`, that is
+  shared with no one and deleted when released.
 
 Other platforms, the BSDs other than macOS among them, are not checked for
 access control lists and labels the same way, so applying is refused
