@@ -203,8 +203,36 @@ fn picks_follow_weights() {
     // The same hash always picks the same variant.
     assert_eq!(open.pick(5), open.pick(5));
     assert_eq!(open.pick(0), "water");
+    assert_eq!(open.pick(2), "water");
     assert_eq!(open.pick(3), "water_ripple");
     assert_eq!(open.pick(4), "water");
+    // Each point of the total picks the variant whose share holds it, as
+    // walking the running sum does.
+    let weights = [1_u32, 65_535, 2, 1, 7];
+    let pattern = super::Pattern::new(
+        weights
+            .iter()
+            .enumerate()
+            .map(|(index, weight)| super::Variant {
+                proto: format!("v{index}"),
+                weight: *weight,
+            })
+            .collect(),
+    );
+    let total: u64 = weights.iter().map(|weight| u64::from(*weight)).sum();
+    for point in [0, 1, 2, 65_535, 65_536, 65_537, 65_538, 65_539, total - 1] {
+        let mut left = point;
+        let walked = weights
+            .iter()
+            .position(|weight| {
+                let inside = left < u64::from(*weight);
+                left = left.saturating_sub(u64::from(*weight));
+                inside
+            })
+            .unwrap();
+        assert_eq!(pattern.pick(point), format!("v{walked}"), "{point}");
+        assert_eq!(pattern.pick(point + total), format!("v{walked}"), "{point}");
+    }
 }
 
 #[test]

@@ -185,11 +185,14 @@ pub struct Variant {
     pub weight: u32,
 }
 
-/// The variants of one pattern, at least one, and their total weight.
+/// The variants of one pattern, at least one, with the running sum of their
+/// weights.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Pattern {
     variants: Vec<Variant>,
-    total: u64,
+    /// For each variant, the sum of its weight and those before it; the
+    /// last is the total.
+    cumulative: Vec<u64>,
 }
 
 impl Pattern {
@@ -199,22 +202,33 @@ impl Pattern {
         &self.variants
     }
 
+    pub(crate) fn new(variants: Vec<Variant>) -> Self {
+        let cumulative = variants
+            .iter()
+            .scan(0_u64, |sum, variant| {
+                *sum += u64::from(variant.weight);
+                Some(*sum)
+            })
+            .collect();
+        Self {
+            variants,
+            cumulative,
+        }
+    }
+
     /// The variant a tile with variant hash `hash` draws: the first at
     /// which the running sum of weights exceeds `hash` modulo their total.
+    /// A binary search finds it, so a pick costs time in proportion to the
+    /// logarithm of the number of variants.
     #[must_use]
     pub fn pick(&self, hash: u64) -> &str {
-        let mut point = hash % self.total.max(1);
-        for variant in &self.variants {
-            let weight = u64::from(variant.weight);
-            if point < weight {
-                return &variant.proto;
-            }
-            point -= weight;
-        }
-        // Weights sum to the total, so the loop has returned; a pattern
-        // always has a variant.
+        let total = self.cumulative.last().copied().unwrap_or(0).max(1);
+        let point = hash % total;
+        let index = self.cumulative.partition_point(|sum| *sum <= point);
+        // A pattern always has a variant, and the point is below the total.
         self.variants
-            .last()
+            .get(index)
+            .or_else(|| self.variants.last())
             .map_or("", |variant| variant.proto.as_str())
     }
 }

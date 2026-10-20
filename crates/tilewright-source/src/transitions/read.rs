@@ -138,11 +138,7 @@ fn read_pattern<'a>(
         }
         _ => vec![read_variant(reader, references, value)?],
     };
-    let total = variants
-        .iter()
-        .map(|variant| u64::from(variant.weight))
-        .sum();
-    Some(Pattern { variants, total })
+    Some(Pattern::new(variants))
 }
 
 /// A pattern key: a canonical decimal integer from 0 to 255.
