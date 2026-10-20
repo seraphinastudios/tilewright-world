@@ -200,14 +200,8 @@ impl Allowlist {
                     values.push((text, value.span()));
                 }
                 let (kind_text, kind_span) = values[0];
-                let kind = Kind::parse(kind_text).ok_or_else(|| {
-                    fail(
-                        kind_span,
-                        "shape.range",
-                        "kind must be anchor, definition, plane, render_layer, stairwell or zone"
-                            .into(),
-                    )
-                })?;
+                let kind = Kind::parse(kind_text)
+                    .ok_or_else(|| fail(kind_span, "shape.range", kinds_message()))?;
                 for (id, span) in &values[1..] {
                     if !kind.is_id(id) {
                         return Err(fail(*span, "shape.identifier", id_form(kind)));
@@ -287,6 +281,15 @@ fn closed(
             format!("unknown key; expected {}", keys.join(", ")),
         )),
         None => Ok(()),
+    }
+}
+
+/// The message for a kind that is not one of [`Kind::ALL`], which it lists.
+fn kinds_message() -> String {
+    let names: Vec<&str> = Kind::ALL.iter().map(|kind| kind.as_str()).collect();
+    match names.split_last() {
+        Some((last, rest)) => format!("kind must be {} or {last}", rest.join(", ")),
+        None => "kind must be a known kind".to_owned(),
     }
 }
 

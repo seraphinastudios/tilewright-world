@@ -993,6 +993,17 @@ fn object_uids_follow_their_objects() {
     );
     assert!(!report.breaking());
 
+    // Unknown kinds are told every kind, objects included.
+    let error = Allowlist::parse(
+        r#"{"format": "tilewright.diff-allow/1", "remove": [{"kind": "objects", "id": "a"}]}"#,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "shape.range");
+    assert_eq!(
+        error.message,
+        "kind must be anchor, definition, object, plane, render_layer, stairwell or zone"
+    );
+
     // An object uid is written as one identifier.
     let error = Allowlist::parse(
         r#"{"format": "tilewright.diff-allow/1", "remove": [{"kind": "object", "id": "vault/chest"}]}"#,
