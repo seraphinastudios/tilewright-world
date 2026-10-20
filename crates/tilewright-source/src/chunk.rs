@@ -10,7 +10,10 @@ use crate::{
     read::Reader,
     schema::{References, Target, read_fields},
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 use tilewright_jsonc::Value;
 
 /// Deepest inventory nesting accepted.
@@ -151,6 +154,7 @@ pub(crate) fn read_chunk(
         let mut context = ObjectContext {
             profile,
             plane: address.plane,
+            path: Arc::from(path),
             size: address.size,
             references,
         };
@@ -335,124 +339,192 @@ fn read_heights<'a>(reader: &Reader<'a>, value: &'a Value, chunk_size: u16) -> O
 struct ObjectContext<'p, 'r> {
     profile: &'p Profile,
     plane: &'p str,
+    /// The chunk's path, kept with each uid its objects claim.
+    path: Arc<str>,
     size: u16,
     references: &'r mut References,
 }
 
-#[allow(clippy::too_many_lines)]
+/// The keys an object may have.
+const OBJECT_KEYS: &[&str] = &[
+    "uid",
+    "at",
+    "proto",
+    "layer",
+    "sub_layer",
+    "z",
+    "fields",
+    "portal",
+    "inventory",
+    "custom",
+];
+
+/// Reads an object. Every part of it is read, and reports its own problems,
+/// before a problem in one part fails the object, so a malformed value
+/// never hides the problems of the object's other values or of its
+/// inventory entries.
 fn read_object<'a>(
     reader: &Reader<'a>,
     context: &mut ObjectContext<'_, '_>,
     value: &'a Value,
     depth: usize,
 ) -> Option<Object> {
-    let entry = reader.object(
-        value,
-        &[
-            "at",
-            "proto",
-            "layer",
-            "sub_layer",
-            "z",
-            "fields",
-            "portal",
-            "inventory",
-            "custom",
-        ],
-    )?;
-    let at = if depth == 0 {
-        let at_value = reader.required(entry, "at")?;
-        let [x, y] = reader.coordinates(at_value)?;
-        let limit = i64::from(context.size);
-        if !(0..limit).contains(&x) || !(0..limit).contains(&y) {
-            reader.report(
-                at_value.span(),
-                Code::Range,
-                format!("at must be within 0..{limit} on both axes"),
-            );
-            return None;
-        }
-        Some([u16::try_from(x).ok()?, u16::try_from(y).ok()?])
-    } else {
-        if let Some(at_value) = entry.get("at") {
-            reader.report(
-                at_value.span(),
-                Code::UnknownKey,
-                "inventory entries have no \"at\"",
-            );
-            return None;
-        }
-        None
-    };
-    let proto_value = reader.required(entry, "proto")?;
-    let proto = reader.identifier(proto_value)?;
-    reader.reference(
-        context.references,
-        &Target::Definition {
-            kind: "proto".to_owned(),
-            id: proto.clone(),
-        },
-        proto_value.span(),
-    );
-    let layer = match entry.get("layer") {
-        Some(layer_value) => {
-            let layer = reader.identifier(layer_value)?;
-            reader.reference(
-                context.references,
-                &Target::RenderLayer(layer.clone()),
-                layer_value.span(),
-            );
-            Some(layer)
-        }
-        None => None,
-    };
-    let sub_layer = match entry.get("sub_layer") {
-        Some(value) => {
-            i16::try_from(reader.integer(value, i64::from(i16::MIN), i64::from(i16::MAX))?).ok()?
-        }
-        None => 0,
-    };
-    let z = match entry.get("z") {
-        Some(value) => reader.i32(value)?,
-        None => 0,
-    };
+    let entry = reader.object(value, OBJECT_KEYS)?;
+    // The uid is claimed before the inventory is read, so of two objects
+    // that share one, the first in document order keeps it.
+    let uid = read_uid(reader, context, entry);
+    let at = read_at(reader, context.size, entry, depth);
+    let proto = reader.required(entry, "proto").and_then(|value| {
+        let proto = reader.identifier(value)?;
+        reader.reference(
+            context.references,
+            &Target::Definition {
+                kind: "proto".to_owned(),
+                id: proto.clone(),
+            },
+            value.span(),
+        );
+        Some(proto)
+    });
+    let layer = optional(entry.get("layer"), |value| {
+        let layer = reader.identifier(value)?;
+        reader.reference(
+            context.references,
+            &Target::RenderLayer(layer.clone()),
+            value.span(),
+        );
+        Some(layer)
+    });
+    let sub_layer = optional(entry.get("sub_layer"), |value| {
+        i16::try_from(reader.integer(value, i64::from(i16::MIN), i64::from(i16::MAX))?).ok()
+    });
+    let z = optional(entry.get("z"), |value| reader.i32(value));
     let fields = read_fields(
         reader,
         entry,
         entry.get("fields"),
         &context.profile.object_fields,
         context.references,
-    )?;
-    let portal = match entry.get("portal") {
-        Some(value) => Some(read_portal(reader, context, value)?),
-        None => None,
-    };
-    let mut inventory = Vec::new();
-    if let Some(items_value) = entry.get("inventory") {
-        if depth + 1 > MAXIMUM_INVENTORY_DEPTH {
+    );
+    let portal = optional(entry.get("portal"), |value| {
+        read_portal(reader, context, value)
+    });
+    let inventory = read_inventory(reader, context, entry, depth);
+    let custom = reader.custom(entry);
+    Some(Object {
+        uid: uid.ok()?,
+        at: at.ok()?,
+        proto: proto?,
+        layer: layer.ok()?,
+        sub_layer: sub_layer.ok()?.unwrap_or(0),
+        z: z.ok()?.unwrap_or(0),
+        fields: fields?,
+        portal: portal.ok()?,
+        inventory: inventory?,
+        custom,
+    })
+}
+
+/// A value that did not read, whose problem has been reported.
+struct Reported;
+
+/// `Ok(None)` for a value that is absent, `Ok(Some(read))` for one that
+/// reads, and [`Reported`] for one that does not.
+fn optional<'a, T>(
+    value: Option<&'a Value>,
+    read: impl FnOnce(&'a Value) -> Option<T>,
+) -> Result<Option<T>, Reported> {
+    match value {
+        Some(value) => read(value).map(Some).ok_or(Reported),
+        None => Ok(None),
+    }
+}
+
+/// An object's uid, claimed for the object: `Ok(None)` without one, and
+/// [`Reported`] for one that is malformed or that an object read before it
+/// has.
+fn read_uid<'a>(
+    reader: &Reader<'a>,
+    context: &mut ObjectContext<'_, '_>,
+    entry: &'a Value,
+) -> Result<Option<String>, Reported> {
+    optional(entry.get("uid"), |value| {
+        let uid = reader.identifier(value)?;
+        if let Some(first) = context.references.claim_uid(&uid, &context.path) {
             reader.report(
-                items_value.span(),
-                Code::Range,
-                format!("inventories nest at most {MAXIMUM_INVENTORY_DEPTH} deep"),
+                value.span(),
+                Code::Duplicate,
+                format!("object uid \"{uid}\" is already used by an object in {first}"),
             );
             return None;
         }
-        for item in reader.array(items_value)? {
-            inventory.push(read_object(reader, context, item, depth + 1)?);
+        Some(uid)
+    })
+}
+
+/// A top-level object's chunk-local tile, which it must have, or an
+/// inventory entry's absent one.
+fn read_at<'a>(
+    reader: &Reader<'a>,
+    size: u16,
+    entry: &'a Value,
+    depth: usize,
+) -> Result<Option<[u16; 2]>, Reported> {
+    if depth > 0 {
+        if let Some(at_value) = entry.get("at") {
+            reader.report(
+                at_value.span(),
+                Code::UnknownKey,
+                "inventory entries have no \"at\"",
+            );
+            return Err(Reported);
+        }
+        return Ok(None);
+    }
+    let at_value = reader.required(entry, "at").ok_or(Reported)?;
+    let [x, y] = reader.coordinates(at_value).ok_or(Reported)?;
+    let limit = i64::from(size);
+    match (u16::try_from(x), u16::try_from(y)) {
+        (Ok(x), Ok(y)) if i64::from(x) < limit && i64::from(y) < limit => Ok(Some([x, y])),
+        _ => {
+            reader.report(
+                at_value.span(),
+                Code::Range,
+                format!("at must be within 0..{limit} on both axes"),
+            );
+            Err(Reported)
         }
     }
-    let custom = reader.custom(entry);
-    Some(Object {
-        at,
-        proto,
-        layer,
-        sub_layer,
-        z,
-        fields,
-        portal,
-        inventory,
-        custom,
-    })
+}
+
+/// An object's inventory. Every entry is read, so each reports its own
+/// problems, before one that fails fails the inventory.
+fn read_inventory<'a>(
+    reader: &Reader<'a>,
+    context: &mut ObjectContext<'_, '_>,
+    entry: &'a Value,
+    depth: usize,
+) -> Option<Vec<Object>> {
+    let Some(items_value) = entry.get("inventory") else {
+        return Some(Vec::new());
+    };
+    if depth + 1 > MAXIMUM_INVENTORY_DEPTH {
+        reader.report(
+            items_value.span(),
+            Code::Range,
+            format!("inventories nest at most {MAXIMUM_INVENTORY_DEPTH} deep"),
+        );
+        return None;
+    }
+    let mut ok = true;
+    let mut inventory = Vec::new();
+    for item in reader.array(items_value)? {
+        match read_object(reader, context, item, depth + 1) {
+            Some(object) => inventory.push(object),
+            None => ok = false,
+        }
+    }
+    ok.then_some(inventory)
 }
 
 fn read_portal<'a>(

@@ -2,14 +2,14 @@
 // SPDX-License-Identifier: MIT
 
 //! Listing the identities a pack holds, for tools that compare IDs: its
-//! render layers, planes, zones, anchors, stairwells and definitions, and
-//! the addresses of its chunks.
+//! render layers, planes, zones, anchors, stairwells and definitions, the
+//! addresses of its chunks, and its object uids.
 
 use super::{
     bounded_identifier, bounded_text, maximum_document_bytes, stored_document, stored_stairwell,
     text, utf8_column,
 };
-use crate::{Error, ErrorCode, Pack, is_identifier};
+use crate::{Error, ErrorCode, MAXIMUM_OBJECT_INDEX, Pack, is_identifier};
 use rusqlite::Row;
 use tilewright_jsonc::{Document, MAX_SAFE_INTEGER, Value};
 use tilewright_source::CHUNK_SIZE;
@@ -56,6 +56,17 @@ pub enum Identity<'a> {
         cx: i64,
         cy: i64,
     },
+    /// An object uid and where its object is: the plane, layer and chunk
+    /// coordinates of its chunk, and its index in the chunk's depth-first
+    /// order.
+    Object {
+        uid: &'a str,
+        plane: &'a str,
+        layer: i32,
+        cx: i64,
+        cy: i64,
+        index: usize,
+    },
 }
 
 /// SQL for `column` when it is an integer, else NULL.
@@ -96,13 +107,13 @@ fn position(row: &Row<'_>, index: usize, what: &str, code: ErrorCode) -> Result<
 /// The chunk coordinate in column `index` of a row selected with
 /// [`integer`]: one whose chunk, `CHUNK_SIZE` tiles across as format 1
 /// requires, keeps every tile within the format's integer range.
-fn chunk_coordinate(row: &Row<'_>, index: usize) -> Result<i64, Error> {
+fn chunk_coordinate(row: &Row<'_>, index: usize, code: ErrorCode) -> Result<i64, Error> {
     let size = i64::from(CHUNK_SIZE);
     let range = -(MAX_SAFE_INTEGER / size)..=(MAX_SAFE_INTEGER - (size - 1)) / size;
     let value: Option<i64> = row.get(index)?;
     value.filter(|value| range.contains(value)).ok_or_else(|| {
         Error::Rejected(
-            ErrorCode::Chunk,
+            code,
             format!(
                 "a chunk coordinate is not an integer from {} to {}",
                 range.start(),
@@ -202,8 +213,9 @@ impl Pack {
     /// Verifies the whole pack, as [`Pack::verify`] does, and then calls
     /// `visit` with every render layer of the profile, in the profile's
     /// order, then with every plane, zone, stairwell, definition and
-    /// anchor, and then with the address of every chunk: table by table in
-    /// that order, each table in primary-key order. Every identity listed
+    /// anchor, then with the address of every chunk, and then with every
+    /// object uid: table by table in that order, each table in primary-key
+    /// order. Every identity listed
     /// is therefore one a valid pack holds. One stored document is held at
     /// a time.
     ///
@@ -226,8 +238,12 @@ impl Pack {
     /// verification checks it, keys are identifiers, documents are
     /// canonical JSON of objects that agree with their rows, stairwells
     /// have the source format's shape, layers and positions are integers
-    /// within the format's range, and chunk coordinates keep every tile of
-    /// a format 1 chunk within it.
+    /// within the format's range, chunk coordinates keep every tile of a
+    /// format 1 chunk within it, and object indexes are at most
+    /// [`MAXIMUM_OBJECT_INDEX`]. Relations between a row and other rows or
+    /// chunk records, such as an anchor's plane existing or a uid's row
+    /// naming an object with that uid, are what the verification before
+    /// the listing checks, and they are not checked again.
     fn visit_rows(
         &self,
         visit: &mut dyn FnMut(Identity<'_>) -> Result<(), Error>,
@@ -364,7 +380,7 @@ impl Pack {
         Ok(())
     }
 
-    /// The anchors and chunk addresses of [`Pack::visit_rows`].
+    /// The anchors, chunk addresses and object uids of [`Pack::visit_rows`].
     fn visit_positions(
         &self,
         visit: &mut dyn FnMut(Identity<'_>) -> Result<(), Error>,
@@ -404,8 +420,42 @@ impl Pack {
                 visit(Identity::Chunk {
                     plane: &identifier(row, 0, "chunk", ErrorCode::Chunk)?,
                     layer: layer(row, 1, "chunk", ErrorCode::Chunk)?,
-                    cx: chunk_coordinate(row, 2)?,
-                    cy: chunk_coordinate(row, 3)?,
+                    cx: chunk_coordinate(row, 2, ErrorCode::Chunk)?,
+                    cy: chunk_coordinate(row, 3, ErrorCode::Chunk)?,
+                })
+            },
+        )?;
+        self.each_row(
+            &format!(
+                "SELECT {}, {}, {}, {}, {}, {} FROM object_uids ORDER BY uid",
+                key("uid"),
+                key("plane"),
+                integer("layer"),
+                integer("cx"),
+                integer("cy"),
+                integer("object")
+            ),
+            &mut |row| {
+                let code = ErrorCode::ObjectUid;
+                let index: Option<i64> = row.get(5)?;
+                let index = index
+                    .and_then(|index| usize::try_from(index).ok())
+                    .filter(|index| *index <= MAXIMUM_OBJECT_INDEX)
+                    .ok_or_else(|| {
+                        Error::Rejected(
+                            code,
+                            format!(
+                                "an object index is not an integer from 0 to {MAXIMUM_OBJECT_INDEX}"
+                            ),
+                        )
+                    })?;
+                visit(Identity::Object {
+                    uid: &identifier(row, 0, "uid", code)?,
+                    plane: &identifier(row, 1, "uid", code)?,
+                    layer: layer(row, 2, "uid", code)?,
+                    cx: chunk_coordinate(row, 3, code)?,
+                    cy: chunk_coordinate(row, 4, code)?,
+                    index,
                 })
             },
         )
@@ -474,6 +524,14 @@ mod tests {
                     cx,
                     cy,
                 } => format!("chunk {plane} {layer} {cx} {cy}"),
+                Identity::Object {
+                    uid,
+                    plane,
+                    layer,
+                    cx,
+                    cy,
+                    index,
+                } => format!("object {uid} {plane} {layer} {cx} {cy} {index}"),
             });
             Ok(())
         })?;
@@ -516,6 +574,19 @@ mod tests {
                 expected.push(format!("chunk {id} {layer} {cx} {cy}"));
             }
         }
+        let mut objects = Vec::new();
+        for (id, plane) in world.planes() {
+            for ((layer, cx, cy), chunk) in &plane.chunks {
+                for (index, object) in chunk.depth_first().enumerate() {
+                    if let Some(uid) = &object.uid {
+                        objects.push(format!("object {uid} {id} {layer} {cx} {cy} {index}"));
+                    }
+                }
+            }
+        }
+        objects.sort();
+        assert_eq!(objects.len(), 5);
+        expected.extend(objects);
         let (_directory, path) = pack("");
         let listed = visit(&path).unwrap();
         assert_eq!(listed, expected);
@@ -563,6 +634,8 @@ mod tests {
             "UPDATE anchors SET plane = 'ghost' WHERE id = 'village.well'",
             "UPDATE chunks SET plane = 'ghost' WHERE plane = 'vault'",
             "UPDATE stairwells SET plane = 'ghost' WHERE id = 'cave.chute'",
+            "UPDATE object_uids SET object = 5 WHERE uid = 'village.chest'",
+            "DELETE FROM object_uids WHERE uid = 'vault.chest'",
         ] {
             let (_directory, path) = pack(sql);
             assert!(visit(&path).is_ok(), "{sql}: the row checks accept it");
@@ -674,6 +747,30 @@ mod tests {
         (
             "UPDATE chunks SET plane = x'00' WHERE plane = 'vault'",
             "identifier",
+        ),
+        (
+            "UPDATE object_uids SET uid = 'Vault.chest' WHERE uid = 'vault.chest'",
+            "uid key",
+        ),
+        (
+            "UPDATE object_uids SET plane = 'Vault' WHERE uid = 'vault.chest'",
+            "uid key",
+        ),
+        (
+            "UPDATE object_uids SET layer = 2147483648 WHERE uid = 'vault.chest'",
+            "32-bit",
+        ),
+        (
+            "UPDATE object_uids SET cx = 281474976710656 WHERE uid = 'vault.chest'",
+            "chunk coordinate",
+        ),
+        (
+            "UPDATE object_uids SET object = -1 WHERE uid = 'vault.chest'",
+            "object index",
+        ),
+        (
+            "UPDATE object_uids SET object = 16777216 WHERE uid = 'vault.chest'",
+            "object index",
         ),
     ];
 

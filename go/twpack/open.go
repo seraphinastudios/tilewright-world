@@ -24,7 +24,8 @@ const (
 	// ApplicationID is the SQLite application_id of a pack: "TWP1".
 	ApplicationID = 0x54575031
 	// UserVersion is the SQLite user_version of a pack of this format.
-	UserVersion = 1
+	// Version 2 added object uids.
+	UserVersion = 2
 	// PageSize is the page size of every pack.
 	PageSize = 4096
 	// DefaultMaxPackBytes is the default Limits.MaxPackBytes: 8 GiB.
@@ -57,6 +58,7 @@ var schemaTables = [][2]string{
 	{"chunks", "CREATE TABLE chunks (plane TEXT NOT NULL, layer INTEGER NOT NULL, cx INTEGER NOT NULL, cy INTEGER NOT NULL, encoding TEXT NOT NULL, data BLOB NOT NULL, PRIMARY KEY (plane, layer, cx, cy)) WITHOUT ROWID"},
 	{"definitions", "CREATE TABLE definitions (type TEXT NOT NULL, id TEXT NOT NULL, document TEXT NOT NULL, PRIMARY KEY (type, id)) WITHOUT ROWID"},
 	{"meta", "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID"},
+	{"object_uids", "CREATE TABLE object_uids (uid TEXT PRIMARY KEY, plane TEXT NOT NULL, layer INTEGER NOT NULL, cx INTEGER NOT NULL, cy INTEGER NOT NULL, object INTEGER NOT NULL) WITHOUT ROWID"},
 	{"planes", "CREATE TABLE planes (id TEXT PRIMARY KEY, kind TEXT NOT NULL, chunk_size INTEGER NOT NULL, document TEXT NOT NULL) WITHOUT ROWID"},
 	{"stairwell_steps", "CREATE TABLE stairwell_steps (plane TEXT NOT NULL, layer INTEGER NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, stairwell TEXT NOT NULL, step INTEGER NOT NULL, proto TEXT NOT NULL, PRIMARY KEY (plane, layer, x, y)) WITHOUT ROWID"},
 	{"stairwells", "CREATE TABLE stairwells (plane TEXT NOT NULL, id TEXT NOT NULL, document TEXT NOT NULL, PRIMARY KEY (plane, id)) WITHOUT ROWID"},

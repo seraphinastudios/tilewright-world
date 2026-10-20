@@ -108,6 +108,9 @@ fn allow(entries: &str) -> Allowlist {
     .unwrap()
 }
 
+/// The fixture's overworld chunk at layer 0, `[0, 0]`.
+const CHUNK: &str = "planes/overworld/layers/0/0_0.jsonc";
+
 /// The fixture with one more ID of `kind`, and that ID.
 fn with_extra(kind: Kind) -> (Copy, &'static str) {
     let copy = Copy::new();
@@ -126,6 +129,14 @@ fn with_extra(kind: Kind) -> (Copy, &'static str) {
                 r#"{"format": "tilewright.def/1", "type": "proto", "id": "rock", "fields": {"face": "rock.png", "layer": "item"}}"#,
             ),
             "proto/rock",
+        ),
+        Kind::Object => (
+            copy.edit(
+                CHUNK,
+                "{\"at\": [7, 0], \"proto\": \"tree\"}",
+                "{\"uid\": \"grove.oak\", \"at\": [7, 0], \"proto\": \"tree\"}",
+            ),
+            "grove.oak",
         ),
         Kind::Plane => (
             copy.edit(
@@ -168,8 +179,8 @@ fn with_extra(kind: Kind) -> (Copy, &'static str) {
 
 /// The fixture with one ID of `kind` renamed, every reference to it
 /// updated, and a display name changed where the kind has one; and the
-/// report line for it.
-fn with_renamed(kind: Kind) -> (Copy, &'static str) {
+/// report's lines for it.
+fn with_renamed(kind: Kind) -> (Copy, &'static [&'static str]) {
     let copy = Copy::new();
     match kind {
         Kind::Anchor => (
@@ -183,7 +194,7 @@ fn with_renamed(kind: Kind) -> (Copy, &'static str) {
                 "\"anchor\": \"village.well\"",
                 "\"anchor\": \"village.fountain\"",
             ),
-            "renamed anchor overworld/village.well -> overworld/village.fountain (same content)",
+            &["renamed anchor overworld/village.well -> overworld/village.fountain (same content)"],
         ),
         Kind::Definition => (
             copy.rename("defs/proto/tree.jsonc", "defs/proto/oak.jsonc")
@@ -197,7 +208,15 @@ fn with_renamed(kind: Kind) -> (Copy, &'static str) {
                     "\"proto\": \"tree\"",
                     "\"proto\": \"oak\"",
                 ),
-            "renamed definition proto/tree -> proto/oak (same content)",
+            &["renamed definition proto/tree -> proto/oak (same content)"],
+        ),
+        Kind::Object => (
+            copy.edit(CHUNK, "\"ruin.north_wall\"", "\"ruin.wall.north\""),
+            // Object uids pair only by a declared rename.
+            &[
+                "removed object ruin.north_wall",
+                "added object ruin.wall.north",
+            ],
         ),
         Kind::Plane => (
             copy.edit("world.jsonc", "\"vault\"]", "\"strongroom\"]")
@@ -217,7 +236,7 @@ fn with_renamed(kind: Kind) -> (Copy, &'static str) {
                     "\"plane\": \"vault\"",
                     "\"plane\": \"strongroom\"",
                 ),
-            "renamed plane vault -> strongroom (same content)",
+            &["renamed plane vault -> strongroom (same content)"],
         ),
         Kind::RenderLayer => (
             copy.edit(
@@ -230,7 +249,7 @@ fn with_renamed(kind: Kind) -> (Copy, &'static str) {
                 "\"living\", \"effect\"]",
                 "\"living\", \"effects\"]",
             ),
-            "renamed render_layer effect -> effects (same content)",
+            &["renamed render_layer effect -> effects (same content)"],
         ),
         Kind::Stairwell => (
             copy.edit(
@@ -238,7 +257,7 @@ fn with_renamed(kind: Kind) -> (Copy, &'static str) {
                 "\"id\": \"cave.chute\"",
                 "\"id\": \"cave.slide\"",
             ),
-            "renamed stairwell overworld/cave.chute -> overworld/cave.slide (same content)",
+            &["renamed stairwell overworld/cave.chute -> overworld/cave.slide (same content)"],
         ),
         Kind::Zone => (
             copy.edit(
@@ -256,7 +275,7 @@ fn with_renamed(kind: Kind) -> (Copy, &'static str) {
                 "\"v\": \"village\"",
                 "\"v\": \"hamlet\"",
             ),
-            "renamed zone overworld/village -> overworld/hamlet (same content)",
+            &["renamed zone overworld/village -> overworld/hamlet (same content)"],
         ),
     }
 }
@@ -327,10 +346,10 @@ fn each_kind_reports_removed_added_and_renamed_ids() {
         assert_eq!(diff(&extra_pack, &old, &none).to_text(), report.to_text());
         assert_eq!(diff(&extra, &old_pack, &none).to_text(), report.to_text());
 
-        let (renamed, line) = with_renamed(kind);
+        let (renamed, expected) = with_renamed(kind);
         let (renamed, renamed_pack) = (renamed.source(), renamed.pack());
         let report = diff(&old, &renamed, &none);
-        assert_eq!(lines(&report), [line], "{kind}");
+        assert_eq!(lines(&report), expected, "{kind}");
         assert!(report.breaking());
         assert_eq!(report.not_allowed(), 1);
         assert_eq!(diff(&old, &renamed_pack, &none).to_text(), report.to_text());
@@ -416,11 +435,16 @@ fn ids_of_a_renamed_plane_pair_with_those_of_its_new_id() {
 
     // Removing a plane removes its anchors; an entry that removes the plane
     // accepts both.
+    // So are the uids of its objects, which belong to the world.
     let gone = without_vault().source();
     let report = diff(&old, &gone, &Allowlist::default());
     assert_eq!(
         lines(&report),
-        ["removed anchor vault/door", "removed plane vault"]
+        [
+            "removed anchor vault/door",
+            "removed object vault.chest",
+            "removed plane vault"
+        ]
     );
     let report = diff(
         &old,
@@ -431,6 +455,7 @@ fn ids_of_a_renamed_plane_pair_with_those_of_its_new_id() {
         lines(&report),
         [
             "removed anchor vault/door (allowed)",
+            "removed object vault.chest (allowed)",
             "removed plane vault (allowed)"
         ]
     );
@@ -447,6 +472,7 @@ fn ids_of_a_renamed_plane_pair_with_those_of_its_new_id() {
         lines(&report),
         [
             "removed anchor vault/door",
+            "removed object vault.chest",
             "renamed plane vault -> overworld (declared, allowed)"
         ]
     );
@@ -536,6 +562,7 @@ fn snapshot(entries: &[(Kind, &str, &str)]) -> Snapshot {
             source_digest: "00".into(),
         },
         ids,
+        object_planes: BTreeMap::new(),
     }
 }
 
@@ -875,15 +902,15 @@ fn snapshots_stop_at_their_id_limit() {
     let written =
         tilewright_pack::write_pack(&world, &copy.directory.path().join("packs")).unwrap();
     // The fixture has 6 render layers, 2 planes, 3 zones, 2 anchors, 3
-    // stairwells and 12 definitions.
+    // stairwells, 12 definitions and 5 object uids.
     let ids = Snapshot::from_world(&world, &Limits::default())
         .unwrap()
         .ids
         .values()
         .map(BTreeMap::len)
         .sum::<usize>();
-    assert_eq!(ids, 28);
-    for maximum in [0, 5, 27] {
+    assert_eq!(ids, 33);
+    for maximum in [0, 5, 28, 32] {
         let limits = Limits {
             maximum_ids: maximum,
         };
@@ -894,7 +921,7 @@ fn snapshots_stop_at_their_id_limit() {
             }
         }
     }
-    let exact = Limits { maximum_ids: 28 };
+    let exact = Limits { maximum_ids: 33 };
     assert_eq!(
         crate::load(&copy.root(), &exact).unwrap().ids,
         crate::load(&written.path, &exact).unwrap().ids
@@ -903,4 +930,144 @@ fn snapshots_stop_at_their_id_limit() {
         Error::TooManyIds(5).to_string(),
         "more than 5 IDs, the ID limit"
     );
+}
+
+/// The vault's chunk, where the fixture's `vault.chest` is.
+const VAULT_CHUNK: &str = "planes/vault/layers/0/0_0.jsonc";
+
+/// The vault chest's entry in its chunk.
+const VAULT_CHEST: &str =
+    r#"{"uid": "vault.chest", "at": [1, 1], "proto": "chest", "fields": {"loot": "chest_common"}}"#;
+
+/// The fixture with the vault chest moved to the overworld's cave chunk,
+/// under `uid`.
+fn with_moved_chest(uid: &str) -> Copy {
+    Copy::new().edit(VAULT_CHUNK, VAULT_CHEST, "").edit(
+        "planes/overworld/layers/-1/0_0.jsonc",
+        "\"objects\": [",
+        &format!(
+            "\"objects\": [\n    {},",
+            VAULT_CHEST.replace("\"vault.chest\"", &format!("\"{uid}\""))
+        ),
+    )
+}
+
+#[test]
+fn object_uids_follow_their_objects() {
+    let base = Copy::new();
+    let (old, old_pack) = (base.source(), base.pack());
+    let none = Allowlist::default();
+
+    // An object keeps its uid when it moves to another plane, or when an
+    // object before it changes its index: neither is reported.
+    let moved = with_moved_chest("vault.chest");
+    let shifted = Copy::new().edit(
+        CHUNK,
+        "\"objects\": [",
+        "\"objects\": [\n    {\"at\": [0, 0], \"proto\": \"tree\"},",
+    );
+    for copy in [&moved, &shifted] {
+        for new in [copy.source(), copy.pack()] {
+            let report = diff(&old, &new, &none);
+            assert!(lines(&report).is_empty(), "{}", report.to_text());
+        }
+    }
+
+    // A uid that changes as its object moves is a removal and an addition;
+    // an entry that renames it says what happened.
+    let renamed = with_moved_chest("vault.box");
+    let report = diff(&old, &renamed.source(), &none);
+    assert_eq!(
+        lines(&report),
+        ["removed object vault.chest", "added object vault.box"]
+    );
+    assert!(report.breaking());
+    assert_eq!(
+        diff(&old_pack, &renamed.pack(), &none).to_text(),
+        report.to_text()
+    );
+    let report = diff(
+        &old,
+        &renamed.source(),
+        &allow(r#""rename": [{"kind": "object", "from": "vault.chest", "to": "vault.box"}]"#),
+    );
+    assert_eq!(
+        lines(&report),
+        ["renamed object vault.chest -> vault.box (declared, allowed)"]
+    );
+    assert!(!report.breaking());
+
+    // Uids are never paired by content: one that changes, in place or as
+    // its object moves to another tile, is a removal and an addition.
+    for to in [
+        "\"uid\": \"ruin.wall\", \"at\": [15, 0]",
+        "\"uid\": \"ruin.wall\", \"at\": [16, 0]",
+    ] {
+        let changed = Copy::new().edit(CHUNK, "\"uid\": \"ruin.north_wall\", \"at\": [15, 0]", to);
+        for new in [changed.source(), changed.pack()] {
+            assert_eq!(
+                lines(&diff(&old, &new, &none)),
+                ["removed object ruin.north_wall", "added object ruin.wall"],
+                "{to}"
+            );
+        }
+    }
+
+    // Unknown kinds are told every kind, objects included.
+    let error = Allowlist::parse(
+        r#"{"format": "tilewright.diff-allow/1", "remove": [{"kind": "objects", "id": "a"}]}"#,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "shape.range");
+    assert_eq!(
+        error.message,
+        "kind must be anchor, definition, object, plane, render_layer, stairwell or zone"
+    );
+
+    // An object uid is written as one identifier.
+    let error = Allowlist::parse(
+        r#"{"format": "tilewright.diff-allow/1", "remove": [{"kind": "object", "id": "vault/chest"}]}"#,
+    )
+    .unwrap_err();
+    assert_eq!(
+        (error.code, error.column),
+        ("shape.identifier", 75),
+        "{error}"
+    );
+    assert!(
+        error.message.starts_with("an object ID is an identifier"),
+        "{error}"
+    );
+
+    // An object that loses its uid, at any depth, removes it.
+    let dropped = Copy::new().edit(CHUNK, "\"uid\": \"o.k3vq7zr2mxa5d6wfh4pnyt2cgu\", ", "");
+    let report = diff(&old, &dropped.source(), &none);
+    assert_eq!(
+        lines(&report),
+        ["removed object o.k3vq7zr2mxa5d6wfh4pnyt2cgu"]
+    );
+    assert!(report.breaking());
+    assert_eq!(
+        diff(&old_pack, &dropped.pack(), &none).to_text(),
+        report.to_text()
+    );
+    let report = diff(
+        &old,
+        &dropped.source(),
+        &allow(r#""remove": [{"kind": "object", "id": "o.k3vq7zr2mxa5d6wfh4pnyt2cgu"}]"#),
+    );
+    assert_eq!(
+        lines(&report),
+        ["removed object o.k3vq7zr2mxa5d6wfh4pnyt2cgu (allowed)"]
+    );
+    assert!(!report.breaking());
+
+    // Two uids that trade objects in one change are both kept, and a kept
+    // ID's content is not compared, so nothing is reported.
+    let swapped = Copy::new()
+        .edit(CHUNK, "\"village.chest.small\"", "\"swap\"")
+        .edit(CHUNK, "\"ruin.north_wall\"", "\"village.chest.small\"")
+        .edit(CHUNK, "\"swap\"", "\"ruin.north_wall\"");
+    let report = diff(&old, &swapped.source(), &none);
+    assert!(lines(&report).is_empty(), "{}", report.to_text());
 }

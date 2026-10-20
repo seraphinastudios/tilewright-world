@@ -4,7 +4,7 @@
 //! Compares the IDs of two Tilewright worlds (`docs/spec/DIFF.md`).
 //!
 //! Games keep IDs in saves, server state and scripts: planes, zones,
-//! anchors, stairwells, definitions and render layers. Removing or renaming
+//! anchors, stairwells, definitions, render layers and object uids. Removing or renaming
 //! one breaks whatever refers to it. A [`Snapshot`] holds the IDs of one
 //! world, read from a source tree or a content pack, with a fingerprint of
 //! each one's content. [`diff`] compares two snapshots and reports which IDs
@@ -76,6 +76,8 @@ pub enum Kind {
     Anchor,
     /// A definition, written `<type>/<id>`.
     Definition,
+    /// An object uid, written `<uid>`: uids are unique in the world.
+    Object,
     /// A plane, written `<id>`.
     Plane,
     /// A render layer of the profile, written `<name>`.
@@ -88,9 +90,10 @@ pub enum Kind {
 
 impl Kind {
     /// Every kind, in order.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Anchor,
         Self::Definition,
+        Self::Object,
         Self::Plane,
         Self::RenderLayer,
         Self::Stairwell,
@@ -102,6 +105,7 @@ impl Kind {
         match self {
             Self::Anchor => "anchor",
             Self::Definition => "definition",
+            Self::Object => "object",
             Self::Plane => "plane",
             Self::RenderLayer => "render_layer",
             Self::Stairwell => "stairwell",
@@ -113,6 +117,15 @@ impl Kind {
     #[must_use]
     pub fn parse(text: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|kind| kind.as_str() == text)
+    }
+
+    /// Whether a removed and an added ID of this kind may pair as a rename
+    /// by having the same content. Object uids pair only by a declared
+    /// rename: an object's content and place change freely while it keeps
+    /// its uid, so neither shows that two uids name one object.
+    #[must_use]
+    pub const fn pairs_by_content(self) -> bool {
+        !matches!(self, Self::Object)
     }
 
     /// Whether IDs of this kind belong to a plane and are written
@@ -136,7 +149,7 @@ impl Kind {
     }
 
     /// What an ID of this kind is unique within: its plane or definition
-    /// type, or `""` for planes and render layers.
+    /// type, or `""` for planes, render layers and objects.
     pub(crate) fn scope(self, id: &str) -> &str {
         if self.in_plane() || self == Self::Definition {
             id.split_once('/').map_or("", |(scope, _)| scope)

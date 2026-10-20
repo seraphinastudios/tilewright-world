@@ -322,13 +322,14 @@ fn inspect(path: &Path, limits: tilewright_pack::VerifyLimits) -> Result<String,
     );
     let _ = writeln!(
         output,
-        "planes: {}\nzones: {}\nanchors: {}\nstairwells: {}\nchunks: {}\nobjects: {}\ndefinitions: {}\nstrings: {}\nverified: yes",
+        "planes: {}\nzones: {}\nanchors: {}\nstairwells: {}\nchunks: {}\nobjects: {}\nobject_uids: {}\ndefinitions: {}\nstrings: {}\nverified: yes",
         summary.planes,
         summary.zones,
         summary.anchors,
         summary.stairwells,
         summary.chunks,
         summary.objects,
+        summary.object_uids,
         summary.definitions,
         summary.strings
     );
@@ -374,7 +375,7 @@ mod tests {
         );
         let inspected = run(&["inspect", &pack]).unwrap();
         assert!(inspected.contains("format: tilewright.pack/1"));
-        assert!(inspected.contains("objects: 11"));
+        assert!(inspected.contains("objects: 11\nobject_uids: 5\n"));
         assert!(inspected.contains("stairwells: 3"));
         assert!(inspected.contains("verified: yes"));
         assert!(

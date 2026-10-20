@@ -3,11 +3,11 @@
 Status: draft, like [FORMAT.md](FORMAT.md) and [PACK.md](PACK.md).
 
 Games keep IDs in saves, server state and scripts: the planes, zones,
-anchors, stairwells, definitions and render layers of a world. Removing or
-renaming one breaks whatever refers to it. `tilewright diff OLD NEW`
-compares the IDs of two worlds and reports which were removed, added and
-renamed, so that content CI can compare a change with a baseline, such as
-the last released pack, and fail on a removal or rename nobody intended.
+anchors, stairwells, definitions, render layers and object uids of a world.
+Removing or renaming one breaks whatever refers to it. `tilewright diff OLD
+NEW` compares the IDs of two worlds and reports which were removed, added
+and renamed, so that content CI can compare a change with a baseline, such
+as the last released pack, and fail on a removal or rename nobody intended.
 
 ```sh
 tilewright diff [--json] [--allow ALLOWLIST] [--max-ids COUNT] OLD NEW
@@ -46,6 +46,7 @@ baseline revision.
 | --- | --- | --- | --- |
 | `anchor` | `<plane>/<id>` | its plane | its `layer` and `at` |
 | `definition` | `<type>/<id>` | its type | its document without `id` |
+| `object` | `<uid>` | the world | nothing: object uids pair only by a declared rename |
 | `plane` | `<id>` | the world | its document without `id` and `title`; the IDs and content of its zones, anchors and stairwells; and the addresses (layer and chunk coordinates) of its chunks, not their contents |
 | `render_layer` | `<name>` | the profile | its position in `render_layers` |
 | `stairwell` | `<plane>/<id>` | its plane | its entry without `id` |
@@ -57,11 +58,19 @@ JSON (PACK.md section 1): comments, whitespace and line breaks do not
 matter, but member order and the spelling of numbers do. Display names
 (`title`, `name`) are left out because they often change with the ID.
 
+An object's ID is its uid, which is unique in the world and names it
+wherever it is: an object that moves to another tile, chunk, plane or
+container keeps its ID, and is not reported. An object's place and content
+change freely while it keeps its uid, so neither shows that two uids name
+one object: a uid that changes is a removal and an addition, unless a
+`rename` entry declares it.
+
 These are not kinds of their own:
 
 - definition types: removing a type removes its definitions, which are
   reported;
 - ground layers, which are render layers;
+- objects without a uid, which have no ID;
 - the profile's `id` and `version`, which the JSON output shows for each
   side but which are not compared;
 - chunks, which are addressed by position, not by ID.
@@ -78,12 +87,12 @@ Pairs are found in this order:
    with its `to` when `from` was removed and `to` is an ID of the new world.
    `to` need not be new: renaming into an existing ID merges two IDs.
 2. **Same content.** Of the removed and added IDs left, a removed ID and an
-   added ID pair when they are the only removed and the only added ID with
-   the same kind, scope and content (section 2). The scope is the plane for
-   zones, anchors and stairwells, the type for definitions, and the world
-   for planes and render layers. The zones, anchors and stairwells of a
-   renamed plane count as being in its new plane, so planes are paired
-   first.
+   added ID of a kind other than `object` pair when they are the only
+   removed and the only added ID with the same kind, scope and content
+   (section 2). The scope is the plane for zones, anchors and stairwells,
+   the type for definitions, and the world for planes and render layers.
+   The zones, anchors and stairwells of a renamed plane count as being in
+   its new plane, so planes are paired first.
 
 There is no other matching: IDs are never paired by similar names or
 similar content. A same-content pair is a likely rename, not a certain
@@ -129,7 +138,11 @@ A removed ID, or the old ID of a rename, is *allowed* when:
 - a `rename` entry names it, and its `to` is an ID of the new world; or
 - it is a zone, anchor or stairwell of a plane that the new world lacks,
   and the plane's entry removes the plane, or renames it to a plane of the
-  new world that has an ID of the same kind with the same local ID.
+  new world that has an ID of the same kind with the same local ID; or
+- it is an object uid whose object was on a plane that the new world
+  lacks, and the plane's entry removes the plane. A uid is not its plane's,
+  so a renamed plane's objects keep theirs, and renaming the plane accepts
+  no removal of one.
 
 An entry that does not apply is reported as *unused*: `not_removed` when its
 ID is not in the old world or is still in the new one, and otherwise

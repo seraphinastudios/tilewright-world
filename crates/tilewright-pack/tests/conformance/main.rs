@@ -121,6 +121,8 @@ fn read(pack: &Pack, op: &Value) -> Option<&'static str> {
         }
         // Reporting the layer height checks the whole stored profile.
         "layer_height" | "profile" => outcome(pack.layer_height()),
+        "object_location" => outcome(pack.object_location(text(op, "uid").unwrap())),
+        "object" => outcome(pack.object(text(op, "uid").unwrap())),
         other => panic!("unknown read {other}"),
     }
 }
@@ -227,6 +229,7 @@ fn the_valid_packs_read_back_as_the_manifest_lists() {
             ("chunks", summary.chunks),
             ("definitions", summary.definitions),
             ("objects", summary.objects),
+            ("object_uids", summary.object_uids),
         ] {
             assert_eq!(unsigned(counts, key), Some(count), "{file}: {key}");
         }
@@ -274,6 +277,28 @@ fn the_valid_packs_read_back_as_the_manifest_lists() {
                 step.get("step").and_then(Value::as_i64)
             );
             assert_eq!(Some(read.proto.as_str()), text(step, "proto"));
+        }
+        for row in valid.get("object_uids").and_then(Value::as_array).unwrap() {
+            let uid = text(row, "uid").unwrap();
+            let (location, object) = pack.object(uid).unwrap().unwrap();
+            assert_eq!(
+                (
+                    Some(location.plane.as_str()),
+                    i64::from(location.layer),
+                    location.cx,
+                    location.cy,
+                    i64::try_from(location.index).unwrap()
+                ),
+                (
+                    text(row, "plane"),
+                    integer(row, "layer"),
+                    integer(row, "cx"),
+                    integer(row, "cy"),
+                    integer(row, "object")
+                ),
+                "{file}: {uid}"
+            );
+            assert_eq!(object.uid.as_deref(), Some(uid));
         }
         for chunk in valid.get("chunks").and_then(Value::as_array).unwrap() {
             let read = pack

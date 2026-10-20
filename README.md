@@ -15,9 +15,9 @@ game-specific code.
 ## Specifications
 
 - [World format](docs/spec/FORMAT.md): planes, stacked layers, chunks,
-  terrain grids, objects, zones, portals, anchors, stairwells, definitions,
-  typed field schemas with nested lists and objects, and the strict JSONC
-  dialect.
+  terrain grids, objects with stable uids, zones, portals, anchors,
+  stairwells, definitions, typed field schemas with nested lists and
+  objects, and the strict JSONC dialect.
 - [Content pack](docs/spec/PACK.md): the SQLite pack and the binary chunk
   encoding.
 - [ID diff](docs/spec/DIFF.md): the ID kinds, rename and allowlist rules,

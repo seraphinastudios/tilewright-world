@@ -53,6 +53,9 @@ pub struct Side {
 pub struct Snapshot {
     pub(crate) side: Side,
     pub(crate) ids: BTreeMap<Kind, BTreeMap<String, Fingerprint>>,
+    /// The plane each object uid's object is on, so that removing a plane
+    /// can accept the removal of its objects' uids.
+    pub(crate) object_planes: BTreeMap<String, String>,
 }
 
 impl Snapshot {
@@ -84,6 +87,9 @@ impl Snapshot {
                 for (layer, cx, cy) in plane.chunks.keys() {
                     builder.chunk(id, *layer, *cx, *cy)?;
                 }
+            }
+            for (uid, location) in world.object_uids() {
+                builder.object(uid, &location.plane)?;
             }
             for ((kind, id), definition) in world.definitions() {
                 builder.definition(kind, id, &definition.canonical)?;
@@ -142,6 +148,7 @@ impl Snapshot {
                     cx,
                     cy,
                 } => builder.chunk(plane, layer, cx, cy),
+                Identity::Object { uid, plane, .. } => builder.object(uid, plane),
             }
             .map_err(tilewright_pack::Error::Invalid)
         });
@@ -174,6 +181,12 @@ impl Snapshot {
         self.ids.get(&kind).is_some_and(|ids| ids.contains_key(id))
     }
 
+    /// The plane the object with `uid` is on.
+    #[must_use]
+    pub fn object_plane(&self, uid: &str) -> Option<&str> {
+        self.object_planes.get(uid).map(String::as_str)
+    }
+
     /// The IDs of `kind`, in byte order.
     pub fn ids(&self, kind: Kind) -> impl Iterator<Item = &str> {
         self.ids
@@ -198,6 +211,8 @@ struct Builder {
     /// Each plane's document fingerprint and a hash of its chunk addresses,
     /// fed in `(layer, cx, cy)` order.
     planes: BTreeMap<String, (Fingerprint, Sha256)>,
+    /// The plane of each object uid.
+    object_planes: BTreeMap<String, String>,
     /// The most IDs the snapshot may hold, and how many it holds.
     maximum: usize,
     count: usize,
@@ -208,6 +223,7 @@ impl Builder {
         Self {
             ids: BTreeMap::new(),
             planes: BTreeMap::new(),
+            object_planes: BTreeMap::new(),
             maximum: limits.maximum_ids,
             count: 0,
         }
@@ -293,6 +309,19 @@ impl Builder {
         self.insert(Kind::Definition, format!("{kind}/{id}"), fingerprint)
     }
 
+    /// Object uids are never paired by content (see [`Kind::pairs_by_content`]),
+    /// so an object's fingerprint is the same for every object. Its plane is
+    /// kept, so that removing the plane can accept the removal of its uid.
+    fn object(&mut self, uid: &str, plane: &str) -> Result<(), String> {
+        self.admit()?;
+        if !is_identifier(uid) || !is_identifier(plane) {
+            return Err("an object uid or its plane is not an identifier".into());
+        }
+        self.insert(Kind::Object, uid.to_owned(), [0; 32])?;
+        self.object_planes.insert(uid.to_owned(), plane.to_owned());
+        Ok(())
+    }
+
     fn chunk(&mut self, plane: &str, layer: i32, cx: i64, cy: i64) -> Result<(), String> {
         let (_, chunks) = self
             .planes
@@ -306,7 +335,10 @@ impl Builder {
 
     fn finish(self, side: Side) -> Snapshot {
         let Self {
-            mut ids, planes, ..
+            mut ids,
+            planes,
+            object_planes,
+            ..
         } = self;
         let mut fingerprints = BTreeMap::new();
         for (plane, (document, chunks)) in planes {
@@ -330,7 +362,11 @@ impl Builder {
             fingerprints.insert(plane, hasher.finalize().into());
         }
         ids.insert(Kind::Plane, fingerprints);
-        Snapshot { side, ids }
+        Snapshot {
+            side,
+            ids,
+            object_planes,
+        }
     }
 }
 

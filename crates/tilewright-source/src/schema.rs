@@ -8,6 +8,7 @@ use crate::{
     Code, FieldValue, Plane, Profile,
     files::Tree,
     read::{Reader, is_identifier},
+    uid::Claims,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -436,13 +437,15 @@ impl Target {
 /// before any reference to it is read, so each reference is checked as it
 /// is read and none is kept: render layers from the profile, definition keys
 /// from the `defs/` layout before any definition is parsed, and planes and
-/// their anchors before any chunk is read.
+/// their anchors before any chunk is read. It also holds the object uids
+/// claimed so far, so a duplicate is reported where it is read.
 pub(crate) struct References {
     render_layers: BTreeSet<String>,
     /// Definition IDs by type, from the file names under `defs/`.
     definitions: BTreeMap<String, BTreeSet<String>>,
     /// Anchor IDs by plane, for every plane that loaded.
     planes: BTreeMap<String, BTreeSet<String>>,
+    uids: Claims,
 }
 
 impl References {
@@ -451,7 +454,14 @@ impl References {
             render_layers: profile.render_layers.iter().cloned().collect(),
             definitions: BTreeMap::new(),
             planes: BTreeMap::new(),
+            uids: Claims::default(),
         }
+    }
+
+    /// Claims an object uid for an object of the chunk at `path`; see
+    /// [`Claims::claim`].
+    pub fn claim_uid(&mut self, uid: &str, path: &Arc<str>) -> Option<Arc<str>> {
+        self.uids.claim(uid, path)
     }
 
     /// Records the definitions the `defs/` layout holds, before any is read.

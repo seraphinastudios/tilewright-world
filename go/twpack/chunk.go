@@ -28,12 +28,17 @@ const (
 	NoTile = 0xFFFF
 )
 
+// RecordVersion is the version of a twc1 record of this format. Version 1
+// records had no uids; readers accept only this version.
+const RecordVersion = 2
+
 const (
-	recordVersion  = 1
+	recordVersion  = RecordVersion
 	flagPortal     = 1
 	flagFields     = 2
 	flagCustom     = 4
 	flagInventory  = 8
+	flagUID        = 16
 	maxGroundCount = 8
 	maxChunkSize   = 255
 	// minimumObjectBytes is the fixed part of an object record.
@@ -61,6 +66,9 @@ type Chunk struct {
 
 // Object is an object record.
 type Object struct {
+	// UID is the object's uid, an identifier unique in the pack, or "" when
+	// it has none.
+	UID string
 	// Tile is y * ChunkSize + x, or NoTile for an inventory entry.
 	Tile  uint16
 	Proto uint32
@@ -575,8 +583,13 @@ func decodeObject(c *cursor, cells, depth int, visit visitor) (Object, error) {
 	if err != nil {
 		return Object{}, err
 	}
-	if flags&^(flagPortal|flagFields|flagCustom|flagInventory) != 0 {
+	if flags&^(flagPortal|flagFields|flagCustom|flagInventory|flagUID) != 0 {
 		return Object{}, recordError("unknown object flags")
+	}
+	if flags&flagUID != 0 {
+		if object.UID, err = decodeUID(c); err != nil {
+			return Object{}, err
+		}
 	}
 	if flags&flagPortal != 0 {
 		if object.Portal, err = decodePortal(c); err != nil {
@@ -622,6 +635,48 @@ func decodeObject(c *cursor, cells, depth int, visit visitor) (Object, error) {
 		}
 	}
 	return object, nil
+}
+
+// decodeUID reads a uid: a length byte, then that many bytes of an
+// identifier.
+func decodeUID(c *cursor) (string, error) {
+	length, err := c.u8()
+	if err != nil {
+		return "", err
+	}
+	b, err := c.take(int(length))
+	if err != nil {
+		return "", err
+	}
+	if !isIdentifier(string(b)) {
+		return "", recordError("a uid is not an identifier")
+	}
+	return string(b), nil
+}
+
+// Object returns the object at index in the chunk's depth-first order,
+// where each object comes before its inventory entries and the first
+// top-level object is 0: the index an object_uids row holds. It returns
+// nil when the chunk has fewer objects.
+func (chunk *Chunk) Object(index int) *Object {
+	remaining := index
+	var find func(objects []Object) *Object
+	find = func(objects []Object) *Object {
+		for i := range objects {
+			if remaining == 0 {
+				return &objects[i]
+			}
+			remaining--
+			if found := find(objects[i].Inventory); found != nil {
+				return found
+			}
+		}
+		return nil
+	}
+	if index < 0 {
+		return nil
+	}
+	return find(chunk.Objects)
 }
 
 func decodePortal(c *cursor) (*Portal, error) {

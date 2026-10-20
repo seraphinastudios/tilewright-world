@@ -45,7 +45,7 @@ func TestNamesMatchTheSourcePatterns(t *testing.T) {
 // objects.
 func testRecord(objects ...[]byte) []byte {
 	record := []byte("TWC1")
-	record = binary.LittleEndian.AppendUint16(record, 1)
+	record = binary.LittleEndian.AppendUint16(record, RecordVersion)
 	record = binary.LittleEndian.AppendUint16(record, 2)
 	record = append(record, 1, 0)
 	record = binary.LittleEndian.AppendUint32(record, 1)
@@ -105,6 +105,54 @@ func TestRecordsDecodeAndStreamObjectsInOrder(t *testing.T) {
 	expectCode(t, "oversized chunk data", err, CodeChunkRecord)
 	_, err = DecodeRecord(make([]byte, MaxRecordBytes+1))
 	expectCode(t, "an oversized record", err, CodeChunkRecord)
+}
+
+func TestRecordsCarryUIDsAtEveryDepth(t *testing.T) {
+	uid := func(text string) []byte { return append([]byte{byte(len(text))}, text...) }
+	inventory := binary.LittleEndian.AppendUint32(nil, 2)
+	inventory = append(inventory, testObject(NoTile, 2, 0)...)
+	inventory = append(inventory, testObject(NoTile, 3, flagUID, uid("chest.coin")...)...)
+	longest := strings.Repeat("a", 128)
+	record := testRecord(
+		testObject(3, 1, flagUID|flagInventory, append(uid("chest"), inventory...)...),
+		testObject(0, 4, flagUID, uid(longest)...),
+	)
+	chunk, err := DecodeRecord(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var uids []string
+	for index := range 4 {
+		object := chunk.Object(index)
+		if object == nil {
+			t.Fatalf("no object %d", index)
+		}
+		uids = append(uids, object.UID)
+	}
+	if !slices.Equal(uids, []string{"chest", "", "chest.coin", longest}) {
+		t.Fatalf("%q", uids)
+	}
+	if chunk.Object(4) != nil || chunk.Object(-1) != nil {
+		t.Fatal("an object past the chunk's or before the first")
+	}
+	for name, bad := range map[string][]byte{
+		"an empty uid":             uid(""),
+		"a capital letter":         uid("Chest"),
+		"a leading underscore":     uid("_chest"),
+		"NUL":                      uid("chest\x00"),
+		"a byte that is not UTF-8": uid("chest\xff"),
+		"129 bytes":                uid(strings.Repeat("a", 129)),
+		"a length past the record": {200, 'a'},
+	} {
+		_, err := DecodeRecord(testRecord(testObject(0, 1, flagUID, bad...)))
+		expectCode(t, name, err, CodeChunkRecord)
+	}
+	_, err = DecodeRecord(testRecord(testObject(0, 1, 32)))
+	expectCode(t, "an unknown flag", err, CodeChunkRecord)
+	old := testRecord(testObject(0, 1, 0))
+	old[4] = 1
+	_, err = DecodeRecord(old)
+	expectCode(t, "a version 1 record", err, CodeChunkRecord)
 }
 
 func TestFrameHeadersAreReadAsZstdReadsThem(t *testing.T) {

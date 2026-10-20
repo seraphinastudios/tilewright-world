@@ -10,8 +10,8 @@
 use crate::{
     APPLICATION_ID, Error, ErrorCode, FORMAT, META_KEYS, SCHEMA_TABLES, USER_VERSION,
     chunk::{
-        CHUNK_ENCODING, ChunkData, DecodeError, FieldRecord, MAXIMUM_CHUNK_BYTES, ObjectRecord,
-        PortalRecord, Visit, decode_chunk_with,
+        CHUNK_ENCODING, ChunkData, DecodeError, FieldRecord, MAXIMUM_CHUNK_BYTES,
+        MAXIMUM_RECORD_BYTES, ObjectRecord, PortalRecord, Visit, decode_chunk_with,
     },
     is_field_name, is_identifier, is_namespace,
 };
@@ -42,6 +42,11 @@ const MAXIMUM_META_BYTES: usize = 1024;
 
 /// Largest `sqlite_schema` value loaded; every expected one is shorter.
 const MAXIMUM_SCHEMA_BYTES: usize = 1024;
+
+/// The largest `object` index an `object_uids` row may hold. Every object
+/// takes more than one byte of a record of at most 16 MiB, so every index
+/// is below this.
+pub const MAXIMUM_OBJECT_INDEX: usize = MAXIMUM_RECORD_BYTES - 1;
 
 /// The default [`VerifyLimits::maximum_decoded_bytes`]: 8 GiB.
 pub const DEFAULT_MAXIMUM_DECODED_BYTES: u64 = 8 * 1024 * 1024 * 1024;
@@ -95,6 +100,19 @@ pub struct Summary {
     /// Objects in every chunk, inventories included; counted by
     /// [`Pack::verify`] only.
     pub objects: u64,
+    /// Rows of `object_uids`: the objects that have a uid.
+    pub object_uids: u64,
+}
+
+/// Where the object with a uid is: its chunk, and its index in the chunk
+/// record's depth-first order (see [`ChunkData::object`]).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UidLocation {
+    pub plane: String,
+    pub layer: i32,
+    pub cx: i64,
+    pub cy: i64,
+    pub index: usize,
 }
 
 /// The stairwell step on a tile.
@@ -235,6 +253,38 @@ fn step_index(column: &str) -> String {
     format!(
         "CASE WHEN typeof({column}) = 'integer' AND {column} BETWEEN 0 AND {} THEN {column} END",
         Limits::default().max_array_items - 1
+    )
+}
+
+/// SQL for `column` when it is an integer from `minimum` to `maximum`, else
+/// NULL.
+fn bounded_integer(column: &str, minimum: i64, maximum: i64) -> String {
+    format!(
+        "CASE WHEN typeof({column}) = 'integer' AND {column} BETWEEN {minimum} AND {maximum} THEN {column} END"
+    )
+}
+
+/// The chunk coordinates of format 1, whose 32-tile chunks keep every tile
+/// within the source format's integer range.
+const CHUNKS: (i64, i64) = (
+    -(MAX_SAFE_INTEGER / CHUNK_SIZE as i64),
+    (MAX_SAFE_INTEGER - (CHUNK_SIZE as i64 - 1)) / CHUNK_SIZE as i64,
+);
+
+/// The columns of an `object_uids` row, each NULL when out of bounds.
+type StoredLocation = (
+    Option<String>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+);
+
+/// The error for an `object_uids` row that is not one a compiler writes.
+fn bad_uid_row() -> Error {
+    Error::Rejected(
+        ErrorCode::ObjectUid,
+        "an object_uids row's plane is not an identifier, or its layer, chunk or index is out of range".into(),
     )
 }
 
@@ -714,6 +764,83 @@ impl Pack {
         }
     }
 
+    /// Where the object with `uid` is, from its `object_uids` row. Like
+    /// [`Pack::chunk`], it checks the shape and bounds of what it loads;
+    /// whether the row agrees with the chunk records is checked by
+    /// [`Pack::verify`], or for this one object by [`Pack::object`].
+    ///
+    /// # Errors
+    /// Returns an error if SQLite fails or the stored row is invalid.
+    pub fn object_location(&self, uid: &str) -> Result<Option<UidLocation>, Error> {
+        if !is_identifier(uid) {
+            return Ok(None);
+        }
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT {}, {}, {}, {}, {} FROM object_uids WHERE uid = ?1",
+            bounded_identifier("plane"),
+            bounded_integer("layer", i64::from(i32::MIN), i64::from(i32::MAX)),
+            bounded_integer("cx", CHUNKS.0, CHUNKS.1),
+            bounded_integer("cy", CHUNKS.0, CHUNKS.1),
+            bounded_integer("object", 0, bound(MAXIMUM_OBJECT_INDEX)),
+        ))?;
+        let mut rows = statement.query([uid])?;
+        let found: Option<StoredLocation> = match rows.next()? {
+            Some(row) => Some((
+                utf8_column(row, 0, ErrorCode::ObjectUid)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            )),
+            None => None,
+        };
+        let Some(found) = found else {
+            return Ok(None);
+        };
+        match found {
+            (Some(plane), Some(layer), Some(cx), Some(cy), Some(index))
+                if is_identifier(&plane) =>
+            {
+                Ok(Some(UidLocation {
+                    plane,
+                    layer: i32::try_from(layer).map_err(|_| bad_uid_row())?,
+                    cx,
+                    cy,
+                    index: usize::try_from(index).map_err(|_| bad_uid_row())?,
+                }))
+            }
+            _ => Err(bad_uid_row()),
+        }
+    }
+
+    /// The object with `uid` and where it is. It decodes the object's chunk,
+    /// as [`Pack::chunk`] does, and fails unless the object at the row's
+    /// index has `uid`.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite fails, the stored row or chunk is invalid,
+    /// or they disagree.
+    pub fn object(&self, uid: &str) -> Result<Option<(UidLocation, ObjectRecord)>, Error> {
+        let Some(location) = self.object_location(uid)? else {
+            return Ok(None);
+        };
+        let object = self
+            .chunk(&location.plane, location.layer, location.cx, location.cy)?
+            .and_then(|chunk| {
+                chunk
+                    .object(location.index)
+                    .filter(|object| object.uid.as_deref() == Some(uid))
+                    .cloned()
+            })
+            .ok_or_else(|| {
+                Error::Rejected(
+                    ErrorCode::ObjectUid,
+                    format!("the object_uids row of {uid} does not name an object with that uid"),
+                )
+            })?;
+        Ok(Some((location, object)))
+    }
+
     /// Row counts.
     ///
     /// # Errors
@@ -736,6 +863,7 @@ impl Pack {
             chunks: count("chunks")?,
             definitions: count("definitions")?,
             objects: 0,
+            object_uids: count("object_uids")?,
         })
     }
 
@@ -882,34 +1010,11 @@ impl Pack {
         self.check_documents()?;
         self.check_stairwells()?;
         let (render_layers, ground_layers, _) = self.profile_layers()?;
-        let mut targets = Targets {
-            strings: u32::try_from(summary.strings)
-                .map_err(|_| Error::Rejected(ErrorCode::StringIds, "too many strings".into()))?,
-            render_layers,
-            is_plane: self.connection.prepare(
-                "SELECT EXISTS (SELECT 1 FROM strings s JOIN planes p ON p.id = s.value WHERE s.id = ?1)",
-            )?,
-            is_proto: self.connection.prepare(
-                "SELECT EXISTS (SELECT 1 FROM strings s JOIN definitions d ON d.type = 'proto' AND d.id = s.value WHERE s.id = ?1)",
-            )?,
-            is_zone: self.connection.prepare(
-                "SELECT EXISTS (SELECT 1 FROM strings s JOIN zones z ON z.plane = ?2 AND z.id = s.value WHERE s.id = ?1)",
-            )?,
-            has_anchor: self.connection.prepare(
-                "SELECT EXISTS (SELECT 1 FROM strings n JOIN anchors a ON a.id = n.value \
-                 WHERE n.id = ?3 AND a.plane = CASE WHEN ?1 = 0 THEN ?2 ELSE (SELECT value FROM strings WHERE id = ?1) END)",
-            )?,
-            value: self.connection.prepare("SELECT value FROM strings WHERE id = ?1")?,
-            planes: BTreeMap::new(),
-            protos: BTreeMap::new(),
-            field_names: BTreeMap::new(),
-            anchors: BTreeMap::new(),
-            current: String::new(),
-            zones: BTreeMap::new(),
-            own_anchors: BTreeMap::new(),
-        };
+        let strings = u32::try_from(summary.strings)
+            .map_err(|_| Error::Rejected(ErrorCode::StringIds, "too many strings".into()))?;
+        let mut targets = Targets::new(&self.connection, strings, render_layers)?;
         let mut statement = self.connection.prepare(&format!(
-            "SELECT p.id, p.chunk_size, {} FROM chunks c JOIN planes p ON p.id = c.plane ORDER BY c.plane, c.layer, c.cx, c.cy",
+            "SELECT p.id, p.chunk_size, c.layer, c.cx, c.cy, {} FROM chunks c JOIN planes p ON p.id = c.plane ORDER BY c.plane, c.layer, c.cx, c.cy",
             chunk_data_sql()
         ))?;
         let mut rows = statement.query([])?;
@@ -918,7 +1023,8 @@ impl Pack {
         while let Some(row) = rows.next()? {
             let plane: String = row.get(0)?;
             let chunk_size: u16 = row.get(1)?;
-            let data: types::Value = row.get(2)?;
+            let key: (i32, i64, i64) = (row.get(2)?, row.get(3)?, row.get(4)?);
+            let data: types::Value = row.get(5)?;
             // The frame records its decoded size, so the budget is checked
             // before the chunk is decompressed.
             decoded = decoded.saturating_add(recorded_size(&data));
@@ -932,7 +1038,7 @@ impl Pack {
             }
             // Objects are checked as they decode rather than kept, so memory
             // stays bounded by the record, not by the objects it holds.
-            targets.enter(&plane);
+            targets.enter(&plane, key);
             let mut failure = None;
             let mut visit = |object: &ObjectRecord| {
                 summary.objects += 1;
@@ -959,6 +1065,16 @@ impl Pack {
             return Err(Error::Rejected(
                 ErrorCode::Chunk,
                 "a chunk names an unknown plane".into(),
+            ));
+        }
+        // Each object with a uid matched the row of its uid, which names
+        // only that object, so the rows the objects matched are distinct;
+        // with as many rows as such objects, no row is left over and no two
+        // objects share a uid.
+        if targets.uids != summary.object_uids {
+            return Err(Error::Rejected(
+                ErrorCode::ObjectUid,
+                "object_uids holds a uid that no object has".into(),
             ));
         }
         Ok(summary)
@@ -1049,6 +1165,19 @@ impl Pack {
                 ),
                 ErrorCode::Definition,
                 "a definition type or ID is not an identifier",
+            ),
+            (
+                // The row's chunk exists, so its plane, layer and position
+                // are valid too.
+                format!(
+                    "SELECT count(*) FROM object_uids u WHERE {} \
+                     OR typeof(u.layer) != 'integer' OR typeof(u.cx) != 'integer' OR typeof(u.cy) != 'integer' \
+                     OR typeof(u.object) != 'integer' OR u.object NOT BETWEEN 0 AND {MAXIMUM_OBJECT_INDEX} \
+                     OR NOT EXISTS (SELECT 1 FROM chunks c WHERE c.plane = u.plane AND c.layer = u.layer AND c.cx = u.cx AND c.cy = u.cy)",
+                    not_identifier("u.uid")
+                ),
+                ErrorCode::ObjectUid,
+                "an object_uids row has an invalid uid or index, or names a missing chunk",
             ),
         ];
         for (query, code, problem) in checks {
@@ -1510,6 +1639,52 @@ struct Targets<'c> {
     current: String,
     zones: BTreeMap<u32, bool>,
     own_anchors: BTreeMap<u32, bool>,
+    /// The `object_uids` row of uid `?1`.
+    uid_row: Statement<'c>,
+    /// The layer and position of the chunk being checked, the index of its
+    /// next object in the record's depth-first order, and the objects with
+    /// a uid checked so far.
+    chunk: (i32, i64, i64),
+    index: i64,
+    uids: u64,
+}
+
+impl<'c> Targets<'c> {
+    /// The lookups of a verification whose strings are `1..=strings` and
+    /// whose profile has `render_layers` render layers.
+    fn new(connection: &'c Connection, strings: u32, render_layers: usize) -> Result<Self, Error> {
+        Ok(Self {
+            strings,
+            render_layers,
+            is_plane: connection.prepare(
+                "SELECT EXISTS (SELECT 1 FROM strings s JOIN planes p ON p.id = s.value WHERE s.id = ?1)",
+            )?,
+            is_proto: connection.prepare(
+                "SELECT EXISTS (SELECT 1 FROM strings s JOIN definitions d ON d.type = 'proto' AND d.id = s.value WHERE s.id = ?1)",
+            )?,
+            is_zone: connection.prepare(
+                "SELECT EXISTS (SELECT 1 FROM strings s JOIN zones z ON z.plane = ?2 AND z.id = s.value WHERE s.id = ?1)",
+            )?,
+            has_anchor: connection.prepare(
+                "SELECT EXISTS (SELECT 1 FROM strings n JOIN anchors a ON a.id = n.value \
+                 WHERE n.id = ?3 AND a.plane = CASE WHEN ?1 = 0 THEN ?2 ELSE (SELECT value FROM strings WHERE id = ?1) END)",
+            )?,
+            value: connection.prepare("SELECT value FROM strings WHERE id = ?1")?,
+            uid_row: connection.prepare(
+                "SELECT plane, layer, cx, cy, object FROM object_uids WHERE uid = ?1",
+            )?,
+            chunk: (0, 0, 0),
+            index: 0,
+            uids: 0,
+            planes: BTreeMap::new(),
+            protos: BTreeMap::new(),
+            field_names: BTreeMap::new(),
+            anchors: BTreeMap::new(),
+            current: String::new(),
+            zones: BTreeMap::new(),
+            own_anchors: BTreeMap::new(),
+        })
+    }
 }
 
 /// Entries kept per lookup cache. A full cache is cleared, so memory stays
@@ -1539,13 +1714,60 @@ impl Targets<'_> {
         (1..=self.strings).contains(&id)
     }
 
-    /// Starts checking chunks of `plane`, dropping lookups relative to the
-    /// previous one.
-    fn enter(&mut self, plane: &str) {
+    /// Starts checking the chunk of `plane` at `chunk`, dropping lookups
+    /// relative to the previous plane.
+    fn enter(&mut self, plane: &str, chunk: (i32, i64, i64)) {
         if self.current != plane {
             plane.clone_into(&mut self.current);
             self.zones.clear();
             self.own_anchors.clear();
+        }
+        self.chunk = chunk;
+        self.index = 0;
+    }
+
+    /// Checks that an object's uid has the `object_uids` row that names the
+    /// object: the current chunk and the object's index in it.
+    fn uid(&mut self, object: &ObjectRecord) -> Result<(), Error> {
+        let index = self.index;
+        self.index += 1;
+        let Some(uid) = &object.uid else {
+            return Ok(());
+        };
+        self.uids += 1;
+        let row: Option<(
+            types::Value,
+            types::Value,
+            types::Value,
+            types::Value,
+            types::Value,
+        )> = self
+            .uid_row
+            .query_row([uid], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })
+            .optional()?;
+        let (layer, cx, cy) = self.chunk;
+        let expected = (
+            types::Value::Text(self.current.clone()),
+            types::Value::Integer(i64::from(layer)),
+            types::Value::Integer(cx),
+            types::Value::Integer(cy),
+            types::Value::Integer(index),
+        );
+        if row.as_ref() == Some(&expected) {
+            Ok(())
+        } else {
+            Err(Error::Rejected(
+                ErrorCode::ObjectUid,
+                format!("the object_uids row of {uid} does not name its object"),
+            ))
         }
     }
 
@@ -1648,6 +1870,7 @@ impl Targets<'_> {
     }
 
     fn check(&mut self, object: &ObjectRecord) -> Result<(), Error> {
+        self.uid(object)?;
         let mut ok = self.proto(object.proto)?
             && usize::from(object.layer) <= self.render_layers
             && self.portal(object.portal.as_ref())?;

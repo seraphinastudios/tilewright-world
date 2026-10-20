@@ -53,6 +53,7 @@ fn small_chunk() -> ChunkData {
         heights: vec![0, -4, 12, i32::MAX],
         zones: vec![0, 0, 2, 2],
         objects: vec![ObjectRecord {
+            uid: None,
             tile: Some(3),
             proto: 7,
             layer: 2,
@@ -74,6 +75,7 @@ fn small_chunk() -> ChunkData {
             ],
             custom: Some("{\"example.org\":1}".to_owned()),
             inventory: vec![ObjectRecord {
+                uid: Some("chest.coin".to_owned()),
                 tile: None,
                 proto: 9,
                 layer: 0,
@@ -227,9 +229,13 @@ fn malformed_chunk_records_are_rejected() {
     let mut magic = record.clone();
     magic[0] = b'X';
     assert!(decode_record(&magic).is_err());
-    let mut version = record.clone();
-    version[4] = 2;
-    assert!(decode_record(&version).is_err());
+    // Only this version decodes: version 1 had no uids.
+    assert_eq!(super::RECORD_VERSION, 2);
+    for other in [1, 3] {
+        let mut version = record.clone();
+        version[4] = other;
+        assert!(decode_record(&version).is_err(), "version {other}");
+    }
 
     let mut outside = small_chunk();
     outside.zones[0] = 3;
@@ -312,7 +318,8 @@ fn metadata_must_be_exactly_the_format_keys() {
             "digest.twpack",
             "UPDATE meta SET value = 'XYZ' WHERE key = 'source_digest'",
         ),
-        ("version.twpack", "PRAGMA user_version = 2"),
+        ("version.twpack", "PRAGMA user_version = 1"),
+        ("later.twpack", "PRAGMA user_version = 3"),
         (
             "long.twpack",
             "UPDATE meta SET value = value || replace(hex(zeroblob(1024)), '00', 'x') WHERE key = 'compiler'",
@@ -658,7 +665,7 @@ fn verification_checks_names_profiles_portals_and_encodings() {
     for (name, sql, problem) in [
         (
             "ground.twpack",
-            "DELETE FROM chunks; UPDATE meta SET value = replace(value, '\"ground_layers\":[\"floor\",\"mask\"]', '\"ground_layers\":[\"floor\",\"mask\",\"a\",\"b\",\"c\",\"d\",\"e\",\"f\",\"g\"]') WHERE key = 'profile'",
+            "DELETE FROM chunks; DELETE FROM object_uids; UPDATE meta SET value = replace(value, '\"ground_layers\":[\"floor\",\"mask\"]', '\"ground_layers\":[\"floor\",\"mask\",\"a\",\"b\",\"c\",\"d\",\"e\",\"f\",\"g\"]') WHERE key = 'profile'",
             "ground_layers",
         ),
         (
@@ -750,6 +757,7 @@ fn a_minimal_object_fits_the_last_bytes_of_a_record() {
             .collect();
         let mut chunk = small_chunk();
         let mut minimal = chunk.objects[0].inventory[0].clone();
+        minimal.uid = None;
         minimal.tile = Some(0);
         minimal.portal = None;
         minimal.fields = (1..=fields)
@@ -780,17 +788,17 @@ fn stored_default_zones_and_profile_layers_must_resolve() {
         ),
         (
             "duplicate.twpack",
-            "DELETE FROM chunks; UPDATE meta SET value = replace(value, '\"living\"', '\"mask\"') WHERE key = 'profile'",
+            "DELETE FROM chunks; DELETE FROM object_uids; UPDATE meta SET value = replace(value, '\"living\"', '\"mask\"') WHERE key = 'profile'",
             "unique render_layers",
         ),
         (
             "null.twpack",
-            "DELETE FROM chunks; UPDATE meta SET value = replace(value, '\"living\"', 'null') WHERE key = 'profile'",
+            "DELETE FROM chunks; DELETE FROM object_uids; UPDATE meta SET value = replace(value, '\"living\"', 'null') WHERE key = 'profile'",
             "unique render_layers",
         ),
         (
             "ground.twpack",
-            "DELETE FROM chunks; UPDATE meta SET value = replace(value, '\"ground_layers\":[\"floor\",\"mask\"]', '\"ground_layers\":[\"floor\",\"roof\"]') WHERE key = 'profile'",
+            "DELETE FROM chunks; DELETE FROM object_uids; UPDATE meta SET value = replace(value, '\"ground_layers\":[\"floor\",\"mask\"]', '\"ground_layers\":[\"floor\",\"roof\"]') WHERE key = 'profile'",
             "not a render layer",
         ),
     ] {
@@ -884,6 +892,7 @@ fn compile_bounds_object_records() {
 
     // Far deeper than any stack could recurse through.
     let coin = |inventory| tilewright_source::Object {
+        uid: None,
         at: None,
         proto: "coin".to_owned(),
         layer: None,
@@ -1695,4 +1704,333 @@ fn verification_caps_zones_per_plane() {
     let error = Pack::open(&copy).unwrap().verify().unwrap_err();
     assert_eq!(error.code(), super::ErrorCode::Zone);
     assert!(error.to_string().contains("more zones"), "{error}");
+}
+
+/// The uids of the fixture, with the plane, layer, chunk position and
+/// depth-first index of each object, in uid order.
+const FIXTURE_UIDS: [(&str, &str, i32, i64, i64, i64); 5] = [
+    ("o.k3vq7zr2mxa5d6wfh4pnyt2cgu", "overworld", 0, 0, 0, 7),
+    ("ruin.north_wall", "overworld", 0, 0, 0, 1),
+    ("vault.chest", "vault", 0, 0, 0, 0),
+    ("village.chest", "overworld", 0, 0, 0, 4),
+    ("village.chest.small", "overworld", 0, 0, 0, 6),
+];
+
+#[test]
+fn object_uids_compile_into_records_and_an_index() {
+    let world = world();
+    let first = compile(&world).unwrap();
+    assert_eq!(
+        compile(&world).unwrap(),
+        first,
+        "compilation is deterministic"
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let written = write_pack(&world, directory.path()).unwrap();
+    let pack = Pack::open(&written.path).unwrap();
+    assert_eq!(pack.verify().unwrap().object_uids, 5);
+    let connection =
+        Connection::open_with_flags(&written.path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let mut statement = connection
+        .prepare("SELECT uid, plane, layer, cx, cy, object FROM object_uids")
+        .unwrap();
+    let rows: Vec<(String, String, i32, i64, i64, i64)> = statement
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let expected: Vec<_> = FIXTURE_UIDS
+        .iter()
+        .map(|(uid, plane, layer, cx, cy, index)| {
+            (
+                (*uid).to_owned(),
+                (*plane).to_owned(),
+                *layer,
+                *cx,
+                *cy,
+                *index,
+            )
+        })
+        .collect();
+    assert_eq!(rows, expected);
+
+    // Each uid reads back as the source object it names.
+    for (uid, source) in world.object_uids() {
+        let (location, record) = pack.object(uid).unwrap().unwrap();
+        assert_eq!(pack.object_location(uid).unwrap(), Some(location.clone()));
+        assert_eq!(
+            (
+                location.plane.as_str(),
+                (location.layer, location.cx, location.cy)
+            ),
+            (source.plane.as_str(), source.chunk)
+        );
+        assert_eq!(record.uid.as_deref(), Some(uid.as_str()));
+        let proto = pack.string(record.proto).unwrap().unwrap();
+        assert_eq!(proto, world.object(uid).unwrap().proto);
+        assert_eq!(
+            record.inventory.len(),
+            world.object(uid).unwrap().inventory.len()
+        );
+    }
+    assert!(pack.object("nothing").unwrap().is_none());
+    assert!(pack.object_location("Not an identifier").unwrap().is_none());
+
+    // Decoded chunks keep uids at every depth, by depth-first index.
+    let chunk = pack.chunk("overworld", 0, 0, 0).unwrap().unwrap();
+    let uids: Vec<Option<&str>> = (0..9)
+        .map(|index| chunk.object(index).unwrap().uid.as_deref())
+        .collect();
+    assert_eq!(
+        uids,
+        [
+            None,
+            Some("ruin.north_wall"),
+            None,
+            None,
+            Some("village.chest"),
+            None,
+            Some("village.chest.small"),
+            Some("o.k3vq7zr2mxa5d6wfh4pnyt2cgu"),
+            None
+        ]
+    );
+    assert!(chunk.object(9).is_none());
+}
+
+#[test]
+fn record_uids_are_identifiers_of_at_most_128_bytes() {
+    let mut chunk = small_chunk();
+    chunk.objects[0].uid = Some(format!("a{}", "0".repeat(127)));
+    let record = encode_record(&chunk).unwrap();
+    assert_eq!(decode_record(&record).unwrap(), chunk);
+    for bad in [
+        String::new(),
+        "Chest".to_owned(),
+        "a b".to_owned(),
+        "a".repeat(129),
+    ] {
+        chunk.objects[0].uid = Some(bad.clone());
+        let error = encode_record(&chunk).unwrap_err();
+        assert!(error.to_string().contains("not an identifier"), "{bad}");
+    }
+
+    // The inventory entry's uid, after its length byte.
+    let record = encode_record(&small_chunk()).unwrap();
+    let at = record
+        .windows(10)
+        .position(|window| window == b"chest.coin")
+        .unwrap();
+    assert_eq!(record[at - 1], 10);
+    for (offset, byte) in [(0, b'C'), (3, b' '), (9, 0), (9, 0xFF)] {
+        let mut patched = record.clone();
+        patched[at + offset] = byte;
+        let error = decode_record(&patched).unwrap_err();
+        assert!(error.to_string().contains("not an identifier"), "{byte}");
+    }
+    let mut empty = record.clone();
+    empty[at - 1] = 0;
+    assert!(decode_record(&empty).is_err());
+    let mut long = record;
+    long[at - 1] = 0xFF;
+    assert!(decode_record(&long).is_err());
+}
+
+#[test]
+fn verification_checks_object_uids_against_the_records() {
+    for (name, sql, problem) in [
+        (
+            "index.twpack",
+            "UPDATE object_uids SET object = 5 WHERE uid = 'village.chest'",
+            "does not name its object",
+        ),
+        (
+            "plane.twpack",
+            "UPDATE object_uids SET plane = 'vault' WHERE uid = 'village.chest'",
+            "does not name its object",
+        ),
+        (
+            "layer.twpack",
+            "UPDATE object_uids SET layer = 1 WHERE uid = 'village.chest'",
+            "does not name its object",
+        ),
+        (
+            "missing.twpack",
+            "DELETE FROM object_uids WHERE uid = 'vault.chest'",
+            "does not name its object",
+        ),
+        (
+            "extra.twpack",
+            "INSERT INTO object_uids VALUES ('zz.extra', 'overworld', 0, 0, 0, 0)",
+            "no object has",
+        ),
+        (
+            "chunk.twpack",
+            "UPDATE object_uids SET cx = 5 WHERE uid = 'village.chest'",
+            "names a missing chunk",
+        ),
+        (
+            "syntax.twpack",
+            "UPDATE object_uids SET uid = 'Village.chest' WHERE uid = 'village.chest'",
+            "invalid uid",
+        ),
+        (
+            "nul.twpack",
+            "UPDATE object_uids SET uid = 'village.chest' || char(0) WHERE uid = 'village.chest'",
+            "invalid uid",
+        ),
+        (
+            "blob.twpack",
+            "UPDATE object_uids SET uid = CAST(uid AS BLOB) WHERE uid = 'village.chest'",
+            "invalid uid",
+        ),
+        (
+            "negative.twpack",
+            "UPDATE object_uids SET object = -1 WHERE uid = 'village.chest'",
+            "invalid uid or index",
+        ),
+        (
+            "real.twpack",
+            "UPDATE object_uids SET object = 4.5 WHERE uid = 'village.chest'",
+            "invalid uid or index",
+        ),
+        (
+            "large.twpack",
+            "UPDATE object_uids SET object = 16777216 WHERE uid = 'village.chest'",
+            "invalid uid or index",
+        ),
+    ] {
+        let (_directory, copy) = tampered(name, sql);
+        let error = Pack::open(&copy).unwrap().verify().unwrap_err();
+        assert!(error.to_string().contains(problem), "{name}: {error}");
+        assert_eq!(error.code(), super::ErrorCode::ObjectUid, "{name}");
+    }
+
+    // A uid used twice in the records: across planes, and in one chunk.
+    let error = tampered_vault("twice.twpack", |chunk, _| {
+        chunk.objects[0].uid = Some("village.chest".to_owned());
+    });
+    assert!(error.contains("does not name its object"), "{error}");
+    let error = tampered_vault("same.twpack", |chunk, _| {
+        let mut copy = chunk.objects[0].clone();
+        copy.tile = Some(0);
+        chunk.objects.push(copy);
+    });
+    assert!(error.contains("does not name its object"), "{error}");
+    // A uid dropped from a record leaves its row unused.
+    let error = tampered_vault("dropped.twpack", |chunk, _| {
+        chunk.objects[0].uid = None;
+    });
+    assert!(error.contains("no object has"), "{error}");
+}
+
+#[test]
+fn single_uid_reads_check_bounds_and_agreement() {
+    for (name, sql) in [
+        (
+            "plane.twpack",
+            "UPDATE object_uids SET plane = 'Overworld' WHERE uid = 'village.chest'",
+        ),
+        (
+            "layer.twpack",
+            "UPDATE object_uids SET layer = 2147483648 WHERE uid = 'village.chest'",
+        ),
+        (
+            "cx.twpack",
+            "UPDATE object_uids SET cx = 281474976710656 WHERE uid = 'village.chest'",
+        ),
+        (
+            "cy.twpack",
+            "UPDATE object_uids SET cy = 'north' WHERE uid = 'village.chest'",
+        ),
+        (
+            "index.twpack",
+            "UPDATE object_uids SET object = 16777216 WHERE uid = 'village.chest'",
+        ),
+    ] {
+        let (_directory, copy) = tampered(name, sql);
+        let pack = Pack::open(&copy).unwrap();
+        let error = pack.object_location("village.chest").unwrap_err();
+        assert!(
+            error.to_string().contains("out of range"),
+            "{name}: {error}"
+        );
+        assert_eq!(error.code(), super::ErrorCode::ObjectUid, "{name}");
+        assert!(pack.object("village.chest").is_err(), "{name}");
+        // Other rows still read.
+        assert!(pack.object("vault.chest").unwrap().is_some(), "{name}");
+    }
+    for (name, sql) in [
+        (
+            "other.twpack",
+            "UPDATE object_uids SET object = 5 WHERE uid = 'village.chest'",
+        ),
+        (
+            "past.twpack",
+            "UPDATE object_uids SET object = 9 WHERE uid = 'village.chest'",
+        ),
+        (
+            "chunk.twpack",
+            "UPDATE object_uids SET cx = 3 WHERE uid = 'village.chest'",
+        ),
+    ] {
+        let (_directory, copy) = tampered(name, sql);
+        let pack = Pack::open(&copy).unwrap();
+        assert!(pack.object_location("village.chest").unwrap().is_some());
+        let error = pack.object("village.chest").unwrap_err();
+        assert!(
+            error.to_string().contains("does not name an object"),
+            "{name}: {error}"
+        );
+        assert_eq!(error.code(), super::ErrorCode::ObjectUid, "{name}");
+    }
+}
+
+#[test]
+fn compile_rejects_object_uids_used_twice_or_malformed() {
+    use super::compile::{Strings, UidRows, collect_uids, object_record, render_layers};
+    let world = world();
+    let chunk = vault_chunk(&world);
+    let mut rows = UidRows::new();
+    collect_uids(&mut rows, "vault", (0, 0, 0), &chunk).unwrap();
+    assert_eq!(rows["vault.chest"], ("vault", 0, 0, 0, 0));
+    let error = collect_uids(&mut rows, "vault", (0, 0, 1), &chunk).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("two objects have uid vault.chest"),
+        "{error}"
+    );
+    let mut nested = chunk.clone();
+    let mut item = nested.objects[0].clone();
+    item.at = None;
+    nested.objects[0].inventory = vec![item];
+    let error = collect_uids(&mut UidRows::new(), "vault", (0, 0, 0), &nested).unwrap_err();
+    assert!(error.to_string().contains("two objects"), "{error}");
+
+    let mut bad = chunk;
+    bad.objects[0].uid = Some("Vault".to_owned());
+    let error = collect_uids(&mut UidRows::new(), "vault", (0, 0, 0), &bad).unwrap_err();
+    assert!(error.to_string().contains("not an identifier"), "{error}");
+    let strings = Strings::collect(&world).unwrap();
+    let layers = render_layers(world.profile()).unwrap();
+    let error = object_record(
+        &bad.objects[0],
+        &layers,
+        &strings,
+        0,
+        &mut usize::MAX.clone(),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("not an identifier"), "{error}");
 }

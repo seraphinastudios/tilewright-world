@@ -294,15 +294,15 @@ mod tests {
                 "tilewright: allowlist {allowlist}:2:13: shape.format: format must be \"tilewright.diff-allow/1\"\n"
             )
         );
-        let outcome = run(&["--max-ids", "27", &fixture, &fixture]);
+        let outcome = run(&["--max-ids", "32", &fixture, &fixture]);
         assert_eq!(outcome.code, TROUBLE);
         assert_eq!(
             outcome.stderr,
             format!(
-                "tilewright: old {fixture}: more than 27 IDs, the ID limit\ntilewright: new {fixture}: more than 27 IDs, the ID limit\n"
+                "tilewright: old {fixture}: more than 32 IDs, the ID limit\ntilewright: new {fixture}: more than 32 IDs, the ID limit\n"
             )
         );
-        assert_eq!(run(&["--max-ids", "28", &fixture, &fixture]).code, SAME);
+        assert_eq!(run(&["--max-ids", "33", &fixture, &fixture]).code, SAME);
         let outcome = run(&["--allow", &missing, &fixture, &fixture]);
         assert_eq!(outcome.code, TROUBLE);
         assert!(
