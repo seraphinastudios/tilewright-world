@@ -191,10 +191,11 @@ impl Transitions {
                     terrain_at(x - 1, y - 1),
                 ];
                 let index = (y - 1) * SIDE + (x - 1);
-                // In the terrain layer a transition replaces the painted
-                // prototype; elsewhere a prototype the source places wins.
+                // A prototype the source places in a layer wins over any
+                // transition there. No transition draws into the terrain
+                // layer, which keeps the painted terrain.
                 let blocked = (0..self.ground_layers.min(8)).fold(0_u8, |blocked, output| {
-                    if output != self.terrain_layer && cell(own.get(output), index).is_some() {
+                    if output == self.terrain_layer || cell(own.get(output), index).is_some() {
                         blocked | (1 << output)
                     } else {
                         blocked

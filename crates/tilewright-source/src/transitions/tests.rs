@@ -122,7 +122,8 @@ fn open_water(tile: Option<&str>) -> bool {
 }
 
 const FLOOR: usize = 0;
-const EDGE: usize = 1;
+const DECAL: usize = 1;
+const EDGE: usize = 2;
 
 #[test]
 fn each_model_produces_exactly_its_patterns() {
@@ -259,7 +260,7 @@ fn the_fixture_reads_its_terrains_and_transitions() {
     let transitions = transitions(&world);
     assert_eq!(transitions.path(), TRANSITIONS);
     assert_eq!(transitions.terrain_layer(), FLOOR);
-    assert_eq!(transitions.ground_layers(), 2);
+    assert_eq!(transitions.ground_layers(), 3);
     let ids: Vec<&str> = transitions
         .terrains()
         .iter()
@@ -375,58 +376,68 @@ fn resolution_is_deterministic() {
 }
 
 #[test]
-fn the_terrain_layer_is_replaced_where_a_pattern_has_a_tile() {
+fn transitions_draw_over_the_painted_terrain() {
     let world = world();
     let transitions = transitions(&world);
     let island = &world.planes()["island"];
     // A lone water tile has pattern 0.
     assert_eq!(
-        tile(&transitions, island, FLOOR, 3, 3).as_deref(),
+        tile(&transitions, island, EDGE, 3, 3).as_deref(),
         Some("pond")
     );
-    // The pond's sides, and a corner tile that has no pattern of its own and
-    // keeps the painted water.
+    // The pond's sides, and a corner tile whose pattern has no tile.
     assert_eq!(
-        tile(&transitions, island, FLOOR, 10, 8).as_deref(),
+        tile(&transitions, island, EDGE, 10, 8).as_deref(),
         Some("shore_n")
     );
     assert_eq!(
-        tile(&transitions, island, FLOOR, 10, 15).as_deref(),
+        tile(&transitions, island, EDGE, 10, 15).as_deref(),
         Some("shore_s")
     );
     assert_eq!(
-        tile(&transitions, island, FLOOR, 6, 12).as_deref(),
+        tile(&transitions, island, EDGE, 6, 12).as_deref(),
         Some("shore_w")
     );
     assert_eq!(
-        tile(&transitions, island, FLOOR, 14, 10).as_deref(),
+        tile(&transitions, island, EDGE, 14, 10).as_deref(),
         Some("shore_e")
     );
-    assert_eq!(
-        tile(&transitions, island, FLOOR, 6, 8).as_deref(),
-        Some("water")
-    );
+    assert_eq!(tile(&transitions, island, EDGE, 6, 8), None);
+    // The terrain layer keeps the painted terrain everywhere.
+    let world_floor = |x: i64, y: i64| {
+        island.chunks[&(0, x.div_euclid(32), y.div_euclid(32))].ground[FLOOR]
+            .value(usize::try_from(y.rem_euclid(32) * 32 + x.rem_euclid(32)).unwrap())
+            .map(str::to_owned)
+    };
+    for &(layer, cx, cy) in island.chunks.keys() {
+        let resolved = transitions.resolve_chunk(island, layer, cx, cy);
+        for index in 0..1024 {
+            assert_eq!(
+                resolved.value(FLOOR, index),
+                island.chunks[&(layer, cx, cy)].ground[FLOOR].value(index)
+            );
+        }
+    }
+    assert_eq!(world_floor(3, 3).as_deref(), Some("water"));
     // Stone is no terrain: the water beside it continues, and nothing draws
     // on it.
-    assert_eq!(
-        tile(&transitions, island, FLOOR, 14, 11).as_deref(),
-        Some("water")
-    );
+    assert_eq!(tile(&transitions, island, EDGE, 14, 11), None);
     assert_eq!(
         tile(&transitions, island, FLOOR, 15, 11).as_deref(),
         Some("stone")
     );
     assert_eq!(tile(&transitions, island, EDGE, 15, 11), None);
-    // Dirt picks its variants; unpainted tiles stay empty.
+    // Dirt picks its variant decals; unpainted tiles stay empty.
     let dirt: BTreeSet<String> = (0..32)
-        .filter_map(|x| tile(&transitions, island, FLOOR, x, 0))
+        .filter_map(|x| tile(&transitions, island, DECAL, x, 0))
         .collect();
     assert_eq!(
         dirt.into_iter().collect::<Vec<_>>(),
         ["dirt", "dirt_pebbles"]
     );
-    assert_eq!(tile(&transitions, island, FLOOR, 21, 15), None);
-    assert_eq!(tile(&transitions, island, EDGE, 21, 15), None);
+    for ground in [FLOOR, DECAL, EDGE] {
+        assert_eq!(tile(&transitions, island, ground, 21, 15), None);
+    }
 }
 
 #[test]
@@ -450,17 +461,17 @@ fn transitions_match_across_chunk_edges() {
     );
     // A pond across the same edge has no shore along it.
     assert!(open_water(
-        tile(&transitions, island, FLOOR, 31, 21).as_deref()
+        tile(&transitions, island, EDGE, 31, 21).as_deref()
     ));
     assert!(open_water(
-        tile(&transitions, island, FLOOR, 32, 21).as_deref()
+        tile(&transitions, island, EDGE, 32, 21).as_deref()
     ));
     assert_eq!(
-        tile(&transitions, island, FLOOR, 30, 20).as_deref(),
+        tile(&transitions, island, EDGE, 30, 20).as_deref(),
         Some("shore_n")
     );
     assert_eq!(
-        tile(&transitions, island, FLOOR, 33, 20).as_deref(),
+        tile(&transitions, island, EDGE, 33, 20).as_deref(),
         Some("shore_n")
     );
     // Sand at y = 32, in chunk (0, 1), edges the dirt at y = 31.
@@ -478,11 +489,11 @@ fn transitions_match_across_chunk_edges() {
     assert_eq!(tile(&transitions, &alone, EDGE, 31, 15), None);
     // Inside, a tile without terrain continues the water.
     assert!(open_water(
-        tile(&transitions, &alone, FLOOR, 31, 21).as_deref()
+        tile(&transitions, &alone, EDGE, 31, 21).as_deref()
     ));
     // A chunk the source does not have resolves to empty tiles.
     let missing = transitions.resolve_chunk(island, 0, 5, 5);
-    assert_eq!(missing.ground_layers(), 2);
+    assert_eq!(missing.ground_layers(), 3);
     assert_eq!(missing.values().count(), 0);
     assert_eq!(missing.at(FLOOR, [0, 0]), None);
     assert_eq!(
@@ -579,9 +590,10 @@ fn any_terrain_source_resolves_alike() {
     let resolved = transitions.resolve_chunk(&grids, 0, 2, 0);
     assert_eq!(resolved.values().count(), 0);
     let grids = transitions.resolve_chunk(island, 0, 0, 0).grids();
-    assert_eq!(grids.len(), 2);
+    assert_eq!(grids.len(), 3);
     assert_eq!(grids[EDGE].value(6 * 32 + 25), Some("bush"));
-    assert_eq!(grids[FLOOR].value(3 * 32 + 3), Some("pond"));
+    assert_eq!(grids[EDGE].value(3 * 32 + 3), Some("pond"));
+    assert_eq!(grids[FLOOR].value(3 * 32 + 3), Some("water"));
 }
 
 /// An outside transition of `grass` with one side pattern.
@@ -612,6 +624,11 @@ fn malformed_documents_are_rejected() {
         "shape.range",
     );
     rejects(&document(&sides.replace("\"sides\"", "3")), "shape.type");
+    // No transition draws into the terrain layer.
+    rejects(
+        &document(&sides.replace("\"edge\"", "\"floor\"")),
+        "shape.range",
+    );
     rejects(
         &document(
             &sides
@@ -649,7 +666,7 @@ fn malformed_patterns_and_variants_are_rejected() {
         );
     }
     rejects(&document(&sides.replace("\"1\":", "\"0\":")), "shape.range");
-    let blob = r#"{"draw": "inside", "model": "blob", "layer": "floor", "tiles": {"2": "grass"}}"#;
+    let blob = r#"{"draw": "inside", "model": "blob", "layer": "edge", "tiles": {"2": "grass"}}"#;
     rejects(&document(blob), "shape.range");
     rejects(
         &document(&blob.replace("inside", "outside").replace("\"2\"", "\"3\"")),
@@ -754,7 +771,7 @@ fn references_resolve_and_are_unique() {
     assert!(load_with_document(&document("").replace(
         r#"{"id": "water", "protos": ["water"]}"#,
         r#"{"id": "water", "protos": ["water"], "transitions": [{"draw": "inside",
-            "model": "sides", "layer": "floor", "with": ["grass"], "tiles": {"15": "water"}}]}"#
+            "model": "sides", "layer": "edge", "with": ["grass"], "tiles": {"15": "water"}}]}"#
     )));
 }
 
@@ -797,7 +814,7 @@ fn counts_are_capped() {
         })
         .collect();
     let crowded = format!(
-        "{{\"format\": \"tilewright.transitions/1\", \"layer\": \"floor\", \"terrains\": [{{\"id\": \"x\", \"protos\": [\"dirt\"], \"transitions\": [{{\"draw\": \"inside\", \"model\": \"none\", \"layer\": \"floor\", \"tiles\": {{\"0\": \"dirt\"}}}}]}}, {}]}}",
+        "{{\"format\": \"tilewright.transitions/1\", \"layer\": \"floor\", \"terrains\": [{{\"id\": \"x\", \"protos\": [\"dirt\"], \"transitions\": [{{\"draw\": \"inside\", \"model\": \"none\", \"layer\": \"decal\", \"tiles\": {{\"0\": \"dirt\"}}}}]}}, {}]}}",
         crowded.join(", ")
     );
     let problems = problems_with(&crowded);
@@ -1124,7 +1141,9 @@ fn naive(
                     continue;
                 };
                 let output = transition.layer();
-                if output != transitions.terrain_layer() && value(output, x, y).is_some() {
+                // A prototype the source places wins; the loader keeps
+                // every transition out of the terrain layer.
+                if output == transitions.terrain_layer() || value(output, x, y).is_some() {
                     continue;
                 }
                 let hash = variant_hash(transition.seed(), layer, x, y);
@@ -1147,7 +1166,7 @@ fn rich_document() -> String {
             "water",
             "\"water\"",
             &[
-                (Draw::Inside, Model::Blob, "floor", ""),
+                (Draw::Inside, Model::Blob, "decal", ""),
                 (Draw::Outside, Model::Corners, "edge", "\"rock\""),
             ],
         ),
@@ -1156,7 +1175,7 @@ fn rich_document() -> String {
             "\"sand\"",
             &[
                 (Draw::Outside, Model::Sides, "edge", ""),
-                (Draw::Inside, Model::None, "floor", ""),
+                (Draw::Inside, Model::None, "decal", ""),
             ],
         ),
         (
@@ -1172,13 +1191,13 @@ fn rich_document() -> String {
             "\"grass\"",
             &[
                 (Draw::Outside, Model::Corners, "edge", ""),
-                (Draw::Inside, Model::Sides, "floor", "\"dirt\""),
+                (Draw::Inside, Model::Sides, "decal", "\"dirt\""),
             ],
         ),
         (
             "flowers",
             "\"grass_flowers\"",
-            &[(Draw::Outside, Model::Sides, "floor", "\"grass\"")],
+            &[(Draw::Outside, Model::Sides, "decal", "\"grass\"")],
         ),
         (
             "rock",
@@ -1284,6 +1303,10 @@ fn painted(state: &mut u64, missing: bool) -> Grids {
                             .map(|value| (*value).to_owned())
                             .collect(),
                         cells: floor,
+                    },
+                    Grid {
+                        palette: Vec::new(),
+                        cells: vec![0; 1024],
                     },
                     Grid {
                         palette: vec!["bush".to_owned()],

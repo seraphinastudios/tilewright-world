@@ -178,6 +178,9 @@ struct Terrains<'t> {
     /// Terrain indexes by ID.
     ids: &'t BTreeMap<String, usize>,
     count: usize,
+    /// The terrain layer, which no transition draws into; `None` when the
+    /// document's is invalid and has been reported.
+    terrain_layer: Option<usize>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -223,9 +226,18 @@ fn read_transition<'a>(
         );
         ok = false;
     }
-    let layer = reader
-        .required(entry, "layer")
-        .and_then(|value| ground_layer(reader, profile, value));
+    let layer = reader.required(entry, "layer").and_then(|value| {
+        let layer = ground_layer(reader, profile, value)?;
+        if Some(layer) == terrains.terrain_layer {
+            reader.report(
+                value.span(),
+                Code::Range,
+                "a transition draws into a ground layer other than the terrain layer, which keeps the painted terrain",
+            );
+            return None;
+        }
+        Some(layer)
+    });
     let seed = match entry.get("seed") {
         Some(value) => reader.u32(value, 0),
         None => Some(0),
@@ -417,6 +429,7 @@ pub(crate) fn read_transitions(
     let lookup = Terrains {
         ids: &by_id,
         count: items.len(),
+        terrain_layer,
     };
     let mut terrains = Vec::with_capacity(items.len());
     let mut transitions = Vec::new();

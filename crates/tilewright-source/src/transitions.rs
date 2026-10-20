@@ -318,7 +318,7 @@ impl Transition {
     }
 
     /// The index in the profile's ground layers of the layer its tiles go
-    /// into.
+    /// into: never the terrain layer, which keeps the painted terrain.
     #[must_use]
     pub const fn layer(&self) -> usize {
         self.layer

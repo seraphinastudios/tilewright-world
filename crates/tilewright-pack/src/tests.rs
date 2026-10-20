@@ -2082,11 +2082,15 @@ fn packs_hold_resolved_terrain_transitions() {
     }
     assert!(strings.iter().any(|value| value == "grass_edge_5"));
     assert!(!strings.iter().any(|value| value == "bush_edge"));
-    // A pond's derived tile is what readers see in the floor grid.
+    // Readers see a pond's derived tile in the edge grid, over the painted
+    // water the floor grid keeps.
     let chunk = pack.chunk("island", 0, 0, 0).unwrap().unwrap();
-    let floor = chunk.ground[0][3 * 32 + 3];
-    let id = chunk.palette[usize::from(floor) - 1];
-    assert_eq!(pack.string(id).unwrap().as_deref(), Some("pond"));
+    let name = |cell: u16| {
+        let id = chunk.palette[usize::from(cell) - 1];
+        pack.string(id).unwrap().unwrap()
+    };
+    assert_eq!(name(chunk.ground[2][3 * 32 + 3]), "pond");
+    assert_eq!(name(chunk.ground[0][3 * 32 + 3]), "water");
     // Compiling is deterministic with transitions too.
     assert_eq!(compile(&world).unwrap(), compile(&world).unwrap());
 }

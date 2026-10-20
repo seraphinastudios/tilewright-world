@@ -223,7 +223,7 @@ Terrain grids:
   entry instead.
 - With terrain transitions (section 13), the profile's terrain layer holds
   painted terrain, and the edge, corner and variant tiles around it are
-  derived, not stored.
+  derived into the other ground layers, not stored.
 
 Objects:
 
@@ -494,7 +494,7 @@ the terrain a brush paints, and every tool derives the same tiles from it.
   "layer": "floor",
   "terrains": [
     {"id": "water", "protos": ["water"], "transitions": [
-      {"draw": "inside", "model": "blob", "layer": "floor",
+      {"draw": "inside", "model": "blob", "layer": "mask",
        "tiles": {"255": [{"proto": "water", "weight": 3}, "water_ripple"], "0": "pond",
                  "124": "shore_n", "241": "shore_e", "199": "shore_s", "31": "shore_w"}}
     ]},
@@ -525,7 +525,7 @@ in a chunk the plane does not have has no terrain. A transition:
 | --- | --- |
 | `draw` | `"inside"` draws on tiles of the transition's terrain, *T*, where its neighbours differ, such as a shore drawn inside the water. `"outside"` draws on tiles of the terrains in `with`, showing *T* reaching in from their neighbours, such as grass edges drawn over the dirt next to the grass. |
 | `model` | The neighbourhood it reads: `"none"`, `"sides"`, `"corners"` or `"blob"` (below). An outside transition cannot use `"none"`. |
-| `layer` | The ground layer its tiles go into. |
+| `layer` | The ground layer its tiles go into: any but the terrain layer, which keeps the painted terrain. |
 | `with` | Optional list of 1 to 1,024 unique terrain IDs, never *T*: the terrains it blends with. Without it, an inside transition blends with every other terrain, and an outside one draws onto every terrain listed before *T*, of which there must be at least one. |
 | `seed` | Optional integer from 0 to 4,294,967,295, default 0, mixed into the choice of variants. |
 | `tiles` | The tile of each pattern: an object whose keys are patterns, written as decimal integers without leading zeros. Each value is a prototype ID, or a list of 1 to 256 variants, each a prototype ID or `{"proto": id, "weight": w}` with `w` from 1 to 65,535 (default 1). Every prototype is a `proto` definition. |
@@ -561,12 +561,9 @@ order, and each terrain's transitions in order. For each tile with a
 terrain, every transition that applies to it, an inside one of its terrain
 or an outside one whose `with` holds its terrain, computes the tile's
 pattern. If `tiles` lists the pattern, the transition picks a variant and
-draws it into its `layer`:
-
-- in the terrain layer, the tile replaces the painted prototype;
-- in any other ground layer, it fills the cell only when the source leaves
-  it empty: a prototype the source places there wins, so an author can
-  override a transition by hand.
+draws it into its `layer`, but only where the source leaves that cell
+empty: a prototype the source places there wins, so an author can
+override a transition by hand.
 
 A later transition that draws into the same cell replaces the earlier
 one's tile, so a terrain's edges draw over those of the terrains before it.
@@ -596,14 +593,14 @@ that paints a terrain writes its first prototype into the terrain layer,
 one cell per painted tile (a `terrain.set` operation,
 [TRANSACTIONS.md](TRANSACTIONS.md)), so diffs and transactions stay as
 small as the painting, and changing a rule never rewrites the world. The
-compiler resolves transitions into the pack's ground grids (PACK.md
-section 2), so readers and renderers draw them without knowing the rules.
+compiler resolves transitions into the pack's other ground grids (PACK.md
+section 2), so readers and renderers draw them without knowing the rules,
+and the pack's terrain layer holds the painted terrain, for game logic
+such as which tiles are water. The rules are not stored in the pack.
 Editors and other tools call the same resolver (`Transitions::resolve_chunk`
-in `tilewright-source`) to show them. Drawing transitions into a ground
-layer of their own, such as `mask`, keeps the painted terrain in the pack;
-drawing them into the terrain layer replaces it there. A tile's
-transitions depend on its neighbours, so painting a tile changes what is
-drawn on the tiles around it, in adjacent chunks too.
+in `tilewright-source`) to show the tiles. A tile's transitions depend on
+its neighbours, so painting a tile changes what is drawn on the tiles
+around it, in adjacent chunks too.
 
 ## 14. Validation summary
 

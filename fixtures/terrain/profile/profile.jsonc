@@ -3,8 +3,9 @@
   "id": "terrain-example",
   "version": "1.0.0",
   "projection": {"kind": "top_down", "tile_size": 32},
-  "render_layers": ["floor", "edge", "item"],
-  "ground_layers": ["floor", "edge"],
+  "render_layers": ["floor", "decal", "edge", "item"],
+  // Painted terrain stays in floor; transitions draw into decal and edge.
+  "ground_layers": ["floor", "decal", "edge"],
   "definition_types": {
     "proto": {"schema": "schema/proto.jsonc"}
   },
