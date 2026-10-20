@@ -184,8 +184,9 @@ so hashing reads only pages that the integrity check has already read.
 
 Decoding is linear in a pack's decoded size, which compression can make
 thousands of times its file size. A full verification therefore has a
-decoded-byte budget, which the caller sets and which is 8 GiB by default: the
-sum of the decoded sizes the chunks' zstd frames record. It fails as soon as
+decoded-byte budget, which the caller sets and which is 8 GiB by default, or
+256 MiB in the browser reader, whose verification runs on the page's thread:
+the sum of the decoded sizes the chunks' zstd frames record. It fails as soon as
 the next chunk would pass the budget, before decompressing that chunk. The
 `tilewright inspect` command sets the budget with `--max-decoded-bytes`.
 A reader that builds a value for each object and field of a chunk, or step

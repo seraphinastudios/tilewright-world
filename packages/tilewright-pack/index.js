@@ -133,6 +133,11 @@ const I64 = [-(2n ** 63n), 2n ** 63n - 1n];
 const U64 = [0n, 2n ** 64n - 1n];
 const DEFAULT_MAX_PACK_BYTES = 8n * 2n ** 30n;
 
+// Verification decodes every chunk on the calling thread, and compression
+// lets a small pack decode to far more, so the browser's default budget is
+// 256 MiB rather than the 8 GiB of the other readers.
+const DEFAULT_MAX_DECODED_BYTES = 256n * 2n ** 20n;
+
 // What a listing reads at a time: at most 64 rows, and no more once their
 // keys and documents reach 1 MiB, so a page of large documents is one row.
 const PAGE = 64;
@@ -551,7 +556,7 @@ export class Pack {
       "maxDecodedBytes",
     ]);
     const maxPackBytes = limit(pack, "limits.maxPackBytes");
-    const maxDecodedBytes = limit(decoded, "limits.maxDecodedBytes");
+    const maxDecodedBytes = limit(decoded, "limits.maxDecodedBytes") ?? DEFAULT_MAX_DECODED_BYTES;
     return this.#call((reader) => reader.verify(maxPackBytes, maxDecodedBytes));
   }
 

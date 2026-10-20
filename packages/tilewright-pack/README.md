@@ -104,7 +104,7 @@ uid's row names) is what `verify()` checks.
 | `stairwell(plane, id, limits?)`, `stairwells(plane, limits?)`, `stairwellStep(plane, layer, x, y)` | Stairwells and the step on a tile |
 | `definition(type, id)`, `definitions(type?)` | Definitions, with their documents as canonical JSON |
 | `objectLocation(uid)`, `object(uid, limits?)` | Where the object with a uid is, and the object itself |
-| `verify(limits?)` | Checks the whole pack and returns its row counts; `limits` has `maxPackBytes` and `maxDecodedBytes`, the decoded-byte budget, 8 GiB by default |
+| `verify(limits?)` | Checks the whole pack and returns its row counts; `limits` has `maxPackBytes` and `maxDecodedBytes`, the decoded-byte budget |
 | `digest()` | The SHA-256 of the pack's bytes |
 
 A record holds at most 16 MiB, which can encode about a million small
@@ -116,6 +116,12 @@ default. The count is taken in a first pass that holds one object at a
 time, before anything is built. Stairwell reads keep to the same budget for
 their steps, of which a stored document can list about a quarter of a
 million.
+
+Verification decodes every chunk, on the calling thread, and compression
+lets a small pack decode to thousands of times its size. So its
+decoded-byte budget, `limits.maxDecodedBytes`, is 256 MiB by default here,
+not the other readers' 8 GiB; a larger pack fails with
+`pack.decode_budget` until you raise it, best in a worker.
 
 `index.d.ts` describes every value. Numeric arguments are integers, and
 checked: a layer is a 32-bit integer, a position a safe integer or a bigint.

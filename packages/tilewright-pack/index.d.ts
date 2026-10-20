@@ -100,7 +100,11 @@ export interface ReadLimits {
 export interface VerifyLimits {
   /** At most the limit the pack was opened with, which is the default. */
   maxPackBytes?: IntegerArgument;
-  /** The decoded-byte budget for chunks: 8 GiB by default. */
+  /**
+   * The decoded-byte budget for chunks: 256 MiB by default, since
+   * verification runs on the calling thread and compression lets a small
+   * pack decode to far more. Raise it for larger packs, ideally in a worker.
+   */
   maxDecodedBytes?: IntegerArgument;
 }
 

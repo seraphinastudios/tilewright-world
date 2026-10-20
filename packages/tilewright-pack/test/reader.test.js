@@ -318,6 +318,25 @@ test("stairwell reads keep to their budget of steps", async () => {
   }
 });
 
+test("verification's decoded-byte budget is 256 MiB unless raised", async () => {
+  await initialize(module);
+  const pack = openPack(valid);
+  const { verify } = Reader.prototype;
+  const budgets = [];
+  Reader.prototype.verify = function (...args) {
+    budgets.push(args[1]);
+    return verify.apply(this, args);
+  };
+  try {
+    pack.verify();
+    pack.verify({});
+    pack.verify({ maxDecodedBytes: 2n ** 33n });
+  } finally {
+    Reader.prototype.verify = verify;
+  }
+  assert.deepEqual(budgets, [2n ** 28n, 2n ** 28n, 2n ** 33n]);
+});
+
 test("options are read from the bag's own properties only", async () => {
   await initialize(module);
   const inherited = {
