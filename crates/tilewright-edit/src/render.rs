@@ -164,15 +164,18 @@ impl Node {
     }
 
     fn write(&self, indent: &str, expand: bool, output: &mut String) {
-        // An array of numbers, booleans and nulls stays on one line while
-        // that line is not long; any other container while it is short.
+        // A file's root container is always on several lines. Otherwise an
+        // array of numbers, booleans and nulls stays on one line while that
+        // line is not long, an empty object does, and any other container
+        // while it is short.
         let one_line = match self {
+            Self::Scalar(_) | Self::String(_) => true,
+            Self::Array(_) | Self::Object(_) if expand => false,
             Self::Array(items) if items.iter().all(|item| matches!(item, Self::Scalar(_))) => {
                 self.fits(&mut SCALAR_LINE_WIDTH.clone())
             }
             Self::Object(members) if members.is_empty() => true,
-            Self::Scalar(_) | Self::String(_) => true,
-            Self::Array(_) | Self::Object(_) => !expand && self.fits(&mut INLINE_WIDTH.clone()),
+            Self::Array(_) | Self::Object(_) => self.fits(&mut INLINE_WIDTH.clone()),
         };
         if one_line {
             self.inline(output);
@@ -193,7 +196,9 @@ impl Node {
                         item.write(&inner, false, output);
                     }
                 }
-                output.push('\n');
+                if !items.is_empty() {
+                    output.push('\n');
+                }
                 output.push_str(indent);
                 output.push(']');
             }
@@ -222,7 +227,9 @@ impl Node {
                         value.write(&inner, false, output);
                     }
                 }
-                output.push('\n');
+                if !members.is_empty() {
+                    output.push('\n');
+                }
                 output.push_str(indent);
                 output.push('}');
             }

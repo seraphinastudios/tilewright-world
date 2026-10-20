@@ -291,27 +291,14 @@ impl Directory {
     }
 
     /// Whether the file `name` has an access control list beyond its mode
-    /// bits: a POSIX, NFS version 4 or rich one.
+    /// bits.
     #[cfg(target_os = "linux")]
     fn has_access_control_list(&self, name: &str) -> Result<bool, Refused> {
         let flags =
             OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC | OFlags::NOCTTY;
         let fd = openat(&self.0, name, flags, Mode::empty())
             .map_err(|errno| classify(self.0.as_fd(), name, errno, &[name]))?;
-        for attribute in [
-            "system.posix_acl_access",
-            "system.nfs4_acl",
-            "system.richacl",
-        ] {
-            // Asked with no room, the call gives the size of a value that is
-            // there, or says there is none.
-            match rustix::fs::fgetxattr(&fd, attribute, &mut [0_u8; 0][..]) {
-                Ok(_) | Err(Errno::RANGE) => return Ok(true),
-                Err(Errno::NODATA | Errno::NOTSUP) => {}
-                Err(errno) => return Err(Refused::Io(errno.into())),
-            }
-        }
-        Ok(false)
+        access_control_list(&fd)
     }
 
     pub(crate) fn write(
@@ -338,6 +325,10 @@ impl Directory {
             let mut file = std::fs::File::from(fd);
             file.write_all(bytes).map_err(Refused::Io)?;
             if let Some(permissions) = permissions {
+                // An access control list the directory gives new files
+                // would let others read what the mode bits do not.
+                #[cfg(target_os = "linux")]
+                strip_access_control_list(&file)?;
                 fchmod(&file, Mode::from_raw_mode(permissions.mode()))
                     .map_err(|errno| Refused::Io(errno.into()))?;
             }
@@ -380,4 +371,46 @@ impl Directory {
             .map(|()| true)
             .map_err(|errno| Refused::Io(errno.into()))
     }
+}
+
+/// The access control lists Linux file systems keep beside the mode bits.
+#[cfg(target_os = "linux")]
+const ACCESS_CONTROL_LISTS: [&str; 3] = [
+    "system.posix_acl_access",
+    "system.nfs4_acl",
+    "system.richacl",
+];
+
+/// Whether the open file has an access control list beyond its mode bits:
+/// a POSIX, NFS version 4 or rich one.
+#[cfg(target_os = "linux")]
+fn access_control_list(fd: impl AsFd) -> Result<bool, Refused> {
+    for attribute in ACCESS_CONTROL_LISTS {
+        // Asked with no room, the call gives the size of a value that is
+        // there, or says there is none.
+        match rustix::fs::fgetxattr(&fd, attribute, &mut [0_u8; 0][..]) {
+            Ok(_) | Err(Errno::RANGE) => return Ok(true),
+            Err(Errno::NODATA | Errno::NOTSUP) => {}
+            Err(errno) => return Err(Refused::Io(errno.into())),
+        }
+    }
+    Ok(false)
+}
+
+/// Removes the POSIX access control list a new file got from its
+/// directory, so that its mode bits alone say who may read it; any other
+/// list that stays is an error.
+#[cfg(target_os = "linux")]
+fn strip_access_control_list(fd: impl AsFd) -> Result<(), Refused> {
+    match rustix::fs::fremovexattr(&fd, "system.posix_acl_access") {
+        Ok(()) | Err(Errno::NODATA | Errno::NOTSUP) => {}
+        Err(errno) => return Err(Refused::Io(errno.into())),
+    }
+    if access_control_list(&fd)? {
+        return Err(Refused::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "the directory gives new files an access control list that cannot be removed",
+        )));
+    }
+    Ok(())
 }

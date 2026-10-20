@@ -156,11 +156,9 @@ pub fn digest(text: Option<&str>) -> Option<[u8; 32]> {
 #[derive(Debug)]
 pub struct Plan {
     root: PathBuf,
-    /// The transaction's name, for diagnostics.
-    name: String,
     /// The plane and grid of each terrain operation, checked again when
-    /// publishing.
-    terrain: Vec<(String, String)>,
+    /// publishing, with a conflict at the operation to report.
+    terrain: Vec<(String, String, Diagnostic)>,
     /// Where the files renamed or created like another came from, whose
     /// permissions bound theirs.
     lineage: lineage::Lineage,
@@ -514,18 +512,26 @@ fn publish_inputs(
     transaction: &Transaction,
     workspace: &Workspace<'_>,
     files: &[FileChange],
-) -> (Vec<(String, String)>, lineage::Lineage) {
+) -> (Vec<(String, String, Diagnostic)>, lineage::Lineage) {
+    let lines = diagnostic::Lines::new(transaction.text());
     let terrain = transaction
         .operations
         .iter()
         .filter_map(|operation| match &operation.action {
-            transaction::Action::TerrainSet { plane, grid, .. } => {
-                Some((plane.clone(), grid.clone()))
-            }
+            transaction::Action::TerrainSet { plane, grid, .. } => Some((
+                plane.clone(),
+                grid.clone(),
+                diagnostic::at(
+                    &transaction.name,
+                    &lines,
+                    operation.span.start,
+                    operation.span.end,
+                    Code::Conflict.as_str(),
+                    "",
+                ),
+            )),
             _ => None,
         })
-        .collect::<BTreeSet<_>>()
-        .into_iter()
         .collect();
     // A file made by a rename, or created like another, keeps that
     // provenance while it exists, even where an older file was deleted.
@@ -629,7 +635,6 @@ pub fn plan(
     drop(workspace);
     Ok(Plan {
         root: root.to_path_buf(),
-        name: transaction.name.clone(),
         terrain,
         lineage,
         source,

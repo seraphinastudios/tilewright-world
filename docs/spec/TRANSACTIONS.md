@@ -307,8 +307,10 @@ permissions. Restoring after a failure gives every file back the
 permissions it had. Permissions here are the mode bits. Since a file's
 access control list could not be kept, publishing refuses to replace,
 remove or take permissions from a file that has one (POSIX, NFS version 4
-or rich), with `tx.io`; other extended attributes and the owner are not
-carried to the file that replaces a file, which has the directory's
+or rich), with `tx.io`. A file written with permissions of its own drops
+the access control list its directory gives new files, so that its mode
+bits alone say who may read it. Other extended attributes and the owner are
+not carried to the file that replaces a file, which has the directory's
 defaults for them.
 
 Each rename and removal is atomic, but there is no atomic publication of
@@ -347,8 +349,9 @@ container is written on one line when it is empty, when it is an array of
 numbers, booleans and nulls only whose one-line form is at most 4,096
 bytes, or when its one-line form is at most 80 bytes; otherwise each item
 is on its own line one level deeper; a string value, item or key longer
-than 4,096 bytes is on a line of its own, from the line's first column. A file's root is
-always on several lines and the file ends with a newline.
+than 4,096 bytes is on a line of its own, from the line's first column. A
+file's root container is always on several lines, an empty one on two, and
+the file ends with a newline.
 
 ## 11. Limits
 

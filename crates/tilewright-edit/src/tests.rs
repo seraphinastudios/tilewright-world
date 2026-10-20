@@ -932,6 +932,14 @@ fn canonical_layout_is_bounded_and_stable() {
     let short = Node::Object(vec![("a".to_owned(), Node::Array(vec![Node::integer(1)]))]);
     assert_eq!(short.layout(""), "{\"a\": [1]}");
     assert_eq!(short.file(), "{\n  \"a\": [1]\n}\n");
+    // A root container is on several lines, even empty or of numbers.
+    assert_eq!(Node::Object(Vec::new()).file(), "{\n}\n");
+    assert_eq!(Node::Array(Vec::new()).file(), "[\n]\n");
+    assert_eq!(
+        Node::Array(vec![Node::integer(1), Node::integer(2)]).file(),
+        "[\n  1,\n  2\n]\n"
+    );
+    assert_eq!(Node::Object(Vec::new()).layout(""), "{}");
     let numbers = Node::Array((0..40).map(Node::integer).collect());
     assert!(
         !numbers.layout("").contains('\n'),
@@ -1688,17 +1696,24 @@ fn terrain_addresses_are_checked_again_when_publishing() {
     let plan = planned(
         root,
         &transaction(
-            r#"{"op": "terrain.set", "plane": "overworld", "layer": 0, "grid": "effect", "cells": [{"at": [0, 0], "value": null}]}"#,
+            r#"{"op": "terrain.set", "plane": "overworld", "layer": 0, "grid": "effect", "cells": [{"at": [0, 0], "value": null}]},
+    {"op": "terrain.set", "plane": "overworld", "layer": 0, "grid": "effect", "cells": [{"at": [1, 0], "value": null}]}"#,
         ),
     );
-    // The profile, which the operation does not read, loses the grid.
+    // The profile, which the operations do not read, loses the grid.
     fs::write(&profile, &original).unwrap();
     let failure = plan.publish().unwrap_err();
     assert!(!failure.applied);
-    assert!(
-        has(&failure.problems, "tx.conflict", "\"effect\" is not a grid"),
-        "{failure:#?}"
-    );
+    // Each operation is reported, at its own line.
+    let lines: Vec<usize> = failure
+        .problems
+        .iter()
+        .filter(|problem| {
+            problem.code == "tx.conflict" && problem.message.contains("\"effect\" is not a grid")
+        })
+        .map(|problem| problem.line)
+        .collect();
+    assert_eq!(lines, [4, 5], "{failure:#?}");
 }
 
 #[test]
@@ -2495,11 +2510,15 @@ fn a_file_with_an_access_control_list_is_not_replaced() {
     let tree = copy();
     let root = tree.path();
     let target = root.join("planes/overworld/plane.jsonc");
-    let set = std::process::Command::new("setfacl")
-        .args(["-m", "u:nobody:---"])
-        .arg(&target)
-        .status();
-    if !set.is_ok_and(|status| status.success()) {
+    // user::rw-, user:nobody:---, group::r--, mask::r--, other::r--
+    let acl = posix_acl(&[
+        (0x01, 6, NO_ID),
+        (0x02, 0, 65534),
+        (0x04, 4, NO_ID),
+        (0x10, 4, NO_ID),
+        (0x20, 4, NO_ID),
+    ]);
+    if !set_acl(&target, "system.posix_acl_access", &acl) {
         // No ACL support here.
         return;
     }
@@ -2519,4 +2538,66 @@ fn a_file_with_an_access_control_list_is_not_replaced() {
         read(root, "planes/overworld/plane.jsonc"),
         read(&fixture(), "planes/overworld/plane.jsonc")
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_replaced_file_does_not_keep_an_access_control_list_its_directory_gives() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let tree = copy();
+    let root = tree.path();
+    let directory = root.join("planes/overworld");
+    // A default for new files: user::rwx, user:nobody:r--, group::r-x,
+    // mask::r-x, other::r-x.
+    let acl = posix_acl(&[
+        (0x01, 7, NO_ID),
+        (0x02, 4, 65534),
+        (0x04, 5, NO_ID),
+        (0x10, 5, NO_ID),
+        (0x20, 5, NO_ID),
+    ]);
+    if !set_acl(&directory, "system.posix_acl_default", &acl) {
+        // No ACL support here.
+        return;
+    }
+    let target = directory.join("plane.jsonc");
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+    apply(
+        root,
+        &transaction(
+            r#"{"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["title"], "value": "Changed"}"#,
+        ),
+    );
+    assert_eq!(
+        rustix::fs::getxattr(&target, "system.posix_acl_access", &mut [0_u8; 0][..]),
+        Err(rustix::io::Errno::NODATA)
+    );
+    assert_eq!(
+        fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+        0o640
+    );
+}
+
+/// No user or group: the id of an entry that names neither.
+#[cfg(target_os = "linux")]
+const NO_ID: u32 = u32::MAX;
+
+/// A POSIX access control list as Linux stores it: version 2, then each
+/// entry's tag, permissions and id. Set directly rather than by a program,
+/// which a test must not start while another holds a lock.
+#[cfg(target_os = "linux")]
+fn posix_acl(entries: &[(u16, u16, u32)]) -> Vec<u8> {
+    let mut value = 2_u32.to_le_bytes().to_vec();
+    for (tag, permissions, id) in entries {
+        value.extend(tag.to_le_bytes());
+        value.extend(permissions.to_le_bytes());
+        value.extend(id.to_le_bytes());
+    }
+    value
+}
+
+/// Sets an access control list; whether the file system took it.
+#[cfg(target_os = "linux")]
+fn set_acl(path: &Path, name: &str, value: &[u8]) -> bool {
+    rustix::fs::setxattr(path, name, value, rustix::fs::XattrFlags::empty()).is_ok()
 }

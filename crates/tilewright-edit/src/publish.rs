@@ -593,9 +593,13 @@ impl Plan {
             let problems: Vec<Diagnostic> = self
                 .terrain
                 .iter()
-                .filter_map(|(plane, grid)| crate::terrain_problem(&world, plane, grid))
+                .filter_map(|(plane, grid, at)| {
+                    crate::terrain_problem(&world, plane, grid).map(|message| Diagnostic {
+                        message,
+                        ..at.clone()
+                    })
+                })
                 .take(crate::limits::DIAGNOSTICS)
-                .map(|message| diagnostic::file(&self.name, Code::Conflict.as_str(), message))
                 .collect();
             if problems.is_empty() {
                 Ok(())

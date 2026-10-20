@@ -27,7 +27,9 @@ so changing the tree cannot redirect it, and a file with an access control
 list (POSIX, NFS version 4 or rich), whose mode bits do not say who may
 read it, is refused rather than replaced, removed or copied from. A
 replaced file keeps the mode bits of the file it replaces, or narrower
-ones; other extended attributes and the owner are not carried over. Other
+ones, and drops any access control list its directory gives new files, so
+the mode bits alone say who may read it; other extended attributes and the
+owner are not carried over. Other
 platforms either cannot reach files through handles or cannot be checked
 for access control lists the same way, so applying is refused there;
 previewing and rebasing work everywhere.
