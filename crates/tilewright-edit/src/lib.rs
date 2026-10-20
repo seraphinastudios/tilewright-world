@@ -27,7 +27,12 @@
 //! let transaction = Transaction::parse("place-tree.jsonc", text).map_err(|problems| problems.len())?;
 //! let plan = plan(Path::new("content"), &transaction, &Options::default())
 //!     .map_err(|problems| problems.len())?;
-//! std::fs::write("undo.jsonc", plan.inverse()).unwrap();
+//! // The inverse is the recovery record: written atomically and synced,
+//! // before anything is published.
+//! let durable = tilewright_edit::write_new(Path::new("undo.jsonc"), plan.inverse()).unwrap();
+//! if !durable {
+//!     eprintln!("the inverse's name may not be durable yet");
+//! }
 //! plan.publish().map_err(|error| error.problems.len())?;
 //! # Ok::<(), usize>(())
 //! ```

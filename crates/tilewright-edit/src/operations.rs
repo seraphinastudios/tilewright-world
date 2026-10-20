@@ -162,7 +162,7 @@ fn check_object(
                 "object {} on {} has {} {}, expected {}",
                 address.index,
                 tile_name(&address.tile),
-                member.key,
+                crate::diagnostic::quoted(&member.key),
                 found.map_or_else(|| "absent".to_owned(), |value| shown(document, value)),
                 shown(&transaction.document, &member.value)
             )));

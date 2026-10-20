@@ -259,12 +259,13 @@ elsewhere the absolute path it resolved to then. It:
    it with the files it was carried out on, then validates the tree with
    the transaction's files again, and its terrain addresses against that
    tree, since files it did not touch may have changed since it was carried
-   out: two transactions that are valid alone can be invalid together. A difference is a `tx.conflict`, and a result
-   that no longer validates is reported with the loader's diagnostics; in
+   out: two transactions that are valid alone can be invalid together. A
+   difference is a `tx.conflict`, and a result that no longer validates is reported with the loader's diagnostics; in
    both cases the staged files are removed and nothing is written;
-4. renames each staged file over its target and removes each deleted file,
-   in path order. Before a deleted file is removed, any staging file beside
-   it goes, so that a failure there leaves the file;
+4. renames each staged file over its target, in path order, and then
+   removes each deleted file, in path order, so that a renamed file is
+   never only removed. Before a deleted file is removed, any staging file
+   beside it goes, so that a failure there leaves the file;
 5. removes the staging files left beside any file the transaction touched or
    consulted, removes the directories deleting files emptied, and syncs
    every directory whose entries changed. A staging entry or an emptied

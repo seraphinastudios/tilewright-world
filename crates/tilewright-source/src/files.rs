@@ -370,6 +370,8 @@ impl<'o> Tree<'o> {
                 continue;
             };
             if removed.contains(name.as_str()) {
+                // The overlay's entry takes its place, and is counted then.
+                self.entries -= 1;
                 continue;
             }
             let child = join(path, &name);

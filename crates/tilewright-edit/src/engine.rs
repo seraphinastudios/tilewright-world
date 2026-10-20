@@ -379,14 +379,21 @@ impl<'r> Workspace<'r> {
     /// inverses of the edit.
     fn commit(&mut self, path: &str, text: String, inverse: Vec<Primitive>) -> Outcome<()> {
         self.charge(text.len())?;
-        self.record(&inverse)?;
+        // A file the transaction created is undone by deleting it, so the
+        // inverses of its edits are neither kept nor counted.
+        let created = self.entry(path)?.base.is_none();
+        if !created {
+            self.record(&inverse)?;
+        }
         let document = Document::parse(text, &limits()).map_err(|error| {
             Failure::conflict(format!("the edit leaves {path} invalid ({error})"))
         })?;
         let entry = self.entry(path)?;
         let before = std::mem::replace(&mut entry.current, Current::Parsed(document));
         let length = entry.inverse.len();
-        entry.inverse.extend(inverse);
+        if !created {
+            entry.inverse.extend(inverse);
+        }
         self.keep(path, before, length);
         Ok(())
     }
@@ -409,10 +416,15 @@ impl<'r> Workspace<'r> {
             Current::Parsed(document) => document.source().to_owned(),
         };
         let length = entry.inverse.len();
+        let created = entry.base.is_none();
         let inverse = Primitive::Create { text: text.clone() };
-        entry.inverse.push(inverse.clone());
+        if !created {
+            entry.inverse.push(inverse.clone());
+        }
         self.keep(path, before, length);
-        self.record(std::slice::from_ref(&inverse))?;
+        if !created {
+            self.record(std::slice::from_ref(&inverse))?;
+        }
         Ok(text)
     }
 

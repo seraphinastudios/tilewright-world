@@ -227,9 +227,9 @@ pub(crate) struct Diagnostics {
     items: Vec<Diagnostic>,
     maximum: usize,
     dropped: bool,
-    /// Set once a diagnostic is dropped, shared by the collections of one
-    /// load, so that the load stops reading: nothing more could be
-    /// reported.
+    /// Set once a collection of the load holds its limit, shared by the
+    /// collections of one load, so that the load stops reading: nothing
+    /// more could be reported.
     full: Rc<Cell<bool>>,
 }
 
@@ -258,6 +258,10 @@ impl Diagnostics {
             self.items.push(diagnostic);
         } else {
             self.dropped = true;
+        }
+        // Full as soon as the limit is reached: reading on could only find
+        // problems that would not be reported.
+        if self.items.len() >= self.maximum {
             self.full.set(true);
         }
     }

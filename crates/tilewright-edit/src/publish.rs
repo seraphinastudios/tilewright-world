@@ -371,8 +371,11 @@ impl Plan {
             deleted: BTreeMap::new(),
             leftovers: Vec::new(),
         };
-        let changed: Vec<&FileChange> =
+        // Files are written first and removed last, so that whatever stops
+        // a publish halfway, a renamed file is never only removed.
+        let mut changed: Vec<&FileChange> =
             self.files.iter().filter(|file| file.is_changed()).collect();
+        changed.sort_by_key(|file| file.after.is_none());
         let staged = stage_all(&mut directories, &changed, &self.renames)?;
 
         #[cfg(test)]

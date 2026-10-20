@@ -751,7 +751,7 @@ fn preconditions_fail_on_the_operation() {
     for (operations, message) in [
         (
             r#"{"op": "object.remove", "plane": "overworld", "layer": 0, "at": [7, 0], "index": 0, "expect": {"proto": "wall"}}"#,
-            "has proto \"tree\", expected \"wall\"",
+            "has \"proto\" \"tree\", expected \"wall\"",
         ),
         (
             r#"{"op": "object.remove", "plane": "overworld", "layer": 0, "at": [7, 0], "index": 1, "expect": {"proto": "tree"}}"#,
@@ -1851,4 +1851,21 @@ fn permissions_follow_renames_and_their_inverses_only() {
     );
     apply(root, &replace);
     assert_eq!(mode("defs/recipe/box.jsonc"), default);
+}
+
+#[test]
+fn a_file_and_a_directory_of_one_name_are_refused_when_planning() {
+    let tree = copy();
+    let root = tree.path();
+    let found = problems(
+        root,
+        &transaction(
+            r#"{"op": "document.delete", "path": "profile/schema/loot.jsonc"},
+    {"op": "document.create", "path": "profile/schema/loot.jsonc/schema.jsonc", "text": "{}"}"#,
+        ),
+    );
+    assert!(
+        has(&found, "tx.path", "not a regular file or directory"),
+        "{found:#?}"
+    );
 }
