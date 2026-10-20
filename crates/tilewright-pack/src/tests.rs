@@ -655,12 +655,16 @@ fn verification_checks_names_profiles_portals_and_encodings() {
     let upper = directory
         .path()
         .join(name.replace(".twpack", "").to_ascii_uppercase() + ".twpack");
-    std::fs::copy(&written.path, &upper).unwrap();
-    let error = Pack::open(&upper).unwrap().verify().unwrap_err();
-    assert!(
-        error.to_string().contains("does not match its name"),
-        "{error}"
-    );
+    // A file system that ignores case, as macOS and Windows do by default,
+    // has the pack under that name already.
+    if !upper.exists() {
+        std::fs::copy(&written.path, &upper).unwrap();
+        let error = Pack::open(&upper).unwrap().verify().unwrap_err();
+        assert!(
+            error.to_string().contains("does not match its name"),
+            "{error}"
+        );
+    }
 
     for (name, sql, problem) in [
         (

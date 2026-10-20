@@ -41,14 +41,16 @@ replaces did not have.
   checked before a byte is written. A type transition the policy keys on a
   new file's final name is not applied, since the file is staged under
   another name; relabelling the tree applies it.
-- On Windows, access control must be wholly inherited: an access control
-  entry of an entry's own, a list protected from inheritance, a mandatory
-  integrity label, a central access policy, encryption or a read-only file
-  is refused. The changed files must share one access control list, and the
-  directories above them one, and every file publishing writes, and
-  directory it creates, must inherit that list, which is checked before a
-  byte is written. Publishing never changes a list. The lock is a handle on
-  the root directory that shares write access with no one.
+- On Windows, the changed files must share one access control list, and
+  the directories above them one, and every file publishing writes, every
+  deleted file (through an empty file staged beside it) and every directory
+  it creates must be given that list by its directory, which is checked
+  before a byte is written; so a file with entries of its own, which a
+  replacement or an inverse would not get, is refused. Publishing never
+  changes a list. A list protected from inheritance, a mandatory integrity
+  label, a central access policy, encryption or a read-only file is
+  refused. The lock is a handle on the root directory that shares write
+  access with no one.
 
 Other platforms, the BSDs other than macOS among them, are not checked for
 access control lists and labels the same way, so applying is refused

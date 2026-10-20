@@ -9,9 +9,10 @@
 //! renames and removals act on names inside a directory opened that way,
 //! or on handles opened that way, so they never follow a link either.
 //!
-//! An entry has the access its directory gives it: publishing refuses
-//! access control of an entry's own, and compares, and checks before
-//! writing, the inherited access control lists of the entries it touches.
+//! An entry has the access control list its directory gives it: publishing
+//! compares the lists of the entries it touches with each other and with
+//! the list their directory gives a new entry, before writing, and never
+//! changes one.
 
 use super::{Found, RawEntry, RawKind, Refused};
 use crate::access::Access;
@@ -580,7 +581,7 @@ impl Directory {
 fn other_list() -> Refused {
     Refused::Io(io::Error::new(
         io::ErrorKind::Unsupported,
-        "its directory gives it another access control list than the entries publishing compared it with, and publishing does not change access control lists",
+        "its directory gives a new entry another access control list than the one publishing must keep, and publishing does not change access control lists",
     ))
 }
 
@@ -593,11 +594,13 @@ fn unkept(what: &str) -> Refused {
 }
 
 /// Who may use the file or directory `handle` is open on, with
-/// `READ_CONTROL` access: a digest of its access control list, which must
-/// be wholly inherited from the directory above. Refused: an entry that is
-/// encrypted, a file that is read-only, and an entry with an access control
-/// entry of its own, a list protected from inheritance, a mandatory
-/// integrity label or a central access policy.
+/// `READ_CONTROL` access: a digest of its access control list, compared
+/// with others' and with the list its directory gives a new entry. Whether
+/// an entry is marked inherited is not compared: a system gives a new entry
+/// copies of its directory's entries, marked inherited only where the
+/// directory's list is. Refused: an entry that is encrypted, a file that is
+/// read-only, and a list protected from inheritance, a mandatory integrity
+/// label or a central access policy.
 fn access_of(
     handle: BorrowedHandle<'_>,
     attributes: u32,
@@ -618,7 +621,7 @@ fn access_of(
         mode: 0,
         user: 0,
         group: 0,
-        control: inherited_control(&descriptor)?,
+        control: control(&descriptor)?,
     })
 }
 
@@ -631,22 +634,22 @@ fn malformed() -> Refused {
 
 fn u16_at(bytes: &[u8], at: usize) -> Result<u16, Refused> {
     bytes
-        .get(at..at + 2)
+        .get(at..at.checked_add(2).ok_or_else(malformed)?)
         .map(|field| u16::from_le_bytes([field[0], field[1]]))
         .ok_or_else(malformed)
 }
 
 fn u32_at(bytes: &[u8], at: usize) -> Result<usize, Refused> {
     bytes
-        .get(at..at + 4)
+        .get(at..at.checked_add(4).ok_or_else(malformed)?)
         .and_then(|field| field.try_into().ok())
         .map(u32::from_le_bytes)
         .and_then(|value| usize::try_from(value).ok())
         .ok_or_else(malformed)
 }
 
-/// An access control list's bytes and the flags of each of its entries.
-type List<'a> = (&'a [u8], Vec<u8>);
+/// An access control list's revision and its entries, each as its bytes.
+type List<'a> = (u8, Vec<&'a [u8]>);
 
 /// The access control list at `offset` of a self-relative security
 /// descriptor, if `present`.
@@ -655,34 +658,39 @@ fn acl(descriptor: &[u8], present: bool, offset: usize) -> Result<Option<List<'_
         return Ok(None);
     }
     // ACL: revision, padding, size (u16), entry count (u16), padding.
-    let size = usize::from(u16_at(descriptor, offset + 2)?);
+    let size = usize::from(u16_at(
+        descriptor,
+        offset.checked_add(2).ok_or_else(malformed)?,
+    )?);
     let list = descriptor
         .get(offset..offset.checked_add(size).ok_or_else(malformed)?)
         .ok_or_else(malformed)?;
+    let revision = *list.first().ok_or_else(malformed)?;
     let count = u16_at(list, 4)?;
-    let mut flags = Vec::with_capacity(usize::from(count));
+    let mut entries = Vec::with_capacity(usize::from(count));
     let mut at = 8_usize;
     for _ in 0..count {
         // ACE header: type, flags, size (u16).
         let entry_size = usize::from(u16_at(list, at + 2)?);
-        let flag = *list.get(at + 1).ok_or_else(malformed)?;
-        if entry_size < 4 || at + entry_size > list.len() {
-            return Err(malformed());
-        }
-        flags.push(flag);
+        let entry = list
+            .get(at..at + entry_size)
+            .filter(|_| entry_size >= 4)
+            .ok_or_else(malformed)?;
+        entries.push(entry);
         at += entry_size;
     }
-    Ok(Some((list, flags)))
+    Ok(Some((revision, entries)))
 }
 
 /// A digest of a self-relative security descriptor's access control list,
-/// which must be wholly inherited, with no label or central access policy.
-fn inherited_control(descriptor: &[u8]) -> Result<[u8; 32], Refused> {
-    let control = u16_at(descriptor, 2)?;
-    if control & SE_SELF_RELATIVE == 0 {
+/// its entries' inherited marks aside. A list protected from inheritance,
+/// and a label or central access policy, are refused.
+fn control(descriptor: &[u8]) -> Result<[u8; 32], Refused> {
+    let flags = u16_at(descriptor, 2)?;
+    if flags & SE_SELF_RELATIVE == 0 {
         return Err(malformed());
     }
-    if control & SE_DACL_PROTECTED != 0 {
+    if flags & SE_DACL_PROTECTED != 0 {
         return Err(unkept(
             "its access control list is protected from inheritance",
         ));
@@ -691,7 +699,7 @@ fn inherited_control(descriptor: &[u8]) -> Result<[u8; 32], Refused> {
     // entries.
     let system = acl(
         descriptor,
-        control & SE_SACL_PRESENT != 0,
+        flags & SE_SACL_PRESENT != 0,
         u32_at(descriptor, 12)?,
     )?;
     if system.is_some_and(|(_, entries)| !entries.is_empty()) {
@@ -702,20 +710,25 @@ fn inherited_control(descriptor: &[u8]) -> Result<[u8; 32], Refused> {
     let mut hasher = Sha256::new();
     match acl(
         descriptor,
-        control & SE_DACL_PRESENT != 0,
+        flags & SE_DACL_PRESENT != 0,
         u32_at(descriptor, 16)?,
     )? {
         // No list: everyone may use it, as on a file system without them.
         None => hasher.update(b"no access control list"),
-        Some((list, entries)) => {
+        Some((revision, entries)) => {
             let inherited = u8::try_from(INHERITED_ACE).unwrap_or(u8::MAX);
-            if entries.iter().any(|flags| flags & inherited == 0) {
-                return Err(unkept(
-                    "it has an access control entry of its own, not inherited from the directory above",
-                ));
-            }
             hasher.update(b"access control list");
-            hasher.update(list);
+            hasher.update([revision]);
+            hasher.update(
+                u64::try_from(entries.len())
+                    .unwrap_or(u64::MAX)
+                    .to_le_bytes(),
+            );
+            for entry in entries {
+                hasher.update(&entry[..1]);
+                hasher.update([entry[1] & !inherited]);
+                hasher.update(&entry[2..]);
+            }
         }
     }
     Ok(hasher.finalize().into())
@@ -723,17 +736,18 @@ fn inherited_control(descriptor: &[u8]) -> Result<[u8; 32], Refused> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Refused, inherited_control};
+    use super::control;
 
     /// A self-relative descriptor with the control flags and an access
-    /// control list whose entries have the flags `entries`.
-    fn descriptor(control: u16, entries: &[u8]) -> Vec<u8> {
+    /// control list whose entries have the flags `entries`, and `slack`
+    /// unused bytes at its end.
+    fn descriptor(flags: u16, entries: &[u8], slack: usize) -> Vec<u8> {
         let mut bytes = vec![1, 0];
-        bytes.extend(control.to_le_bytes());
+        bytes.extend(flags.to_le_bytes());
         bytes.extend([0_u8; 8]); // owner, group
         bytes.extend(0_u32.to_le_bytes()); // no system list
         bytes.extend(20_u32.to_le_bytes()); // the list follows
-        let size = 8 + entries.len() * 8;
+        let size = 8 + entries.len() * 8 + slack;
         bytes.extend([2, 0]);
         bytes.extend(u16::try_from(size).unwrap().to_le_bytes());
         bytes.extend(u16::try_from(entries.len()).unwrap().to_le_bytes());
@@ -741,33 +755,37 @@ mod tests {
         for flags in entries {
             bytes.extend([0, *flags, 8, 0, 0, 0, 0, 0]);
         }
+        bytes.extend(vec![0; slack]);
         bytes
     }
 
     #[test]
-    fn only_inherited_lists_are_kept() {
+    fn lists_are_compared_without_inherited_marks() {
         let present = 0x8000 | 0x0004;
-        let inherited = inherited_control(&descriptor(present, &[0x10, 0x10 | 0x03])).unwrap();
-        assert_ne!(inherited, [0; 32]);
+        let list = control(&descriptor(present, &[0x10, 0x13], 0)).unwrap();
+        assert_ne!(list, [0; 32]);
+        // Marked inherited or not, and with room to spare, it is one list.
         assert_eq!(
-            inherited_control(&descriptor(present, &[0x10, 0x13])).unwrap(),
-            inherited
+            control(&descriptor(present, &[0x00, 0x03], 0)).unwrap(),
+            list
         );
+        assert_eq!(
+            control(&descriptor(present, &[0x10, 0x13], 16)).unwrap(),
+            list
+        );
+        // Other entries are another.
+        assert_ne!(control(&descriptor(present, &[0x10], 0)).unwrap(), list);
         assert_ne!(
-            inherited_control(&descriptor(present, &[0x10])).unwrap(),
-            inherited
+            control(&descriptor(present, &[0x10, 0x11], 0)).unwrap(),
+            list
         );
-        // An entry of its own, a protected list, or a malformed one.
-        assert!(matches!(
-            inherited_control(&descriptor(present, &[0x10, 0x00])),
-            Err(Refused::Io(_))
-        ));
-        assert!(inherited_control(&descriptor(present | 0x1000, &[0x10])).is_err());
-        let mut short = descriptor(present, &[0x10]);
+        // A protected list, and a malformed one, are refused.
+        assert!(control(&descriptor(present | 0x1000, &[0x10], 0)).is_err());
+        let mut short = descriptor(present, &[0x10], 0);
         short.truncate(short.len() - 1);
-        assert!(inherited_control(&short).is_err());
-        assert!(inherited_control(&descriptor(present & !0x8000, &[0x10])).is_err());
+        assert!(control(&short).is_err());
+        assert!(control(&descriptor(present & !0x8000, &[0x10], 0)).is_err());
         // No list at all.
-        assert!(inherited_control(&descriptor(0x8000, &[])).is_ok());
+        assert!(control(&descriptor(0x8000, &[], 0)).is_ok());
     }
 }

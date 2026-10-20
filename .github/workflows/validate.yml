@@ -54,17 +54,5 @@ jobs:
       - name: Lint
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
-      - name: Show temporary directory access (diagnostic)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          icacls $env:TEMP
-          $probe = Join-Path $env:TEMP "tw-probe"
-          New-Item -ItemType Directory -Force -Path "$probe\a\b" | Out-Null
-          icacls $probe
-          icacls "$probe\a"
-          icacls "$probe\a\b"
-          Get-Acl "$probe\a" | Format-List
-
       - name: Test
         run: cargo test --locked --workspace --all-targets --no-fail-fast

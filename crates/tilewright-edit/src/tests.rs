@@ -658,10 +658,17 @@ fn link_directory(link: &Path, target: &Path) {
             "/C".as_ref(),
             "mklink".as_ref(),
             "/J".as_ref(),
-            link.as_os_str(),
-            target.as_os_str(),
+            native(link).as_os_str(),
+            native(target).as_os_str(),
         ],
     );
+}
+
+/// `path` with Windows separators, as programs that take `/` for an
+/// option need.
+#[cfg(windows)]
+fn native(path: &Path) -> PathBuf {
+    path.components().collect()
 }
 
 /// Runs a program, which must succeed.
@@ -1557,9 +1564,15 @@ fn a_plan_publishes_into_the_root_it_was_made_on() {
         r#"{"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["title"], "value": "Changed"}"#,
     );
     let plan = planned(&planned_root, &tx);
-    // The path now names another, identical tree.
+    // The path now names another, identical tree. Windows does not move a
+    // directory something has open, so there the plan's root stays put.
     let moved = directory.path().join("moved");
-    fs::rename(&planned_root, &moved).unwrap();
+    if let Err(error) = fs::rename(&planned_root, &moved) {
+        assert_eq!(std::env::consts::OS, "windows", "{error}");
+        plan.publish().unwrap();
+        assert!(read(&planned_root, "planes/overworld/plane.jsonc").contains("\"Changed\""));
+        return;
+    }
     for (path, bytes) in snapshot(&fixture()) {
         let target = planned_root.join(&path);
         fs::create_dir_all(target.parent().unwrap()).unwrap();
@@ -2878,6 +2891,7 @@ fn an_access_control_list_is_refused_on_macos() {
 /// Runs `icacls` on `path` with `arguments`.
 #[cfg(windows)]
 fn icacls(path: &Path, arguments: &[&str]) {
+    let path = native(path);
     let mut all = vec![path.as_os_str()];
     all.extend(arguments.iter().map(std::ffi::OsStr::new));
     run("icacls", &all);
@@ -2885,32 +2899,46 @@ fn icacls(path: &Path, arguments: &[&str]) {
 
 #[cfg(windows)]
 #[test]
-fn access_control_of_an_entry_own_is_refused_on_windows() {
+fn access_control_lists_are_kept_on_windows() {
     let edit = r#"{"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["title"], "value": "Changed"}"#;
-    for (at, arguments, refusal) in [
-        // An entry granted to the file itself.
+    let delete = r#"{"op": "document.delete", "path": "defs/recipe/chest.jsonc"}"#;
+    for (at, arguments, operations, refusal) in [
+        // An entry granted to the file itself, which a replacement would
+        // not get from its directory.
         (
             "planes/overworld/plane.jsonc",
             &["/grant", "*S-1-1-0:(R)"][..],
-            "access control entry of its own",
+            edit,
+            "another access control list",
+        ),
+        // The same for a deleted file, which its inverse would create
+        // again without it.
+        (
+            "defs/recipe/chest.jsonc",
+            &["/grant", "*S-1-1-0:(R)"],
+            delete,
+            "another access control list",
         ),
         // A list no longer inherited.
         (
             "planes/overworld/plane.jsonc",
             &["/inheritance:d"],
+            edit,
             "protected from inheritance",
         ),
-        // An entry a directory above it has of its own.
+        // An entry a directory above it, and those below, have but the
+        // root does not.
         (
             "planes",
             &["/grant", "*S-1-1-0:(OI)(CI)(R)"],
-            "access control entry of its own",
+            edit,
+            "can be reached by different users",
         ),
     ] {
         let tree = copy();
         let root = tree.path();
         icacls(&root.join(at), arguments);
-        let plan = planned(root, &transaction(edit));
+        let plan = planned(root, &transaction(operations));
         let failure = plan.publish().unwrap_err();
         assert!(!failure.applied);
         assert!(has(&failure.problems, "tx.io", refusal), "{failure:#?}");
@@ -2925,11 +2953,26 @@ fn access_control_of_an_entry_own_is_refused_on_windows() {
     fs::set_permissions(&target, permissions).unwrap();
     let failure = planned(root, &transaction(edit)).publish().unwrap_err();
     assert!(has(&failure.problems, "tx.io", "read-only"), "{failure:#?}");
+    // A deletion that keeps its list leaves nothing behind it.
+    let tree = copy();
+    let root = tree.path();
+    let plan = apply(root, &transaction(delete));
+    assert!(!root.join("defs/recipe/chest.jsonc").exists());
+    assert!(
+        !root
+            .join("defs/recipe/.chest.jsonc.tilewright-tmp")
+            .exists()
+    );
+    apply(
+        root,
+        &Transaction::parse("inverse.jsonc", plan.inverse()).unwrap(),
+    );
+    assert_eq!(snapshot(root), snapshot(&fixture()));
 }
 
 #[cfg(windows)]
 #[test]
-fn entries_a_transaction_changes_must_have_one_inherited_list_on_windows() {
+fn entries_a_transaction_changes_must_have_one_list_on_windows() {
     // The directory above the tree gives the root, and only the root, an
     // entry no directory below it has.
     let outer = tempfile::tempdir().unwrap();

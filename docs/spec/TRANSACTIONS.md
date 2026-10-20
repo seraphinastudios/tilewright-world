@@ -339,18 +339,21 @@ gives that name, which must be the tree's; a type transition the policy
 keys on the final file name is not applied, and relabelling the tree
 afterwards (`restorecon -R`) applies it.
 
-On Windows an entry has the access control list its directory gives it,
-by inheritance. Every changed file and every directory above it, the root
-included, may have only inherited access control: no access control entry
-of its own, no list protected from inheritance, no mandatory integrity
-label or central access policy, no encryption, and no read-only attribute
-on a file. The changed files must have one access control list, and the
-directories one; a file's is not compared with a directory's, since their
-entries differ in kind. Publishing never changes a list: a new or restored
-file must be given by inheritance the list the changed files have, if
-there are any, and a new directory the list of the directory above it,
-which is checked before a byte is written or the directory used. The owner
-of every file written is the user applying.
+On Windows a new entry gets the access control list its directory gives
+it, by inheritance, and publishing never changes a list. So the changed
+files must have one access control list, and the directories above them,
+the root included, one; a file's is not compared with a directory's, since
+their entries differ in kind. Every file publishing stages must be given
+by its directory the list the file it replaces has, or the changed files
+have; beside a deleted file, which its inverse creates again, an empty
+file is staged to check the same, and removed with the deleted file. Both
+are checked before a byte is written, and a directory publishing makes
+must be given the list of the directory above it. Whether an entry of a
+list is marked inherited is not compared: a system marks the entries it
+copies from a directory's list only where that list is marked so. A list
+protected from inheritance, a mandatory integrity label or central access
+policy, encryption, and the read-only attribute on a file are refused. The
+owner of every file written is the user applying.
 
 A file whose bytes end as they began is not written. Restoring after a
 failure gives every file back the access it had. Other extended

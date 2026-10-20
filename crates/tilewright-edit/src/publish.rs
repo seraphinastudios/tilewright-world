@@ -355,27 +355,8 @@ struct Known {
 }
 
 impl Known {
-    /// The access a new file at `path` gets: on Unix from the nearest
-    /// directory above it that was there; on Windows, where a new file
-    /// takes the access its directory gives it, that of the changed files,
-    /// which is one access, when there are any.
-    fn new_file(&self, path: &str) -> Option<Access> {
-        let mut directory = split(path).0;
-        loop {
-            if let Some(access) = self.directories.get(directory) {
-                return access
-                    .new_file()
-                    .or_else(|| self.files.values().flatten().next().copied());
-            }
-            if directory.is_empty() {
-                return None;
-            }
-            directory = split(directory).0;
-        }
-    }
-
-    /// The access the directories made for a file at `path` get.
-    fn new_directory(&self, path: &str) -> Option<&Access> {
+    /// The access of the nearest directory above `path` that was there.
+    fn nearest(&self, path: &str) -> Option<&Access> {
         let mut directory = split(path).0;
         loop {
             if let Some(access) = self.directories.get(directory) {
@@ -386,6 +367,28 @@ impl Known {
             }
             directory = split(directory).0;
         }
+    }
+
+    /// The access a new file at `path` gets: on Unix from the nearest
+    /// directory above it that was there; on Windows, where a new file
+    /// takes the access its directory gives it, that of the changed files,
+    /// which is one access, when there are any.
+    fn new_file(&self, path: &str) -> Option<Access> {
+        self.nearest(path)?
+            .new_file()
+            .or_else(|| self.files.values().flatten().next().copied())
+    }
+
+    /// Whether a new file at `path` takes the access its directory gives
+    /// it, which the directory's own access does not tell (Windows).
+    fn inherits(&self, path: &str) -> bool {
+        self.nearest(path)
+            .is_some_and(|access| access.new_file().is_none())
+    }
+
+    /// The access the directories made for a file at `path` get.
+    fn new_directory(&self, path: &str) -> Option<&Access> {
+        self.nearest(path)
     }
 }
 
@@ -505,9 +508,12 @@ fn check_access(directories: &mut Directories<'_>, known: &Known) -> Result<(), 
 }
 
 /// Stages every new file: one written where a file is with that file's
-/// access, a new one with its directory's. On failure removes every
-/// staging file it wrote, the failed one included, and the directories it
-/// created.
+/// access, a new one with its directory's. Where a new file takes the
+/// access its directory gives it (Windows), an empty file is staged beside
+/// each deleted file too, and must get the access the deleted file has:
+/// its inverse creates it again with what its directory gives. That file
+/// goes with the deleted one. On failure removes every staging file it
+/// wrote, the failed one included, and the directories it created.
 fn stage_all<'f>(
     directories: &mut Directories<'_>,
     known: &Known,
@@ -515,24 +521,23 @@ fn stage_all<'f>(
 ) -> Result<Vec<&'f str>, PublishError> {
     let mut staged = Vec::new();
     for file in changed {
-        let Some(text) = &file.after else {
-            continue;
+        let (access, text) = match (&file.after, known.files.get(&file.path)) {
+            (Some(text), Some(Some(access))) => (Some(*access), text.as_bytes()),
+            (Some(text), _) => (known.new_file(&file.path), text.as_bytes()),
+            (None, Some(Some(access))) if known.inherits(&file.path) => (Some(*access), &b""[..]),
+            (None, _) => continue,
         };
         staged.push(file.path.as_str());
         // Writing removes whatever was at the staging name first, so the
         // directory may change even if the write fails.
         directories.changed.insert(split(&file.path).0.to_owned());
         let (parent, name) = split(&file.path);
-        let access = match known.files.get(&file.path) {
-            Some(Some(access)) => Some(*access),
-            _ => known.new_file(&file.path),
-        };
         let result = directories
             .get(parent, known.new_directory(&file.path))
             .and_then(|directory| {
                 let directory =
                     directory.ok_or_else(|| AccessError::Unexpected(file.path.clone()))?;
-                directory.write(&staging_name(name), access.as_ref(), text.as_bytes())?;
+                directory.write(&staging_name(name), access.as_ref(), text)?;
                 // The new inode must have no access beyond its mode bits,
                 // such as a label the system's policy gave it.
                 directory.access(&staging_name(name)).map(|_| ())
@@ -774,7 +779,8 @@ fn publish_one<'f>(
         };
         directory.rename(&staging_name(name), name)?;
     } else {
-        // A staging file left by an interrupted apply goes first, so that
+        // The staging file beside it, the empty one staged to check its
+        // access or one left by an interrupted apply, goes first, so that
         // failing to remove it leaves the target untouched; its removal is
         // recorded to sync whatever happens next. The target's access was
         // noted, and checked, before publishing began.

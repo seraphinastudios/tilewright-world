@@ -894,6 +894,12 @@ mod windows_tests {
         assert!(status.success(), "{program} {arguments:?}");
     }
 
+    /// `path` with Windows separators, as programs that take `/` for an
+    /// option need.
+    fn native(path: &Path) -> std::path::PathBuf {
+        path.components().collect()
+    }
+
     /// Makes `link` a junction to the directory `target`.
     fn junction(link: &Path, target: &Path) {
         run(
@@ -902,10 +908,18 @@ mod windows_tests {
                 "/C".as_ref(),
                 "mklink".as_ref(),
                 "/J".as_ref(),
-                link.as_os_str(),
-                target.as_os_str(),
+                native(link).as_os_str(),
+                native(target).as_os_str(),
             ],
         );
+    }
+
+    /// Runs `icacls` on `path` with `arguments`.
+    fn icacls(path: &Path, arguments: &[&str]) {
+        let path = native(path);
+        let mut all = vec![path.as_os_str()];
+        all.extend(arguments.iter().map(std::ffi::OsStr::new));
+        run("icacls", &all);
     }
 
     fn tree() -> tempfile::TempDir {
@@ -1013,7 +1027,6 @@ mod windows_tests {
         // one asked for.
         let like = dir.access("file.jsonc").unwrap().unwrap();
         assert!(dir.access("nope").unwrap().is_none());
-        assert!(dir.access("link-free").unwrap().is_none());
         dir.write("kept", Some(&like), b"x").unwrap();
         assert_eq!(dir.access("kept").unwrap().unwrap(), like);
         let other = Access {
@@ -1078,35 +1091,35 @@ mod windows_tests {
     }
 
     #[test]
-    fn access_control_of_an_entry_own_is_refused() {
+    fn access_control_lists_are_compared_and_kept() {
         let directory = tree();
+        fs::write(directory.path().join("dir/other.jsonc"), "{}").unwrap();
         let root = Root::new(directory.path());
         let dir = root.directory(&["dir"], false).unwrap();
         let file = directory.path().join("dir/file.jsonc");
-        assert!(dir.access("file.jsonc").is_ok());
-        // An entry of its own.
-        run(
-            "icacls",
-            &[file.as_os_str(), "/grant".as_ref(), "*S-1-1-0:(R)".as_ref()],
-        );
+        let sibling = dir.access("other.jsonc").unwrap().unwrap();
+        assert_eq!(dir.access("file.jsonc").unwrap().unwrap(), sibling);
+        // An entry of its own makes another list, which a file written
+        // there would not get.
+        icacls(&file, &["/grant", "*S-1-1-0:(R)"]);
+        let granted = dir.access("file.jsonc").unwrap().unwrap();
+        assert_ne!(granted, sibling);
+        assert!(dir.write("staged", Some(&granted), b"secret").is_err());
+        assert!(!directory.path().join("dir/staged").exists());
+        dir.write("staged", Some(&sibling), b"x").unwrap();
+        // A list protected from inheritance is refused.
+        icacls(&file, &["/reset"]);
+        assert_eq!(dir.access("file.jsonc").unwrap().unwrap(), sibling);
+        icacls(&file, &["/inheritance:d"]);
         assert!(matches!(dir.access("file.jsonc"), Err(Refused::Io(_))));
-        // A list protected from inheritance, with the inherited entries
-        // copied.
-        run("icacls", &[file.as_os_str(), "/reset".as_ref()]);
-        assert!(dir.access("file.jsonc").is_ok());
-        run("icacls", &[file.as_os_str(), "/inheritance:d".as_ref()]);
-        assert!(matches!(dir.access("file.jsonc"), Err(Refused::Io(_))));
-        // A directory with an entry of its own.
-        run(
-            "icacls",
-            &[
-                directory.path().join("dir").as_os_str(),
-                "/grant".as_ref(),
-                "*S-1-1-0:(OI)(CI)(R)".as_ref(),
-            ],
+        // A directory with an entry of its own has another list.
+        let own = dir.own_access().unwrap();
+        icacls(
+            &directory.path().join("dir"),
+            &["/grant", "*S-1-1-0:(OI)(CI)(R)"],
         );
-        assert!(matches!(dir.own_access(), Err(Refused::Io(_))));
-        // A read-only file.
+        assert_ne!(dir.own_access().unwrap(), own);
+        // A read-only file is refused.
         let plain = directory.path().join("plain.jsonc");
         fs::write(&plain, "{}").unwrap();
         let base = root.directory(&[], false).unwrap();

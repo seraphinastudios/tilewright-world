@@ -92,10 +92,11 @@ fn checked_name(name: &str) -> Result<&str, AccessError> {
 /// On Unix: the permission bits, the owner and the group. Beside them on
 /// Linux, the mandatory access control labels (`SELinux`, Smack), which
 /// publishing requires to be the same on every entry it compares. On
-/// Windows, where entries take the access their directory gives them: the
-/// inherited discretionary access control list. Where the mode bits do not
-/// say who may read, as with an access control list on Unix, or access
-/// control of an entry's own on Windows, reading the access is refused.
+/// Windows, where a new entry takes the access its directory gives it: the
+/// discretionary access control list, whose entries' inherited marks are
+/// not compared. Access control that publishing could not keep, such as an
+/// access control list on Unix or a list protected from inheritance on
+/// Windows, is refused when the access is read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Access {
     /// The permission bits, with the set-user, set-group and sticky bits;
@@ -315,10 +316,9 @@ impl SourceDirectory {
     /// Who may use the regular file `name`; `None` when there is no regular
     /// file there. A file whose access publishing could not keep is
     /// refused: on Linux and macOS one with an access control list; on
-    /// Windows one with access control of its own (an access control entry
-    /// that is not inherited, or a list protected from inheritance), a
-    /// mandatory integrity label or central access policy, encryption, or
-    /// the read-only attribute.
+    /// Windows one with a list protected from inheritance, a mandatory
+    /// integrity label or central access policy, encryption, or the
+    /// read-only attribute.
     pub fn access(&self, name: &str) -> Result<Option<Access>, AccessError> {
         self.directory
             .access(checked_name(name)?)
@@ -336,8 +336,8 @@ impl SourceDirectory {
 
     /// Gives this directory the mode and group of `access`, and checks that
     /// it has the labels of `access`. On Windows, where a directory has the
-    /// access control list it inherits, checks that the list is that of
-    /// `access`.
+    /// access control list its directory gives it, checks that the list is
+    /// that of `access`.
     pub fn set_own_access(&self, access: &Access) -> Result<(), AccessError> {
         self.directory
             .set_own_access(access)
