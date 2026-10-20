@@ -344,15 +344,7 @@ fn read_transition<'a>(
     else {
         return None;
     };
-    ok.then_some(Transition {
-        terrain,
-        draw,
-        model,
-        layer,
-        blends,
-        seed,
-        tiles,
-    })
+    ok.then(|| Transition::new((terrain, draw, model, layer), blends, seed, tiles))
 }
 
 /// Reads the terrain IDs of a document, by index; `None` where an entry has

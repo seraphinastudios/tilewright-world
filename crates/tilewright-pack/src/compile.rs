@@ -122,7 +122,7 @@ impl<'w> Strings<'w> {
         // terrain transitions draw, so every prototype the transitions name
         // is interned, and chunks are resolved once, as they are encoded.
         if let Some(transitions) = &world.profile().transitions {
-            for proto in transitions.tile_protos() {
+            for proto in transitions.protos() {
                 values.insert(identifier(proto)?);
             }
         }

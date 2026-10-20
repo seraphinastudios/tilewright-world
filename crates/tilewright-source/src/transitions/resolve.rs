@@ -118,6 +118,17 @@ impl<'a> ResolvedChunk<'a> {
     }
 }
 
+/// The neighbours that satisfy `test`, as bits N 1, NE 2, ... NW 128.
+fn neighbour_bits(neighbours: &[Option<usize>; 8], test: impl Fn(Option<usize>) -> bool) -> u8 {
+    let mut bits = 0;
+    for (bit, neighbour) in neighbours.iter().enumerate() {
+        if test(*neighbour) {
+            bits |= 1 << bit;
+        }
+    }
+    bits
+}
+
 /// The value of a grid's cell, or `None` for an empty one or one the grid
 /// does not have.
 fn cell(grid: Option<&Grid>, index: usize) -> Option<&str> {
@@ -133,10 +144,11 @@ impl Transitions {
     /// neighbours' terrain grids, so tiles along chunk edges agree across
     /// them. A chunk the source does not have resolves to empty tiles. The
     /// result depends only on the source's grids and the transitions, so it
-    /// is the same for every caller. A tile evaluates only the transitions
+    /// is the same for every caller. A tile looks up only the transitions
     /// of its own terrain and of its neighbours' terrains, at most
-    /// [`MAXIMUM_TILE_TRANSITIONS`](super::MAXIMUM_TILE_TRANSITIONS), so the
-    /// cost is linear in the chunk's tiles however large the document.
+    /// [`MAXIMUM_TILE_TRANSITIONS`](super::MAXIMUM_TILE_TRANSITIONS), each
+    /// in a table of its neighbourhoods, so the cost is linear in the
+    /// chunk's tiles however large the document.
     #[must_use]
     pub fn resolve_chunk<'a, S>(
         &'a self,
@@ -158,9 +170,6 @@ impl Transitions {
             .collect();
         let window = self.window(source, layer, cx, cy);
         let terrain_at = |x: usize, y: usize| window.get(y * WINDOW + x).copied().flatten();
-        // For each ground layer, the latest transition to draw on the
-        // current tile, by position, and its tile. A later transition wins,
-        // so the order they are evaluated in does not matter.
         let mut drawn: Vec<Option<(usize, &'a str)>> = vec![None; self.ground_layers];
         // Plane coordinates of the chunk's first tile; a source chunk keeps
         // them in range, and they are only hashed.
@@ -182,69 +191,22 @@ impl Transitions {
                     terrain_at(x - 1, y - 1),
                 ];
                 let index = (y - 1) * SIDE + (x - 1);
-                drawn.fill(None);
-                // Only the tile's own terrain and its neighbours' terrains,
-                // each once, own transitions that can draw here: an outside
-                // transition of any other terrain has pattern 0.
-                let owners =
-                    std::iter::once(terrain).chain(neighbours.iter().enumerate().filter_map(
-                        |(seen, neighbour)| {
-                            let neighbour = (*neighbour)?;
-                            (neighbour != terrain && !neighbours[..seen].contains(&Some(neighbour)))
-                                .then_some(neighbour)
-                        },
-                    ));
-                for owner in owners {
-                    let Some(range) = self
-                        .terrains
-                        .get(owner)
-                        .map(|owner| owner.transitions.clone())
-                    else {
-                        continue;
-                    };
-                    for position in range {
-                        let Some(transition) = self.list.get(position) else {
-                            continue;
-                        };
-                        // Inside transitions of the tile's terrain, and
-                        // outside ones of its neighbours' that blend with it.
-                        let applies = if owner == terrain {
-                            transition.draw == Draw::Inside
-                        } else {
-                            transition.draw == Draw::Outside && transition.blends_with(terrain)
-                        };
-                        let output = transition.layer;
-                        // In the terrain layer a transition replaces the
-                        // painted prototype; elsewhere a prototype the
-                        // source places wins.
-                        if !applies
-                            || (output != self.terrain_layer
-                                && cell(own.get(output), index).is_some())
-                            || drawn
-                                .get(output)
-                                .is_some_and(|entry| entry.is_some_and(|(at, _)| at > position))
-                        {
-                            continue;
-                        }
-                        let shows = neighbours.map(|neighbour| match transition.draw {
-                            Draw::Inside => {
-                                neighbour.is_none_or(|neighbour| !transition.blends_with(neighbour))
-                            }
-                            Draw::Outside => neighbour == Some(transition.terrain),
-                        });
-                        let pattern = transition.model.pattern(transition.draw, shows);
-                        if transition.draw == Draw::Outside && pattern == 0 {
-                            continue;
-                        }
-                        let Some(tiles) = transition.tiles.get(&pattern) else {
-                            continue;
-                        };
-                        let hash = variant_hash(transition.seed, layer, plane_x, plane_y);
-                        if let Some(slot) = drawn.get_mut(output) {
-                            *slot = Some((position, tiles.pick(hash)));
-                        }
+                // In the terrain layer a transition replaces the painted
+                // prototype; elsewhere a prototype the source places wins.
+                let blocked = (0..self.ground_layers.min(8)).fold(0_u8, |blocked, output| {
+                    if output != self.terrain_layer && cell(own.get(output), index).is_some() {
+                        blocked | (1 << output)
+                    } else {
+                        blocked
                     }
-                }
+                });
+                self.draw_tile(
+                    terrain,
+                    &neighbours,
+                    blocked,
+                    (layer, plane_x, plane_y),
+                    &mut drawn,
+                );
                 for (output, entry) in drawn.iter().enumerate() {
                     if let (Some((_, tile)), Some(slot)) = (
                         entry,
@@ -258,6 +220,84 @@ impl Transitions {
             }
         }
         ResolvedChunk { layers }
+    }
+
+    /// Sets `drawn`, for each ground layer, to the latest transition that
+    /// draws on the tile `(x, y)` of `layer`, by position, and its tile, or
+    /// to `None`. The tile's terrain is `terrain` and its neighbours' are
+    /// `neighbours`; a transition into a ground layer whose bit is set in
+    /// `blocked` draws nothing.
+    ///
+    /// Only the transitions of the tile's own terrain and of its
+    /// neighbours' terrains can draw on it: an outside transition of any
+    /// other terrain sees no neighbour of its terrain. Each terrain is
+    /// visited once and its transitions latest first, so one that a later
+    /// transition has already beaten in its layer is skipped, and each
+    /// other one costs a lookup in its table of neighbourhoods.
+    fn draw_tile<'a>(
+        &'a self,
+        terrain: usize,
+        neighbours: &[Option<usize>; 8],
+        blocked: u8,
+        (layer, x, y): (i32, i64, i64),
+        drawn: &mut [Option<(usize, &'a str)>],
+    ) {
+        drawn.fill(None);
+        let owners = std::iter::once(terrain).chain(neighbours.iter().enumerate().filter_map(
+            |(seen, neighbour)| {
+                let neighbour = (*neighbour)?;
+                (neighbour != terrain && !neighbours[..seen].contains(&Some(neighbour)))
+                    .then_some(neighbour)
+            },
+        ));
+        for owner in owners {
+            let Some(range) = self
+                .terrains
+                .get(owner)
+                .map(|owner| owner.transitions.clone())
+            else {
+                continue;
+            };
+            // Which neighbours are the owner's terrain, for its outside
+            // transitions.
+            let same = neighbour_bits(neighbours, |neighbour| neighbour == Some(owner));
+            for position in range.rev() {
+                let Some(transition) = self.list.get(position) else {
+                    continue;
+                };
+                let output = transition.layer;
+                if blocked & (1 << output.min(7)) != 0
+                    || drawn
+                        .get(output)
+                        .is_some_and(|entry| entry.is_some_and(|(at, _)| at > position))
+                {
+                    continue;
+                }
+                // Inside transitions of the tile's terrain, and outside ones
+                // of its neighbours' that blend with it.
+                let shows = if owner == terrain {
+                    if transition.draw != Draw::Inside {
+                        continue;
+                    }
+                    neighbour_bits(neighbours, |neighbour| {
+                        neighbour.is_none_or(|neighbour| !transition.blends_with(neighbour))
+                    })
+                } else if transition.draw == Draw::Outside && transition.blends_with(terrain) {
+                    same
+                } else {
+                    continue;
+                };
+                if !transition.draws(shows) {
+                    continue;
+                }
+                let hash = variant_hash(transition.seed, layer, x, y);
+                if let (Some(tile), Some(slot)) =
+                    (transition.draw_at(shows, hash), drawn.get_mut(output))
+                {
+                    *slot = Some((position, tile));
+                }
+            }
+        }
     }
 
     /// The terrain of each tile of the chunk at `(layer, cx, cy)` and of the

@@ -289,6 +289,20 @@ fn the_fixture_reads_its_terrains_and_transitions() {
     let grass = &transitions.transitions()[3];
     assert!((0..3).all(|terrain| grass.blends_with(terrain)));
     assert_eq!(transitions.transitions()[2].seed(), 7);
+    // Every prototype the document names: members and tiles.
+    let named: BTreeSet<&str> = transitions.protos().collect();
+    for proto in [
+        "water",
+        "grass_flowers",
+        "dirt",
+        "pond",
+        "grass_edge_5",
+        "water_ripple",
+    ] {
+        assert!(named.contains(proto), "{proto}");
+    }
+    assert!(!named.contains("stone"));
+    assert!(!named.contains("bush"));
 }
 
 /// Renders the resolved tiles of every chunk of the fixture, with a legend

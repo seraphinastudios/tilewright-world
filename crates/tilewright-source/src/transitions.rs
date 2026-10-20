@@ -249,9 +249,58 @@ pub struct Transition {
     blends: Vec<bool>,
     seed: u32,
     tiles: BTreeMap<u8, Pattern>,
+    /// For each neighbourhood, the 8 bits of which neighbours show the
+    /// terrain (N 1, NE 2, ... NW 128), the pattern it draws, if `tiles`
+    /// has one for it: resolving a tile looks a transition up here instead
+    /// of computing its pattern.
+    draws: Box<[Option<u8>; 256]>,
 }
 
 impl Transition {
+    pub(crate) fn new(
+        (terrain, draw, model, layer): (usize, Draw, Model, usize),
+        blends: Vec<bool>,
+        seed: u32,
+        tiles: BTreeMap<u8, Pattern>,
+    ) -> Self {
+        let mut draws = Box::new([None; 256]);
+        for (bits, entry) in (0..=255_u8).zip(draws.iter_mut()) {
+            let shows = std::array::from_fn(|bit| bits & (1 << bit) != 0);
+            let pattern = model.pattern(draw, shows);
+            if (draw == Draw::Inside || pattern != 0) && tiles.contains_key(&pattern) {
+                *entry = Some(pattern);
+            }
+        }
+        Self {
+            terrain,
+            draw,
+            model,
+            layer,
+            blends,
+            seed,
+            tiles,
+            draws,
+        }
+    }
+
+    /// The tile this transition draws on a tile whose neighbours, as bits
+    /// N 1, NE 2, ... NW 128, show its terrain where set, for variant hash
+    /// `hash`; `None` where its table has no tile for the pattern.
+    #[must_use]
+    pub fn draw_at(&self, shows: u8, hash: u64) -> Option<&str> {
+        let pattern = self.draws.get(usize::from(shows)).copied().flatten()?;
+        Some(self.tiles.get(&pattern)?.pick(hash))
+    }
+
+    /// Whether this transition draws anything on a tile whose neighbours
+    /// show its terrain as the bits of `shows` do.
+    #[must_use]
+    pub fn draws(&self, shows: u8) -> bool {
+        self.draws
+            .get(usize::from(shows))
+            .is_some_and(Option::is_some)
+    }
+
     /// The index of its terrain in [`Transitions::terrains`].
     #[must_use]
     pub const fn terrain(&self) -> usize {
@@ -369,17 +418,23 @@ impl Transitions {
         self.by_proto.get(proto).copied()
     }
 
-    /// Every prototype a transition may draw, with repeats: what resolved
-    /// tiles can hold besides the source's own prototypes.
-    pub fn tile_protos(&self) -> impl Iterator<Item = &str> + '_ {
-        self.list.iter().flat_map(|transition| {
+    /// Every prototype the document names, with repeats: the terrains'
+    /// prototypes and every variant a transition may draw. Resolved tiles
+    /// hold only these and the source's own prototypes.
+    pub fn protos(&self) -> impl Iterator<Item = &str> + '_ {
+        let members = self
+            .terrains
+            .iter()
+            .flat_map(|terrain| terrain.protos.iter().map(String::as_str));
+        let tiles = self.list.iter().flat_map(|transition| {
             transition.tiles.values().flat_map(|pattern| {
                 pattern
                     .variants
                     .iter()
                     .map(|variant| variant.proto.as_str())
             })
-        })
+        });
+        members.chain(tiles)
     }
 
     /// The prototype a brush writes into the terrain layer to paint the
