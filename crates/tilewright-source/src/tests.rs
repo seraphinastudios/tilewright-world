@@ -1828,6 +1828,36 @@ fn duplicate_object_uids_are_reported_where_they_repeat() {
 }
 
 #[test]
+fn a_malformed_uid_does_not_stop_the_checks_of_its_object() {
+    let copy = workspace();
+    edit(
+        copy.path(),
+        CHUNK,
+        "{\"uid\": \"village.chest\", \"at\": [2, 2], \"proto\": \"chest\", \"fields\": {\"locked\": true,",
+        "{\"uid\": \"Village\", \"at\": [2, 2], \"proto\": \"chest\", \"fields\": {\"locked\": 1,",
+    );
+    edit(
+        copy.path(),
+        CHUNK,
+        "{\"proto\": \"coin\", \"fields\": {\"count\": 3}},",
+        "{\"uid\": \"ruin.north_wall\", \"proto\": \"coin\"}, {\"proto\": \"missing\"},",
+    );
+    let found: Vec<_> = problems(copy.path())
+        .into_iter()
+        .map(|(code, path, _)| (code, path))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            ("shape.identifier", CHUNK.to_owned()),
+            ("shape.type", CHUNK.to_owned()),
+            ("ref.duplicate", CHUNK.to_owned()),
+            ("ref.unresolved", CHUNK.to_owned()),
+        ]
+    );
+}
+
+#[test]
 fn object_uids_are_identifiers_of_at_most_128_bytes() {
     let longest = format!("a{}", "0".repeat(127));
     let copy = workspace();
