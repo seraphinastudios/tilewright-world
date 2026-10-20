@@ -10,7 +10,7 @@ renamed, so that content CI can compare a change with a baseline, such as
 the last released pack, and fail on a removal or rename nobody intended.
 
 ```sh
-tilewright diff [--json] [--allow ALLOWLIST] OLD NEW
+tilewright diff [--json] [--allow ALLOWLIST] [--max-ids COUNT] OLD NEW
 ```
 
 ## 1. Inputs
@@ -21,6 +21,11 @@ path as a source root. Both sides are untrusted and read with the default
 bounds. A source root is loaded and validated by the reference loader. A
 pack is opened and fully verified, as `tilewright inspect` does, before any
 of its IDs is read. A side that does not load is a load error (section 7).
+
+A comparison keeps every ID of both sides in memory, so each side may hold
+at most `--max-ids` IDs of all kinds, 1,000,000 by default. Reading stops at
+the first ID past the limit, before it is kept, and the side is a load
+error.
 
 A reference that no longer resolves, such as a chunk that still names a
 removed prototype, makes the new world invalid: the loader reports it as
@@ -176,5 +181,5 @@ version that changes the meaning of a member gets a new `format`.
 
 With code 2, nothing is printed on standard output. Standard error says
 why: a source side's diagnostics, one per line prefixed with `old: ` or
-`new: `, a pack side's first problem, the allowlist's first problem, or the
-usage.
+`new: `, a pack side's first problem, a side past the ID limit, the
+allowlist's first problem, or the usage.

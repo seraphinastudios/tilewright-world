@@ -4,14 +4,14 @@
 //! What a comparison reads of one world: every ID, with a fingerprint of the
 //! content that the rename rule of `docs/spec/DIFF.md` compares.
 
-use crate::{Error, Kind, is_identifier};
+use crate::{Error, Kind, Limits, is_identifier};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write as _,
     ops::Bound,
 };
-use tilewright_jsonc::{Document, Limits, Value, write_json_string};
+use tilewright_jsonc::{Document, Limits as ParseLimits, Value, write_json_string};
 use tilewright_pack::{Identity, Pack};
 use tilewright_source::World;
 
@@ -59,11 +59,12 @@ impl Snapshot {
     /// The snapshot of a loaded source tree.
     ///
     /// # Errors
-    /// Returns [`Error::Invalid`] if a document of the world cannot be read
-    /// again, which a world that loaded never has.
-    pub fn from_world(world: &World) -> Result<Self, Error> {
+    /// Returns [`Error::TooManyIds`] if the world has more IDs than
+    /// `limits` allow, or [`Error::Invalid`] if a document of the world
+    /// cannot be read again, which a world that loaded never has.
+    pub fn from_world(world: &World, limits: &Limits) -> Result<Self, Error> {
         let profile = world.profile();
-        let mut builder = Builder::default();
+        let mut builder = Builder::new(*limits);
         let mut read = || -> Result<(), String> {
             builder.render_layers(profile.render_layers.iter().map(String::as_str))?;
             for (id, plane) in world.planes() {
@@ -86,7 +87,9 @@ impl Snapshot {
             }
             Ok(())
         };
-        read().map_err(Error::Invalid)?;
+        let read = read();
+        builder.check()?;
+        read.map_err(Error::Invalid)?;
         Ok(builder.finish(Side {
             input: Input::Source,
             profile: profile.id.clone(),
@@ -97,12 +100,14 @@ impl Snapshot {
 
     /// The snapshot of a content pack. [`crate::load`] verifies the pack
     /// first; on its own, this checks the shape and bounds of each row it
-    /// reads, as [`Pack::visit_identities`] does.
+    /// reads, as [`Pack::visit_identities`] does. Rows are read one at a
+    /// time, and reading stops as soon as the pack has more IDs than
+    /// `limits` allow.
     ///
     /// # Errors
-    /// Returns [`Error::Pack`] if SQLite fails or a row or the stored
-    /// profile is invalid.
-    pub fn from_pack(pack: &Pack) -> Result<Self, Error> {
+    /// Returns [`Error::TooManyIds`] past the limit, or [`Error::Pack`] if
+    /// SQLite fails or a row or the stored profile is invalid.
+    pub fn from_pack(pack: &Pack, limits: &Limits) -> Result<Self, Error> {
         let invalid = |message: String| Error::Pack(tilewright_pack::Error::Invalid(message));
         let meta = |key: &str| -> Result<String, Error> {
             pack.meta(key)
@@ -117,11 +122,11 @@ impl Snapshot {
             .and_then(Value::as_array)
             .and_then(|items| items.iter().map(Value::as_str).collect())
             .ok_or_else(|| invalid("the stored profile has no render_layers list".into()))?;
-        let mut builder = Builder::default();
-        builder
-            .render_layers(render_layers.into_iter())
-            .map_err(invalid)?;
-        pack.visit_identities(&mut |identity| {
+        let mut builder = Builder::new(*limits);
+        let read = builder.render_layers(render_layers.into_iter());
+        builder.check()?;
+        read.map_err(invalid)?;
+        let read = pack.visit_identities(&mut |identity| {
             match identity {
                 Identity::Plane { id, document } => builder.plane(id, document),
                 Identity::Zone {
@@ -151,8 +156,9 @@ impl Snapshot {
                 } => builder.chunk(plane, layer, cx, cy),
             }
             .map_err(tilewright_pack::Error::Invalid)
-        })
-        .map_err(Error::Pack)?;
+        });
+        builder.check()?;
+        read.map_err(Error::Pack)?;
         Ok(builder.finish(Side {
             input: Input::Pack,
             profile: meta("profile_id")?,
@@ -192,15 +198,45 @@ impl Snapshot {
 
 /// Collects a snapshot. A plane's fingerprint covers its zones, anchors and
 /// stairwells, so it is finished once everything has been read.
-#[derive(Default)]
 struct Builder {
     ids: BTreeMap<Kind, BTreeMap<String, Fingerprint>>,
     /// Each plane's document fingerprint and a hash of its chunk addresses,
     /// fed in `(layer, cx, cy)` order.
     planes: BTreeMap<String, (Fingerprint, Sha256)>,
+    /// The most IDs the snapshot may hold, and how many it holds.
+    maximum: usize,
+    count: usize,
 }
 
 impl Builder {
+    const fn new(limits: Limits) -> Self {
+        Self {
+            ids: BTreeMap::new(),
+            planes: BTreeMap::new(),
+            maximum: limits.maximum_ids,
+            count: 0,
+        }
+    }
+
+    /// Counts one more ID before anything of it is kept, failing once the
+    /// count passes the limit.
+    fn admit(&mut self) -> Result<(), String> {
+        self.count = self.count.saturating_add(1);
+        if self.count > self.maximum {
+            return Err(format!("more than {} IDs", self.maximum));
+        }
+        Ok(())
+    }
+
+    /// [`Error::TooManyIds`] if reading stopped at the limit.
+    const fn check(&self) -> Result<(), Error> {
+        if self.count > self.maximum {
+            Err(Error::TooManyIds(self.maximum))
+        } else {
+            Ok(())
+        }
+    }
+
     fn insert(&mut self, kind: Kind, id: String, fingerprint: Fingerprint) -> Result<(), String> {
         let ids = self.ids.entry(kind).or_default();
         if ids.contains_key(&id) {
@@ -214,6 +250,7 @@ impl Builder {
     /// profile's list.
     fn render_layers<'a>(&mut self, layers: impl Iterator<Item = &'a str>) -> Result<(), String> {
         for (index, layer) in layers.enumerate() {
+            self.admit()?;
             if !is_identifier(layer) {
                 return Err("a render layer is not an identifier".into());
             }
@@ -224,6 +261,7 @@ impl Builder {
     }
 
     fn plane(&mut self, id: &str, document: &str) -> Result<(), String> {
+        self.admit()?;
         let fingerprint = document_fingerprint(document, &["id", "title"])?;
         if self
             .planes
@@ -236,11 +274,13 @@ impl Builder {
     }
 
     fn zone(&mut self, plane: &str, id: &str, document: &str) -> Result<(), String> {
+        self.admit()?;
         let fingerprint = document_fingerprint(document, &["id", "name"])?;
         self.insert(Kind::Zone, format!("{plane}/{id}"), fingerprint)
     }
 
     fn anchor(&mut self, plane: &str, id: &str, layer: i32, at: [i64; 2]) -> Result<(), String> {
+        self.admit()?;
         let content = format!("{{\"layer\":{layer},\"at\":[{},{}]}}", at[0], at[1]);
         self.insert(
             Kind::Anchor,
@@ -250,11 +290,13 @@ impl Builder {
     }
 
     fn stairwell(&mut self, plane: &str, id: &str, document: &str) -> Result<(), String> {
+        self.admit()?;
         let fingerprint = document_fingerprint(document, &["id"])?;
         self.insert(Kind::Stairwell, format!("{plane}/{id}"), fingerprint)
     }
 
     fn definition(&mut self, kind: &str, id: &str, document: &str) -> Result<(), String> {
+        self.admit()?;
         let fingerprint = document_fingerprint(document, &["id"])?;
         self.insert(Kind::Definition, format!("{kind}/{id}"), fingerprint)
     }
@@ -271,7 +313,9 @@ impl Builder {
     }
 
     fn finish(self, side: Side) -> Snapshot {
-        let Self { mut ids, planes } = self;
+        let Self {
+            mut ids, planes, ..
+        } = self;
         let mut fingerprints = BTreeMap::new();
         for (plane, (document, chunks)) in planes {
             let mut hasher = Sha256::new();
@@ -307,9 +351,9 @@ fn feed(hasher: &mut Sha256, bytes: &[u8]) {
 
 /// Limits for reading back canonical JSON, which is one line: the format's
 /// limits, with the line limit raised to the input limit.
-fn canonical_limits() -> Limits {
-    let limits = Limits::default();
-    Limits {
+fn canonical_limits() -> ParseLimits {
+    let limits = ParseLimits::default();
+    ParseLimits {
         max_line_bytes: limits.max_input_bytes,
         ..limits
     }

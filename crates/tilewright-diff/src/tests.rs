@@ -1,12 +1,18 @@
 // Copyright 2026 Seraphina Studios
 // SPDX-License-Identifier: MIT
 
-use crate::{Allowance, Allowlist, Error, Input, Kind, Reason, Report, Side, Snapshot, diff, load};
+use crate::{
+    Allowance, Allowlist, Error, Input, Kind, Limits, Reason, Report, Side, Snapshot, diff,
+};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
 };
+
+fn load(path: &Path) -> Result<Snapshot, Error> {
+    crate::load(path, &Limits::default())
+}
 
 fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/basic")
@@ -860,4 +866,41 @@ fn malformed_sides_do_not_load() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn snapshots_stop_at_their_id_limit() {
+    let copy = Copy::new();
+    let world = tilewright_source::load(&copy.root()).unwrap();
+    let written =
+        tilewright_pack::write_pack(&world, &copy.directory.path().join("packs")).unwrap();
+    // The fixture has 6 render layers, 2 planes, 3 zones, 2 anchors, 3
+    // stairwells and 12 definitions.
+    let ids = Snapshot::from_world(&world, &Limits::default())
+        .unwrap()
+        .ids
+        .values()
+        .map(BTreeMap::len)
+        .sum::<usize>();
+    assert_eq!(ids, 28);
+    for maximum in [0, 5, 27] {
+        let limits = Limits {
+            maximum_ids: maximum,
+        };
+        for path in [copy.root(), written.path.clone()] {
+            match crate::load(&path, &limits) {
+                Err(Error::TooManyIds(limit)) => assert_eq!(limit, maximum),
+                other => panic!("{maximum} {}: {other:?}", path.display()),
+            }
+        }
+    }
+    let exact = Limits { maximum_ids: 28 };
+    assert_eq!(
+        crate::load(&copy.root(), &exact).unwrap().ids,
+        crate::load(&written.path, &exact).unwrap().ids
+    );
+    assert_eq!(
+        Error::TooManyIds(5).to_string(),
+        "more than 5 IDs, the ID limit"
+    );
 }

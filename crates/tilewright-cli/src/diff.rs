@@ -8,7 +8,7 @@
 
 use super::{USAGE, diagnostics_text, field, terminal_safe};
 use std::{ffi::OsStr, fmt::Write as _, path::Path, process::ExitCode};
-use tilewright_diff::{Allowlist, Error, Snapshot};
+use tilewright_diff::{Allowlist, Error, Limits, Snapshot};
 
 /// No ID was removed or renamed without the allowlist accepting it.
 const SAME: u8 = 0;
@@ -45,14 +45,16 @@ pub fn main(arguments: &[&OsStr]) -> ExitCode {
 struct Options<'a> {
     json: bool,
     allow: Option<&'a OsStr>,
+    limits: Limits,
     old: &'a OsStr,
     new: &'a OsStr,
 }
 
-/// `[--json] [--allow ALLOWLIST] OLD NEW`: each flag at most once, in any
-/// order, then the two sides, neither of which may look like a flag.
+/// `[--json] [--allow ALLOWLIST] [--max-ids COUNT] OLD NEW`: each flag at
+/// most once, in any order, then the two sides, neither of which may look
+/// like a flag.
 fn options<'a>(arguments: &[&'a OsStr]) -> Option<Options<'a>> {
-    let (mut json, mut allow) = (false, None);
+    let (mut json, mut allow, mut maximum_ids) = (false, None, None);
     let mut rest = arguments;
     loop {
         match rest {
@@ -64,11 +66,17 @@ fn options<'a>(arguments: &[&'a OsStr]) -> Option<Options<'a>> {
                 allow = Some(*path);
                 rest = tail;
             }
+            [flag, count, tail @ ..] if *flag == "--max-ids" && maximum_ids.is_none() => {
+                maximum_ids = Some(count.to_str()?.parse().ok()?);
+                rest = tail;
+            }
             [old, new] => {
                 let flag = |side: &OsStr| side.as_encoded_bytes().starts_with(b"--");
                 return (!flag(old) && !flag(new)).then_some(Options {
                     json,
                     allow,
+                    limits: maximum_ids
+                        .map_or_else(Limits::default, |maximum_ids| Limits { maximum_ids }),
                     old,
                     new,
                 });
@@ -104,8 +112,8 @@ pub fn run(arguments: &[&OsStr]) -> Outcome {
         },
     };
     let mut stderr = String::new();
-    let old = side("old", options.old, &mut stderr);
-    let new = side("new", options.new, &mut stderr);
+    let old = side("old", options.old, options.limits, &mut stderr);
+    let new = side("new", options.new, options.limits, &mut stderr);
     let (Some(old), Some(new)) = (old, new) else {
         return Outcome::trouble(&stderr);
     };
@@ -124,9 +132,9 @@ pub fn run(arguments: &[&OsStr]) -> Outcome {
 /// Loads one side, or appends why it did not load to `stderr`: each source
 /// diagnostic on its own line, prefixed with the side's name, then a
 /// summary.
-fn side(name: &str, path: &OsStr, stderr: &mut String) -> Option<Snapshot> {
+fn side(name: &str, path: &OsStr, limits: Limits, stderr: &mut String) -> Option<Snapshot> {
     let path = Path::new(path);
-    let error = match tilewright_diff::load(path) {
+    let error = match tilewright_diff::load(path, &limits) {
         Ok(snapshot) => return Some(snapshot),
         Err(error) => error,
     };
@@ -286,6 +294,15 @@ mod tests {
                 "tilewright: allowlist {allowlist}:2:13: shape.format: format must be \"tilewright.diff-allow/1\"\n"
             )
         );
+        let outcome = run(&["--max-ids", "27", &fixture, &fixture]);
+        assert_eq!(outcome.code, TROUBLE);
+        assert_eq!(
+            outcome.stderr,
+            format!(
+                "tilewright: old {fixture}: more than 27 IDs, the ID limit\ntilewright: new {fixture}: more than 27 IDs, the ID limit\n"
+            )
+        );
+        assert_eq!(run(&["--max-ids", "28", &fixture, &fixture]).code, SAME);
         let outcome = run(&["--allow", &missing, &fixture, &fixture]);
         assert_eq!(outcome.code, TROUBLE);
         assert!(
@@ -310,6 +327,9 @@ mod tests {
             &["--allow", &fixture],
             &["--allow", "a", "--allow", "b", &fixture, &fixture],
             &["--verbose", &fixture, &fixture],
+            &["--max-ids", "lots", &fixture, &fixture],
+            &["--max-ids", "-1", &fixture, &fixture],
+            &["--max-ids", "1", "--max-ids", "2", &fixture, &fixture],
         ] {
             let outcome = run(arguments);
             assert_eq!(outcome.code, TROUBLE, "{arguments:?}");

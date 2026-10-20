@@ -13,8 +13,9 @@
 //!
 //! ```no_run
 //! # use std::path::Path;
-//! let old = tilewright_diff::load(Path::new("baseline.twpack"))?;
-//! let new = tilewright_diff::load(Path::new("content"))?;
+//! let limits = tilewright_diff::Limits::default();
+//! let old = tilewright_diff::load(Path::new("baseline.twpack"), &limits)?;
+//! let new = tilewright_diff::load(Path::new("content"), &limits)?;
 //! let report = tilewright_diff::diff(&old, &new, &tilewright_diff::Allowlist::default());
 //! print!("{}", report.to_text());
 //! if report.breaking() {
@@ -41,6 +42,26 @@ pub const FORMAT: &str = "tilewright.diff/1";
 
 /// The `format` of an allowlist document.
 pub const ALLOWLIST_FORMAT: &str = "tilewright.diff-allow/1";
+
+/// The default [`Limits::maximum_ids`].
+pub const DEFAULT_MAXIMUM_IDS: usize = 1_000_000;
+
+/// Bounds on what a snapshot may hold. A snapshot keeps every ID of its
+/// world with a fingerprint, so its memory grows with its IDs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Limits {
+    /// Most IDs of all kinds one snapshot holds. Reading a world with more
+    /// stops at the first ID past the limit, before it is kept.
+    pub maximum_ids: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            maximum_ids: DEFAULT_MAXIMUM_IDS,
+        }
+    }
+}
 
 /// A kind of ID. Kinds sort by name.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -144,6 +165,8 @@ pub enum Error {
     Source(Vec<Diagnostic>),
     /// The pack did not open, verify or read.
     Pack(tilewright_pack::Error),
+    /// The world has more IDs than the limit, which this holds.
+    TooManyIds(usize),
     /// A document that loaded could not be read again.
     Invalid(String),
 }
@@ -155,6 +178,9 @@ impl fmt::Display for Error {
                 write!(formatter, "{} problem(s) in the source", diagnostics.len())
             }
             Self::Pack(error) => error.fmt(formatter),
+            Self::TooManyIds(maximum) => {
+                write!(formatter, "more than {maximum} IDs, the ID limit")
+            }
             Self::Invalid(message) => formatter.write_str(message),
         }
     }
@@ -162,20 +188,22 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// Reads one side of a comparison with the default bounds: a content pack
-/// when `path` is a file, which is opened and fully verified first, and
-/// otherwise a source tree, which is loaded and validated.
+/// Reads one side of a comparison: a content pack when `path` is a file,
+/// which is opened and fully verified with the default bounds first, and
+/// otherwise a source tree, which is loaded and validated with the default
+/// bounds. The snapshot holds at most `limits.maximum_ids` IDs.
 ///
 /// # Errors
-/// Returns the source diagnostics, or the pack's first problem.
-pub fn load(path: &Path) -> Result<Snapshot, Error> {
+/// Returns the source diagnostics, the pack's first problem, or
+/// [`Error::TooManyIds`].
+pub fn load(path: &Path, limits: &Limits) -> Result<Snapshot, Error> {
     if std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) {
         let pack = tilewright_pack::Pack::open(path).map_err(Error::Pack)?;
         pack.verify().map_err(Error::Pack)?;
-        Snapshot::from_pack(&pack)
+        Snapshot::from_pack(&pack, limits)
     } else {
         let world = tilewright_source::load(path).map_err(Error::Source)?;
-        Snapshot::from_world(&world)
+        Snapshot::from_world(&world, limits)
     }
 }
 

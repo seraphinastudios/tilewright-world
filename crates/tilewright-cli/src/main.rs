@@ -18,17 +18,18 @@ const USAGE: &str = "usage:
   tilewright validate [--json] ROOT
   tilewright compile ROOT OUTPUT_DIRECTORY
   tilewright inspect [--max-decoded-bytes BYTES] [--max-pack-bytes BYTES] PACK
-  tilewright diff [--json] [--allow ALLOWLIST] OLD NEW
+  tilewright diff [--json] [--allow ALLOWLIST] [--max-ids COUNT] OLD NEW
   tilewright --version
 
 inspect verifies the pack. It stops once the chunks decode to more than
 --max-decoded-bytes, and rejects a pack file longer than --max-pack-bytes
 before opening or hashing it. Both default to 8589934592 (8 GiB).
 
-diff compares the IDs of two worlds, each a source root or a pack. It exits
-0 when no ID was removed or renamed, or the allowlist accepts each one; 1
-when one was not accepted; and 2 when a side, the allowlist or the
-arguments could not be read.";
+diff compares the IDs of two worlds, each a source root or a pack, holding
+at most --max-ids IDs (default 1000000) of each. It exits 0 when no ID was
+removed or renamed, or the allowlist accepts each one; 1 when one was not
+accepted; and 2 when a side, the allowlist or the arguments could not be
+read.";
 
 fn main() -> ExitCode {
     // Paths need not be UTF-8, so arguments are read as OS strings.

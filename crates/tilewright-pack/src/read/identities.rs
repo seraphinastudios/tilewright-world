@@ -12,6 +12,7 @@ use super::{
 use crate::{Error, Pack, is_identifier};
 use rusqlite::Row;
 use tilewright_jsonc::MAX_SAFE_INTEGER;
+use tilewright_source::CHUNK_SIZE;
 
 /// One identity of a pack, as [`Pack::visit_identities`] lists it.
 /// Documents are the stored canonical JSON: a plane's or definition's
@@ -87,6 +88,22 @@ fn position(row: &Row<'_>, index: usize, what: &str) -> Result<i64, Error> {
         })
 }
 
+/// The chunk coordinate in column `index` of a row selected with
+/// [`integer`]: one whose chunk, `CHUNK_SIZE` tiles across as format 1
+/// requires, keeps every tile within the format's integer range.
+fn chunk_coordinate(row: &Row<'_>, index: usize) -> Result<i64, Error> {
+    let size = i64::from(CHUNK_SIZE);
+    let range = -(MAX_SAFE_INTEGER / size)..=(MAX_SAFE_INTEGER - (size - 1)) / size;
+    let value: Option<i64> = row.get(index)?;
+    value.filter(|value| range.contains(value)).ok_or_else(|| {
+        Error::Invalid(format!(
+            "a chunk coordinate is not an integer from {} to {}",
+            range.start(),
+            range.end()
+        ))
+    })
+}
+
 impl Pack {
     /// Calls `each` with every row of `sql`, whose `?1`, if any, is the
     /// largest stored document.
@@ -115,8 +132,9 @@ impl Pack {
     /// Like [`Pack::chunk`], it checks the shape and bounds of what it
     /// loads: keys are identifiers, documents are canonical JSON of objects
     /// whose identity agrees with their row, stairwells have the source
-    /// format's shape, and layers and positions are integers within the
-    /// format's range. Whether the planes and targets they name exist is
+    /// format's shape, layers and positions are integers within the
+    /// format's range, and chunk coordinates keep every tile of a format 1
+    /// chunk within it. Whether the planes and targets they name exist is
     /// checked by [`Pack::verify`].
     ///
     /// # Errors
@@ -250,8 +268,8 @@ impl Pack {
                 visit(Identity::Chunk {
                     plane: &identifier(row, 0, "chunk")?,
                     layer: layer(row, 1, "chunk")?,
-                    cx: position(row, 2, "chunk")?,
-                    cy: position(row, 3, "chunk")?,
+                    cx: chunk_coordinate(row, 2)?,
+                    cy: chunk_coordinate(row, 3)?,
                 })
             },
         )
@@ -426,6 +444,14 @@ mod tests {
             ),
             ("UPDATE chunks SET layer = 'x' WHERE layer = 1", "32-bit"),
             (
+                "UPDATE chunks SET cx = 281474976710656 WHERE plane = 'vault'",
+                "chunk coordinate",
+            ),
+            (
+                "UPDATE chunks SET cy = -281474976710656 WHERE plane = 'vault'",
+                "chunk coordinate",
+            ),
+            (
                 "UPDATE chunks SET plane = x'00' WHERE plane = 'vault'",
                 "identifier",
             ),
@@ -434,5 +460,14 @@ mod tests {
             let error = visit(&path).expect_err(sql).to_string();
             assert!(error.contains(problem), "{sql}: {error}");
         }
+        // The outermost chunks whose tiles stay within range are listed.
+        let (_directory, path) = pack(
+            "UPDATE chunks SET cx = 281474976710655, cy = -281474976710655 WHERE plane = 'vault'",
+        );
+        assert!(
+            visit(&path)
+                .unwrap()
+                .contains(&"chunk vault 0 281474976710655 -281474976710655".to_owned())
+        );
     }
 }
