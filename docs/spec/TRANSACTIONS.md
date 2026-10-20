@@ -371,7 +371,7 @@ FORMAT.md section 3 and these, while they are read and carried out:
 | Terrain cells | 1,000,000 |
 | Bytes read from touched files | 256 MiB |
 | Work, in bytes: each operation's own size, the size of each document it reads (once per operation) and of each edit it makes | 4 GiB |
-| Diagnostics reported, the edited world's included | 1,000 |
+| Diagnostics reported, the edited world's included, the last place kept for a note that there are more | 1,000 |
 
 Whatever an operation does within a document, finding values, scanning
 members or objects and comparing values, is bounded by a constant times

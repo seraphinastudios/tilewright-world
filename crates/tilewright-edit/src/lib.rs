@@ -238,14 +238,15 @@ pub fn staging_name(name: &str) -> String {
     format!(".{name}.tilewright-tmp")
 }
 
-/// The tree as the plan leaves it, over the files on disk: its changed
-/// files, and no staging file beside any file it touched or consulted.
+/// The tree as the plan leaves it, over the files on disk: every file it
+/// touched or consulted, as it read or left it, and no staging file beside
+/// any of them.
 fn overlay(files: &[FileChange]) -> Overlay {
+    // Every file the transaction read is validated as it read it, changed
+    // or not, so that one snapshot is carried out and validated.
     let mut overlay = Overlay::new();
     for file in files {
-        if file.is_changed() {
-            overlay.insert(file.path.clone(), file.after.clone());
-        }
+        overlay.insert(file.path.clone(), file.after.clone());
         overlay.insert(staging_path(&file.path), None);
     }
     overlay
@@ -265,25 +266,68 @@ pub(crate) fn staging_path(path: &str) -> String {
     }
 }
 
-/// The problems of one plan, at spans of the transaction.
+/// The problems of one plan, at spans of the transaction. The last place
+/// of the diagnostic limit is kept for a note that there may be more.
 struct Problems<'a> {
     name: &'a str,
     lines: diagnostic::Lines<'a>,
     found: Vec<Diagnostic>,
+    /// Whether a problem was dropped, or checking stopped, at the limit.
+    more: bool,
 }
 
-impl Problems<'_> {
+impl<'a> Problems<'a> {
+    fn new(transaction: &'a Transaction) -> Self {
+        Self {
+            name: &transaction.name,
+            lines: diagnostic::Lines::new(transaction.text()),
+            found: Vec::new(),
+            more: false,
+        }
+    }
+
     fn report(&mut self, span: tilewright_jsonc::Span, failure: Failure) {
-        if self.found.len() < limits::DIAGNOSTICS {
-            self.found.push(diagnostic::at(
+        if self.full() {
+            return;
+        }
+        self.found.push(diagnostic::at(
+            self.name,
+            &self.lines,
+            span.start,
+            span.end,
+            failure.code.as_str(),
+            failure.message,
+        ));
+    }
+
+    /// Whether no more problems are kept; checking should stop, and a note
+    /// will say there may be more.
+    fn full(&mut self) -> bool {
+        let full = self.found.len() >= limits::DIAGNOSTICS - 1;
+        self.more |= full;
+        full
+    }
+
+    fn is_empty(&self) -> bool {
+        self.found.is_empty()
+    }
+
+    /// The problems in order, with the note if there may be more.
+    fn finish(self) -> Vec<Diagnostic> {
+        let mut found = self.found;
+        found.sort();
+        found.dedup();
+        if self.more {
+            found.push(diagnostic::file(
                 self.name,
-                &self.lines,
-                span.start,
-                span.end,
-                failure.code.as_str(),
-                failure.message,
+                Code::Limit.as_str(),
+                format!(
+                    "{} problems are reported, as many as may be; there may be more",
+                    limits::DIAGNOSTICS - 1
+                ),
             ));
         }
+        found
     }
 }
 
@@ -301,7 +345,7 @@ fn check_base(
     };
     let resumable = transaction.documents_only();
     for (path, expected) in base {
-        if workspace.exhausted() || problems.found.len() >= limits::DIAGNOSTICS {
+        if workspace.exhausted() || problems.full() {
             break;
         }
         if let Err(failure) = workspace.exists(path) {
@@ -355,10 +399,9 @@ fn check_recorded(
     transaction: &Transaction,
     problems: &mut Problems<'_>,
 ) {
-    let full = |problems: &Problems<'_>| problems.found.len() >= limits::DIAGNOSTICS;
     if let Some((span, base)) = &transaction.base {
         for path in workspace.entries.keys() {
-            if full(problems) {
+            if problems.full() {
                 return;
             }
             if !base.contains_key(path) {
@@ -372,7 +415,7 @@ fn check_recorded(
         }
     }
     // Nothing more could be reported, so the result is not worth hashing.
-    if full(problems) {
+    if problems.full() {
         return;
     }
     if let Some(result) = &transaction.result {
@@ -407,13 +450,9 @@ fn check_terrain_addresses(
     transaction: &Transaction,
     problem: impl Fn(&str, &str) -> Option<String>,
 ) -> Vec<Diagnostic> {
-    let mut problems = Problems {
-        name: &transaction.name,
-        lines: diagnostic::Lines::new(transaction.text()),
-        found: Vec::new(),
-    };
+    let mut problems = Problems::new(transaction);
     for operation in &transaction.operations {
-        if problems.found.len() >= limits::DIAGNOSTICS {
+        if problems.full() {
             break;
         }
         if let transaction::Action::TerrainSet { plane, grid, .. } = &operation.action
@@ -422,7 +461,11 @@ fn check_terrain_addresses(
             problems.report(operation.span, Failure::conflict(message));
         }
     }
-    problems.found
+    if problems.is_empty() {
+        Vec::new()
+    } else {
+        problems.finish()
+    }
 }
 
 /// Why a terrain address does not name a grid of `world`, if it does not.
@@ -479,7 +522,7 @@ fn run_operations(
     for operation in &transaction.operations {
         // Past a budget or the diagnostic limit, carrying on could only
         // cost more; what is reported already rejects the transaction.
-        if workspace.exhausted() || problems.found.len() >= limits::DIAGNOSTICS {
+        if workspace.exhausted() || problems.full() {
             break;
         }
         let finished = operation
@@ -552,18 +595,14 @@ pub fn plan(
     };
     let source = SourceRoot::new(root);
     let mut workspace = Workspace::new(&source);
-    let mut problems = Problems {
-        name: &transaction.name,
-        lines: diagnostic::Lines::new(transaction.text()),
-        found: Vec::new(),
-    };
+    let mut problems = Problems::new(transaction);
     let done = if options.rebase {
         BTreeSet::new()
     } else {
         check_base(&mut workspace, transaction, &mut problems)
     };
     let mut chunks = BTreeSet::new();
-    if problems.found.is_empty() {
+    if problems.is_empty() {
         run_operations(
             &mut workspace,
             transaction,
@@ -572,19 +611,16 @@ pub fn plan(
             &mut problems,
         );
     }
-    if problems.found.is_empty()
+    if problems.is_empty()
         && let Err(failure) = remove_empty_chunks(&mut workspace, &chunks)
     {
         problems.report(transaction.document.root().span(), failure);
     }
-    if !options.rebase && problems.found.is_empty() {
+    if !options.rebase && problems.is_empty() {
         check_recorded(&workspace, transaction, &mut problems);
     }
-    if !problems.found.is_empty() {
-        let mut found = problems.found;
-        found.sort();
-        found.dedup();
-        return Err(found);
+    if !problems.is_empty() {
+        return Err(problems.finish());
     }
 
     let files: Vec<FileChange> = workspace

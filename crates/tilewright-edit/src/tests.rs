@@ -1316,8 +1316,8 @@ fn one_operation_touches_a_bounded_number_of_chunks() {
 fn the_inverse_log_is_bounded_while_carrying_out() {
     let tree = copy();
     let root = tree.path();
-    // A large object, moved back and forth: each move keeps a copy of it
-    // for the inverse.
+    // A large object, moved from tile to tile: each move keeps a copy of it
+    // for the inverse, since the file never returns to what it was.
     let line = format!("\"{}\"", "x".repeat(512 << 10));
     let custom = [line.as_str(); 8].join(",\n");
     let chunk = format!(
@@ -1325,10 +1325,13 @@ fn the_inverse_log_is_bounded_while_carrying_out() {
     );
     fs::create_dir_all(root.join("planes/overworld/layers/6")).unwrap();
     fs::write(root.join("planes/overworld/layers/6/0_0.jsonc"), chunk).unwrap();
-    let there = r#"{"op": "object.move", "plane": "overworld", "layer": 6, "at": [0, 0], "index": 0, "expect": {"proto": "tree"}, "to": {"at": [1, 0]}}"#;
-    let back = r#"{"op": "object.move", "plane": "overworld", "layer": 6, "at": [1, 0], "index": 0, "expect": {"proto": "tree"}, "to": {"at": [0, 0]}}"#;
-    let moves: Vec<&str> = (0..20)
-        .map(|step| if step % 2 == 0 { there } else { back })
+    let moves: Vec<String> = (0..20)
+        .map(|step| {
+            format!(
+                "{{\"op\": \"object.move\", \"plane\": \"overworld\", \"layer\": 6, \"at\": [{step}, 0], \"index\": 0, \"expect\": {{\"proto\": \"tree\"}}, \"to\": {{\"at\": [{}, 0]}}}}",
+                step + 1
+            )
+        })
         .collect();
     let found = problems(root, &transaction(&moves.join(",\n    ")));
     assert!(
@@ -2504,4 +2507,100 @@ fn edits_that_cancel_out_do_not_fill_the_inverse() {
     let operations = vec![pair; pairs].join(",\n    ");
     let plan = planned(tree.path(), &transaction(&operations));
     assert!(plan.files().iter().all(|file| !file.is_changed()));
+}
+
+#[test]
+fn moves_that_cancel_out_keep_no_inverse_steps() {
+    let tree = copy();
+    let root = tree.path();
+    // A large object moved back and forth: each return leaves the file as
+    // it began, so nothing is kept for the inverse past it.
+    let line = format!("\"{}\"", "x".repeat(512 << 10));
+    let custom = [line.as_str(); 8].join(",\n");
+    let chunk = format!(
+        "{{\"format\": \"tilewright.chunk/1\", \"plane\": \"overworld\", \"layer\": 6, \"chunk\": [0, 0],\n \"objects\": [{{\"at\": [0, 0], \"proto\": \"tree\", \"custom\": {{\"example.org/big\": [\n{custom}\n]}}}}]}}\n"
+    );
+    fs::create_dir_all(root.join("planes/overworld/layers/6")).unwrap();
+    fs::write(root.join("planes/overworld/layers/6/0_0.jsonc"), chunk).unwrap();
+    let there = r#"{"op": "object.move", "plane": "overworld", "layer": 6, "at": [0, 0], "index": 0, "expect": {"proto": "tree"}, "to": {"at": [1, 0]}}"#;
+    let back = r#"{"op": "object.move", "plane": "overworld", "layer": 6, "at": [1, 0], "index": 0, "expect": {"proto": "tree"}, "to": {"at": [0, 0]}}"#;
+    let moves: Vec<&str> = (0..41)
+        .map(|step| if step % 2 == 0 { there } else { back })
+        .collect();
+    let plan = planned(root, &transaction(&moves.join(",\n    ")));
+    // The inverse holds one move back, not forty-one.
+    assert!(plan.inverse().len() < 8 << 20, "{}", plan.inverse().len());
+}
+
+#[test]
+fn a_transaction_with_more_problems_than_reported_says_so() {
+    let operations = vec![r#"{"op": "frob"}"#; limits::DIAGNOSTICS + 100].join(", ");
+    let found = Transaction::parse("t.jsonc", wrap(&operations)).unwrap_err();
+    assert_eq!(found.len(), limits::DIAGNOSTICS);
+    assert!(
+        has(&found, "tx.limit", "the rest are not reported"),
+        "{:#?}",
+        &found[..3]
+    );
+}
+
+#[test]
+fn a_terrain_operation_past_the_chunk_limit_stops_carrying_out() {
+    let tree = copy();
+    let cells: Vec<String> = (0..=limits::FILES)
+        .map(|index| {
+            format!(
+                "{{\"at\": [{}, {}], \"value\": 1}}",
+                (index % 101) * 32,
+                (index / 101) * 32
+            )
+        })
+        .collect();
+    let operations = format!(
+        "{{\"op\": \"terrain.set\", \"plane\": \"overworld\", \"layer\": 0, \"grid\": \"height\", \"cells\": [{}]}},\n    {}",
+        cells.join(", "),
+        r#"{"op": "test", "path": "defs/proto/coin.jsonc", "pointer": ["id"], "value": "x"}"#
+    );
+    let found = problems(tree.path(), &transaction(&operations));
+    assert_eq!(found.len(), 1, "{:#?}", &found[..found.len().min(3)]);
+    assert!(has(&found, "tx.limit", "chunks"), "{found:#?}");
+}
+
+#[test]
+fn a_file_replaced_by_a_directory_while_publishing_is_a_conflict() {
+    let tree = copy();
+    let root = tree.path().to_path_buf();
+    let plan = planned(
+        &root,
+        &transaction(
+            r#"{"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["title"], "value": "Changed"},
+    {"op": "test", "path": "defs/proto/coin.jsonc", "pointer": ["id"], "value": "coin"}"#,
+        ),
+    );
+    let consulted = root.join("defs/proto/coin.jsonc");
+    let failure = publish_with(&plan, move || {
+        fs::remove_file(&consulted).unwrap();
+        fs::create_dir(&consulted).unwrap();
+    });
+    assert!(
+        has(&failure.problems, "tx.conflict", "the file changed"),
+        "{failure:#?}"
+    );
+}
+
+#[test]
+fn a_plan_with_more_problems_than_reported_says_so() {
+    let tree = copy();
+    let operations = vec![
+        r#"{"op": "test", "path": "defs/proto/coin.jsonc", "pointer": ["id"], "value": "x"}"#;
+        limits::DIAGNOSTICS + 100
+    ]
+    .join(",\n    ");
+    let found = problems(tree.path(), &transaction(&operations));
+    assert_eq!(found.len(), limits::DIAGNOSTICS);
+    assert!(
+        has(&found, "tx.limit", "there may be more"),
+        "{:#?}",
+        &found[..3]
+    );
 }

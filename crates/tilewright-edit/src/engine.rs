@@ -190,6 +190,24 @@ impl Entry {
     }
 }
 
+impl Entry {
+    /// Drops the inverse steps the inverse will not hold: all of them for a
+    /// file back as it began, and all but one creation of its text for a
+    /// file deleted. Should the file be created again, undoing that and
+    /// then creating the text restores it as well.
+    fn compact(&mut self) {
+        if !self.is_changed() {
+            self.inverse.clear();
+            self.recorded = (0, 0);
+        } else if let (Some(base), Current::Absent) = (&self.base, &self.current)
+            && self.inverse.len() != 1
+        {
+            self.inverse = vec![Primitive::Create { text: base.clone() }];
+            self.recorded = size_of(&self.inverse);
+        }
+    }
+}
+
 /// The bytes and operations of `inverse`.
 fn size_of(inverse: &[Primitive]) -> (u64, usize) {
     let bytes = inverse
@@ -264,7 +282,13 @@ impl<'r> Workspace<'r> {
     /// did is kept.
     pub fn begin(&mut self, size: usize) -> Outcome<()> {
         self.charged.clear();
-        self.journal.clear();
+        // The files the last operation changed keep only the inverse steps
+        // the inverse will hold, so that what is kept is what is counted.
+        for path in std::mem::take(&mut self.journal).into_keys() {
+            if let Some(entry) = self.entries.get_mut(&path) {
+                entry.compact();
+            }
+        }
         self.journal_inverse_bytes = self.inverse_bytes;
         self.journal_inverse_operations = self.inverse_operations;
         self.charge(size)
@@ -454,7 +478,7 @@ impl<'r> Workspace<'r> {
 
     /// A failure, after which nothing more is carried out if it is past a
     /// limit: the transaction is rejected whatever follows.
-    fn failed(&mut self, failure: Failure) -> Failure {
+    pub(crate) fn failed(&mut self, failure: Failure) -> Failure {
         if failure.code == Code::Limit {
             self.spent = true;
         }

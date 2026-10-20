@@ -330,6 +330,9 @@ struct Shape<'a> {
     document: &'a Document,
     lines: diagnostic::Lines<'a>,
     problems: Vec<Diagnostic>,
+    /// Whether a problem was dropped at the limit, whose last place is
+    /// kept for a note that there were more.
+    dropped: bool,
     cells: usize,
 }
 
@@ -342,6 +345,7 @@ impl<'a> Shape<'a> {
             document,
             lines: diagnostic::Lines::new(document.source()),
             problems: Vec::new(),
+            dropped: false,
             cells: 0,
         }
     }
@@ -349,11 +353,23 @@ impl<'a> Shape<'a> {
     fn finish(mut self) -> Vec<Diagnostic> {
         self.problems.sort();
         self.problems.dedup();
+        if self.dropped {
+            self.problems.push(diagnostic::file(
+                self.name,
+                Code::Limit.as_str(),
+                format!(
+                    "more than {} problems; the rest are not reported",
+                    limits::DIAGNOSTICS - 1
+                ),
+            ));
+        }
         self.problems
     }
 
     fn report(&mut self, span: Span, code: Code, message: impl Into<String>) {
-        if self.problems.len() < limits::DIAGNOSTICS {
+        if self.problems.len() >= limits::DIAGNOSTICS - 1 {
+            self.dropped = true;
+        } else {
             self.problems.push(diagnostic::at(
                 self.name,
                 &self.lines,

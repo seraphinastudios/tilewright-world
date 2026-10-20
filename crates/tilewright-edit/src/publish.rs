@@ -554,8 +554,11 @@ fn check_again(root: &SourceRoot, files: &[FileChange]) -> Result<(), Vec<Diagno
         };
         let current = match root.read(&file.path, limit) {
             Ok(current) => current,
-            // A file grown past what can be read changed too.
-            Err(AccessError::TooLarge(_)) => return Err(changed()),
+            // A file grown past what can be read, or replaced by a link,
+            // a directory or a special file, changed too.
+            Err(AccessError::TooLarge(_) | AccessError::Link(_) | AccessError::Unexpected(_)) => {
+                return Err(changed());
+            }
             Err(error) => return Err(io(&file.path, &error)),
         };
         let found = current.map(|bytes| {
