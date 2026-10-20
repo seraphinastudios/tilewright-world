@@ -593,12 +593,15 @@ impl Reader {
     /// The object with `uid`, its chunk read within a budget of
     /// `max_objects` objects.
     pub fn object(&self, uid: &str, max_objects: u64) -> Found {
-        optional(self.pack.object_within(uid, max_objects), |(found, record)| {
-            object(&[
-                ("location", location(found)),
-                ("object", object_record(record)),
-            ])
-        })
+        optional(
+            self.pack.object_within(uid, max_objects),
+            |(found, record)| {
+                object(&[
+                    ("location", location(found)),
+                    ("object", object_record(record)),
+                ])
+            },
+        )
     }
 
     /// Verifies the whole pack; see `Pack::verify_with`. Limits not given
