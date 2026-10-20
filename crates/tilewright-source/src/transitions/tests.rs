@@ -814,3 +814,87 @@ fn the_profile_names_a_safe_transitions_path() {
     let world = load(directory.path()).unwrap();
     assert!(world.profile().transitions.is_none());
 }
+
+#[test]
+fn every_terrain_is_checked_at_once() {
+    // A terrain whose ID is invalid still has its prototypes and
+    // transitions checked.
+    let problems = problems_with(&document("").replace(
+        r#"{"id": "sand", "protos": ["sand"]}"#,
+        r#"{"id": "Sand", "protos": [], "transitions": [{"draw": "aside"}]}"#,
+    ));
+    for code in ["shape.identifier", "shape.range", "shape.missing_key"] {
+        assert!(
+            problems
+                .iter()
+                .any(|(found, path)| *found == code && path == TRANSITIONS),
+            "{code}: {problems:?}"
+        );
+    }
+    // A repeated prototype names the terrain that has it, even one whose
+    // ID is invalid.
+    let diagnostics = |document: &str| -> Vec<String> {
+        let directory = tempfile::tempdir().unwrap();
+        copy_tree(&fixture(), directory.path());
+        fs::write(directory.path().join(TRANSITIONS), document).unwrap();
+        load(directory.path())
+            .unwrap_err()
+            .into_iter()
+            .map(|diagnostic| diagnostic.message)
+            .collect()
+    };
+    let messages = diagnostics(&document("").replace("[\"sand\"]", "[\"water\"]"));
+    assert!(
+        messages
+            .iter()
+            .any(|message| message == "prototype \"water\" already paints terrain \"water\""),
+        "{messages:?}"
+    );
+    let messages = diagnostics(
+        &document("")
+            .replace("\"id\": \"water\"", "\"id\": \"Water\"")
+            .replace("[\"sand\"]", "[\"water\"]"),
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message == "prototype \"water\" already paints terrain number 1"),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn transitions_count_as_declared() {
+    // Malformed transitions count toward the document's cap too, so the
+    // cap bounds the work however many fail: 17 terrains of 16 each are
+    // more than 256, and the cap is reported once.
+    let terrains: Vec<String> = (0..17)
+        .map(|index| {
+            format!(
+                "{{\"id\": \"t{index}\", \"protos\": [\"grass_edge_{}\"], \"transitions\": [{}]}}",
+                index % 15 + 1,
+                vec!["{}"; 16].join(", ")
+            )
+        })
+        .collect();
+    let document = format!(
+        "{{\"format\": \"tilewright.transitions/1\", \"layer\": \"floor\", \"terrains\": [{}]}}",
+        terrains.join(", ")
+    );
+    let directory = tempfile::tempdir().unwrap();
+    copy_tree(&fixture(), directory.path());
+    fs::write(directory.path().join(TRANSITIONS), document).unwrap();
+    let diagnostics = load(directory.path()).unwrap_err();
+    let capped = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.message.contains("at most 256 transitions"))
+        .count();
+    assert_eq!(capped, 1, "{diagnostics:?}");
+    // The rules past the cap are not read: only the first 256 report
+    // their missing keys.
+    let missing = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.message == "missing key \"draw\"")
+        .count();
+    assert_eq!(missing, 256);
+}

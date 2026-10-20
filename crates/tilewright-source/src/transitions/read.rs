@@ -404,10 +404,19 @@ pub(crate) fn read_transitions(
     let mut terrains = Vec::with_capacity(items.len());
     let mut transitions = Vec::new();
     let mut by_proto: BTreeMap<String, usize> = BTreeMap::new();
-    for (index, (item, id)) in items.iter().zip(ids).enumerate() {
-        let Some(id) = id else {
+    // Transitions are counted as they are declared, whether or not they
+    // parse, so the document's cap bounds the work of reading them.
+    let mut declared = 0_usize;
+    let mut capped = false;
+    for (index, item) in items.iter().enumerate() {
+        // An entry that is not an object has been reported and has no
+        // members. One whose ID is invalid or repeated is still checked, so
+        // every problem is reported at once.
+        if item.as_object().is_none() {
+            ok = false;
             continue;
-        };
+        }
+        let id = ids.get(index).cloned().flatten();
         let protos = reader.required(item, "protos").and_then(|value| {
             let count = reader.array(value)?.len();
             if !count_within(&reader, value, count, (1, MAXIMUM_TERRAIN_PROTOS), "protos") {
@@ -419,14 +428,14 @@ pub(crate) fn read_transitions(
                 if proto(&reader, references, item).is_none() {
                     ok = false;
                 } else if let Some(&other) = by_proto.get(name) {
-                    let other = by_id
-                        .iter()
-                        .find_map(|(id, position)| (*position == other).then_some(id.as_str()))
-                        .unwrap_or_default();
+                    let owner = ids
+                        .get(other)
+                        .and_then(Option::as_deref)
+                        .map_or_else(|| format!("number {}", other + 1), |id| format!("\"{id}\""));
                     reader.report(
                         item.span(),
                         Code::Duplicate,
-                        format!("prototype \"{name}\" already paints terrain \"{other}\""),
+                        format!("prototype \"{name}\" already paints terrain {owner}"),
                     );
                     ok = false;
                 } else {
@@ -449,32 +458,39 @@ pub(crate) fn read_transitions(
                 {
                     ok = false;
                 }
-                Some(list) if start + list.len() > MAXIMUM_TRANSITIONS => {
-                    reader.report(
-                        value.span(),
-                        Code::Range,
-                        format!("a document has at most {MAXIMUM_TRANSITIONS} transitions"),
-                    );
-                    ok = false;
-                }
                 Some(list) => {
-                    for entry in list {
-                        match read_transition(&reader, profile, references, &lookup, index, entry) {
-                            Some(transition) => transitions.push(transition),
-                            None => ok = false,
+                    declared = declared.saturating_add(list.len());
+                    if declared > MAXIMUM_TRANSITIONS {
+                        if !capped {
+                            reader.report(
+                                value.span(),
+                                Code::Range,
+                                format!("a document has at most {MAXIMUM_TRANSITIONS} transitions"),
+                            );
+                            capped = true;
+                        }
+                        ok = false;
+                    } else {
+                        for entry in list {
+                            match read_transition(
+                                &reader, profile, references, &lookup, index, entry,
+                            ) {
+                                Some(transition) => transitions.push(transition),
+                                None => ok = false,
+                            }
                         }
                     }
                 }
                 None => ok = false,
             }
         }
-        match protos {
-            Some(protos) => terrains.push(Terrain {
+        match (id, protos) {
+            (Some(id), Some(protos)) => terrains.push(Terrain {
                 id,
                 protos,
                 transitions: start..transitions.len(),
             }),
-            None => ok = false,
+            _ => ok = false,
         }
     }
     let terrain_layer = terrain_layer?;

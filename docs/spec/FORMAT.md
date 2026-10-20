@@ -57,12 +57,13 @@ an error, and so is a symbolic link anywhere in a path that is read. Other files
 ignored. Assets such as images and sounds stay ordinary files referenced by
 path or by an ID the profile defines.
 
-Paths written inside documents (the profile path, schema paths) are relative,
-`/`-separated, made of ASCII letters, digits, `_`, `.` and `-`, with no
-component starting with `.` or `-`, and end in `.jsonc`. A path is at most
-1,024 bytes and 32 components, each at most 128 bytes. Schema paths are
-relative to the profile's directory and cannot leave it. Several roles may
-name the same schema; it is read once.
+Paths written inside documents (the profile path, schema paths, the
+transitions path) are relative, `/`-separated, made of ASCII letters,
+digits, `_`, `.` and `-`, with no component starting with `.` or `-`, and
+end in `.jsonc`. A path is at most 1,024 bytes and 32 components, each at
+most 128 bytes. Schema and transitions paths are relative to the profile's
+directory and cannot leave it. Several roles may name the same schema; it
+is read once.
 
 ## 3. Syntax: strict JSONC
 
