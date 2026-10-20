@@ -88,10 +88,11 @@ export interface OpenOptions {
 
 export interface ReadLimits {
   /**
-   * The most entries, objects with inventories included and their fields,
-   * a read builds values for from a chunk; a chunk with more fails with
-   * `pack.decode_budget` before any is built. 65,536 by default: a record
-   * of at most 16 MiB can hold about a million of either.
+   * The most entries a read builds values for: a chunk's objects, with
+   * inventories included, and their fields, or a stairwell's steps. A read
+   * of more fails with `pack.decode_budget` before any is built. 65,536 by
+   * default: a record of at most 16 MiB can hold about a million objects or
+   * fields, and a stairwell document about a quarter of a million steps.
    */
   maxEntries?: IntegerArgument;
 }
@@ -295,9 +296,10 @@ export class Pack {
   anchor(plane: string, id: string): Anchor | undefined;
   /** The anchors of a plane, in ID order. */
   anchors(plane: string): IterableIterator<Anchor>;
-  stairwell(plane: string, id: string): Stairwell | undefined;
-  /** The stairwells of a plane, in ID order. */
-  stairwells(plane: string): IterableIterator<Stairwell>;
+  /** A stairwell; one with more steps than `limits.maxEntries` is an error. */
+  stairwell(plane: string, id: string, limits?: ReadLimits): Stairwell | undefined;
+  /** The stairwells of a plane, in ID order, each within `limits`. */
+  stairwells(plane: string, limits?: ReadLimits): IterableIterator<Stairwell>;
   stairwellStep(
     plane: string,
     layer: number,

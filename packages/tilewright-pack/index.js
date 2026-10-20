@@ -180,10 +180,11 @@ function isBuffer(value) {
   });
 }
 
-// A chunk read builds values for each object and field of the chunk, so it
-// fails with pack.decode_budget past this many entries, objects with
-// inventories included and fields, unless the caller sets another budget.
-// A record of at most 16 MiB can hold about a million of either.
+// A chunk read builds values for each object and field of the chunk, and a
+// stairwell read for each step, so a read fails with pack.decode_budget
+// past this many entries unless the caller sets another budget. A record
+// of at most 16 MiB can hold about a million objects or fields, and a
+// stairwell document about a quarter of a million steps.
 const DEFAULT_MAX_ENTRIES = 65536n;
 
 function entryBudget(limits) {
@@ -406,16 +407,18 @@ export class Pack {
     );
   }
 
-  stairwell(plane, id) {
+  stairwell(plane, id, limits) {
     text(plane, "plane");
     text(id, "id");
-    return this.#call((reader) => reader.stairwell(plane, id));
+    const maxEntries = entryBudget(limits);
+    return this.#call((reader) => reader.stairwell(plane, id, maxEntries));
   }
 
-  stairwells(plane) {
+  stairwells(plane, limits) {
     text(plane, "plane");
+    const maxEntries = entryBudget(limits);
     return this.#rows(
-      (reader, after) => reader.stairwells(plane, after, PAGE, PAGE_BYTES),
+      (reader, after) => reader.stairwells(plane, after, PAGE, PAGE_BYTES, maxEntries),
       (stairwell) => stairwell.id,
     );
   }

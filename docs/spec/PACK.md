@@ -188,9 +188,9 @@ decoded-byte budget, which the caller sets and which is 8 GiB by default: the
 sum of the decoded sizes the chunks' zstd frames record. It fails as soon as
 the next chunk would pass the budget, before decompressing that chunk. The
 `tilewright inspect` command sets the budget with `--max-decoded-bytes`.
-A reader that builds a value for each object and field of a chunk, as the
-browser reader does, may also give single chunk reads a budget of objects
-and fields, counted before any is built.
+A reader that builds a value for each object and field of a chunk, or step
+of a stairwell, as the browser reader does, may also give single reads a
+budget of them, counted before any is built.
 Verification checks each chunk's objects as they decode instead of building
 the chunk's object model, and keeps its target lookups in caches of bounded
 size, so its memory stays bounded by one record.
@@ -291,7 +291,7 @@ fails with, and every reader in this repository runs them.
 | `pack.object_uid` | An `object_uids` row is invalid, or the table does not index exactly the uids of the chunk records. |
 | `pack.integrity` | SQLite's integrity check failed. |
 | `pack.digest` | The file's SHA-256 does not match its name, or a pack opened from bytes does not have the digest its caller expects. |
-| `pack.decode_budget` | The chunks decode to more than the verification budget, or a chunk read past the reader's budget of objects and fields. |
+| `pack.decode_budget` | The chunks decode to more than the verification budget, or a single read past the reader's budget of objects, fields or steps. |
 
 Text that is not UTF-8 in a value a reader loads gets the code of that
 value's rule, not `pack.sqlite`. A pack that breaks several rules may be

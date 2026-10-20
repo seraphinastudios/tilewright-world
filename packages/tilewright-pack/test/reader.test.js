@@ -296,6 +296,23 @@ test("chunk reads keep to their budget of objects and fields", async () => {
   }
 });
 
+test("stairwell reads keep to their budget of steps", async () => {
+  await initialize(module);
+  const pack = openPack(valid);
+  const stairwells = [...pack.stairwells("overworld")];
+  const most = Math.max(...stairwells.map((stairwell) => stairwell.steps.length));
+  const longest = stairwells.find((stairwell) => stairwell.steps.length === most);
+  assert.ok(most >= 2);
+  assert.equal(pack.stairwell("overworld", longest.id, { maxEntries: most }).steps.length, most);
+  rejects(() => pack.stairwell("overworld", longest.id, { maxEntries: most - 1 }), "pack.decode_budget");
+  assert.equal([...pack.stairwells("overworld", { maxEntries: most })].length, stairwells.length);
+  rejects(() => [...pack.stairwells("overworld", { maxEntries: 1 })], "pack.decode_budget");
+  for (const limits of [1, null, { maxEntries: -1 }]) {
+    assert.throws(() => pack.stairwell("overworld", longest.id, limits), TypeError);
+    assert.throws(() => pack.stairwells("overworld", limits), TypeError);
+  }
+});
+
 test("a pack collected without being closed is freed", async () => {
   await initialize(module);
   const freed = await counting("free", async (calls) => {

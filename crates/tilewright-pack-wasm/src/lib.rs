@@ -13,7 +13,7 @@
 
 use js_sys::{Array, Int32Array, Object, Reflect, Uint8Array, Uint16Array, Uint32Array};
 use tilewright_pack::{
-    Anchor, ChunkData, Definition, Error, FieldRecord, ObjectRecord, Pack, Page, Plane,
+    Anchor, ChunkData, Definition, Error, ErrorCode, FieldRecord, ObjectRecord, Pack, Page, Plane,
     PortalRecord, Summary, UidLocation, VerifyLimits, Zone,
 };
 use tilewright_source::Stairwell;
@@ -179,6 +179,22 @@ fn stairwell(plane: &str, stairwell: &Stairwell) -> JsValue {
         ("custom", optional_text(stairwell.custom.as_deref())),
         ("document", text(&stairwell.canonical)),
     ])
+}
+
+/// `stairwell`, unless it has more than `max_entries` steps: a stored
+/// document can list about a quarter of a million, and a read builds a
+/// value for each.
+fn steps_within(stairwell: Stairwell, max_entries: u64) -> Result<Stairwell, Error> {
+    if u64::try_from(stairwell.steps.len()).unwrap_or(u64::MAX) > max_entries {
+        return Err(Error::Rejected(
+            ErrorCode::DecodeBudget,
+            format!(
+                "stairwell {} has more than {max_entries} steps, the read's budget",
+                stairwell.id
+            ),
+        ));
+    }
+    Ok(stairwell)
 }
 
 fn location(location: &UidLocation) -> JsValue {
@@ -483,21 +499,37 @@ impl Reader {
         )
     }
 
-    pub fn stairwell(&self, plane: &str, id: &str) -> Found {
-        optional(self.pack.stairwell(plane, id), |found| {
-            stairwell(plane, found)
-        })
+    /// A stairwell, whose steps must be at most `max_entries`.
+    pub fn stairwell(&self, plane: &str, id: &str, max_entries: u64) -> Found {
+        let found = self.pack.stairwell(plane, id).and_then(|found| {
+            found
+                .map(|found| steps_within(found, max_entries))
+                .transpose()
+        });
+        optional(found, |found| stairwell(plane, found))
     }
 
+    /// A page of a plane's stairwells, each of whose steps must be at most
+    /// `max_entries`.
     #[expect(
         clippy::needless_pass_by_value,
         reason = "wasm-bindgen passes optional strings by value"
     )]
-    pub fn stairwells(&self, plane: &str, after: Option<String>, limit: u32, bytes: u32) -> Found {
+    pub fn stairwells(
+        &self,
+        plane: &str,
+        after: Option<String>,
+        limit: u32,
+        bytes: u32,
+        max_entries: u64,
+    ) -> Found {
         listed(
             |visit| {
-                self.pack
-                    .visit_stairwells(plane, page(after.as_deref(), limit, bytes), visit)
+                self.pack.visit_stairwells(
+                    plane,
+                    page(after.as_deref(), limit, bytes),
+                    &mut |found| visit(steps_within(found, max_entries)?),
+                )
             },
             |found| stairwell(plane, found),
         )

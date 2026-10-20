@@ -101,7 +101,7 @@ uid's row names) is what `verify()` checks.
 | `chunk(plane, layer, cx, cy, limits?)` | A decoded chunk: palette, ground, height and zone grids as typed arrays, and objects |
 | `zone(plane, id)`, `zones(plane)` | Zones |
 | `anchor(plane, id)`, `anchors(plane)` | Anchors |
-| `stairwell(plane, id)`, `stairwells(plane)`, `stairwellStep(plane, layer, x, y)` | Stairwells and the step on a tile |
+| `stairwell(plane, id, limits?)`, `stairwells(plane, limits?)`, `stairwellStep(plane, layer, x, y)` | Stairwells and the step on a tile |
 | `definition(type, id)`, `definitions(type?)` | Definitions, with their documents as canonical JSON |
 | `objectLocation(uid)`, `object(uid, limits?)` | Where the object with a uid is, and the object itself |
 | `verify(limits?)` | Checks the whole pack and returns its row counts; `limits` has `maxPackBytes` and `maxDecodedBytes`, the decoded-byte budget, 8 GiB by default |
@@ -113,7 +113,9 @@ objects or fields, and a chunk read builds JavaScript values for each. So
 `pack.decode_budget` when the chunk holds more than `limits.maxEntries`
 entries, objects with inventories included and their fields: 65,536 by
 default. The count is taken in a first pass that holds one object at a
-time, before anything is built.
+time, before anything is built. Stairwell reads keep to the same budget for
+their steps, of which a stored document can list about a quarter of a
+million.
 
 `index.d.ts` describes every value. Numeric arguments are integers, and
 checked: a layer is a 32-bit integer, a position a safe integer or a bigint.
