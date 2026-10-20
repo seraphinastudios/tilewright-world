@@ -36,6 +36,9 @@ let loading;
  * `WebAssembly.Module`, a URL or a `Response`.
  */
 export function initialize(source) {
+  if (stopped !== undefined) {
+    return Promise.reject(stoppedError());
+  }
   if (state === "ready") {
     return Promise.resolve();
   }
@@ -46,8 +49,7 @@ export function initialize(source) {
         state = "ready";
       },
       (error) => {
-        state = "unloaded";
-        loading = undefined;
+        failed(error);
         throw error;
       },
     );
@@ -61,12 +63,47 @@ export function initialize(source) {
  * while `initialize()` is loading it.
  */
 export function initializeSync(source) {
+  usable();
   if (state === "loading") {
     throw new Error("initialize() is loading the module; await it instead");
   }
   if (state === "unloaded") {
-    initSync({ module: source });
+    try {
+      initSync({ module: source });
+    } catch (error) {
+      failed(error);
+      throw error;
+    }
     state = "ready";
+  }
+}
+
+/**
+ * After loading failed: whether wasm-bindgen had installed the instance
+ * before the failure, as it has when the instance's start traps. Its
+ * initSync returns at once when an instance is installed, and otherwise
+ * fails before doing anything on an undefined module.
+ */
+function installed() {
+  try {
+    initSync(undefined);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Loading failed. Before an instance was installed, as when a download or
+ * compilation fails, loading can be tried again; after, the instance is
+ * not whole, and the module stops.
+ */
+function failed(error) {
+  if (installed()) {
+    stop(error);
+  } else {
+    state = "unloaded";
+    loading = undefined;
   }
 }
 
@@ -143,15 +180,15 @@ function isBuffer(value) {
   });
 }
 
-// A chunk read builds an object for each object of the chunk, so it fails
-// with pack.decode_budget past this many, inventories included, unless the
-// caller sets another budget. A record of at most 16 MiB can hold about a
-// million.
-const DEFAULT_MAX_OBJECTS = 65536n;
+// A chunk read builds values for each object and field of the chunk, so it
+// fails with pack.decode_budget past this many entries, objects with
+// inventories included and fields, unless the caller sets another budget.
+// A record of at most 16 MiB can hold about a million of either.
+const DEFAULT_MAX_ENTRIES = 65536n;
 
-function objectBudget(limits) {
-  const { maxObjects } = options(limits, "limits");
-  return maxObjects === undefined ? DEFAULT_MAX_OBJECTS : big(maxObjects, "limits.maxObjects", U64);
+function entryBudget(limits) {
+  const { maxEntries } = options(limits, "limits");
+  return maxEntries === undefined ? DEFAULT_MAX_ENTRIES : big(maxEntries, "limits.maxEntries", U64);
 }
 
 function bytesOf(bytes) {
@@ -190,11 +227,15 @@ function stop(error) {
   stopped = error;
 }
 
+function stoppedError() {
+  return new Error("the pack reader stopped after a WebAssembly error; load the page or process again", {
+    cause: stopped,
+  });
+}
+
 function usable() {
   if (stopped !== undefined) {
-    throw new Error("the pack reader stopped after a WebAssembly error; load the page or process again", {
-      cause: stopped,
-    });
+    throw stoppedError();
   }
 }
 
@@ -218,10 +259,10 @@ function rethrown(error) {
  * `options.maxPackBytes` is the pack size limit, 8 GiB by default.
  */
 export function openPack(bytes, settings) {
+  usable();
   if (state !== "ready") {
     throw new Error("call initialize() or initializeSync() before openPack()");
   }
-  usable();
   const image = bytesOf(bytes);
   const { digest, maxPackBytes } = options(settings, "options");
   if (digest !== undefined) {
@@ -423,8 +464,8 @@ export class Pack {
     text(plane, "plane");
     int(layer, "layer", I32);
     const [bigX, bigY] = [big(cx, "cx", I64), big(cy, "cy", I64)];
-    const maxObjects = objectBudget(limits);
-    return this.#call((reader) => reader.chunk(plane, layer, bigX, bigY, maxObjects));
+    const maxEntries = entryBudget(limits);
+    return this.#call((reader) => reader.chunk(plane, layer, bigX, bigY, maxEntries));
   }
 
   objectLocation(uid) {
@@ -434,8 +475,8 @@ export class Pack {
 
   object(uid, limits) {
     text(uid, "uid");
-    const maxObjects = objectBudget(limits);
-    return this.#call((reader) => reader.object(uid, maxObjects));
+    const maxEntries = entryBudget(limits);
+    return this.#call((reader) => reader.object(uid, maxEntries));
   }
 
   verify(limits) {

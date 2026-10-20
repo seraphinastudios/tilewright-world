@@ -276,19 +276,21 @@ test("listings read a page at a time from the last key", async () => {
   assert.throws(() => planes.next(), /closed/);
 });
 
-test("chunk reads keep to their object budget", async () => {
+test("chunk reads keep to their budget of objects and fields", async () => {
   await initialize(module);
   const pack = openPack(valid);
-  const all = (objects) => objects.reduce((total, object) => total + 1 + all(object.inventory), 0);
-  const objects = all(pack.chunk("overworld", 0, 0, 0).objects);
-  assert.ok(objects > 1);
-  assert.equal(all(pack.chunk("overworld", 0, 0, 0, { maxObjects: objects }).objects), objects);
-  rejects(() => pack.chunk("overworld", 0, 0, 0, { maxObjects: objects - 1 }), "pack.decode_budget");
-  assert.ok(pack.chunk("overworld", 1, 0, 0, { maxObjects: 0n }));
+  const entries = (objects) =>
+    objects.reduce((total, object) => total + 1 + object.fields.length + entries(object.inventory), 0);
+  const count = entries(pack.chunk("overworld", 0, 0, 0).objects);
+  assert.ok(count > 1);
+  assert.equal(entries(pack.chunk("overworld", 0, 0, 0, { maxEntries: count }).objects), count);
+  // Fields count as well as objects.
+  rejects(() => pack.chunk("overworld", 0, 0, 0, { maxEntries: count - 1 }), "pack.decode_budget");
+  assert.ok(pack.chunk("overworld", 1, 0, 0, { maxEntries: 0n }));
   const uid = "o.k3vq7zr2mxa5d6wfh4pnyt2cgu";
-  assert.equal(pack.object(uid, { maxObjects: objects }).object.uid, uid);
-  rejects(() => pack.object(uid, { maxObjects: 0 }), "pack.decode_budget");
-  for (const limits of [1, null, { maxObjects: -1 }, { maxObjects: 1.5 }, { maxObjects: "1" }]) {
+  assert.equal(pack.object(uid, { maxEntries: count }).object.uid, uid);
+  rejects(() => pack.object(uid, { maxEntries: 0 }), "pack.decode_budget");
+  for (const limits of [1, null, { maxEntries: -1 }, { maxEntries: 1.5 }, { maxEntries: "1" }]) {
     assert.throws(() => pack.chunk("overworld", 0, 0, 0, limits), TypeError);
     assert.throws(() => pack.object(uid, limits), TypeError);
   }

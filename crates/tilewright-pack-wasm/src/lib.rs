@@ -576,11 +576,11 @@ impl Reader {
         )
     }
 
-    /// A chunk, read within a budget of `max_objects` objects; see
-    /// `Pack::chunk_within`.
-    pub fn chunk(&self, plane: &str, layer: i32, cx: i64, cy: i64, max_objects: u64) -> Found {
+    /// A chunk, read within a budget of `max_entries` objects and fields;
+    /// see `Pack::chunk_within`.
+    pub fn chunk(&self, plane: &str, layer: i32, cx: i64, cy: i64, max_entries: u64) -> Found {
         optional(
-            self.pack.chunk_within(plane, layer, cx, cy, max_objects),
+            self.pack.chunk_within(plane, layer, cx, cy, max_entries),
             chunk,
         )
     }
@@ -591,10 +591,10 @@ impl Reader {
     }
 
     /// The object with `uid`, its chunk read within a budget of
-    /// `max_objects` objects.
-    pub fn object(&self, uid: &str, max_objects: u64) -> Found {
+    /// `max_entries` objects and fields.
+    pub fn object(&self, uid: &str, max_entries: u64) -> Found {
         optional(
-            self.pack.object_within(uid, max_objects),
+            self.pack.object_within(uid, max_entries),
             |(found, record)| {
                 object(&[
                     ("location", location(found)),

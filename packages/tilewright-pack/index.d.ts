@@ -88,11 +88,12 @@ export interface OpenOptions {
 
 export interface ReadLimits {
   /**
-   * The most objects, inventories included, a read builds from a chunk; a
-   * chunk with more fails with `pack.decode_budget` before any is built.
-   * 65,536 by default: a record of at most 16 MiB can hold about a million.
+   * The most entries, objects with inventories included and their fields,
+   * a read builds values for from a chunk; a chunk with more fails with
+   * `pack.decode_budget` before any is built. 65,536 by default: a record
+   * of at most 16 MiB can hold about a million of either.
    */
-  maxObjects?: IntegerArgument;
+  maxEntries?: IntegerArgument;
 }
 
 export interface VerifyLimits {

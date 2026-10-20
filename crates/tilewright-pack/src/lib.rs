@@ -210,7 +210,7 @@ pub enum ErrorCode {
     /// opened from bytes is not the digest its caller expects.
     Digest,
     /// The chunks decode to more than the verification budget, or a chunk
-    /// read holds more objects than its budget.
+    /// read holds more objects and fields than its budget.
     DecodeBudget,
     /// The compiler cannot encode a world.
     Invalid,
