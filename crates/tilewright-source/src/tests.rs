@@ -2100,3 +2100,17 @@ fn object_uids_are_identifiers_of_at_most_128_bytes() {
         assert_eq!(found, [(code, VAULT_CHUNK.to_owned())], "{uid}");
     }
 }
+
+#[test]
+fn a_root_and_what_is_in_it_exist() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("file.jsonc"), "{}").unwrap();
+    let root = crate::SourceRoot::new(directory.path());
+    assert!(root.exists("").unwrap());
+    assert!(root.exists("file.jsonc").unwrap());
+    assert!(!root.exists("nope.jsonc").unwrap());
+    // A path through a file names nothing.
+    assert!(!root.exists("file.jsonc/inside").unwrap());
+    let missing = crate::SourceRoot::new(&directory.path().join("missing"));
+    assert!(!missing.exists("").unwrap());
+}

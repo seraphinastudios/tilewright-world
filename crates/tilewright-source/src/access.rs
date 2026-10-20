@@ -151,11 +151,18 @@ impl Access {
     }
 
     /// The access a new file in a directory with this access is given: the
-    /// directory's mode without the execute bits, its group and its labels.
+    /// directory's mode without the execute bits, its group and its labels,
+    /// and as its owner the user that makes it, this process's effective
+    /// user (0 where there are no users).
     #[must_use]
     pub fn new_file(&self) -> Self {
+        #[cfg(unix)]
+        let user = rustix::process::geteuid().as_raw();
+        #[cfg(not(unix))]
+        let user = 0;
         Self {
             mode: self.mode & 0o666,
+            user,
             ..*self
         }
     }
@@ -196,6 +203,10 @@ impl SourceRoot {
     /// on Windows drops trailing dots, can be an entry named otherwise.
     /// A path through a file names nothing; a link on the way is an error.
     pub fn exists(&self, path: &str) -> Result<bool, AccessError> {
+        // The empty path is the root.
+        if path.is_empty() {
+            return self.directory(path, false).map(|root| root.is_some());
+        }
         match self.root.kind(&checked(path)?) {
             Ok(crate::files::Found::Missing) | Err(Refused::Missing | Refused::Unexpected) => {
                 Ok(false)

@@ -833,6 +833,10 @@ mod tests {
         assert_ne!(labelled.control, unlabelled.control);
         assert_ne!(labelled.audience(false), unlabelled.audience(false));
         assert_eq!(labelled.new_file().control, labelled.control);
+        assert_eq!(
+            labelled.new_file().user,
+            rustix::process::geteuid().as_raw()
+        );
         // A new file the system labels otherwise is refused before anything
         // is written, and none is left.
         assert!(dir.write("new", Some(&labelled), b"secret").is_err());
