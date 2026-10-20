@@ -532,23 +532,6 @@ pub(crate) fn read_transitions(
     if !ok {
         return None;
     }
-    let mut drawn_on = vec![Vec::new(); terrains.len()];
-    for (position, transition) in transitions.iter().enumerate() {
-        match transition.draw {
-            Draw::Inside => {
-                if let Some(list) = drawn_on.get_mut(transition.terrain) {
-                    list.push(position);
-                }
-            }
-            Draw::Outside => {
-                for (terrain, list) in drawn_on.iter_mut().enumerate() {
-                    if transition.blends_with(terrain) {
-                        list.push(position);
-                    }
-                }
-            }
-        }
-    }
     Some(Transitions {
         path: path.to_owned(),
         terrain_layer,
@@ -556,6 +539,5 @@ pub(crate) fn read_transitions(
         terrains,
         list: transitions,
         by_proto,
-        drawn_on,
     })
 }

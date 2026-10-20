@@ -569,6 +569,9 @@ A later transition that draws into the same cell replaces the earlier
 one's tile, so a terrain's edges draw over those of the terrains before it.
 Transitions read only the painted terrain, never another transition's
 tiles, so a tile's result does not depend on the order tiles are visited.
+An outside transition draws only next to its own terrain, so the
+transitions of a tile's terrain and of its neighbours' terrains are the
+only ones that can draw on it: at most 144, however many the document has.
 
 Variants. A pattern's tile is picked by a hash of the tile's position,
 computed with 64-bit unsigned integers whose multiplications wrap:

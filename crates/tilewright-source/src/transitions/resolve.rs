@@ -133,9 +133,10 @@ impl Transitions {
     /// neighbours' terrain grids, so tiles along chunk edges agree across
     /// them. A chunk the source does not have resolves to empty tiles. The
     /// result depends only on the source's grids and the transitions, so it
-    /// is the same for every caller; it costs time in proportion to the
-    /// chunk's tiles and the transitions each runs, at most
-    /// [`MAXIMUM_TRANSITIONS`](super::MAXIMUM_TRANSITIONS).
+    /// is the same for every caller. A tile evaluates only the transitions
+    /// of its own terrain and of its neighbours' terrains, at most
+    /// [`MAXIMUM_TILE_TRANSITIONS`](super::MAXIMUM_TILE_TRANSITIONS), so the
+    /// cost is linear in the chunk's tiles however large the document.
     #[must_use]
     pub fn resolve_chunk<'a, S>(
         &'a self,
@@ -156,6 +157,7 @@ impl Transitions {
             })
             .collect();
         let window = self.window(source, layer, cx, cy);
+        let mut candidates = Vec::with_capacity(super::MAXIMUM_TILE_TRANSITIONS);
         let terrain_at = |x: usize, y: usize| window.get(y * WINDOW + x).copied().flatten();
         // Plane coordinates of the chunk's first tile; a source chunk keeps
         // them in range, and they are only hashed.
@@ -177,11 +179,9 @@ impl Transitions {
                     terrain_at(x - 1, y - 1),
                 ];
                 let index = (y - 1) * SIDE + (x - 1);
-                for transition in self
-                    .drawn_on
-                    .get(terrain)
-                    .into_iter()
-                    .flatten()
+                self.candidates(terrain, &neighbours, &mut candidates);
+                for transition in candidates
+                    .iter()
                     .filter_map(|position| self.list.get(*position))
                 {
                     let shows = neighbours.map(|neighbour| match transition.draw {
@@ -215,6 +215,47 @@ impl Transitions {
             }
         }
         ResolvedChunk { layers }
+    }
+
+    /// Sets `candidates` to the transitions that may draw on a tile of
+    /// `terrain` with `neighbours`, in the order they run: the inside
+    /// transitions of its terrain, and the outside transitions of its
+    /// neighbours' terrains that blend with it. An outside transition of any
+    /// other terrain has pattern 0 there and draws nothing.
+    fn candidates(
+        &self,
+        terrain: usize,
+        neighbours: &[Option<usize>; 8],
+        candidates: &mut Vec<usize>,
+    ) {
+        candidates.clear();
+        let own = |terrain: usize| {
+            self.terrains
+                .get(terrain)
+                .map_or(0..0, |terrain| terrain.transitions.clone())
+        };
+        candidates.extend(own(terrain).filter(|position| {
+            self.list
+                .get(*position)
+                .is_some_and(|transition| transition.draw == Draw::Inside)
+        }));
+        for (seen, neighbour) in neighbours.iter().enumerate() {
+            let Some(neighbour) = *neighbour else {
+                continue;
+            };
+            // Each neighbouring terrain once; none blends with itself.
+            if neighbour == terrain || neighbours[..seen].contains(&Some(neighbour)) {
+                continue;
+            }
+            candidates.extend(own(neighbour).filter(|position| {
+                self.list.get(*position).is_some_and(|transition| {
+                    transition.draw == Draw::Outside && transition.blends_with(terrain)
+                })
+            }));
+        }
+        // Transitions run in document order, and a terrain's transitions
+        // are a contiguous run of it.
+        candidates.sort_unstable();
     }
 
     /// The terrain of each tile of the chunk at `(layer, cx, cy)` and of the

@@ -30,9 +30,14 @@ pub const MAXIMUM_TERRAIN_PROTOS: usize = 1_024;
 /// Most transitions one terrain has.
 pub const MAXIMUM_TERRAIN_TRANSITIONS: usize = 16;
 
-/// Most transitions a transitions document has in all. A tile runs at most
-/// this many, however large the world.
+/// Most transitions a transitions document has in all.
 pub const MAXIMUM_TRANSITIONS: usize = 256;
+
+/// Most transitions resolving one tile evaluates, however large the
+/// document: the transitions of the tile's own terrain and of the terrains
+/// of its eight neighbours, since an outside transition draws only next to
+/// its terrain.
+pub const MAXIMUM_TILE_TRANSITIONS: usize = 9 * MAXIMUM_TERRAIN_TRANSITIONS;
 
 /// Most variants one pattern lists.
 pub const MAXIMUM_VARIANTS: usize = 256;
@@ -316,9 +321,6 @@ pub struct Transitions {
     list: Vec<Transition>,
     /// The terrain of each member prototype.
     by_proto: BTreeMap<String, usize>,
-    /// For each terrain, the transitions that may draw on its tiles, in the
-    /// order they run.
-    drawn_on: Vec<Vec<usize>>,
 }
 
 impl Transitions {

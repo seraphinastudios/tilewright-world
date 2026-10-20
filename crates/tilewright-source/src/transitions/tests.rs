@@ -1029,3 +1029,263 @@ fn every_member_of_a_list_is_checked() {
         );
     }
 }
+
+/// Resolves a chunk as section 13 reads, without the resolver's window or
+/// candidate pruning: every transition, in order, for every tile, with
+/// each neighbour looked up on its own.
+fn naive(
+    transitions: &Transitions,
+    source: &Grids,
+    layer: i32,
+    cx: i64,
+    cy: i64,
+) -> Vec<Vec<Option<String>>> {
+    let value = |ground: usize, x: i64, y: i64| -> Option<String> {
+        let grids = source.chunk_ground(layer, x.div_euclid(32), y.div_euclid(32))?;
+        let index = usize::try_from(y.rem_euclid(32) * 32 + x.rem_euclid(32)).unwrap();
+        grids.get(ground)?.value(index).map(str::to_owned)
+    };
+    let terrain_at = |x: i64, y: i64| {
+        value(transitions.terrain_layer(), x, y).and_then(|proto| transitions.terrain_of(&proto))
+    };
+    let mut layers = vec![vec![None; 1024]; transitions.ground_layers()];
+    for local_y in 0..32 {
+        for local_x in 0..32 {
+            let (x, y) = (cx * 32 + local_x, cy * 32 + local_y);
+            let index = usize::try_from(local_y * 32 + local_x).unwrap();
+            for (ground, tiles) in layers.iter_mut().enumerate() {
+                tiles[index] = value(ground, x, y);
+            }
+            let Some(terrain) = terrain_at(x, y) else {
+                continue;
+            };
+            let neighbours = [
+                (0, -1),
+                (1, -1),
+                (1, 0),
+                (1, 1),
+                (0, 1),
+                (-1, 1),
+                (-1, 0),
+                (-1, -1),
+            ]
+            .map(|(dx, dy)| terrain_at(x + dx, y + dy));
+            for transition in transitions.transitions() {
+                let applies = match transition.draw() {
+                    Draw::Inside => transition.terrain() == terrain,
+                    Draw::Outside => transition.blends_with(terrain),
+                };
+                if !applies {
+                    continue;
+                }
+                let shows = neighbours.map(|neighbour| match transition.draw() {
+                    Draw::Inside => neighbour.is_none_or(|other| !transition.blends_with(other)),
+                    Draw::Outside => neighbour == Some(transition.terrain()),
+                });
+                let pattern = transition.model().pattern(transition.draw(), shows);
+                if transition.draw() == Draw::Outside && pattern == 0 {
+                    continue;
+                }
+                let Some(tiles) = transition.tiles().get(&pattern) else {
+                    continue;
+                };
+                let output = transition.layer();
+                if output != transitions.terrain_layer() && value(output, x, y).is_some() {
+                    continue;
+                }
+                let hash = variant_hash(transition.seed(), layer, x, y);
+                layers[output][index] = Some(tiles.pick(hash).to_owned());
+            }
+        }
+    }
+    layers
+}
+
+/// A transition of [`rich_document`]: its draw, model, layer and `with`.
+type RichRule = (Draw, Model, &'static str, &'static str);
+
+/// A transitions document over the fixture's prototypes that uses every
+/// model and draw, `with` lists naming earlier and later terrains, and
+/// output into both ground layers.
+fn rich_document() -> String {
+    let terrains: [(&str, &str, &[RichRule]); 6] = [
+        (
+            "water",
+            "\"water\"",
+            &[
+                (Draw::Inside, Model::Blob, "floor", ""),
+                (Draw::Outside, Model::Corners, "edge", "\"rock\""),
+            ],
+        ),
+        (
+            "sand",
+            "\"sand\"",
+            &[
+                (Draw::Outside, Model::Sides, "edge", ""),
+                (Draw::Inside, Model::None, "floor", ""),
+            ],
+        ),
+        (
+            "dirt",
+            "\"dirt\", \"dirt_pebbles\"",
+            &[
+                (Draw::Outside, Model::Blob, "edge", "\"water\", \"sand\""),
+                (Draw::Inside, Model::Corners, "edge", ""),
+            ],
+        ),
+        (
+            "grass",
+            "\"grass\"",
+            &[
+                (Draw::Outside, Model::Corners, "edge", ""),
+                (Draw::Inside, Model::Sides, "floor", "\"dirt\""),
+            ],
+        ),
+        (
+            "flowers",
+            "\"grass_flowers\"",
+            &[(Draw::Outside, Model::Sides, "floor", "\"grass\"")],
+        ),
+        (
+            "rock",
+            "\"stone\"",
+            &[
+                (Draw::Inside, Model::None, "edge", ""),
+                (Draw::Outside, Model::Blob, "edge", ""),
+            ],
+        ),
+    ];
+    let mut seed = 0;
+    let terrains: Vec<String> = terrains
+        .iter()
+        .map(|(id, protos, rules)| {
+            let rules: Vec<String> = rules
+                .iter()
+                .map(|(draw, model, layer, with)| {
+                    seed += 1;
+                    rich_rule(*draw, *model, layer, with, seed)
+                })
+                .collect();
+            format!(
+                "{{\"id\": \"{id}\", \"protos\": [{protos}], \"transitions\": [{}]}}",
+                rules.join(", ")
+            )
+        })
+        .collect();
+    format!(
+        "{{\"format\": \"tilewright.transitions/1\", \"layer\": \"floor\", \"terrains\": [{}]}}",
+        terrains.join(", ")
+    )
+}
+
+/// A transition of [`rich_document`] with a tile for every pattern its
+/// model produces, each of two weighted variants.
+fn rich_rule(draw: Draw, model: Model, layer: &str, with: &str, seed: u32) -> String {
+    let tiles: Vec<String> = (0..=255_u8)
+        .filter(|pattern| model.produces(draw, *pattern))
+        .map(|pattern| {
+            let edge = u32::from(pattern) % 15 + 1;
+            format!(
+                "\"{pattern}\": [\"grass_edge_{edge}\", {{\"proto\": \"shore_n\", \"weight\": {}}}]",
+                u32::from(pattern) % 3 + 1
+            )
+        })
+        .collect();
+    let with = if with.is_empty() {
+        String::new()
+    } else {
+        format!(", \"with\": [{with}]")
+    };
+    format!(
+        "{{\"draw\": \"{}\", \"model\": \"{}\", \"layer\": \"{layer}\"{with}, \"seed\": {seed}, \"tiles\": {{{}}}}}",
+        draw.as_str(),
+        model.as_str(),
+        tiles.join(", ")
+    )
+}
+
+/// A deterministic pseudo-random painting of a 3 × 3 block of chunks, in
+/// runs so that terrains meet in every arrangement, with a few bushes
+/// placed by hand; without the chunk at (1, 1) when `missing`.
+fn painted(state: &mut u64, missing: bool) -> Grids {
+    let floor_values = [
+        "water",
+        "sand",
+        "dirt",
+        "dirt_pebbles",
+        "grass",
+        "grass_flowers",
+        "stone",
+        "bush",
+    ];
+    let mut next = |bound: usize| {
+        *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        usize::try_from(variant_hash(0, 0, state.cast_signed(), 0) % bound as u64).unwrap()
+    };
+    let mut grids = Grids(BTreeMap::new());
+    for cy in -1..=1 {
+        for cx in -1..=1 {
+            let mut floor = vec![0_u16; 1024];
+            let mut edge = vec![0_u16; 1024];
+            for index in 0..1024 {
+                // Mostly runs of the tile before, so patterns vary.
+                floor[index] = if index > 0 && next(4) != 0 {
+                    floor[index - 1]
+                } else {
+                    u16::try_from(next(floor_values.len() + 1)).unwrap()
+                };
+                if next(40) == 0 {
+                    edge[index] = 1;
+                }
+            }
+            if missing && (cx, cy) == (1, 1) {
+                continue;
+            }
+            grids.0.insert(
+                (0, cx, cy),
+                vec![
+                    Grid {
+                        palette: floor_values
+                            .iter()
+                            .map(|value| (*value).to_owned())
+                            .collect(),
+                        cells: floor,
+                    },
+                    Grid {
+                        palette: vec!["bush".to_owned()],
+                        cells: edge,
+                    },
+                ],
+            );
+        }
+    }
+    grids
+}
+
+#[test]
+fn the_resolver_matches_the_definition() {
+    let directory = tempfile::tempdir().unwrap();
+    copy_tree(&fixture(), directory.path());
+    fs::write(directory.path().join(TRANSITIONS), rich_document()).unwrap();
+    let world = load(directory.path()).unwrap_or_else(|diagnostics| panic!("{diagnostics:?}"));
+    let transitions = transitions(&world);
+    let mut state = 0x5eed_u64;
+    for round in 0..4 {
+        let grids = painted(&mut state, round == 3);
+        for cy in -1..=1 {
+            for cx in -1..=1 {
+                let resolved = transitions.resolve_chunk(&grids, 0, cx, cy);
+                let expected = naive(&transitions, &grids, 0, cx, cy);
+                for (ground, tiles) in expected.iter().enumerate() {
+                    for (index, tile) in tiles.iter().enumerate() {
+                        assert_eq!(
+                            resolved.value(ground, index),
+                            tile.as_deref(),
+                            "round {round} chunk {cx} {cy} ground {ground} tile {index}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
