@@ -297,15 +297,19 @@ impl Directory {
             | OFlags::NOFOLLOW
             | OFlags::CLOEXEC
             | OFlags::NOCTTY;
-        let fd = openat(&self.0, name, flags, Mode::from_raw_mode(0o666))
+        // A file with permissions of its own is only its owner's until it
+        // has them: they are set after writing, which would clear set-user
+        // and set-group bits set before.
+        let mode = if permissions.is_some() { 0o600 } else { 0o666 };
+        let fd = openat(&self.0, name, flags, Mode::from_raw_mode(mode))
             .map_err(|errno| classify(self.0.as_fd(), name, errno, &[name]))?;
         let written = (|| {
-            if let Some(permissions) = permissions {
-                fchmod(&fd, Mode::from_raw_mode(permissions.mode()))
-                    .map_err(|errno| Refused::Io(errno.into()))?;
-            }
             let mut file = std::fs::File::from(fd);
             file.write_all(bytes).map_err(Refused::Io)?;
+            if let Some(permissions) = permissions {
+                fchmod(&file, Mode::from_raw_mode(permissions.mode()))
+                    .map_err(|errno| Refused::Io(errno.into()))?;
+            }
             file.sync_all().map_err(Refused::Io)
         })();
         if written.is_err() {

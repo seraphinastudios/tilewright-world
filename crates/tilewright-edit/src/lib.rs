@@ -407,13 +407,12 @@ fn check_recorded(
     }
 }
 
-/// Checks that every terrain operation names a plane of the edited world
-/// and a grid of its profile. An edit that leaves no content writes nothing
-/// the loader could check, so its address is checked here.
+/// The terrain operations whose address `problem` finds wrong, reported
+/// at the operation.
 fn check_terrain_addresses(
     transaction: &Transaction,
-    world: &World,
-) -> Result<(), Vec<Diagnostic>> {
+    problem: impl Fn(&str, &str) -> Option<String>,
+) -> Vec<Diagnostic> {
     let mut problems = Problems {
         name: &transaction.name,
         lines: diagnostic::Lines::new(transaction.text()),
@@ -424,29 +423,35 @@ fn check_terrain_addresses(
             break;
         }
         if let transaction::Action::TerrainSet { plane, grid, .. } = &operation.action
-            && let Some(message) = terrain_problem(world, plane, grid)
+            && let Some(message) = problem(plane, grid)
         {
             problems.report(operation.span, Failure::conflict(message));
         }
     }
-    if problems.found.is_empty() {
-        Ok(())
-    } else {
-        Err(problems.found)
-    }
+    problems.found
 }
 
 /// Why a terrain address does not name a grid of `world`, if it does not.
 pub(crate) fn terrain_problem(world: &World, plane: &str, grid: &str) -> Option<String> {
-    if !world.planes().contains_key(plane) {
+    address_problem(
+        world.planes().contains_key(plane),
+        &world.profile().ground_layers,
+        plane,
+        grid,
+    )
+}
+
+/// Why a terrain address does not name a grid, given whether its plane
+/// exists and the profile's ground layers.
+fn address_problem(
+    has_plane: bool,
+    ground_layers: &[String],
+    plane: &str,
+    grid: &str,
+) -> Option<String> {
+    if !has_plane {
         Some(format!("plane \"{plane}\" does not exist"))
-    } else if grid != "height"
-        && grid != "zone"
-        && !world
-            .profile()
-            .ground_layers
-            .iter()
-            .any(|layer| layer == grid)
+    } else if grid != "height" && grid != "zone" && !ground_layers.iter().any(|layer| layer == grid)
     {
         Some(format!(
             "\"{grid}\" is not a grid: name a ground layer of the profile, height or zone"
@@ -454,6 +459,71 @@ pub(crate) fn terrain_problem(world: &World, plane: &str, grid: &str) -> Option<
     } else {
         None
     }
+}
+
+/// The edited tree, loaded and with every terrain address checked against
+/// it.
+fn load_result(
+    source: &SourceRoot,
+    load: &LoadOptions,
+    transaction: &Transaction,
+    files: &[FileChange],
+) -> Result<World, Vec<Diagnostic>> {
+    let world = match tilewright_source::load_edited_in(source, load, &overlay(files)) {
+        Ok(world) => world,
+        Err(found) => {
+            // A terrain operation that names no plane or grid of the edited
+            // tree may be why it does not load: it is reported first, at
+            // the operation.
+            let mut problems =
+                named_addresses(source, files).map_or_else(Vec::new, |(planes, ground_layers)| {
+                    check_terrain_addresses(transaction, |plane, grid| {
+                        address_problem(planes.contains(plane), &ground_layers, plane, grid)
+                    })
+                });
+            let left = limits::DIAGNOSTICS.saturating_sub(problems.len());
+            problems.extend(found.into_iter().take(left));
+            return Err(problems);
+        }
+    };
+    let problems = check_terrain_addresses(transaction, |plane, grid| {
+        terrain_problem(&world, plane, grid)
+    });
+    if problems.is_empty() {
+        Ok(world)
+    } else {
+        Err(problems)
+    }
+}
+
+/// The planes and ground layers that the edited tree's `world.jsonc` and
+/// profile name, read from them directly, for when the tree does not load;
+/// `None` when either cannot be read.
+fn named_addresses(
+    source: &SourceRoot,
+    files: &[FileChange],
+) -> Option<(BTreeSet<String>, Vec<String>)> {
+    let limits = Limits::default();
+    let text = |path: &str| -> Option<String> {
+        if let Ok(index) = files.binary_search_by(|file| file.path.as_str().cmp(path)) {
+            return files[index].after.clone();
+        }
+        let limit = u64::try_from(limits.max_input_bytes).unwrap_or(u64::MAX);
+        String::from_utf8(source.read(path, limit).ok()??).ok()
+    };
+    let strings = |value: Option<&tilewright_jsonc::Value>| -> Option<Vec<String>> {
+        value?
+            .as_array()?
+            .iter()
+            .map(|item| item.as_str().map(str::to_owned))
+            .collect()
+    };
+    let world = Document::parse(text("world.jsonc")?.as_str(), &limits).ok()?;
+    let planes = strings(world.root().get("planes"))?.into_iter().collect();
+    let profile_path = world.root().get("profile")?.as_str()?;
+    let profile = Document::parse(text(profile_path)?.as_str(), &limits).ok()?;
+    let ground_layers = strings(profile.root().get("ground_layers"))?;
+    Some((planes, ground_layers))
 }
 
 /// Carries out the operations in order. A failed one changes nothing and
@@ -588,8 +658,7 @@ pub fn plan(
             after: entry.current.text().map(str::to_owned),
         })
         .collect();
-    let world = tilewright_source::load_edited_in(&source, &options.load, &overlay(&files))?;
-    check_terrain_addresses(transaction, &world)?;
+    let world = load_result(&source, &options.load, transaction, &files)?;
     let sealed = seal(transaction, &files);
     let too_large = |what: &str, detail: &str| {
         vec![diagnostic::file(
@@ -839,7 +908,8 @@ fn write_operation(
 }
 
 /// A file each file was renamed or copied to, by the file it first came
-/// from, for the files that exist at the end.
+/// from, for the files that exist at the end and are written, so that
+/// their permissions are no broader than the file's.
 fn renamed_to<'w>(workspace: &'w Workspace<'_>) -> BTreeMap<&'w str, &'w str> {
     workspace
         .lineage
@@ -848,7 +918,7 @@ fn renamed_to<'w>(workspace: &'w Workspace<'_>) -> BTreeMap<&'w str, &'w str> {
             workspace
                 .entries
                 .get(*to)
-                .is_some_and(|entry| entry.current.text().is_some())
+                .is_some_and(|entry| entry.current.text().is_some() && entry.is_changed())
         })
         .map(|(to, from)| (from, to))
         .collect()

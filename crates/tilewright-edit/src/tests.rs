@@ -2142,3 +2142,139 @@ fn long_lists_name_ten_and_count_the_rest() {
     assert!(text.ends_with("\"f9\" and 2 more"), "{text}");
     assert_eq!(crate::diagnostic::listed(["a"].into_iter()), "\"a\"");
 }
+
+/// Publishes `plan` with `hook` run between staging and the checks.
+fn publish_with(plan: &Plan, hook: impl FnOnce() + 'static) -> PublishError {
+    publish::BEFORE_CHECK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    plan.publish().unwrap_err()
+}
+
+#[test]
+fn a_created_directory_left_full_is_reported() {
+    let tree = copy();
+    let root = tree.path().to_path_buf();
+    let plan = planned(
+        &root,
+        &transaction(
+            r#"{"op": "object.insert", "plane": "overworld", "layer": 7, "at": [1, 1], "object": {"proto": "tree"}}"#,
+        ),
+    );
+    let (layer, zones) = (
+        root.join("planes/overworld/layers/7"),
+        root.join("planes/overworld/zones.jsonc"),
+    );
+    let failure = publish_with(&plan, move || {
+        fs::write(layer.join("note.txt"), "").unwrap();
+        let text = fs::read_to_string(&zones).unwrap();
+        fs::write(&zones, format!("{text}\n")).unwrap();
+    });
+    assert!(!failure.applied && !failure.cleaned, "{failure:#?}");
+    assert!(
+        has(&failure.problems, "tx.io", "it is not empty"),
+        "{failure:#?}"
+    );
+}
+
+#[test]
+fn a_file_grown_too_large_while_publishing_is_a_conflict() {
+    let tree = copy();
+    let root = tree.path().to_path_buf();
+    let plan = planned(
+        &root,
+        &transaction(
+            r#"{"op": "set", "path": "planes/overworld/zones.jsonc", "pointer": ["zones", 0, "name"], "value": "Changed"}"#,
+        ),
+    );
+    let zones = root.join("planes/overworld/zones.jsonc");
+    let failure = publish_with(&plan, move || {
+        fs::write(&zones, vec![b' '; (64 << 20) + 1]).unwrap();
+    });
+    assert!(
+        has(&failure.problems, "tx.conflict", "the file changed"),
+        "{failure:#?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn permissions_narrowed_while_publishing_are_a_conflict() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let tree = copy();
+    let root = tree.path().to_path_buf();
+    let plan = planned(
+        &root,
+        &transaction(
+            r#"{"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["title"], "value": "Changed"}"#,
+        ),
+    );
+    let target = root.join("planes/overworld/plane.jsonc");
+    let hook_target = target.clone();
+    let failure = publish_with(&plan, move || {
+        fs::set_permissions(&hook_target, fs::Permissions::from_mode(0o600)).unwrap();
+    });
+    assert!(
+        has(&failure.problems, "tx.conflict", "its permissions changed"),
+        "{failure:#?}"
+    );
+    assert_eq!(
+        read(&root, "planes/overworld/plane.jsonc"),
+        read(&fixture(), "planes/overworld/plane.jsonc")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn special_mode_bits_are_kept() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let tree = copy();
+    let root = tree.path();
+    let target = root.join("planes/overworld/plane.jsonc");
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o4640)).unwrap();
+    let mode = || fs::metadata(&target).unwrap().permissions().mode() & 0o7777;
+    if mode() != 0o4640 {
+        // The file system does not keep the bit for this user.
+        return;
+    }
+    apply(
+        root,
+        &transaction(
+            r#"{"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["title"], "value": "Changed"}"#,
+        ),
+    );
+    assert_eq!(mode(), 0o4640);
+}
+
+#[test]
+fn a_bad_terrain_address_is_reported_when_its_grid_breaks_the_load() {
+    let tree = copy();
+    let found = problems(
+        tree.path(),
+        &transaction(
+            r#"{"op": "terrain.set", "plane": "overworld", "layer": 0, "grid": "floro", "cells": [{"at": [1, 1], "value": "grass"}]}"#,
+        ),
+    );
+    assert!(
+        has(&found, "tx.conflict", "\"floro\" is not a grid"),
+        "{found:#?}"
+    );
+}
+
+#[test]
+fn an_inverse_names_no_unwritten_file_like_another() {
+    let tree = copy();
+    let root = tree.path();
+    let coin = read(root, "defs/proto/coin.jsonc");
+    let mut pieces = String::new();
+    tilewright_jsonc::write_json_string(&coin, &mut pieces);
+    // The recreated file keeps its bytes, so it is not written and does not
+    // take the deleted file's permissions; the inverse cannot rely on it.
+    let plan = planned(
+        root,
+        &transaction(&format!(
+            r#"{{"op": "document.delete", "path": "defs/recipe/chest.jsonc"}},
+    {{"op": "document.delete", "path": "defs/proto/coin.jsonc"}},
+    {{"op": "document.create", "path": "defs/proto/coin.jsonc", "text": {pieces}, "like": "defs/recipe/chest.jsonc"}}"#
+        )),
+    );
+    assert!(!plan.inverse().contains("\"like\""), "{}", plan.inverse());
+}

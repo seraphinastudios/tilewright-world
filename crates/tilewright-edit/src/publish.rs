@@ -207,10 +207,29 @@ impl Directories<'_> {
         }
     }
 
-    /// Removes the directories this publish created, if they are empty.
+    /// Removes the directories this publish created. One that is not
+    /// empty now, since another writer added to it, is reported.
     fn remove_created(&mut self) {
         for path in std::mem::take(&mut self.created).into_iter().rev() {
-            self.clean(&path, true);
+            let removed = match self.remove(&path, true) {
+                Ok(true) => continue,
+                Ok(false) => matches!(self.root.directory(&path, false), Ok(None)),
+                Err(error) => {
+                    self.leftover(diagnostic::file(
+                        &path,
+                        Code::Io.as_str(),
+                        format!("could not be removed ({error}); remove it by hand"),
+                    ));
+                    continue;
+                }
+            };
+            if !removed {
+                self.leftover(diagnostic::file(
+                    &path,
+                    Code::Io.as_str(),
+                    "this apply created the directory and could not remove it, since it is not empty; remove it by hand if it is not wanted",
+                ));
+            }
         }
     }
 
@@ -311,6 +330,31 @@ fn on_disk(
     Ok(found)
 }
 
+/// Checks that the permissions staging read are still those on disk, so
+/// that no file is published with permissions that were narrowed since.
+fn check_permissions(
+    directories: &mut Directories<'_>,
+    known: &Known,
+) -> Result<(), Vec<Diagnostic>> {
+    for (path, before) in &known.paths {
+        let (parent, name) = split(path);
+        let now = match directories.get(parent, false) {
+            Ok(Some(directory)) => directory.permissions(name),
+            Ok(None) => Ok(None),
+            Err(error) => Err(error),
+        }
+        .map_err(|error| io(path, &error))?;
+        if now != *before {
+            return Err(problem(
+                path,
+                Code::Conflict,
+                "its permissions changed while the transaction was being applied; nothing was written",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// What both allow, where either may be unknown.
 fn both(
     left: Option<std::fs::Permissions>,
@@ -386,11 +430,11 @@ fn stage(directory: &SourceDirectory, path: &str, text: &str) -> Result<(), Acce
 /// the failed one included, and the directories it created.
 fn stage_all<'f>(
     directories: &mut Directories<'_>,
+    known: &mut Known,
     changed: &[&'f FileChange],
     lineage: &Lineage,
 ) -> Result<Vec<&'f str>, PublishError> {
     let mut staged = Vec::new();
-    let mut known = Known::default();
     for file in changed {
         let Some(text) = &file.after else {
             continue;
@@ -401,7 +445,7 @@ fn stage_all<'f>(
         directories.changed.insert(split(&file.path).0.to_owned());
         let (parent, name) = split(&file.path);
         let result =
-            permissions_for(directories, &mut known, &file.path, lineage).and_then(|permissions| {
+            permissions_for(directories, known, &file.path, lineage).and_then(|permissions| {
                 let directory = directories
                     .get(parent, true)?
                     .ok_or_else(|| AccessError::Unexpected(file.path.clone()))?;
@@ -424,19 +468,25 @@ fn check_again(root: &SourceRoot, files: &[FileChange]) -> Result<(), Vec<Diagno
     let limit =
         u64::try_from(tilewright_jsonc::Limits::default().max_input_bytes).unwrap_or(u64::MAX);
     for file in files {
-        let current = root
-            .read(&file.path, limit)
-            .map_err(|error| io(&file.path, &error))?;
+        let changed = || {
+            problem(
+                &file.path,
+                Code::Conflict,
+                "the file changed while the transaction was being applied; nothing was written",
+            )
+        };
+        let current = match root.read(&file.path, limit) {
+            Ok(current) => current,
+            // A file grown past what can be read changed too.
+            Err(AccessError::TooLarge(_)) => return Err(changed()),
+            Err(error) => return Err(io(&file.path, &error)),
+        };
         let found = current.map(|bytes| {
             use sha2::Digest as _;
             <[u8; 32]>::from(sha2::Sha256::digest(&bytes))
         });
         if found != digest(file.before.as_deref()) {
-            return Err(problem(
-                &file.path,
-                Code::Conflict,
-                "the file changed while the transaction was being applied; nothing was written",
-            ));
+            return Err(changed());
         }
     }
     Ok(())
@@ -479,7 +529,8 @@ impl Plan {
         let mut changed: Vec<&FileChange> =
             self.files.iter().filter(|file| file.is_changed()).collect();
         changed.sort_by_key(|file| file.after.is_none());
-        let staged = stage_all(&mut directories, &changed, &self.lineage)?;
+        let mut known = Known::default();
+        let staged = stage_all(&mut directories, &mut known, &changed, &self.lineage)?;
 
         #[cfg(test)]
         if let Some(hook) = BEFORE_CHECK.with(|hook| hook.borrow_mut().take()) {
@@ -501,6 +552,9 @@ impl Plan {
                 Err(problems)
             }
         });
+        // Last, as close to publishing as can be: the permissions the
+        // staged files were given must still be what they came from.
+        let checked = checked.and_then(|()| check_permissions(&mut directories, &known));
         if let Err(problems) = checked {
             discard(&mut directories, &staged);
             directories.remove_created();

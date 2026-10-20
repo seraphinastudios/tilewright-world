@@ -439,7 +439,9 @@ pub type Overlay = BTreeMap<String, Option<String>>;
 
 /// Loads a source tree as it would be with `overlay` applied, without
 /// writing anything. Overlay files are read under the same limits and
-/// budget as files on disk, and a directory that holds one exists.
+/// budget as files on disk, and a directory that holds one exists. An
+/// overlay of more entries than `maximum_entries` is refused before
+/// anything is read.
 ///
 /// # Errors
 /// Returns every diagnostic found, sorted by path and position.
@@ -466,6 +468,18 @@ pub fn load_edited_in(
         limits: within_format(options.limits),
         ..*options
     };
+    // Each entry adds, replaces or removes a directory entry; more than a
+    // load may list cannot load, and is not looked at.
+    if overlay.len() > options.maximum_entries {
+        return Err(vec![Diagnostic::file(
+            ".",
+            Code::Budget,
+            format!(
+                "the edits hold more than {} entries",
+                options.maximum_entries
+            ),
+        )]);
+    }
     let mut diagnostics = Diagnostics::new(options.maximum_diagnostics);
     let mut tree = files::Tree::in_root(root.platform(), options, overlay, diagnostics.total());
     let world = load_tree(&mut tree, &mut diagnostics);

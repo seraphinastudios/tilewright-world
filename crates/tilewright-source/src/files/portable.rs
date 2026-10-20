@@ -193,17 +193,22 @@ impl Directory {
         use std::io::Write as _;
         self.remove_file(name)?;
         let path = self.0.join(name);
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(Refused::Io)?;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        // A file with permissions of its own is only its owner's until it
+        // has them, where the platform allows; they are set after writing.
+        #[cfg(unix)]
+        if permissions.is_some() {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&path).map_err(Refused::Io)?;
         let written = (|| {
+            file.write_all(bytes).map_err(Refused::Io)?;
             if let Some(permissions) = permissions {
                 file.set_permissions(permissions.clone())
                     .map_err(Refused::Io)?;
             }
-            file.write_all(bytes).map_err(Refused::Io)?;
             file.sync_all().map_err(Refused::Io)
         })();
         if written.is_err() {

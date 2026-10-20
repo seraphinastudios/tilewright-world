@@ -1817,6 +1817,13 @@ fn overlay_files_count_against_the_entry_budget() {
             .any(|diagnostic| diagnostic.code == "source.budget"),
         "{found:?}"
     );
+    // So do removals, before anything is read.
+    let removals: Overlay = (0..101)
+        .map(|index| (format!("defs/proto/x{index}.jsonc"), None))
+        .collect();
+    let found = load_edited(root.path(), &small, &removals).unwrap_err();
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].code, "source.budget");
     // Within the budget, the same names are listed.
     let mut few = Overlay::new();
     few.insert("defs/proto/x0.jsonc".to_owned(), Some("{}".to_owned()));

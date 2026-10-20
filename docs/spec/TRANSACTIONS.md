@@ -80,8 +80,10 @@ transaction out records every file it read, created or checked for absence
   is that identifier. `["zones", {"id": "island"}, "name"]` names a zone's
   name whatever its position. An object target, `"object": {"plane",
   "layer", "at", "index"}`, takes the place of `"path"` and makes the pointer
-  relative to the object; it may not start with `at`, which is the object's
-  tile.
+  relative to the object. That pointer names a part of the object: it is
+  not empty and does not start with `at`, which is the object's tile, and an
+  `insert` inserts into a part of the object, so its pointer has a step
+  before the index. A `set` adds a member to the object itself.
 
 Values in operations are written exactly as they appear in the transaction,
 comments and spacing included, and keys exactly as spelled there.
@@ -187,7 +189,8 @@ The edited tree is then validated by the normal loader, with the edited files
 in memory over the files on disk. Previewing stops there and writes nothing;
 it returns the edited files, the validated world, the sealed transaction and
 the inverse. A transaction whose result does not validate is rejected with
-the loader's diagnostics.
+the loader's diagnostics, after a `tx.conflict` at each terrain operation
+whose plane or grid the edited `world.jsonc` and profile do not name.
 
 The sealed transaction is the transaction's own text, with `base` and
 `result` set to every file it touched or consulted, before and after; every
@@ -257,17 +260,20 @@ elsewhere the absolute path it resolved to then. It:
    directory on Unix), so two applies cannot interleave;
 2. writes each new file beside its target as `.<name>.tilewright-tmp`,
    created fresh (whatever was at that name is removed first, so a link or
-   hard link there is never written through), with the permissions given
-   below, and synced; a failure removes every staging file it wrote
-   and the directories it created;
+   hard link there is never written through), only its owner's until it
+   is written, then with the permissions given below, and synced; a
+   failure removes every staging file it wrote and the directories it
+   created, and reports one it created that is no longer empty;
 3. reads every file the transaction touched or consulted again and compares
    it with the files it was carried out on, then validates the tree with
    the transaction's files again, and its terrain addresses against that
    tree, since files it did not touch may have changed since it was carried
    out: two transactions that are valid alone can be invalid together. A
    difference is a `tx.conflict`, and a result that no longer validates is
-   reported with the loader's diagnostics; in both cases the staged files
-   are removed and nothing is written;
+   reported with the loader's diagnostics. Last, the permissions that step
+   2 read must still be those on disk. A file grown past what can be read
+   is a difference too. On any of these the staged files are removed and
+   nothing is written;
 4. renames each staged file over its target, in path order, and then
    removes each deleted file, in path order, so that a renamed file is
    never only removed. Before a deleted file is removed, any staging file
