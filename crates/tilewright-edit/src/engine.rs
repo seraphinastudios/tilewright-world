@@ -253,6 +253,11 @@ pub(crate) struct Workspace<'r> {
     journal_inverse_operations: usize,
     /// Files that were read but cannot be edited, with why.
     unreadable: BTreeMap<String, String>,
+    /// Files whose text changed since the uid index last looked at them.
+    pub changed: BTreeSet<String>,
+    /// Where the objects with uids are, when the transaction addresses
+    /// objects by uid.
+    pub uids: Option<crate::uids::Index>,
 }
 
 fn limits() -> Limits {
@@ -274,6 +279,8 @@ impl<'r> Workspace<'r> {
             journal_inverse_bytes: 0,
             journal_inverse_operations: 0,
             unreadable: BTreeMap::new(),
+            changed: BTreeSet::new(),
+            uids: None,
         }
     }
 
@@ -303,6 +310,7 @@ impl<'r> Workspace<'r> {
                 entry.inverse.truncate(length);
                 entry.recorded = recorded;
             }
+            self.changed.insert(path);
         }
         self.inverse_bytes = self.journal_inverse_bytes;
         self.inverse_operations = self.journal_inverse_operations;
@@ -516,6 +524,7 @@ impl<'r> Workspace<'r> {
         }
         let after = entry.inverse_size();
         self.keep(path, before, length, recorded);
+        self.changed.insert(path.to_owned());
         self.account(share, after)
     }
 
@@ -552,6 +561,7 @@ impl<'r> Workspace<'r> {
         }
         let after = entry.inverse_size();
         self.keep(path, before, length, recorded);
+        self.changed.insert(path.to_owned());
         self.account(share, after)?;
         Ok(text)
     }
