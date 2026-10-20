@@ -13,12 +13,12 @@
     // Trees across the chunk edge: the second chunk is created.
     {"op": "object.insert", "plane": "overworld", "layer": 0, "at": [30, 10], "object": {"proto": "apple_tree"}},
     {"op": "object.insert", "plane": "overworld", "layer": 0, "at": [33, 10], "object": {"proto": "apple_tree", "z": 1}},
-    // The old tree makes way, and the wall moves into the gap.
+    // The old tree makes way, and the wall moves into the gap. The wall is
+    // named by its uid, which finds it wherever it has moved.
     {"op": "object.remove", "plane": "overworld", "layer": 0, "at": [12, 12], "index": 0,
      "expect": {"proto": "tree"}},
-    {"op": "object.move", "plane": "overworld", "layer": 0, "at": [15, 0], "index": 0,
-     "expect": {"proto": "wall"}, "to": {"at": [12, 12]}},
-    {"op": "set", "object": {"plane": "overworld", "layer": 0, "at": [12, 12], "index": 0},
+    {"op": "object.move", "uid": "ruin.north_wall", "expect": {"proto": "wall"}, "to": {"at": [12, 12]}},
+    {"op": "set", "object": {"uid": "ruin.north_wall"},
      "pointer": ["fields", "name"], "value": "Orchard wall", "expect": "Old wall"},
     // Sand paths between the rows, on both sides of the edge.
     {"op": "terrain.set", "plane": "overworld", "layer": 0, "grid": "floor", "cells": [

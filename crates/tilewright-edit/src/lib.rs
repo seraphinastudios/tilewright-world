@@ -5,9 +5,9 @@
 //!
 //! A transaction is a document of operations against a base revision of a
 //! source tree. Operations address content by identity: tiles by plane,
-//! layer and position, objects by their place among a tile's objects,
-//! values by document path and pointer. Chunks are not named; files are
-//! created and removed as content appears and disappears.
+//! layer and position, objects by their place among a tile's objects or by
+//! their uid, values by document path and pointer. Chunks are not named;
+//! files are created and removed as content appears and disappears.
 //!
 //! [`plan`] carries a transaction out in memory: every edit is a lossless
 //! span edit, the result is validated with the normal loader, and nothing is
@@ -45,6 +45,7 @@ mod render;
 mod splice;
 mod terrain;
 mod transaction;
+mod uids;
 
 pub use publish::{PUBLISH_SUPPORTED, PublishError, Published};
 pub use transaction::{Digests, FORMAT, Transaction};
@@ -601,6 +602,11 @@ pub fn plan(
     } else {
         check_base(&mut workspace, transaction, &mut problems)
     };
+    // Uid addresses resolve through the world as loaded, and as the
+    // operations go on to edit it.
+    if problems.is_empty() && transaction.addresses_uids() {
+        workspace.uids = Some(uids::Index::load(&source, &options.load));
+    }
     let mut chunks = BTreeSet::new();
     if problems.is_empty() {
         run_operations(

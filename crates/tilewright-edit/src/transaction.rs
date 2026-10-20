@@ -34,11 +34,23 @@ pub(crate) struct Tile {
     pub at: [i64; 2],
 }
 
-/// The object at position `index` among the objects of a tile.
+/// How an operation names an object.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ObjectAddress {
-    pub tile: Tile,
-    pub index: usize,
+pub(crate) enum ObjectAddress {
+    /// The object at position `index` among the objects of a tile.
+    Place { tile: Tile, index: usize },
+    /// The object with this uid, wherever it is.
+    Uid(String),
+}
+
+/// Where `object.move` takes an object: each part not given is the
+/// object's own, which a uid address only finds when the move is carried
+/// out.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Destination {
+    pub plane: Option<String>,
+    pub layer: Option<i32>,
+    pub at: Option<[i64; 2]>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -123,7 +135,7 @@ pub(crate) enum Action {
     ObjectMove {
         address: ObjectAddress,
         expect: Span,
-        to: Tile,
+        to: Destination,
         index: Option<usize>,
     },
     TerrainSet {
@@ -271,6 +283,34 @@ impl Transaction {
                             ..
                         }
                 )
+        })
+    }
+
+    /// Whether an operation addresses an object by uid.
+    pub(crate) fn addresses_uids(&self) -> bool {
+        self.operations.iter().any(|operation| {
+            matches!(
+                &operation.action,
+                Action::Set {
+                    target: Target::Object(ObjectAddress::Uid(_)),
+                    ..
+                } | Action::Insert {
+                    target: Target::Object(ObjectAddress::Uid(_)),
+                    ..
+                } | Action::Remove {
+                    target: Target::Object(ObjectAddress::Uid(_)),
+                    ..
+                } | Action::Test {
+                    target: Target::Object(ObjectAddress::Uid(_)),
+                    ..
+                } | Action::ObjectRemove {
+                    address: ObjectAddress::Uid(_),
+                    ..
+                } | Action::ObjectMove {
+                    address: ObjectAddress::Uid(_),
+                    ..
+                }
+            )
         })
     }
 
@@ -727,8 +767,8 @@ impl<'a> Shape<'a> {
             "remove" => &["op", "path", "object", "pointer", "expect", "separator"],
             "test" => &["op", "path", "object", "pointer", "value", "absent"],
             "object.insert" => &["op", "plane", "layer", "at", "index", "object"],
-            "object.remove" => &["op", "plane", "layer", "at", "index", "expect"],
-            "object.move" => &["op", "plane", "layer", "at", "index", "expect", "to"],
+            "object.remove" => &["op", "plane", "layer", "at", "index", "uid", "expect"],
+            "object.move" => &["op", "plane", "layer", "at", "index", "uid", "expect", "to"],
             "terrain.set" => &["op", "plane", "layer", "grid", "cells"],
             "document.create" => &["op", "path", "document", "text"],
             "document.delete" => &["op", "path"],
@@ -834,7 +874,7 @@ impl<'a> Shape<'a> {
         match (item.get("path"), item.get("object")) {
             (Some(path), None) => Some(Target::Path(self.path(path)?)),
             (None, Some(object)) => {
-                let object = self.object(object, &["plane", "layer", "at", "index"])?;
+                let object = self.object(object, &["plane", "layer", "at", "index", "uid"])?;
                 Some(Target::Object(self.address(object)?))
             }
             _ => {
@@ -859,12 +899,27 @@ impl<'a> Shape<'a> {
         })
     }
 
+    /// An object address: a `uid` alone, or a tile and an `index`.
     fn address(&mut self, item: &'a Value) -> Option<ObjectAddress> {
+        if let Some(uid) = item.get("uid") {
+            let uid = self.identifier(uid);
+            let place = ["plane", "layer", "at", "index"]
+                .into_iter()
+                .filter_map(|key| item.member(key))
+                .collect::<Vec<_>>();
+            for member in &place {
+                self.shape(
+                    member.key_span,
+                    "an object is addressed by its uid alone, or by plane, layer, at and index",
+                );
+            }
+            return place.is_empty().then_some(ObjectAddress::Uid(uid?));
+        }
         let tile = self.tile(item);
         let index = self
             .required(item, "index")
             .and_then(|value| self.index(value));
-        Some(ObjectAddress {
+        Some(ObjectAddress::Place {
             tile: tile?,
             index: index?,
         })
@@ -885,7 +940,7 @@ impl<'a> Shape<'a> {
         if let Some(at) = expect.member("at") {
             self.shape(
                 at.key_span,
-                "the tile comes from the address; leave out \"at\"",
+                "expect names what the object is, not where it is; leave out \"at\"",
             );
             usable = false;
         }
@@ -1088,18 +1143,18 @@ impl<'a> Shape<'a> {
             .required(item, "to")
             .and_then(|to| self.object(to, &["plane", "layer", "at", "index"]));
         // The destination's fields are checked whether or not the source's
-        // passed; a missing one is the source's.
+        // passed; a missing one is the object's own.
         let plane = match to.and_then(|to| to.get("plane")) {
-            Some(value) => self.identifier(value),
-            None => address.as_ref().map(|address| address.tile.plane.clone()),
+            Some(value) => self.identifier(value).map(Some),
+            None => Some(None),
         };
         let layer = match to.and_then(|to| to.get("layer")) {
-            Some(value) => self.layer(value),
-            None => address.as_ref().map(|address| address.tile.layer),
+            Some(value) => self.layer(value).map(Some),
+            None => Some(None),
         };
         let at = match to.and_then(|to| to.get("at")) {
-            Some(value) => self.at(value),
-            None => address.as_ref().map(|address| address.tile.at),
+            Some(value) => self.at(value).map(Some),
+            None => Some(None),
         };
         let index = match to.and_then(|to| to.get("index")) {
             Some(value) => self.index(value).map(Some),
@@ -1109,7 +1164,7 @@ impl<'a> Shape<'a> {
         Some(Action::ObjectMove {
             address: address?,
             expect: expect?,
-            to: Tile {
+            to: Destination {
                 plane: plane?,
                 layer: layer?,
                 at: at?,
@@ -1249,6 +1304,7 @@ const ANY_OPERATION_KEYS: &[&str] = &[
     "layer",
     "at",
     "index",
+    "uid",
     "grid",
     "cells",
     "document",
