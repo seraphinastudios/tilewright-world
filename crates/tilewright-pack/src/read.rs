@@ -8,7 +8,7 @@
 //! rows instead of collecting whole tables.
 
 use crate::{
-    APPLICATION_ID, Error, FORMAT, META_KEYS, SCHEMA_TABLES, USER_VERSION,
+    APPLICATION_ID, Error, ErrorCode, FORMAT, META_KEYS, SCHEMA_TABLES, USER_VERSION,
     chunk::{
         CHUNK_ENCODING, ChunkData, DecodeError, FieldRecord, MAXIMUM_CHUNK_BYTES, ObjectRecord,
         PortalRecord, Visit, decode_chunk_with,
@@ -73,9 +73,10 @@ impl Default for VerifyLimits {
 
 /// The error for a pack longer than `maximum` bytes.
 fn too_long(maximum: u64) -> Error {
-    Error::Invalid(format!(
-        "the pack is more than {maximum} bytes, the pack size limit"
-    ))
+    Error::Rejected(
+        ErrorCode::TooLarge,
+        format!("the pack is more than {maximum} bytes, the pack size limit"),
+    )
 }
 
 /// Row counts of a pack.
@@ -127,7 +128,7 @@ fn uri(absolute: &Path) -> Result<String, Error> {
     #[cfg(not(unix))]
     let bytes = absolute
         .to_str()
-        .ok_or_else(|| Error::Invalid("pack path is not UTF-8".into()))?
+        .ok_or_else(|| Error::Rejected(ErrorCode::Io, "pack path is not UTF-8".into()))?
         .as_bytes();
     // `file://` and then the absolute path, so a path that itself begins with
     // `//` stays part of the file name instead of becoming a URI authority.
@@ -206,12 +207,14 @@ fn chunk_data(value: types::Value) -> Result<ChunkData, Error> {
 fn chunk_data_with(value: types::Value, visit: Option<Visit<'_>>) -> Result<ChunkData, Error> {
     match value {
         types::Value::Blob(data) => decode_chunk_with(&data, visit).map_err(Error::Chunk),
-        types::Value::Integer(0) => Err(Error::Invalid(format!(
-            "a chunk's encoding is not {CHUNK_ENCODING}"
-        ))),
-        _ => Err(Error::Invalid(format!(
-            "a chunk's data is not a blob of at most {MAXIMUM_CHUNK_BYTES} bytes"
-        ))),
+        types::Value::Integer(0) => Err(Error::Rejected(
+            ErrorCode::ChunkEncoding,
+            format!("a chunk's encoding is not {CHUNK_ENCODING}"),
+        )),
+        _ => Err(Error::Rejected(
+            ErrorCode::ChunkData,
+            format!("a chunk's data is not a blob of at most {MAXIMUM_CHUNK_BYTES} bytes"),
+        )),
     }
 }
 
@@ -239,12 +242,14 @@ fn bounded_text(column: &str) -> String {
     )
 }
 
-/// Parses a stored document, which must be canonical JSON of an object.
-fn stored_document(text: Option<String>, what: &str) -> Result<Document, Error> {
+/// Parses a stored document, which must be canonical JSON of an object;
+/// `code` is the rule a bad one breaks.
+fn stored_document(text: Option<String>, what: &str, code: ErrorCode) -> Result<Document, Error> {
     let invalid = || {
-        Error::Invalid(format!(
-            "{what} is not canonical JSON of an object with namespaced custom data"
-        ))
+        Error::Rejected(
+            code,
+            format!("{what} is not canonical JSON of an object with namespaced custom data"),
+        )
     };
     let document = Document::parse(text.ok_or_else(invalid)?, &crate::canonical_limits())
         .map_err(|_| invalid())?;
@@ -304,9 +309,12 @@ fn stored_layer_height(profile: &Document) -> Result<Option<u32>, Error> {
                 .filter(|height| (1..=i64::from(MAXIMUM_LAYER_HEIGHT)).contains(height))
                 .and_then(|height| u32::try_from(height).ok())
                 .ok_or_else(|| {
-                    Error::Invalid(format!(
-                        "the stored profile's layer_height is not an integer from 1 to {MAXIMUM_LAYER_HEIGHT}"
-                    ))
+                    Error::Rejected(
+                        ErrorCode::Profile,
+                        format!(
+                            "the stored profile's layer_height is not an integer from 1 to {MAXIMUM_LAYER_HEIGHT}"
+                        ),
+                    )
                 })
         })
         .transpose()
@@ -318,8 +326,12 @@ fn stored_layer_height(profile: &Document) -> Result<Option<u32>, Error> {
 /// each a 32-bit layer, a position within the integer range and a
 /// prototype identifier, and a valid direction and flag.
 fn stored_stairwell(document: &Document) -> Result<Stairwell, Error> {
-    let invalid =
-        || Error::Invalid("a stairwell document does not have the source format's shape".into());
+    let invalid = || {
+        Error::Rejected(
+            ErrorCode::Stairwell,
+            "a stairwell document does not have the source format's shape".into(),
+        )
+    };
     let closed = |value: &Value, keys: &[&str]| {
         value.as_object().is_some_and(|members| {
             members
@@ -390,9 +402,12 @@ fn stored_stairwell(document: &Document) -> Result<Stairwell, Error> {
         });
     }
     if !Stairwell::connects(&steps) {
-        return Err(Error::Invalid(format!(
-            "the steps of stairwell {id} are not on adjacent layers in one direction, at most one tile apart"
-        )));
+        return Err(Error::Rejected(
+            ErrorCode::Stairwell,
+            format!(
+                "the steps of stairwell {id} are not on adjacent layers in one direction, at most one tile apart"
+            ),
+        ));
     }
     Ok(Stairwell {
         id: id.to_owned(),
@@ -409,17 +424,40 @@ fn text<'d>(document: &'d Document, key: &str) -> Option<&'d str> {
     document.root().get(key).and_then(Value::as_str)
 }
 
+/// Column `index` as text: `None` when it is not text, as a bounded column
+/// is when out of bounds. SQLite stores any bytes as text, so text that is
+/// not UTF-8 is `code`'s error rather than an SQLite one.
+fn utf8_column(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+    code: ErrorCode,
+) -> Result<Option<String>, Error> {
+    match row.get_ref(index)? {
+        types::ValueRef::Text(bytes) => std::str::from_utf8(bytes)
+            .map(|text| Some(text.to_owned()))
+            .map_err(|_| Error::Rejected(code, "a stored value is not UTF-8 text".into())),
+        _ => Ok(None),
+    }
+}
+
 /// A stairwell from a row of `id, document`, bounded in SQL by
 /// [`bounded_identifier`] and [`bounded_text`] (NULL when out of bounds),
 /// after checking that the document has the row's ID.
 fn stairwell_row(row: &rusqlite::Row<'_>) -> Result<Stairwell, Error> {
-    let id: Option<String> = row.get(0)?;
-    let stairwell = stored_stairwell(&stored_document(row.get(1)?, "a stairwell document")?)?;
+    let id = utf8_column(row, 0, ErrorCode::Stairwell)?;
+    let stairwell = stored_stairwell(&stored_document(
+        utf8_column(row, 1, ErrorCode::Stairwell)?,
+        "a stairwell document",
+        ErrorCode::Stairwell,
+    )?)?;
     if id.as_deref() != Some(stairwell.id.as_str()) {
-        return Err(Error::Invalid(format!(
-            "the document of stairwell {} disagrees with its row",
-            stairwell.id
-        )));
+        return Err(Error::Rejected(
+            ErrorCode::Stairwell,
+            format!(
+                "the document of stairwell {} disagrees with its row",
+                stairwell.id
+            ),
+        ));
     }
     Ok(stairwell)
 }
@@ -447,7 +485,10 @@ impl Pack {
         let path = std::path::absolute(path)?;
         let metadata = std::fs::metadata(&path)?;
         if !metadata.is_file() {
-            return Err(Error::Invalid(format!("{} is not a file", path.display())));
+            return Err(Error::Rejected(
+                ErrorCode::NotAFile,
+                format!("{} is not a file", path.display()),
+            ));
         }
         if metadata.len() > limits.maximum_pack_bytes {
             return Err(too_long(limits.maximum_pack_bytes));
@@ -471,9 +512,10 @@ impl Pack {
             .and_then(|pages| pages.checked_mul(PAGE_SIZE.unsigned_abs()))
             != Some(length)
         {
-            return Err(Error::Invalid(format!(
-                "the file is {length} bytes, not its {pages} pages of {PAGE_SIZE} bytes"
-            )));
+            return Err(Error::Rejected(
+                ErrorCode::FileLength,
+                format!("the file is {length} bytes, not its {pages} pages of {PAGE_SIZE} bytes"),
+            ));
         }
         // The file SQLite opened may have replaced the one whose length was
         // checked, so its pages are checked against the limit too.
@@ -507,12 +549,14 @@ impl Pack {
     /// # Errors
     /// Returns an error if SQLite fails.
     pub fn meta(&self, key: &str) -> Result<Option<String>, Error> {
-        Ok(self
+        let mut statement = self
             .connection
-            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |row| {
-                row.get(0)
-            })
-            .optional()?)
+            .prepare("SELECT value FROM meta WHERE key = ?1")?;
+        let mut rows = statement.query([key])?;
+        match rows.next()? {
+            Some(row) => utf8_column(row, 0, ErrorCode::Meta),
+            None => Ok(None),
+        }
     }
 
     /// An interned string.
@@ -521,21 +565,18 @@ impl Pack {
     /// Returns an error if SQLite fails or the stored value is not text of
     /// at most 1 MiB.
     pub fn string(&self, id: u32) -> Result<Option<String>, Error> {
-        let value: Option<Option<String>> = self
-            .connection
-            .query_row(
-                &format!(
-                    "SELECT {} FROM strings WHERE id = ?2",
-                    bounded_text("value")
-                ),
-                params![maximum_string_bytes(), id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        match value {
-            None => Ok(None),
-            Some(Some(text)) => Ok(Some(text)),
-            Some(None) => Err(Error::Invalid(
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT {} FROM strings WHERE id = ?2",
+            bounded_text("value")
+        ))?;
+        let mut rows = statement.query(params![maximum_string_bytes(), id])?;
+        let Some(row) = rows.next()? else {
+            return Ok(None);
+        };
+        match utf8_column(row, 0, ErrorCode::String)? {
+            Some(text) => Ok(Some(text)),
+            None => Err(Error::Rejected(
+                ErrorCode::String,
                 "a string is not text of at most 1 MiB".into(),
             )),
         }
@@ -632,23 +673,22 @@ impl Pack {
         x: i64,
         y: i64,
     ) -> Result<Option<StairwellTile>, Error> {
-        let found: Option<(Option<String>, Option<i64>, Option<String>)> = self
-            .connection
-            .query_row(
-                &format!(
-                    "SELECT {}, {}, {} FROM stairwell_steps \
-                     WHERE plane = ?1 AND layer = ?2 AND x = ?3 AND y = ?4",
-                    bounded_identifier("stairwell"),
-                    step_index("step"),
-                    bounded_identifier("proto"),
-                ),
-                params![plane, layer, x, y],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()?;
-        let Some(found) = found else {
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT {}, {}, {} FROM stairwell_steps \
+             WHERE plane = ?1 AND layer = ?2 AND x = ?3 AND y = ?4",
+            bounded_identifier("stairwell"),
+            step_index("step"),
+            bounded_identifier("proto"),
+        ))?;
+        let mut rows = statement.query(params![plane, layer, x, y])?;
+        let Some(row) = rows.next()? else {
             return Ok(None);
         };
+        let found: (Option<String>, Option<i64>, Option<String>) = (
+            utf8_column(row, 0, ErrorCode::StairwellStep)?,
+            row.get(1)?,
+            utf8_column(row, 2, ErrorCode::StairwellStep)?,
+        );
         match found {
             (Some(stairwell), Some(step), Some(proto))
                 if is_identifier(&stairwell) && is_identifier(&proto) =>
@@ -656,12 +696,16 @@ impl Pack {
                 Ok(Some(StairwellTile {
                     stairwell,
                     step: usize::try_from(step).map_err(|_| {
-                        Error::Invalid("a stairwell step has a negative index".into())
+                        Error::Rejected(
+                            ErrorCode::StairwellStep,
+                            "a stairwell step has a negative index".into(),
+                        )
                     })?,
                     proto,
                 }))
             }
-            _ => Err(Error::Invalid(
+            _ => Err(Error::Rejected(
+                ErrorCode::StairwellStep,
                 "a stairwell step's stairwell or proto is not an identifier, or its index is not one a source array can have".into(),
             )),
         }
@@ -713,7 +757,7 @@ impl Pack {
         let path = self
             .path
             .as_ref()
-            .ok_or_else(|| Error::Invalid("the pack is not a file".into()))?;
+            .ok_or_else(|| Error::Rejected(ErrorCode::NotAFile, "the pack is not a file".into()))?;
         let file = std::fs::File::open(path)?;
         if file.metadata()?.len() > maximum {
             return Err(too_long(maximum));
@@ -784,9 +828,10 @@ impl Pack {
             .connection
             .query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
         if integrity != "ok" {
-            return Err(Error::Invalid(format!(
-                "integrity check failed: {integrity}"
-            )));
+            return Err(Error::Rejected(
+                ErrorCode::Integrity,
+                format!("integrity check failed: {integrity}"),
+            ));
         }
         if let Some(stem) = self
             .path
@@ -799,9 +844,10 @@ impl Pack {
             // The name must be the lowercase digest; other cases do not match.
             let digest = crate::compile::hex(&self.digest_within(maximum_bytes)?);
             if digest != stem {
-                return Err(Error::Invalid(format!(
-                    "file digest {digest} does not match its name"
-                )));
+                return Err(Error::Rejected(
+                    ErrorCode::Digest,
+                    format!("file digest {digest} does not match its name"),
+                ));
             }
         }
         self.verify_contents(limits.maximum_decoded_bytes)
@@ -822,7 +868,10 @@ impl Pack {
             _ => false,
         };
         if !contiguous {
-            return Err(Error::Invalid("string IDs are not 1..=count".into()));
+            return Err(Error::Rejected(
+                ErrorCode::StringIds,
+                "string IDs are not 1..=count".into(),
+            ));
         }
         self.check_rows()?;
         self.check_string_encoding()?;
@@ -831,7 +880,7 @@ impl Pack {
         let (render_layers, ground_layers, _) = self.profile_layers()?;
         let mut targets = Targets {
             strings: u32::try_from(summary.strings)
-                .map_err(|_| Error::Invalid("too many strings".into()))?,
+                .map_err(|_| Error::Rejected(ErrorCode::StringIds, "too many strings".into()))?,
             render_layers,
             is_plane: self.connection.prepare(
                 "SELECT EXISTS (SELECT 1 FROM strings s JOIN planes p ON p.id = s.value WHERE s.id = ?1)",
@@ -870,9 +919,12 @@ impl Pack {
             // before the chunk is decompressed.
             decoded = decoded.saturating_add(recorded_size(&data));
             if decoded > maximum_decoded_bytes {
-                return Err(Error::Invalid(format!(
-                    "the chunks decode to more than {maximum_decoded_bytes} bytes, the verification limit"
-                )));
+                return Err(Error::Rejected(
+                    ErrorCode::DecodeBudget,
+                    format!(
+                        "the chunks decode to more than {maximum_decoded_bytes} bytes, the verification limit"
+                    ),
+                ));
             }
             // Objects are checked as they decode rather than kept, so memory
             // stays bounded by the record, not by the objects it holds.
@@ -891,7 +943,8 @@ impl Pack {
             }
             let chunk = decoded_chunk?;
             if chunk.chunk_size != chunk_size || chunk.ground.len() != ground_layers {
-                return Err(Error::Invalid(
+                return Err(Error::Rejected(
+                    ErrorCode::Chunk,
                     "a chunk disagrees with its plane or profile".into(),
                 ));
             }
@@ -899,7 +952,10 @@ impl Pack {
             checked += 1;
         }
         if checked != summary.chunks {
-            return Err(Error::Invalid("a chunk names an unknown plane".into()));
+            return Err(Error::Rejected(
+                ErrorCode::Chunk,
+                "a chunk names an unknown plane".into(),
+            ));
         }
         Ok(summary)
     }
@@ -913,10 +969,12 @@ impl Pack {
                     "SELECT count(*) FROM strings WHERE typeof(value) != 'text' OR octet_length(value) > {} OR instr(value, char(0)) != 0",
                     maximum_string_bytes()
                 ),
+                ErrorCode::String,
                 "a string is not text of at most 1 MiB without NUL",
             ),
             (
                 "SELECT count(*) FROM strings a JOIN strings b ON b.id = a.id + 1 WHERE b.value <= a.value".to_owned(),
+                ErrorCode::StringIds,
                 "string IDs are not in byte order of their values",
             ),
             (
@@ -924,6 +982,7 @@ impl Pack {
                     "SELECT count(*) FROM planes WHERE {} OR kind NOT IN ('shared', 'instanced', 'per_player') OR typeof(chunk_size) != 'integer' OR chunk_size != {CHUNK_SIZE}",
                     not_identifier("id")
                 ),
+                ErrorCode::Plane,
                 "a plane has an invalid ID or kind, or a chunk size other than 32",
             ),
             (
@@ -931,6 +990,7 @@ impl Pack {
                     "SELECT count(*) FROM zones z WHERE {} OR NOT EXISTS (SELECT 1 FROM planes p WHERE p.id = z.plane) OR (z.parent IS NOT NULL AND NOT EXISTS (SELECT 1 FROM zones q WHERE q.plane = z.plane AND q.id = z.parent))",
                     not_identifier("z.id")
                 ),
+                ErrorCode::Zone,
                 "a zone has an invalid ID or names an unknown plane or parent",
             ),
             (
@@ -943,6 +1003,7 @@ impl Pack {
                  UNION ALL SELECT c.plane, c.id FROM rooted r JOIN children c ON c.plane = r.plane AND c.parent = r.id) \
                  SELECT (SELECT count(*) FROM zones) - (SELECT count(*) FROM rooted)"
                     .to_owned(),
+                ErrorCode::Zone,
                 "zone parents form a cycle",
             ),
             (
@@ -950,6 +1011,7 @@ impl Pack {
                     "SELECT count(*) FROM anchors a WHERE {} OR NOT EXISTS (SELECT 1 FROM planes p WHERE p.id = a.plane) OR typeof(a.layer) != 'integer' OR a.layer NOT BETWEEN -2147483648 AND 2147483647 OR typeof(a.x) != 'integer' OR a.x NOT BETWEEN -{MAX_SAFE_INTEGER} AND {MAX_SAFE_INTEGER} OR typeof(a.y) != 'integer' OR a.y NOT BETWEEN -{MAX_SAFE_INTEGER} AND {MAX_SAFE_INTEGER}",
                     not_identifier("a.id")
                 ),
+                ErrorCode::Anchor,
                 "an anchor has an invalid ID, layer or position, or names an unknown plane",
             ),
             (
@@ -957,6 +1019,7 @@ impl Pack {
                     "SELECT count(*) FROM stairwells s WHERE {} OR NOT EXISTS (SELECT 1 FROM planes p WHERE p.id = s.plane)",
                     not_identifier("s.id")
                 ),
+                ErrorCode::Stairwell,
                 "a stairwell has an invalid ID or names an unknown plane",
             ),
             (
@@ -972,6 +1035,7 @@ impl Pack {
                     step_index("t.step"),
                     not_identifier("t.proto")
                 ),
+                ErrorCode::StairwellStep,
                 "a stairwell step names an unknown stairwell or proto, or has an invalid layer, position or index",
             ),
             (
@@ -983,6 +1047,7 @@ impl Pack {
                      OR c.cx NOT BETWEEN -({MAX_SAFE_INTEGER} / p.chunk_size) AND ({MAX_SAFE_INTEGER} - p.chunk_size + 1) / p.chunk_size \
                      OR c.cy NOT BETWEEN -({MAX_SAFE_INTEGER} / p.chunk_size) AND ({MAX_SAFE_INTEGER} - p.chunk_size + 1) / p.chunk_size"
                 ),
+                ErrorCode::Chunk,
                 "a chunk names an unknown plane or has an invalid layer or position",
             ),
             (
@@ -991,13 +1056,14 @@ impl Pack {
                     not_identifier("type"),
                     not_identifier("id")
                 ),
+                ErrorCode::Definition,
                 "a definition type or ID is not an identifier",
             ),
         ];
-        for (query, problem) in checks {
+        for (query, code, problem) in checks {
             let count: i64 = self.connection.query_row(&query, [], |row| row.get(0))?;
             if count != 0 {
-                return Err(Error::Invalid(problem.into()));
+                return Err(Error::Rejected(code, problem.into()));
             }
         }
         Ok(())
@@ -1013,7 +1079,12 @@ impl Pack {
         while let Some(row) = rows.next()? {
             match row.get_ref(0)? {
                 types::ValueRef::Text(bytes) if std::str::from_utf8(bytes).is_ok() => {}
-                _ => return Err(Error::Invalid("a string is not UTF-8 text".into())),
+                _ => {
+                    return Err(Error::Rejected(
+                        ErrorCode::String,
+                        "a string is not UTF-8 text".into(),
+                    ));
+                }
             }
         }
         Ok(())
@@ -1034,7 +1105,11 @@ impl Pack {
         while let Some(row) = rows.next()? {
             let (id, kind, chunk_size): (String, String, i64) =
                 (row.get(0)?, row.get(1)?, row.get(2)?);
-            let stored = stored_document(row.get(3)?, "a plane document")?;
+            let stored = stored_document(
+                utf8_column(row, 3, ErrorCode::Plane)?,
+                "a plane document",
+                ErrorCode::Plane,
+            )?;
             let default_zone_ok = match stored.root().get("default_zone") {
                 None => true,
                 Some(zone) => match zone.as_str() {
@@ -1048,9 +1123,10 @@ impl Pack {
                 || stored.root().get("chunk_size").and_then(Value::as_i64) != Some(chunk_size)
                 || !default_zone_ok
             {
-                return Err(Error::Invalid(format!(
-                    "the document of plane {id} disagrees with its row"
-                )));
+                return Err(Error::Rejected(
+                    ErrorCode::Plane,
+                    format!("the document of plane {id} disagrees with its row"),
+                ));
             }
         }
         let mut zones = self.connection.prepare(&format!(
@@ -1060,13 +1136,18 @@ impl Pack {
         while let Some(row) = rows.next()? {
             let (plane, id, parent): (String, String, Option<String>) =
                 (row.get(0)?, row.get(1)?, row.get(2)?);
-            let stored = stored_document(row.get(3)?, "a zone document")?;
+            let stored = stored_document(
+                utf8_column(row, 3, ErrorCode::Zone)?,
+                "a zone document",
+                ErrorCode::Zone,
+            )?;
             if text(&stored, "id") != Some(&id)
                 || stored.root().get("parent").map(Value::as_str) != parent.as_deref().map(Some)
             {
-                return Err(Error::Invalid(format!(
-                    "the document of zone {plane}/{id} disagrees with its row"
-                )));
+                return Err(Error::Rejected(
+                    ErrorCode::Zone,
+                    format!("the document of zone {plane}/{id} disagrees with its row"),
+                ));
             }
         }
         let mut definitions = self.connection.prepare(&format!(
@@ -1075,14 +1156,19 @@ impl Pack {
         let mut rows = definitions.query([limit])?;
         while let Some(row) = rows.next()? {
             let (kind, id): (String, String) = (row.get(0)?, row.get(1)?);
-            let stored = stored_document(row.get(2)?, "a definition document")?;
+            let stored = stored_document(
+                utf8_column(row, 2, ErrorCode::Definition)?,
+                "a definition document",
+                ErrorCode::Definition,
+            )?;
             if text(&stored, "format") != Some("tilewright.def/1")
                 || text(&stored, "type") != Some(&kind)
                 || text(&stored, "id") != Some(&id)
             {
-                return Err(Error::Invalid(format!(
-                    "the document of definition {kind}/{id} disagrees with its row"
-                )));
+                return Err(Error::Rejected(
+                    ErrorCode::Definition,
+                    format!("the document of definition {kind}/{id} disagrees with its row"),
+                ));
             }
         }
         Ok(())
@@ -1116,21 +1202,28 @@ impl Pack {
             }
             count += 1;
             if count > limits.max_array_items {
-                return Err(Error::Invalid(format!(
-                    "plane {plane} has more stairwells than a source document holds"
-                )));
+                return Err(Error::Rejected(
+                    ErrorCode::Stairwell,
+                    format!("plane {plane} has more stairwells than a source document holds"),
+                ));
             }
-            let stored = stored_stairwell(&stored_document(row.get(2)?, "a stairwell document")?)?;
+            let stored = stored_stairwell(&stored_document(
+                utf8_column(row, 2, ErrorCode::Stairwell)?,
+                "a stairwell document",
+                ErrorCode::Stairwell,
+            )?)?;
             steps = steps.saturating_add(stored.steps.len());
             if steps > limits.max_values {
-                return Err(Error::Invalid(format!(
-                    "plane {plane} has more stairwell steps than a source document holds"
-                )));
+                return Err(Error::Rejected(
+                    ErrorCode::Stairwell,
+                    format!("plane {plane} has more stairwell steps than a source document holds"),
+                ));
             }
             let disagrees = || {
-                Error::Invalid(format!(
-                    "the document of stairwell {plane}/{id} disagrees with its rows"
-                ))
+                Error::Rejected(
+                    ErrorCode::Stairwell,
+                    format!("the document of stairwell {plane}/{id} disagrees with its rows"),
+                )
             };
             if stored.id != id {
                 return Err(disagrees());
@@ -1154,7 +1247,8 @@ impl Pack {
             self.connection
                 .query_row("SELECT count(*) FROM stairwell_steps", [], |row| row.get(0))?;
         if u64::try_from(rows).ok() != Some(listed) {
-            return Err(Error::Invalid(
+            return Err(Error::Rejected(
+                ErrorCode::StairwellStep,
                 "stairwell_steps holds a step that no stairwell lists".into(),
             ));
         }
@@ -1164,7 +1258,11 @@ impl Pack {
     /// Render and ground layer counts from the stored profile, which must be
     /// canonical and agree with `profile_id` and `profile_version`.
     fn profile_layers(&self) -> Result<(usize, usize, Option<u32>), Error> {
-        let profile = stored_document(self.meta("profile")?, "the stored profile")?;
+        let profile = stored_document(
+            self.meta("profile")?,
+            "the stored profile",
+            ErrorCode::Profile,
+        )?;
         // The identity must be one a source profile can have: an identifier
         // and a version of at most 64 characters.
         let identity_ok = text(&profile, "id").is_some_and(is_identifier)
@@ -1174,12 +1272,14 @@ impl Pack {
             || text(&profile, "id") != self.meta("profile_id")?.as_deref()
             || text(&profile, "version") != self.meta("profile_version")?.as_deref()
         {
-            return Err(Error::Invalid(
+            return Err(Error::Rejected(
+                ErrorCode::Profile,
                 "the stored profile disagrees with profile_id or profile_version".into(),
             ));
         }
         if !projection_ok(&profile) {
-            return Err(Error::Invalid(
+            return Err(Error::Rejected(
+                ErrorCode::Profile,
                 "the stored profile's projection is not one a source profile can have".into(),
             ));
         }
@@ -1199,11 +1299,14 @@ impl Pack {
                     unique.len() == names.len() && names.iter().all(|name| is_identifier(name))
                 })
                 .ok_or_else(|| {
-                    Error::Invalid(format!(
-                        "stored profile does not list {}..={} unique {key}",
-                        range.start(),
-                        range.end()
-                    ))
+                    Error::Rejected(
+                        ErrorCode::Profile,
+                        format!(
+                            "stored profile does not list {}..={} unique {key}",
+                            range.start(),
+                            range.end()
+                        ),
+                    )
                 })
         };
         let render = layers("render_layers", 1..=usize::from(u16::MAX - 1))?;
@@ -1213,7 +1316,8 @@ impl Pack {
             .iter()
             .any(|name| !known.contains(name) || ["height", "zone"].contains(name))
         {
-            return Err(Error::Invalid(
+            return Err(Error::Rejected(
+                ErrorCode::Profile,
                 "a stored ground layer is not a render layer other than height or zone".into(),
             ));
         }
@@ -1232,11 +1336,16 @@ fn check_identity(connection: &Connection) -> Result<(), Error> {
         bounded_text("sql"),
         SCHEMA_TABLES.len() + 1
     ))?;
-    let found: Vec<(Option<String>, Option<String>, Option<String>)> = schema
-        .query_map([bound(MAXIMUM_SCHEMA_BYTES)], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })?
-        .collect::<Result<_, _>>()?;
+    let mut found: Vec<(Option<String>, Option<String>, Option<String>)> = Vec::new();
+    let mut rows = schema.query([bound(MAXIMUM_SCHEMA_BYTES)])?;
+    while let Some(row) = rows.next()? {
+        found.push((
+            utf8_column(row, 0, ErrorCode::Schema)?,
+            utf8_column(row, 1, ErrorCode::Schema)?,
+            utf8_column(row, 2, ErrorCode::Schema)?,
+        ));
+    }
+    drop(rows);
     drop(schema);
     let mut expected: Vec<(Option<String>, Option<String>, Option<String>)> = SCHEMA_TABLES
         .iter()
@@ -1250,7 +1359,8 @@ fn check_identity(connection: &Connection) -> Result<(), Error> {
         .collect();
     expected.sort_by(|left, right| left.1.cmp(&right.1));
     if found != expected {
-        return Err(Error::Invalid(
+        return Err(Error::Rejected(
+            ErrorCode::Schema,
             "the pack schema does not match this format".into(),
         ));
     }
@@ -1258,9 +1368,12 @@ fn check_identity(connection: &Connection) -> Result<(), Error> {
     let version: i32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     let page_size: i64 = connection.query_row("PRAGMA page_size", [], |row| row.get(0))?;
     if application != APPLICATION_ID || version != USER_VERSION || page_size != PAGE_SIZE {
-        return Err(Error::Invalid(format!(
-            "not a Tilewright pack of user_version {USER_VERSION} with {PAGE_SIZE}-byte pages"
-        )));
+        return Err(Error::Rejected(
+            ErrorCode::Identity,
+            format!(
+                "not a Tilewright pack of user_version {USER_VERSION} with {PAGE_SIZE}-byte pages"
+            ),
+        ));
     }
     // `VACUUM` leaves a compiled pack no free pages. Free pages hold no
     // data, so a sparse file could make them holes that cost nothing to
@@ -1268,9 +1381,10 @@ fn check_identity(connection: &Connection) -> Result<(), Error> {
     // page as table data before the file is hashed.
     let free: i64 = connection.query_row("PRAGMA freelist_count", [], |row| row.get(0))?;
     if free != 0 {
-        return Err(Error::Invalid(format!(
-            "the pack has {free} free pages; a pack has none"
-        )));
+        return Err(Error::Rejected(
+            ErrorCode::FreePages,
+            format!("the pack has {free} free pages; a pack has none"),
+        ));
     }
     let meta = read_meta(connection)?;
     let value = |key: &str| {
@@ -1288,9 +1402,10 @@ fn check_identity(connection: &Connection) -> Result<(), Error> {
         || value("chunk_encoding") != Some(CHUNK_ENCODING)
         || !digest_ok
     {
-        return Err(Error::Invalid(format!(
-            "the pack's metadata is not that of {FORMAT}"
-        )));
+        return Err(Error::Rejected(
+            ErrorCode::Meta,
+            format!("the pack's metadata is not that of {FORMAT}"),
+        ));
     }
     Ok(())
 }
@@ -1314,14 +1429,19 @@ fn read_meta(connection: &Connection) -> Result<Vec<(String, String)>, Error> {
     )?;
     let expected = i64::try_from(META_KEYS.len()).unwrap_or(i64::MAX);
     if total != expected || known != expected || oversized != 0 {
-        return Err(Error::Invalid(format!(
-            "the pack's metadata is not that of {FORMAT}"
-        )));
+        return Err(Error::Rejected(
+            ErrorCode::Meta,
+            format!("the pack's metadata is not that of {FORMAT}"),
+        ));
     }
     let mut statement = connection.prepare("SELECT key, value FROM meta ORDER BY key")?;
-    let meta = statement
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-        .collect::<Result<_, _>>()?;
+    let mut rows = statement.query([])?;
+    let mut meta = Vec::with_capacity(META_KEYS.len());
+    while let Some(row) = rows.next()? {
+        // Every value was checked to be text above.
+        let value = utf8_column(row, 1, ErrorCode::Meta)?.unwrap_or_default();
+        meta.push((row.get(0)?, value));
+    }
     Ok(meta)
 }
 
@@ -1444,7 +1564,8 @@ impl Targets<'_> {
                 })?;
             }
             if !ok {
-                return Err(Error::Invalid(
+                return Err(Error::Rejected(
+                    ErrorCode::Reference,
                     "a palette entry is unused or not a proto definition or zone of its plane"
                         .into(),
                 ));
@@ -1509,7 +1630,8 @@ impl Targets<'_> {
         if ok {
             Ok(())
         } else {
-            Err(Error::Invalid(
+            Err(Error::Rejected(
+                ErrorCode::Reference,
                 "an object references a missing string, layer, plane or anchor, repeats or misnames a field, or has a portal position or integer field out of range".into(),
             ))
         }

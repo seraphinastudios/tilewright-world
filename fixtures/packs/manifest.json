@@ -1,0 +1,1669 @@
+{
+  "format": "tilewright.pack-conformance/1",
+  "codes": [
+    "pack.io",
+    "pack.sqlite",
+    "pack.not_a_file",
+    "pack.too_large",
+    "pack.file_length",
+    "pack.schema",
+    "pack.identity",
+    "pack.free_pages",
+    "pack.meta",
+    "pack.profile",
+    "pack.string",
+    "pack.string_ids",
+    "pack.plane",
+    "pack.zone",
+    "pack.anchor",
+    "pack.stairwell",
+    "pack.stairwell_step",
+    "pack.definition",
+    "pack.chunk",
+    "pack.chunk_encoding",
+    "pack.chunk_data",
+    "pack.chunk_record",
+    "pack.reference",
+    "pack.integrity",
+    "pack.digest",
+    "pack.decode_budget"
+  ],
+  "valid": [
+    {
+      "file": "ebb9690c844a6ff564da78cb86a363c05adf68f615ec6dbdc50b721025192fab.twpack",
+      "summary": {
+        "strings": 22,
+        "planes": 2,
+        "zones": 3,
+        "anchors": 2,
+        "stairwells": 3,
+        "chunks": 5,
+        "definitions": 12,
+        "objects": 11
+      },
+      "meta": {
+        "chunk_encoding": "twc1+zstd",
+        "compiler": "tilewright-pack 0.1.0",
+        "format": "tilewright.pack/1",
+        "profile": "{\"format\":\"tilewright.profile/1\",\"id\":\"example\",\"version\":\"1.0.0\",\"projection\":{\"kind\":\"isometric\",\"tile_width\":48,\"tile_height\":24},\"render_layers\":[\"floor\",\"mask\",\"item\",\"wall\",\"living\",\"effect\"],\"ground_layers\":[\"floor\",\"mask\"],\"definition_types\":{\"proto\":{\"schema\":\"schema/proto.jsonc\"},\"loot\":{\"schema\":\"schema/loot.jsonc\"},\"recipe\":{\"schema\":\"schema/recipe.jsonc\"}},\"object_fields\":\"schema/object-fields.jsonc\",\"zone_properties\":\"schema/zone-properties.jsonc\",\"layer_height\":50,\"movement\":{\"max_step\":12,\"fall_unit\":50}}",
+        "profile_id": "example",
+        "profile_version": "1.0.0",
+        "source_digest": "6b8a3606b4975cf574fafd9f5513e8b0f72044b80690df772e51e6d301fa333b"
+      },
+      "layer_height": 50,
+      "strings": [
+        "Old wall",
+        "cave.entrance",
+        "cave_floor",
+        "chest",
+        "chest_common",
+        "coin",
+        "count",
+        "edge_n",
+        "grass",
+        "island",
+        "locked",
+        "loot",
+        "name",
+        "sand",
+        "stairs_down",
+        "stairs_up",
+        "tags",
+        "tree",
+        "vault",
+        "village",
+        "village.well",
+        "wall"
+      ],
+      "planes": [
+        {
+          "id": "overworld",
+          "kind": "shared",
+          "chunk_size": 32,
+          "document": "{\"format\":\"tilewright.plane/1\",\"id\":\"overworld\",\"title\":\"Overworld\",\"kind\":\"shared\",\"chunk_size\":32,\"default_zone\":\"wilderness\"}"
+        },
+        {
+          "id": "vault",
+          "kind": "instanced",
+          "chunk_size": 32,
+          "document": "{\"format\":\"tilewright.plane/1\",\"id\":\"vault\",\"kind\":\"instanced\",\"chunk_size\":32}"
+        }
+      ],
+      "zones": [
+        {
+          "plane": "overworld",
+          "id": "island",
+          "parent": "wilderness",
+          "document": "{\"id\":\"island\",\"parent\":\"wilderness\",\"name\":\"Green Island\",\"properties\":{\"music\":\"calm\"}}"
+        },
+        {
+          "plane": "overworld",
+          "id": "village",
+          "parent": "island",
+          "document": "{\"id\":\"village\",\"parent\":\"island\",\"name\":\"Little Village\",\"properties\":{\"safe\":true}}"
+        },
+        {
+          "plane": "overworld",
+          "id": "wilderness",
+          "parent": null,
+          "document": "{\"id\":\"wilderness\",\"name\":\"Wilderness\"}"
+        }
+      ],
+      "anchors": [
+        {"plane": "overworld", "id": "cave.entrance", "layer": -1, "x": 4, "y": 4},
+        {"plane": "overworld", "id": "village.well", "layer": 0, "x": 10, "y": 12}
+      ],
+      "stairwells": [
+        {
+          "plane": "overworld",
+          "id": "cave.chute",
+          "document": "{\"id\":\"cave.chute\",\"steps\":[{\"layer\":0,\"at\":[28,28],\"proto\":\"stairs_down\"},{\"layer\":-1,\"at\":[28,28],\"proto\":\"cave_floor\"}],\"direction\":\"down\",\"custom\":{\"example.org/notes\":{\"reviewed\":true}}}"
+        },
+        {
+          "plane": "overworld",
+          "id": "cliff.path",
+          "document": "{\"id\":\"cliff.path\",\"steps\":[{\"layer\":1,\"at\":[24,8],\"proto\":\"stairs_down\"},{\"layer\":0,\"at\":[25,8],\"proto\":\"stairs_down\"},{\"layer\":-1,\"at\":[26,9],\"proto\":\"stairs_up\"}],\"hidden_on_other_layers\":false}"
+        },
+        {
+          "plane": "overworld",
+          "id": "tower.stairs",
+          "document": "{\"id\":\"tower.stairs\",\"steps\":[{\"layer\":-1,\"at\":[20,20],\"proto\":\"stairs_up\"},{\"layer\":0,\"at\":[20,20],\"proto\":\"stairs_up\"},{\"layer\":1,\"at\":[20,20],\"proto\":\"stairs_down\"}]}"
+        }
+      ],
+      "steps": [
+        {
+          "plane": "overworld",
+          "layer": -1,
+          "x": 20,
+          "y": 20,
+          "stairwell": "tower.stairs",
+          "step": 0,
+          "proto": "stairs_up"
+        },
+        {
+          "plane": "overworld",
+          "layer": -1,
+          "x": 26,
+          "y": 9,
+          "stairwell": "cliff.path",
+          "step": 2,
+          "proto": "stairs_up"
+        },
+        {
+          "plane": "overworld",
+          "layer": -1,
+          "x": 28,
+          "y": 28,
+          "stairwell": "cave.chute",
+          "step": 1,
+          "proto": "cave_floor"
+        },
+        {
+          "plane": "overworld",
+          "layer": 0,
+          "x": 20,
+          "y": 20,
+          "stairwell": "tower.stairs",
+          "step": 1,
+          "proto": "stairs_up"
+        },
+        {
+          "plane": "overworld",
+          "layer": 0,
+          "x": 25,
+          "y": 8,
+          "stairwell": "cliff.path",
+          "step": 1,
+          "proto": "stairs_down"
+        },
+        {
+          "plane": "overworld",
+          "layer": 0,
+          "x": 28,
+          "y": 28,
+          "stairwell": "cave.chute",
+          "step": 0,
+          "proto": "stairs_down"
+        },
+        {
+          "plane": "overworld",
+          "layer": 1,
+          "x": 20,
+          "y": 20,
+          "stairwell": "tower.stairs",
+          "step": 2,
+          "proto": "stairs_down"
+        },
+        {
+          "plane": "overworld",
+          "layer": 1,
+          "x": 24,
+          "y": 8,
+          "stairwell": "cliff.path",
+          "step": 0,
+          "proto": "stairs_down"
+        }
+      ],
+      "definitions": [
+        {
+          "type": "loot",
+          "id": "chest_common",
+          "document": "{\"format\":\"tilewright.def/1\",\"type\":\"loot\",\"id\":\"chest_common\",\"fields\":{\"entries\":[{\"item\":\"coin\",\"weight\":9,\"count\":{\"min\":1,\"max\":5}},{\"item\":\"chest\",\"weight\":1}],\"chance\":0.5}}"
+        },
+        {
+          "type": "proto",
+          "id": "cave_floor",
+          "document": "{\"format\":\"tilewright.def/1\",\"type\":\"proto\",\"id\":\"cave_floor\",\"fields\":{\"face\":\"cave.png\",\"layer\":\"floor\"}}"
+        },
+        {
+          "type": "proto",
+          "id": "chest",
+          "document": "{\"format\":\"tilewright.def/1\",\"type\":\"proto\",\"id\":\"chest\",\"fields\":{\"face\":\"chest.png\",\"layer\":\"item\",\"weight\":12.5}}"
+        },
+        {
+          "type": "proto",
+          "id": "coin",
+          "document": "{\"format\":\"tilewright.def/1\",\"type\":\"proto\",\"id\":\"coin\",\"fields\":{\"face\":\"coin.png\",\"layer\":\"item\",\"weight\":0.01}}"
+        },
+        {
+          "type": "proto",
+          "id": "edge_n",
+          "document": "{\"format\":\"tilewright.def/1\",\"type\":\"proto\",\"id\":\"edge_n\",\"fields\":{\"face\":\"edge_n.png\",\"layer\":\"mask\"}}"
+        },
+        {
+          "type": "proto",
+          "id": "grass",
+          "document": "{\"format\":\"tilewright.def/1\",\"type\":\"proto\",\"id\":\"grass\",\"fields\":{\"face\":\"grass.png\",\"layer\":\"floor\"}}"
+        },
+        {
+          "type": "proto",
+          "id": "sand",
+          "document": "{\"format\":\"tilewright.def/1\",\"type\":\"proto\",\"id\":\"sand\",\"fields\":{\"face\":\"sand.png\",\"layer\":\"floor\"}}"
+        },
+        {
+          "type": "proto",
+          "id": "stairs_down",
+          "document": "{\"format\":\"tilewright.def/1\",\"type\":\"proto\",\"id\":\"stairs_down\",\"fields\":{\"face\":\"stairs_down.png\",\"layer\":\"item\"}}"
+        },
+        {
+          "type": "proto",
+          "id": "stairs_up",
+          "document": "{\"format\":\"tilewright.def/1\",\"type\":\"proto\",\"id\":\"stairs_up\",\"fields\":{\"face\":\"stairs_up.png\",\"layer\":\"item\"}}"
+        },
+        {
+          "type": "proto",
+          "id": "tree",
+          "document": "{\"format\":\"tilewright.def/1\",\"type\":\"proto\",\"id\":\"tree\",\"fields\":{\"face\":\"tree.png\",\"layer\":\"item\",\"blocks_view\":true}}"
+        },
+        {
+          "type": "proto",
+          "id": "wall",
+          "document": "{\"format\":\"tilewright.def/1\",\"type\":\"proto\",\"id\":\"wall\",\"fields\":{\"face\":\"wall.png\",\"layer\":\"wall\",\"blocks_view\":true,\"footprint\":[1,1]}}"
+        },
+        {
+          "type": "recipe",
+          "id": "chest",
+          "document": "{\"format\":\"tilewright.def/1\",\"type\":\"recipe\",\"id\":\"chest\",\"fields\":{\"output\":\"chest\",\"ingredients\":[{\"item\":\"wall\",\"count\":2},{\"item\":\"coin\",\"count\":5}]}}"
+        }
+      ],
+      "chunks": [
+        {
+          "plane": "overworld",
+          "layer": -1,
+          "cx": 0,
+          "cy": 0,
+          "palette": ["cave_floor"],
+          "objects": 1,
+          "render_sha256": "6ab32262e726a55b676a6e3113a3e9c9cfaa3d51c9db416cb7bc2ae9091addba"
+        },
+        {
+          "plane": "overworld",
+          "layer": 0,
+          "cx": -1,
+          "cy": 0,
+          "palette": ["grass"],
+          "objects": 0,
+          "render_sha256": "c91ea6acd348193104f9388b0bc4d5d87323c48eb2e85367cd5e68dfa4becb36"
+        },
+        {
+          "plane": "overworld",
+          "layer": 0,
+          "cx": 0,
+          "cy": 0,
+          "palette": ["edge_n", "grass", "island", "sand", "village"],
+          "objects": 9,
+          "render_sha256": "f2522f24cff43366e00c06b027eabf887d8ca15a40140a807459012465b3197a"
+        },
+        {
+          "plane": "overworld",
+          "layer": 1,
+          "cx": 0,
+          "cy": 0,
+          "palette": ["cave_floor"],
+          "objects": 0,
+          "render_sha256": "8e8ad6060d31239fa6a1ab1853ecc7f343c5fbc8d62b7e3cbc6d623490d5741b"
+        },
+        {
+          "plane": "vault",
+          "layer": 0,
+          "cx": 0,
+          "cy": 0,
+          "palette": ["cave_floor"],
+          "objects": 1,
+          "render_sha256": "09f8ececfe499cb2efbfe6c0c8c13859f099490fdca6b66be750be96918fa7f2"
+        }
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "file": "open-not-a-database.twpack",
+      "rule": "a file of one page that is not an SQLite database",
+      "open": "pack.sqlite"
+    },
+    {
+      "file": "open-empty.twpack",
+      "rule": "an empty file, which SQLite opens as a database without tables",
+      "open": "pack.schema"
+    },
+    {
+      "file": "open-schema-view.twpack",
+      "rule": "the schema has a view beyond the format's tables",
+      "open": "pack.schema"
+    },
+    {
+      "file": "open-schema-index.twpack",
+      "rule": "the schema has an index beyond SQLite's automatic ones",
+      "open": "pack.schema"
+    },
+    {
+      "file": "open-schema-column.twpack",
+      "rule": "a table has a column the format does not",
+      "open": "pack.schema"
+    },
+    {
+      "file": "open-schema-many-tables.twpack",
+      "rule": "the schema has more tables than the format",
+      "open": "pack.schema"
+    },
+    {
+      "file": "open-schema-long.twpack",
+      "rule": "a table's SQL is longer than any the format has",
+      "open": "pack.schema"
+    },
+    {
+      "file": "open-application-id.twpack",
+      "rule": "the application ID is not TWP1",
+      "open": "pack.identity"
+    },
+    {"file": "open-user-version.twpack", "rule": "the user version is not 1", "open": "pack.identity"},
+    {"file": "open-page-size.twpack", "rule": "the pages are 8192 bytes", "open": "pack.identity"},
+    {
+      "file": "open-free-pages.twpack",
+      "rule": "pages freed by a dropped table are kept as free pages",
+      "open": "pack.free_pages"
+    },
+    {
+      "file": "verify-hidden-free-pages.twpack",
+      "rule": "free pages that the header no longer lists, which the integrity check finds unused",
+      "verify": "pack.integrity"
+    },
+    {"file": "open-meta-missing-key.twpack", "rule": "meta lacks the compiler key", "open": "pack.meta"},
+    {
+      "file": "open-meta-extra-key.twpack",
+      "rule": "meta has a key beyond the format's",
+      "open": "pack.meta"
+    },
+    {"file": "open-meta-format.twpack", "rule": "meta names another pack format", "open": "pack.meta"},
+    {
+      "file": "open-meta-encoding.twpack",
+      "rule": "meta names another chunk encoding",
+      "open": "pack.meta"
+    },
+    {
+      "file": "open-meta-digest.twpack",
+      "rule": "the source digest is not lowercase hex",
+      "open": "pack.meta"
+    },
+    {"file": "open-meta-blob.twpack", "rule": "a meta value is a blob", "open": "pack.meta"},
+    {
+      "file": "open-meta-long.twpack",
+      "rule": "a meta value other than profile is longer than 1 KiB",
+      "open": "pack.meta"
+    },
+    {
+      "file": "open-meta-utf8.twpack",
+      "rule": "a meta value is text that is not UTF-8",
+      "open": "pack.meta"
+    },
+    {
+      "file": "open-trailing-byte.twpack",
+      "rule": "one byte follows the last page",
+      "open": "pack.file_length"
+    },
+    {
+      "file": "open-trailing-page.twpack",
+      "rule": "a page of zeros, as a sparse hole reads, follows the last page",
+      "open": "pack.file_length"
+    },
+    {
+      "file": "open-truncated.twpack",
+      "rule": "the file ends one page before the database does, inside a table opening reads",
+      "open": "pack.sqlite"
+    },
+    {
+      "file": "open-too-large.twpack",
+      "rule": "the file is one byte longer than the pack size limit",
+      "open_limits": {"max_pack_bytes": 45055},
+      "open": "pack.too_large"
+    },
+    {
+      "file": "verify-too-large.twpack",
+      "rule": "verification's pack size limit is one byte less than the file",
+      "verify_limits": {"max_pack_bytes": 45055},
+      "verify": "pack.too_large"
+    },
+    {
+      "file": "verify-decode-budget.twpack",
+      "rule": "the chunks decode to more than the verification budget",
+      "verify_limits": {"max_decoded_bytes": 1},
+      "verify": "pack.decode_budget"
+    },
+    {
+      "file": "0000000000000000000000000000000000000000000000000000000000000000.twpack",
+      "rule": "the file is named by a digest that is not its own",
+      "verify": "pack.digest"
+    },
+    {
+      "file": "verify-integrity.twpack",
+      "rule": "a key in the strings value index differs from its row",
+      "reads": [
+        {"op": "string", "id": 3, "error": null}
+      ],
+      "verify": "pack.integrity"
+    },
+    {
+      "file": "string-blob.twpack",
+      "rule": "a string is a blob",
+      "reads": [
+        {"op": "string", "id": 1, "error": "pack.string"}
+      ],
+      "verify": "pack.string"
+    },
+    {
+      "file": "string-long.twpack",
+      "rule": "a string is longer than 1 MiB",
+      "reads": [
+        {"op": "string", "id": 22, "error": "pack.string"}
+      ],
+      "verify": "pack.string"
+    },
+    {
+      "file": "string-utf8.twpack",
+      "rule": "a string is text that is not UTF-8",
+      "reads": [
+        {"op": "string", "id": 22, "error": "pack.string"}
+      ],
+      "verify": "pack.string"
+    },
+    {
+      "file": "string-nul.twpack",
+      "rule": "a string holds NUL, which only verification checks",
+      "reads": [
+        {"op": "string", "id": 22, "error": null}
+      ],
+      "verify": "pack.string"
+    },
+    {
+      "file": "string-ids-order.twpack",
+      "rule": "the last string sorts before the one before it",
+      "verify": "pack.string_ids"
+    },
+    {"file": "string-ids-gap.twpack", "rule": "string IDs skip a number", "verify": "pack.string_ids"},
+    {
+      "file": "plane-kind.twpack",
+      "rule": "a plane's kind is not one the format has",
+      "reads": [
+        {"op": "plane", "id": "vault", "error": "pack.plane"}
+      ],
+      "verify": "pack.plane"
+    },
+    {
+      "file": "plane-id.twpack",
+      "rule": "a plane's ID is not an identifier",
+      "reads": [
+        {"op": "plane", "id": "Vault", "error": "pack.plane"}
+      ],
+      "verify": "pack.plane"
+    },
+    {
+      "file": "plane-chunk-size.twpack",
+      "rule": "a plane's chunks are not 32 tiles square",
+      "reads": [
+        {"op": "plane", "id": "vault", "error": "pack.plane"}
+      ],
+      "verify": "pack.plane"
+    },
+    {
+      "file": "zone-parent.twpack",
+      "rule": "a zone's parent is not a zone of its plane",
+      "reads": [
+        {"op": "zone", "plane": "overworld", "id": "village", "error": null}
+      ],
+      "verify": "pack.zone"
+    },
+    {
+      "file": "zone-id.twpack",
+      "rule": "a zone's ID is not an identifier",
+      "reads": [
+        {"op": "zone", "plane": "overworld", "id": "a b", "error": "pack.zone"}
+      ],
+      "verify": "pack.zone"
+    },
+    {
+      "file": "zone-cycle.twpack",
+      "rule": "zone parents form a cycle",
+      "reads": [
+        {"op": "zone", "plane": "overworld", "id": "island", "error": null}
+      ],
+      "verify": "pack.zone"
+    },
+    {
+      "file": "zone-plane.twpack",
+      "rule": "a zone names a plane the pack does not have",
+      "reads": [
+        {"op": "zone", "plane": "attic", "id": "village", "error": null}
+      ],
+      "verify": "pack.zone"
+    },
+    {
+      "file": "anchor-plane.twpack",
+      "rule": "an anchor names a plane the pack does not have",
+      "reads": [
+        {"op": "anchor", "plane": "attic", "id": "village.well", "error": null}
+      ],
+      "verify": "pack.anchor"
+    },
+    {
+      "file": "anchor-x.twpack",
+      "rule": "an anchor's x is text",
+      "reads": [
+        {"op": "anchor", "plane": "overworld", "id": "village.well", "error": "pack.anchor"}
+      ],
+      "verify": "pack.anchor"
+    },
+    {
+      "file": "anchor-range.twpack",
+      "rule": "an anchor's y is past the source format's integer range",
+      "reads": [
+        {"op": "anchor", "plane": "overworld", "id": "village.well", "error": "pack.anchor"}
+      ],
+      "verify": "pack.anchor"
+    },
+    {
+      "file": "anchor-layer.twpack",
+      "rule": "an anchor's layer is past 32 bits",
+      "reads": [
+        {"op": "anchor", "plane": "overworld", "id": "village.well", "error": "pack.anchor"}
+      ],
+      "verify": "pack.anchor"
+    },
+    {
+      "file": "anchor-id.twpack",
+      "rule": "an anchor's ID is not an identifier",
+      "reads": [
+        {"op": "anchor", "plane": "overworld", "id": "Village.Well", "error": "pack.anchor"}
+      ],
+      "verify": "pack.anchor"
+    },
+    {
+      "file": "anchor-id-nul.twpack",
+      "rule": "an anchor's ID holds NUL",
+      "reads": [
+        {"op": "anchor", "plane": "overworld", "id": "cave.entrance", "error": null}
+      ],
+      "verify": "pack.anchor"
+    },
+    {
+      "file": "definition-id.twpack",
+      "rule": "a definition's ID is not an identifier",
+      "reads": [
+        {"op": "definition", "type": "loot", "id": "Chest_Common", "error": "pack.definition"}
+      ],
+      "verify": "pack.definition"
+    },
+    {
+      "file": "chunk-layer.twpack",
+      "rule": "a chunk's layer is text",
+      "reads": [
+        {"op": "chunk", "plane": "vault", "layer": 0, "cx": 0, "cy": 0, "error": null}
+      ],
+      "verify": "pack.chunk"
+    },
+    {
+      "file": "chunk-position.twpack",
+      "rule": "a chunk's position puts tiles past the source format's integer range",
+      "reads": [
+        {"op": "chunk", "plane": "vault", "layer": 0, "cx": 281474976710656, "cy": 0, "error": null}
+      ],
+      "verify": "pack.chunk"
+    },
+    {
+      "file": "chunk-plane.twpack",
+      "rule": "a chunk names a plane the pack does not have",
+      "reads": [
+        {"op": "chunk", "plane": "attic", "layer": 0, "cx": 0, "cy": 0, "error": null}
+      ],
+      "verify": "pack.chunk"
+    },
+    {
+      "file": "stairwell-plane.twpack",
+      "rule": "a stairwell names a plane the pack does not have",
+      "reads": [
+        {"op": "stairwell", "plane": "attic", "id": "cave.chute", "error": null}
+      ],
+      "verify": "pack.stairwell"
+    },
+    {
+      "file": "stairwell-row-id.twpack",
+      "rule": "a stairwell's row ID is not its document's",
+      "reads": [
+        {"op": "stairwell", "plane": "overworld", "id": "tower.steps", "error": "pack.stairwell"}
+      ],
+      "verify": "pack.stairwell"
+    },
+    {
+      "file": "stairwell-step-proto-row.twpack",
+      "rule": "a step's row names another prototype than its stairwell's document",
+      "reads": [
+        {"op": "stairwell_step", "plane": "overworld", "layer": 0, "x": 20, "y": 20, "error": null}
+      ],
+      "verify": "pack.stairwell"
+    },
+    {
+      "file": "stairwell-step-missing.twpack",
+      "rule": "a step of a stairwell's document has no row",
+      "reads": [
+        {"op": "stairwell", "plane": "overworld", "id": "tower.stairs", "error": null}
+      ],
+      "verify": "pack.stairwell"
+    },
+    {
+      "file": "stairwell-step-extra.twpack",
+      "rule": "stairwell_steps holds a row no stairwell lists",
+      "reads": [
+        {"op": "stairwell_step", "plane": "overworld", "layer": 5, "x": 20, "y": 20, "error": null}
+      ],
+      "verify": "pack.stairwell_step"
+    },
+    {
+      "file": "stairwell-step-proto.twpack",
+      "rule": "a step's prototype is not an identifier",
+      "reads": [
+        {
+          "op": "stairwell_step",
+          "plane": "overworld",
+          "layer": 0,
+          "x": 20,
+          "y": 20,
+          "error": "pack.stairwell_step"
+        }
+      ],
+      "verify": "pack.stairwell_step"
+    },
+    {
+      "file": "stairwell-step-index.twpack",
+      "rule": "a step's index is negative",
+      "reads": [
+        {
+          "op": "stairwell_step",
+          "plane": "overworld",
+          "layer": 0,
+          "x": 20,
+          "y": 20,
+          "error": "pack.stairwell_step"
+        }
+      ],
+      "verify": "pack.stairwell_step"
+    },
+    {
+      "file": "stairwell-step-stairwell.twpack",
+      "rule": "a step names a stairwell its plane does not have",
+      "reads": [
+        {"op": "stairwell_step", "plane": "overworld", "layer": 0, "x": 20, "y": 20, "error": null}
+      ],
+      "verify": "pack.stairwell_step"
+    },
+    {
+      "file": "stairwell-step-unknown-proto.twpack",
+      "rule": "a step's prototype is not a proto definition",
+      "reads": [
+        {"op": "stairwell", "plane": "overworld", "id": "tower.stairs", "error": null}
+      ],
+      "verify": "pack.stairwell_step"
+    },
+    {
+      "file": "plane-document-json.twpack",
+      "rule": "a plane document is not JSON",
+      "reads": [
+        {"op": "plane", "id": "vault", "error": "pack.plane"}
+      ],
+      "verify": "pack.plane"
+    },
+    {
+      "file": "plane-document-kind.twpack",
+      "rule": "a plane document's kind is not its row's",
+      "reads": [
+        {"op": "plane", "id": "vault", "error": "pack.plane"}
+      ],
+      "verify": "pack.plane"
+    },
+    {
+      "file": "plane-document-space.twpack",
+      "rule": "a plane document is not canonical: it has a space",
+      "reads": [
+        {"op": "plane", "id": "vault", "error": "pack.plane"}
+      ],
+      "verify": "pack.plane"
+    },
+    {
+      "file": "plane-default-zone.twpack",
+      "rule": "a plane's default zone is not one of its zones",
+      "reads": [
+        {"op": "plane", "id": "overworld", "error": null}
+      ],
+      "verify": "pack.plane"
+    },
+    {
+      "file": "plane-document-nul.twpack",
+      "rule": "a plane document holds NUL after its JSON",
+      "reads": [
+        {"op": "plane", "id": "vault", "error": "pack.plane"}
+      ],
+      "verify": "pack.plane"
+    },
+    {
+      "file": "plane-document-utf8.twpack",
+      "rule": "a plane document is text that is not UTF-8",
+      "reads": [
+        {"op": "plane", "id": "vault", "error": "pack.plane"}
+      ],
+      "verify": "pack.plane"
+    },
+    {
+      "file": "zone-document-id.twpack",
+      "rule": "a zone document's ID is not its row's",
+      "reads": [
+        {"op": "zone", "plane": "overworld", "id": "village", "error": "pack.zone"}
+      ],
+      "verify": "pack.zone"
+    },
+    {
+      "file": "zone-document-parent.twpack",
+      "rule": "a zone document has no parent but its row has one",
+      "reads": [
+        {"op": "zone", "plane": "overworld", "id": "village", "error": "pack.zone"}
+      ],
+      "verify": "pack.zone"
+    },
+    {
+      "file": "zone-document-custom.twpack",
+      "rule": "a zone document's custom data has a key that is not a namespace",
+      "reads": [
+        {"op": "zone", "plane": "overworld", "id": "village", "error": "pack.zone"}
+      ],
+      "verify": "pack.zone"
+    },
+    {
+      "file": "definition-document-array.twpack",
+      "rule": "a definition document is an array",
+      "reads": [
+        {"op": "definition", "type": "proto", "id": "coin", "error": "pack.definition"}
+      ],
+      "verify": "pack.definition"
+    },
+    {
+      "file": "definition-document-type.twpack",
+      "rule": "a definition document's type is not its row's",
+      "reads": [
+        {"op": "definition", "type": "proto", "id": "coin", "error": "pack.definition"}
+      ],
+      "verify": "pack.definition"
+    },
+    {
+      "file": "definition-document-escape.twpack",
+      "rule": "a definition document escapes a character JSON does not require",
+      "reads": [
+        {"op": "definition", "type": "proto", "id": "coin", "error": "pack.definition"}
+      ],
+      "verify": "pack.definition"
+    },
+    {
+      "file": "definition-document-duplicate.twpack",
+      "rule": "a definition document repeats a key",
+      "reads": [
+        {"op": "definition", "type": "proto", "id": "coin", "error": "pack.definition"}
+      ],
+      "verify": "pack.definition"
+    },
+    {
+      "file": "definition-document-integer.twpack",
+      "rule": "a definition document has an integer past the source format's range",
+      "reads": [
+        {"op": "definition", "type": "proto", "id": "coin", "error": "pack.definition"}
+      ],
+      "verify": "pack.definition"
+    },
+    {
+      "file": "stairwell-document-steps.twpack",
+      "rule": "a stairwell's steps are on the same layer",
+      "reads": [
+        {"op": "stairwell", "plane": "overworld", "id": "tower.stairs", "error": "pack.stairwell"}
+      ],
+      "verify": "pack.stairwell"
+    },
+    {
+      "file": "stairwell-document-key.twpack",
+      "rule": "a stairwell document has a key the source format does not",
+      "reads": [
+        {"op": "stairwell", "plane": "overworld", "id": "tower.stairs", "error": "pack.stairwell"}
+      ],
+      "verify": "pack.stairwell"
+    },
+    {
+      "file": "stairwell-document-direction.twpack",
+      "rule": "a stairwell's direction is not one the format has",
+      "reads": [
+        {"op": "stairwell", "plane": "overworld", "id": "cave.chute", "error": "pack.stairwell"}
+      ],
+      "verify": "pack.stairwell"
+    },
+    {
+      "file": "stairwell-document-custom.twpack",
+      "rule": "a stairwell's custom data is not an object",
+      "reads": [
+        {"op": "stairwell", "plane": "overworld", "id": "cave.chute", "error": "pack.stairwell"}
+      ],
+      "verify": "pack.stairwell"
+    },
+    {
+      "file": "stairwell-document-space.twpack",
+      "rule": "a stairwell document is not canonical: it has a space",
+      "reads": [
+        {"op": "stairwell", "plane": "overworld", "id": "tower.stairs", "error": "pack.stairwell"}
+      ],
+      "verify": "pack.stairwell"
+    },
+    {
+      "file": "profile-space.twpack",
+      "rule": "the profile is not canonical: it starts with a space",
+      "reads": [
+        {"op": "profile", "error": "pack.profile"}
+      ],
+      "verify": "pack.profile"
+    },
+    {
+      "file": "profile-id.twpack",
+      "rule": "profile_id is not the profile's ID",
+      "reads": [
+        {"op": "profile", "error": "pack.profile"}
+      ],
+      "verify": "pack.profile"
+    },
+    {
+      "file": "profile-version.twpack",
+      "rule": "the profile's version is longer than 64 characters",
+      "reads": [
+        {"op": "profile", "error": "pack.profile"}
+      ],
+      "verify": "pack.profile"
+    },
+    {
+      "file": "profile-layer-height.twpack",
+      "rule": "the profile's layer_height is 0",
+      "reads": [
+        {"op": "layer_height", "error": "pack.profile"}
+      ],
+      "verify": "pack.profile"
+    },
+    {
+      "file": "profile-layer-height-float.twpack",
+      "rule": "the profile's layer_height is not an integer",
+      "reads": [
+        {"op": "layer_height", "error": "pack.profile"}
+      ],
+      "verify": "pack.profile"
+    },
+    {
+      "file": "profile-projection.twpack",
+      "rule": "the profile's projection has a key its kind does not",
+      "reads": [
+        {"op": "profile", "error": "pack.profile"}
+      ],
+      "verify": "pack.profile"
+    },
+    {
+      "file": "profile-render-duplicate.twpack",
+      "rule": "the profile lists a render layer twice",
+      "reads": [
+        {"op": "profile", "error": "pack.profile"}
+      ],
+      "verify": "pack.profile"
+    },
+    {
+      "file": "profile-ground-unknown.twpack",
+      "rule": "a ground layer is not a render layer",
+      "reads": [
+        {"op": "profile", "error": "pack.profile"}
+      ],
+      "verify": "pack.profile"
+    },
+    {
+      "file": "profile-ground-many.twpack",
+      "rule": "the profile lists more than 8 ground layers",
+      "reads": [
+        {"op": "profile", "error": "pack.profile"}
+      ],
+      "verify": "pack.profile"
+    },
+    {
+      "file": "chunk-encoding.twpack",
+      "rule": "a chunk's encoding is not twc1+zstd",
+      "reads": [
+        {"op": "chunk", "plane": "vault", "layer": 0, "cx": 0, "cy": 0, "error": "pack.chunk_encoding"}
+      ],
+      "verify": "pack.chunk_encoding"
+    },
+    {
+      "file": "chunk-data-text.twpack",
+      "rule": "a chunk's data is text",
+      "reads": [
+        {"op": "chunk", "plane": "vault", "layer": 0, "cx": 0, "cy": 0, "error": "pack.chunk_data"}
+      ],
+      "verify": "pack.chunk_data"
+    },
+    {
+      "file": "chunk-records.twpack",
+      "rule": "vault chunks at cx 1 on: one record every reader accepts, then one malformed record each; the read's rule says how",
+      "reads": [
+        {
+          "op": "chunk",
+          "rule": "accepted: a record with every feature",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 1,
+          "cy": 0,
+          "error": null
+        },
+        {
+          "op": "chunk",
+          "rule": "the data is the record, not compressed",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 2,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "the data is two zstd frames",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 3,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "the frame does not record its content size",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 4,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "one byte follows the frame",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 5,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "the frame ends one byte early",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 6,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "the frame's checksum does not match",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 7,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "the frame header sets its reserved bit",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 8,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "the data is a skippable frame",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 9,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "the frame records more than 16 MiB",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 10,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "the magic is not TWC1",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 11,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "the version is 2",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 12,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "the chunk size is 0",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 13,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "the chunk size is 256",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 14,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "the ground count is 9",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 15,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "the reserved byte is 1",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 16,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "the palette length passes the record",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 17,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "the palette holds 0",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 18,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "the palette descends",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 19,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "a ground cell is outside the palette",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 20,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "a zone cell is outside the palette",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 21,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "the record ends inside the grids",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 22,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "the object count passes the record",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 23,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "an object's tile is past the chunk",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 24,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "a top-level object has the inventory tile",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 25,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "an inventory entry has a tile",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 26,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "an object has an unknown flag",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 27,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "a portal has an unknown kind",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 28,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "an object flags fields but has none",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 29,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "a field count passes the record",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 30,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "a field has an unknown tag",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 31,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "a number field is NaN",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 32,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "a number field is infinite",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 33,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "a JSON field is not canonical: it has a space",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 34,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "a JSON field is a number",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 35,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "a JSON field is a string",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 36,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "a JSON field is not JSON",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 37,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "a JSON field has a trailing comma",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 38,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "a JSON field repeats a key",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 39,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "a JSON field escapes a slash",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 40,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "a JSON field escapes a letter",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 41,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "a JSON field escapes a control character in uppercase",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 42,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "a JSON field escapes a newline as \\u000a",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 43,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "a JSON field holds NUL",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 44,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "a JSON field holds a raw tab",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 45,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "a JSON field is not UTF-8",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 46,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "a JSON field has an integer past the source format's range",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 47,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "a JSON field has a number that is not finite",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 48,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "a JSON field has a number with a leading zero",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 49,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "a JSON field nests 65 deep",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 50,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "a JSON field has a comment",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 51,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "a JSON field starts with a byte-order mark",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 52,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "custom data is an array",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 53,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "custom data has a key that is not a namespace",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 54,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "custom data is not canonical: it has a space",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 55,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "custom data's length passes the record",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 56,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "an object flags an inventory but has none",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 57,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "inventories nest 17 deep",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 58,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "a byte follows the objects",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 59,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        },
+        {
+          "op": "chunk",
+          "rule": "the record ends inside an object",
+          "plane": "vault",
+          "layer": 0,
+          "cx": 60,
+          "cy": 0,
+          "error": "pack.chunk_record"
+        }
+      ],
+      "verify": "pack.chunk_record"
+    },
+    {
+      "file": "reference-proto-id.twpack",
+      "rule": "an object's prototype is a string ID past the strings",
+      "reads": [
+        {"op": "chunk", "plane": "vault", "layer": 0, "cx": 0, "cy": 0, "error": null}
+      ],
+      "verify": "pack.reference"
+    },
+    {
+      "file": "reference-proto.twpack",
+      "rule": "an object's prototype is a string that names no proto definition",
+      "reads": [
+        {"op": "chunk", "plane": "vault", "layer": 0, "cx": 0, "cy": 0, "error": null}
+      ],
+      "verify": "pack.reference"
+    },
+    {
+      "file": "reference-layer.twpack",
+      "rule": "an object's render layer is past the profile's",
+      "reads": [
+        {"op": "chunk", "plane": "vault", "layer": 0, "cx": 0, "cy": 0, "error": null}
+      ],
+      "verify": "pack.reference"
+    },
+    {
+      "file": "reference-portal-plane.twpack",
+      "rule": "a portal names a plane that does not exist",
+      "reads": [
+        {"op": "chunk", "plane": "vault", "layer": 0, "cx": 0, "cy": 0, "error": null}
+      ],
+      "verify": "pack.reference"
+    },
+    {
+      "file": "reference-portal-position.twpack",
+      "rule": "a portal's x is past the source format's integer range",
+      "reads": [
+        {"op": "chunk", "plane": "vault", "layer": 0, "cx": 0, "cy": 0, "error": null}
+      ],
+      "verify": "pack.reference"
+    },
+    {
+      "file": "reference-portal-anchor.twpack",
+      "rule": "a portal names an anchor its plane does not have",
+      "reads": [
+        {"op": "chunk", "plane": "vault", "layer": 0, "cx": 0, "cy": 0, "error": null}
+      ],
+      "verify": "pack.reference"
+    },
+    {
+      "file": "reference-portal-anchor-plane.twpack",
+      "rule": "a portal names an anchor of a plane that does not have it",
+      "reads": [
+        {"op": "chunk", "plane": "overworld", "layer": 0, "cx": 0, "cy": 0, "error": null}
+      ],
+      "verify": "pack.reference"
+    },
+    {
+      "file": "reference-field-name.twpack",
+      "rule": "a field name is a string that is not a field name",
+      "reads": [
+        {"op": "chunk", "plane": "vault", "layer": 0, "cx": 0, "cy": 0, "error": null}
+      ],
+      "verify": "pack.reference"
+    },
+    {
+      "file": "reference-field-repeated.twpack",
+      "rule": "an object lists a field twice",
+      "reads": [
+        {"op": "chunk", "plane": "vault", "layer": 0, "cx": 0, "cy": 0, "error": null}
+      ],
+      "verify": "pack.reference"
+    },
+    {
+      "file": "reference-field-string.twpack",
+      "rule": "a string field is a string ID past the strings",
+      "reads": [
+        {"op": "chunk", "plane": "vault", "layer": 0, "cx": 0, "cy": 0, "error": null}
+      ],
+      "verify": "pack.reference"
+    },
+    {
+      "file": "reference-field-integer.twpack",
+      "rule": "an integer field is past the source format's range",
+      "reads": [
+        {"op": "chunk", "plane": "vault", "layer": 0, "cx": 0, "cy": 0, "error": null}
+      ],
+      "verify": "pack.reference"
+    },
+    {
+      "file": "reference-inventory.twpack",
+      "rule": "an inventory entry's prototype names no proto definition",
+      "reads": [
+        {"op": "chunk", "plane": "vault", "layer": 0, "cx": 0, "cy": 0, "error": null}
+      ],
+      "verify": "pack.reference"
+    },
+    {
+      "file": "reference-palette-unused.twpack",
+      "rule": "a palette entry is used by no cell",
+      "reads": [
+        {"op": "chunk", "plane": "vault", "layer": 0, "cx": 0, "cy": 0, "error": null}
+      ],
+      "verify": "pack.reference"
+    },
+    {
+      "file": "reference-palette-ground.twpack",
+      "rule": "a ground cell names a string that is no proto definition",
+      "reads": [
+        {"op": "chunk", "plane": "vault", "layer": 0, "cx": 0, "cy": 0, "error": null}
+      ],
+      "verify": "pack.reference"
+    },
+    {
+      "file": "reference-palette-zone.twpack",
+      "rule": "a zone cell names a zone of another plane",
+      "reads": [
+        {"op": "chunk", "plane": "vault", "layer": 0, "cx": 0, "cy": 0, "error": null}
+      ],
+      "verify": "pack.reference"
+    },
+    {
+      "file": "reference-palette-string.twpack",
+      "rule": "a palette entry is a string ID past the strings",
+      "reads": [
+        {"op": "chunk", "plane": "vault", "layer": 0, "cx": 0, "cy": 0, "error": null}
+      ],
+      "verify": "pack.reference"
+    },
+    {
+      "file": "chunk-size-mismatch.twpack",
+      "rule": "a chunk's record is 16 tiles square in a plane of 32",
+      "reads": [
+        {"op": "chunk", "plane": "vault", "layer": 0, "cx": 0, "cy": 0, "error": null}
+      ],
+      "verify": "pack.chunk"
+    },
+    {
+      "file": "chunk-ground-mismatch.twpack",
+      "rule": "a chunk's record has one ground layer where the profile has two",
+      "reads": [
+        {"op": "chunk", "plane": "vault", "layer": 0, "cx": 0, "cy": 0, "error": null}
+      ],
+      "verify": "pack.chunk"
+    },
+    {
+      "file": "reference-deleted-proto.twpack",
+      "rule": "an object's prototype definition is deleted",
+      "reads": [
+        {"op": "chunk", "plane": "overworld", "layer": 0, "cx": 0, "cy": 0, "error": null}
+      ],
+      "verify": "pack.reference"
+    },
+    {
+      "file": "reference-deleted-ground.twpack",
+      "rule": "a ground cell's prototype definition is deleted",
+      "reads": [
+        {"op": "chunk", "plane": "overworld", "layer": 0, "cx": 0, "cy": 0, "error": null}
+      ],
+      "verify": "pack.reference"
+    },
+    {
+      "file": "reference-deleted-zone.twpack",
+      "rule": "a zone cell's zone is deleted",
+      "reads": [
+        {"op": "chunk", "plane": "overworld", "layer": 0, "cx": 0, "cy": 0, "error": null}
+      ],
+      "verify": "pack.reference"
+    },
+    {
+      "file": "reference-deleted-anchor.twpack",
+      "rule": "a portal's anchor is deleted",
+      "reads": [
+        {"op": "chunk", "plane": "overworld", "layer": 0, "cx": 0, "cy": 0, "error": null}
+      ],
+      "verify": "pack.reference"
+    }
+  ]
+}

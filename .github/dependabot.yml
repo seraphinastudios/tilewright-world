@@ -4,6 +4,16 @@ updates:
     directory: /
     schedule:
       interval: weekly
+  - package-ecosystem: gomod
+    directory: /go
+    schedule:
+      interval: weekly
+    groups:
+      # modernc.org/sqlite requires the exact modernc.org/libc it pins, so
+      # the modernc modules move together.
+      modernc:
+        patterns:
+          - "modernc.org/*"
   - package-ecosystem: github-actions
     directory: /
     schedule:
