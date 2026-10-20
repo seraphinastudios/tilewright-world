@@ -2245,7 +2245,7 @@ fn special_mode_bits_are_kept() {
 }
 
 #[test]
-fn a_bad_terrain_address_is_reported_when_its_grid_breaks_the_load() {
+fn cells_at_a_bad_terrain_address_fail_validation() {
     let tree = copy();
     let found = problems(
         tree.path(),
@@ -2253,8 +2253,12 @@ fn a_bad_terrain_address_is_reported_when_its_grid_breaks_the_load() {
             r#"{"op": "terrain.set", "plane": "overworld", "layer": 0, "grid": "floro", "cells": [{"at": [1, 1], "value": "grass"}]}"#,
         ),
     );
+    // The loader says why, at the chunk.
     assert!(
-        has(&found, "tx.conflict", "\"floro\" is not a grid"),
+        found.iter().any(
+            |problem| problem.path == "planes/overworld/layers/0/0_0.jsonc"
+                && problem.message.contains("floro")
+        ),
         "{found:#?}"
     );
 }
@@ -2277,4 +2281,80 @@ fn an_inverse_names_no_unwritten_file_like_another() {
         )),
     );
     assert!(!plan.inverse().contains("\"like\""), "{}", plan.inverse());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_deleted_file_permissions_are_checked_before_publishing() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let tree = copy();
+    let root = tree.path().to_path_buf();
+    let target = root.join("defs/recipe/chest.jsonc");
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+    let plan = planned(
+        &root,
+        &transaction(r#"{"op": "document.delete", "path": "defs/recipe/chest.jsonc"}"#),
+    );
+    // Its permissions are noted with the others, so a change before
+    // publishing is caught rather than restored with on failure.
+    let hook_target = target.clone();
+    let failure = publish_with(&plan, move || {
+        fs::set_permissions(&hook_target, fs::Permissions::from_mode(0o666)).unwrap();
+    });
+    assert!(
+        has(&failure.problems, "tx.conflict", "its permissions changed"),
+        "{failure:#?}"
+    );
+    assert!(target.exists());
+}
+
+#[test]
+fn a_file_that_does_not_parse_cannot_be_deleted() {
+    let tree = copy();
+    fs::write(tree.path().join("defs/proto/broken.jsonc"), "{\"id\": ").unwrap();
+    let found = problems(
+        tree.path(),
+        &transaction(r#"{"op": "document.delete", "path": "defs/proto/broken.jsonc"}"#),
+    );
+    assert!(
+        has(&found, "tx.conflict", "is not valid JSONC"),
+        "{found:#?}"
+    );
+}
+
+#[test]
+fn an_edit_past_a_parser_bound_is_a_limit() {
+    let tree = copy();
+    let members: Vec<String> = (0..256).map(|index| format!("\"k{index}\": 0")).collect();
+    fs::write(
+        tree.path().join("defs/proto/wide.jsonc"),
+        format!("{{\n{}\n}}\n", members.join(",\n")),
+    )
+    .unwrap();
+    let found = problems(
+        tree.path(),
+        &transaction(
+            r#"{"op": "set", "path": "defs/proto/wide.jsonc", "pointer": ["one_more"], "value": 0}"#,
+        ),
+    );
+    assert!(has(&found, "tx.limit", "invalid"), "{found:#?}");
+}
+
+#[test]
+fn an_oversized_file_stops_carrying_out() {
+    let tree = copy();
+    fs::write(
+        tree.path().join("defs/proto/huge.jsonc"),
+        vec![b' '; (64 << 20) + 1],
+    )
+    .unwrap();
+    let found = problems(
+        tree.path(),
+        &transaction(
+            r#"{"op": "test", "path": "defs/proto/huge.jsonc", "pointer": [], "absent": true},
+    {"op": "test", "path": "defs/proto/coin.jsonc", "pointer": ["id"], "value": "x"}"#,
+        ),
+    );
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(found[0].code, "tx.limit", "{found:#?}");
 }

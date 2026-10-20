@@ -1835,3 +1835,15 @@ fn overlay_files_count_against_the_entry_budget() {
         "{found:?}"
     );
 }
+
+#[test]
+fn a_failed_load_says_why_even_with_no_room_for_diagnostics() {
+    let copy = workspace();
+    fs::write(copy.path().join("defs/proto/bad.jsonc"), "{}\n").unwrap();
+    let options = LoadOptions {
+        maximum_diagnostics: 0,
+        ..LoadOptions::default()
+    };
+    let found = load_with(copy.path(), &options).expect_err("the definition is invalid");
+    assert!(!found.is_empty());
+}

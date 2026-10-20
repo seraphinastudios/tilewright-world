@@ -13,7 +13,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub(crate) struct Root(PathBuf);
+/// The root's absolute path, or why it could not be resolved: then every
+/// access fails, rather than resolving a relative path later.
+pub(crate) struct Root(Result<PathBuf, ErrorKind>);
 
 fn kind_of(file_type: fs::FileType) -> RawKind {
     if file_type.is_symlink() {
@@ -33,9 +35,9 @@ impl Root {
     /// resolved yet, such as a missing one, is still made absolute.
     pub(crate) fn new(path: &Path) -> Self {
         Self(
-            fs::canonicalize(path).unwrap_or_else(|_| {
-                std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
-            }),
+            fs::canonicalize(path)
+                .or_else(|_| std::path::absolute(path))
+                .map_err(|error| error.kind()),
         )
     }
 
@@ -43,10 +45,15 @@ impl Root {
         Self(self.0.clone())
     }
 
+    /// The root's path, if it was resolved.
+    fn base(&self) -> Result<PathBuf, Refused> {
+        self.0.clone().map_err(|kind| Refused::Io(kind.into()))
+    }
+
     /// The path of `components` and its metadata, after checking that no
     /// component is a link.
     fn checked(&self, components: &[&str]) -> Result<(PathBuf, fs::Metadata), Refused> {
-        let mut current = self.0.clone();
+        let mut current = self.base()?;
         let mut metadata = fs::metadata(&current).map_err(refused)?;
         for (index, component) in components.iter().enumerate() {
             current.push(component);
@@ -83,7 +90,7 @@ impl Root {
         components: &[&str],
         create: bool,
     ) -> Result<Directory, Refused> {
-        let mut current = self.0.clone();
+        let mut current = self.base()?;
         fs::metadata(&current).map_err(refused)?;
         for (index, component) in components.iter().enumerate() {
             current.push(component);
@@ -115,7 +122,7 @@ impl Root {
             return Ok(false);
         };
         self.directory(parent, false)?;
-        let mut path = self.0.clone();
+        let mut path = self.base()?;
         path.extend(components);
         match fs::create_dir(&path) {
             Ok(()) => Ok(true),

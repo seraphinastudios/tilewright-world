@@ -20,6 +20,15 @@ directory's handle. On other platforms components are
 checked by path first, which a local process changing the tree at the same
 time can race. Sources are local checkouts, so a race needs a local attacker.
 
+Applying a transaction writes, renames and removes files beneath the root
+through the same confinement. On Unix it works through the directory
+handles opened while the transaction was carried out, so changing the tree
+cannot redirect it. On other platforms it works by path, checked for links
+first, so a local process that changes the tree at the same moment, for
+instance by replacing a directory with a link, could redirect a write,
+rename or removal outside the root. There, as with verifying packs, applying
+transactions in a tree that others can change is not supported.
+
 A pack's file name digest is checked against the file at its path, so the
 check binds to the path. Packs are content-addressed files opened from
 directories the caller controls; verifying packs in a directory others can

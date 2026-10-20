@@ -253,15 +253,16 @@ impl Directories<'_> {
     ) -> Result<Published, PublishError> {
         let cleaned = self.leftovers.is_empty();
         problems.append(&mut self.leftovers);
-        let (failures, platform) = self.sync();
-        let durable = failures.is_empty() && platform;
-        problems.extend(failures);
-        // Every problem counts toward the limit; past it, one says how many
-        // more there were.
         let limit = crate::limits::DIAGNOSTICS;
-        let more = self.dropped + problems.len().saturating_sub(limit);
-        problems.truncate(limit);
-        if more > 0 {
+        let (failures, unsynced, platform) = self.sync(limit.saturating_sub(problems.len()));
+        let durable = unsynced == 0 && platform;
+        let dropped = self.dropped + (unsynced - failures.len());
+        problems.extend(failures);
+        // Every problem counts toward the limit; past it, the last place
+        // goes to one that says how many more there were.
+        if dropped + problems.len() > limit {
+            let more = dropped + problems.len() - (limit - 1);
+            problems.truncate(limit - 1);
             problems.push(diagnostic::file(
                 ".",
                 Code::Limit.as_str(),
@@ -280,27 +281,42 @@ impl Directories<'_> {
         }
     }
 
-    /// Syncs every directory whose entries changed. Returns the failures,
-    /// and whether the platform could sync every one.
-    fn sync(&mut self) -> (Vec<Diagnostic>, bool) {
+    /// Syncs every directory whose entries changed. Returns up to `room`
+    /// of the failures, how many there were, and whether the platform could
+    /// sync every directory.
+    fn sync(&mut self, room: usize) -> (Vec<Diagnostic>, usize, bool) {
         let mut failures = Vec::new();
+        let mut failed = 0;
         let mut durable = true;
         for path in std::mem::take(&mut self.changed) {
-            #[cfg(test)]
-            if FAIL_SYNC.with(std::cell::Cell::get) {
-                failures.extend(problem(&path, Code::Io, "injected sync failure"));
-                continue;
-            }
-            match self.get(&path, false) {
-                Ok(Some(directory)) => match directory.sync() {
-                    Ok(synced) => durable &= synced,
-                    Err(error) => failures.extend(io(&path, &error)),
-                },
-                Ok(None) => {}
-                Err(error) => failures.extend(io(&path, &error)),
+            let failure = self.sync_one(&path, &mut durable);
+            if let Some(failure) = failure {
+                failed += 1;
+                if failures.len() < room {
+                    failures.extend(failure);
+                }
             }
         }
-        (failures, durable)
+        (failures, failed, durable)
+    }
+
+    /// Syncs one directory; returns why it failed, if it did.
+    fn sync_one(&mut self, path: &str, durable: &mut bool) -> Option<Vec<Diagnostic>> {
+        #[cfg(test)]
+        if FAIL_SYNC.with(std::cell::Cell::get) {
+            return Some(problem(path, Code::Io, "injected sync failure"));
+        }
+        match self.get(path, false) {
+            Ok(Some(directory)) => match directory.sync() {
+                Ok(synced) => {
+                    *durable &= synced;
+                    None
+                }
+                Err(error) => Some(io(path, &error)),
+            },
+            Ok(None) => None,
+            Err(error) => Some(io(path, &error)),
+        }
     }
 }
 
@@ -355,6 +371,22 @@ fn check_permissions(
     Ok(())
 }
 
+/// The permissions of the file at `path` on disk, noted to restore it with
+/// if publishing fails.
+fn original(
+    directories: &mut Directories<'_>,
+    known: &mut Known,
+    path: &str,
+) -> Result<Option<std::fs::Permissions>, AccessError> {
+    let existing = on_disk(directories, known, path)?;
+    if let Some(existing) = &existing {
+        directories
+            .original
+            .insert(path.to_owned(), existing.clone());
+    }
+    Ok(existing)
+}
+
 /// What both allow, where either may be unknown.
 fn both(
     left: Option<std::fs::Permissions>,
@@ -378,12 +410,7 @@ fn permissions_for(
     path: &str,
     lineage: &Lineage,
 ) -> Result<Option<std::fs::Permissions>, AccessError> {
-    let existing = on_disk(directories, known, path)?;
-    if let Some(existing) = &existing {
-        directories
-            .original
-            .insert(path.to_owned(), existing.clone());
-    }
+    let existing = original(directories, known, path)?;
     // Walk back to a step already known, then work forward: each step
     // allows what its file on disk and the steps before it allow.
     let mut pending = Vec::new();
@@ -436,21 +463,24 @@ fn stage_all<'f>(
 ) -> Result<Vec<&'f str>, PublishError> {
     let mut staged = Vec::new();
     for file in changed {
-        let Some(text) = &file.after else {
-            continue;
+        let result = match &file.after {
+            // A deleted file's permissions are read now, and checked again
+            // with the others, to restore it with if publishing fails.
+            None => original(directories, known, &file.path).map(|_| ()),
+            Some(text) => {
+                staged.push(file.path.as_str());
+                // Writing removes whatever was at the staging name first,
+                // so the directory may change even if the write fails.
+                directories.changed.insert(split(&file.path).0.to_owned());
+                let (parent, name) = split(&file.path);
+                permissions_for(directories, known, &file.path, lineage).and_then(|permissions| {
+                    let directory = directories
+                        .get(parent, true)?
+                        .ok_or_else(|| AccessError::Unexpected(file.path.clone()))?;
+                    directory.write_with(&staging_name(name), permissions.as_ref(), text.as_bytes())
+                })
+            }
         };
-        staged.push(file.path.as_str());
-        // Writing removes whatever was at the staging name first, so the
-        // directory may change even if the write fails.
-        directories.changed.insert(split(&file.path).0.to_owned());
-        let (parent, name) = split(&file.path);
-        let result =
-            permissions_for(directories, known, &file.path, lineage).and_then(|permissions| {
-                let directory = directories
-                    .get(parent, true)?
-                    .ok_or_else(|| AccessError::Unexpected(file.path.clone()))?;
-                directory.write_with(&staging_name(name), permissions.as_ref(), text.as_bytes())
-            });
         if let Err(error) = result {
             discard(directories, &staged);
             directories.remove_created();
@@ -630,7 +660,7 @@ fn publish_one<'f>(
         // A staging file left by an interrupted apply goes first, so that
         // failing to remove it leaves the target untouched; its removal is
         // recorded to sync whatever happens next. The target's permissions
-        // are kept to restore it with.
+        // were noted, and checked, before publishing began.
         if let Err(error) = directories.remove(&staging_path(&file.path), false) {
             directories.leftover(diagnostic::file(
                 &staging_path(&file.path),
@@ -642,11 +672,7 @@ fn publish_one<'f>(
         let Some(directory) = directories.get(parent, false)? else {
             return Err(AccessError::Unexpected(parent.to_owned()));
         };
-        let permissions = directory.permissions(name)?;
         directory.remove_file(name)?;
-        if let Some(permissions) = permissions {
-            directories.original.insert(file.path.clone(), permissions);
-        }
     }
     published.push(file);
     directories.changed.insert(parent.to_owned());

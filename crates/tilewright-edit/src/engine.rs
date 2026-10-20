@@ -35,6 +35,29 @@ impl Failure {
         }
     }
 
+    /// A document that does not parse: past a parser bound it is a limit,
+    /// otherwise a conflict.
+    fn unparsed(error: &tilewright_jsonc::Error, message: String) -> Self {
+        use tilewright_jsonc::ErrorCode as E;
+        let limit = matches!(
+            error.code,
+            E::InputTooLarge
+                | E::TooManyLines
+                | E::LineTooLong
+                | E::NumberTooLong
+                | E::StringTooLong
+                | E::TooManyComments
+                | E::DepthLimit
+                | E::ValueLimit
+                | E::ArrayLimit
+                | E::ObjectLimit
+        );
+        Self {
+            code: if limit { Code::Limit } else { Code::Conflict },
+            message,
+        }
+    }
+
     fn access(error: &AccessError) -> Self {
         Self {
             code: match error {
@@ -268,9 +291,15 @@ impl<'r> Workspace<'r> {
                 let left = limits::READ_BYTES.saturating_sub(self.read_bytes);
                 let bytes = match root.read(path, file_limit.min(left)) {
                     Ok(bytes) => bytes,
-                    Err(AccessError::TooLarge(_)) if left < file_limit => {
+                    // A file past either bound rejects the transaction, so
+                    // nothing more is carried out.
+                    Err(error @ AccessError::TooLarge(_)) => {
                         self.spent = true;
-                        return Err(spent());
+                        return Err(if left < file_limit {
+                            spent()
+                        } else {
+                            Failure::access(&error)
+                        });
                     }
                     Err(error) => return Err(Failure::access(&error)),
                 };
@@ -364,9 +393,10 @@ impl<'r> Workspace<'r> {
         let entry = self.entry(path)?;
         if let Current::Text(text) = &entry.current {
             let document = Document::parse(text.as_str(), &limits()).map_err(|error| {
-                Failure::conflict(format!(
-                    "{path} is not valid JSONC ({error}); it cannot be edited"
-                ))
+                Failure::unparsed(
+                    &error,
+                    format!("{path} is not valid JSONC ({error}); it cannot be edited"),
+                )
             })?;
             entry.current = Current::Parsed(document);
         }
@@ -389,7 +419,7 @@ impl<'r> Workspace<'r> {
             self.record(&inverse)?;
         }
         let document = Document::parse(text, &limits()).map_err(|error| {
-            Failure::conflict(format!("the edit leaves {path} invalid ({error})"))
+            Failure::unparsed(&error, format!("the edit leaves {path} invalid ({error})"))
         })?;
         let entry = self.entry(path)?;
         let before = std::mem::replace(&mut entry.current, Current::Parsed(document));
@@ -409,8 +439,13 @@ impl<'r> Workspace<'r> {
         self.commit(path, text, vec![Primitive::Delete])
     }
 
-    /// Deletes `path` and returns its text.
+    /// Deletes `path` and returns its text. The file must parse, so that
+    /// the inverse can create it again.
     pub fn delete(&mut self, path: &str) -> Outcome<String> {
+        if !self.exists(path)? {
+            return Err(Failure::conflict(format!("{path} does not exist")));
+        }
+        self.document(path)?;
         let entry = self.entry(path)?;
         let before = std::mem::replace(&mut entry.current, Current::Absent);
         let text = match &before {

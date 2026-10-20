@@ -177,6 +177,10 @@ chunks. In each chunk the grid is edited in place:
 
 The operation must name a plane of the edited world and a ground layer of
 its profile, `height` or `zone`, even when it leaves no content to write.
+Once the edited tree validates, an address that does not is a
+`tx.conflict` at the operation. Cells written at such an address make the
+tree fail validation first, and the loader's diagnostics at the chunk say
+so.
 
 ## 6. Carrying out
 
@@ -189,8 +193,7 @@ The edited tree is then validated by the normal loader, with the edited files
 in memory over the files on disk. Previewing stops there and writes nothing;
 it returns the edited files, the validated world, the sealed transaction and
 the inverse. A transaction whose result does not validate is rejected with
-the loader's diagnostics, after a `tx.conflict` at each terrain operation
-whose plane or grid the edited `world.jsonc` and profile do not name.
+the loader's diagnostics.
 
 The sealed transaction is the transaction's own text, with `base` and
 `result` set to every file it touched or consulted, before and after; every
@@ -260,8 +263,9 @@ elsewhere the absolute path it resolved to then. It:
    directory on Unix), so two applies cannot interleave;
 2. writes each new file beside its target as `.<name>.tilewright-tmp`,
    created fresh (whatever was at that name is removed first, so a link or
-   hard link there is never written through), only its owner's until it
-   is written, then with the permissions given below, and synced; a
+   hard link there is never written through), with the permissions given
+   below, set after it is written (a file with permissions of its own is
+   only its owner's until then), and synced; a
    failure removes every staging file it wrote and the directories it
    created, and reports one it created that is no longer empty;
 3. reads every file the transaction touched or consulted again and compares
@@ -360,7 +364,12 @@ most 10,000 chunks; and carrying out stops as soon as a budget is spent or
 the diagnostic limit is reached. Messages describe a value over 4 KiB by its kind and size
 rather than render it.
 
-Each touched file must be within the 64 MiB document limit after every edit.
+Each touched file must be within the JSONC limits, as read and after every
+edit; an operation that finds or leaves one past a limit fails with
+`tx.limit`. A file larger than the 64 MiB document limit, or than the read
+allowance left, is not read: that is a `tx.limit` too, and carrying out
+stops there. A file a transaction deletes must be valid JSONC, so that its
+inverse can create it again.
 The sealed transaction and the inverse must themselves be valid transactions
 under these limits; a transaction whose inverse would not be is rejected
 before anything is written, and should be split.

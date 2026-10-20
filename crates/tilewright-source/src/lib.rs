@@ -70,8 +70,8 @@ pub struct LoadOptions {
     pub maximum_entries: usize,
     /// Most bytes read in one load.
     pub maximum_total_bytes: u64,
-    /// Most diagnostics kept; past this, one `source.budget` diagnostic
-    /// notes that the rest were dropped.
+    /// Most diagnostics kept, at least one; past this, one `source.budget`
+    /// diagnostic notes that the rest were dropped.
     pub maximum_diagnostics: usize,
 }
 
@@ -464,8 +464,10 @@ pub fn load_edited_in(
     options: &LoadOptions,
     overlay: &Overlay,
 ) -> Result<World, Vec<Diagnostic>> {
+    // At least one diagnostic is kept, so a failed load always says why.
     let options = &LoadOptions {
         limits: within_format(options.limits),
+        maximum_diagnostics: options.maximum_diagnostics.max(1),
         ..*options
     };
     // Each entry adds, replaces or removes a directory entry; more than a
