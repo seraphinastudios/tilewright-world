@@ -134,6 +134,23 @@ impl Access {
         self.mode & 0o040 != 0 && self.mode & 0o004 == 0
     }
 
+    /// Whether the classes that may reach content through an entry with
+    /// this access, a directory if `directory`, nest: its owner may
+    /// whenever its group may, and its group whenever others may. Where
+    /// they do not, as for mode `0604`, which denies the group what it
+    /// lets others read, who may reach depends on who the owner and group
+    /// are, which [`audience`](Self::audience) does not say.
+    #[must_use]
+    pub const fn nested(&self, directory: bool) -> bool {
+        let bits = if directory {
+            self.mode & 0o111
+        } else {
+            (self.mode & 0o444) >> 2
+        };
+        let (owner, group, other) = (bits & 0o100 != 0, bits & 0o010 != 0, bits & 0o001 != 0);
+        (owner || !group) && (group || !other)
+    }
+
     /// Who may reach content through an entry with this access, a
     /// directory if `directory`.
     #[must_use]

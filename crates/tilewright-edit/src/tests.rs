@@ -2592,6 +2592,38 @@ fn an_inverse_recreates_a_deleted_file_with_its_directory_access() {
 
 #[cfg(unix)]
 #[test]
+fn modes_whose_classes_do_not_nest_are_refused() {
+    use std::os::unix::fs::PermissionsExt as _;
+    // Each lets others read, or search, what it denies the group.
+    for (path, mode) in [
+        ("planes/overworld/plane.jsonc", 0o604),
+        ("planes/overworld", 0o705),
+    ] {
+        let tree = copy();
+        let root = tree.path();
+        fs::set_permissions(root.join(path), fs::Permissions::from_mode(mode)).unwrap();
+        let plan = planned(
+            root,
+            &transaction(
+                r#"{"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["title"], "value": "Changed"}"#,
+            ),
+        );
+        let failure = plan.publish().unwrap_err();
+        assert!(!failure.applied);
+        assert!(
+            has(
+                &failure.problems,
+                "tx.io",
+                "so who may is up to who owns it"
+            ),
+            "{mode:o}: {failure:#?}"
+        );
+        assert_eq!(snapshot(root), snapshot(&fixture()));
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn a_file_its_inverse_could_not_make_again_is_not_deleted() {
     use std::os::unix::fs::PermissionsExt as _;
     fn walk(path: &Path) {

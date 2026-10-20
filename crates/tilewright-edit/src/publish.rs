@@ -457,6 +457,30 @@ fn survey(
                 .iter()
                 .map(|(path, access)| (shown(path), access.audience(true))),
         );
+    // A mode whose classes do not nest, such as 0604, lets who may read
+    // depend on who owns the entry, and a replacement is owned by the user
+    // applying, so it is refused.
+    let unnested = known
+        .files
+        .iter()
+        .filter_map(|(path, access)| Some((path.as_str(), access.as_ref()?, false)))
+        .chain(
+            known
+                .directories
+                .iter()
+                .map(|(path, access)| (shown(path), access, true)),
+        )
+        .find(|(_, access, directory)| !access.nested(*directory));
+    if let Some((path, _, directory)) = unnested {
+        return Err(problem(
+            path,
+            Code::Io,
+            format!(
+                "its mode lets others {} what it denies its group, or its group what it denies its owner, so who may is up to who owns it, which publishing would change",
+                if directory { "search" } else { "read" }
+            ),
+        ));
+    }
     if let Some((first, expected)) = audiences.next()
         && let Some((other, _)) = audiences.find(|(_, found)| *found != expected)
     {

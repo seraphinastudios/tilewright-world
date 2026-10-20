@@ -376,7 +376,12 @@ by the same users, which publishing checks before it writes anything and
 again just before it renames: the classes that may read each file, and
 search each directory, must be the same, and where the group may and
 others may not, the group must be the same. Otherwise publishing is
-refused with `tx.io`, naming two that differ, and nothing is written. A
+refused with `tx.io`, naming two that differ, and nothing is written. So
+is a mode whose classes do not nest, one that lets others read, or
+search, what it denies the group, or the group what it denies the owner
+(such as `0604`): who may read under it depends on who owns the entry and
+which group it has, and a file publishing writes is owned by the user
+applying. A
 file written where a file is keeps that file's mode and group. A new file
 takes the mode of the directory above it without the execute bits, and its
 group, and a new directory the mode and group of the directory above it;
