@@ -60,7 +60,7 @@ fn refused(path: &str, refused: Refused) -> AccessError {
 
 /// The checked components of a root-relative path; the empty path is the
 /// root.
-fn checked(path: &str) -> Result<Vec<&str>, AccessError> {
+pub(crate) fn checked(path: &str) -> Result<Vec<&str>, AccessError> {
     if path.is_empty() {
         return Ok(Vec::new());
     }

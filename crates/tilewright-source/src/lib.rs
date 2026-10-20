@@ -482,6 +482,23 @@ pub fn load_edited_in(
             ),
         )]);
     }
+    // Every key must be a path a file could have, so no entry costs more
+    // than a path does.
+    if let Some(key) = overlay
+        .keys()
+        .find(|key| key.is_empty() || access::checked(key).is_err())
+    {
+        let shown = if key.len() <= 128 {
+            format!("{key:?}")
+        } else {
+            format!("a path of {} bytes", key.len())
+        };
+        return Err(vec![Diagnostic::file(
+            ".",
+            Code::Path,
+            format!("the edits name {shown}, which is not a path a file of the tree can have"),
+        )]);
+    }
     let mut diagnostics = Diagnostics::new(options.maximum_diagnostics);
     let mut tree = files::Tree::in_root(root.platform(), options, overlay, diagnostics.total());
     let world = load_tree(&mut tree, &mut diagnostics);

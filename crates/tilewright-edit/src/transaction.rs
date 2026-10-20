@@ -678,11 +678,20 @@ impl<'a> Shape<'a> {
     }
 
     fn operation(&mut self, item: &'a Value) -> Option<Action> {
-        let Some(kind) = item.get("op") else {
-            self.shape(item.span(), "missing key \"op\"");
+        if item.as_object().is_none() {
+            self.shape(
+                item.span(),
+                format!("an operation is an object, found {}", item.kind()),
+            );
+            return None;
+        }
+        let kind = self.required(item, "op").and_then(|kind| self.string(kind));
+        // Without a known operation, its keys are still checked against
+        // every operation's.
+        let Some(kind) = kind else {
+            self.object(item, ANY_OPERATION_KEYS);
             return None;
         };
-        let kind = self.string(kind)?;
         let allowed: &[&str] = match kind {
             "set" => &["op", "path", "object", "pointer", "value", "expect"],
             "insert" => &[
@@ -702,6 +711,7 @@ impl<'a> Shape<'a> {
                     item.get("op").map_or(item.span(), Value::span),
                     format!("unknown operation {}", diagnostic::quoted(kind)),
                 );
+                self.object(item, ANY_OPERATION_KEYS);
                 return None;
             }
         };
@@ -1197,3 +1207,30 @@ pub(crate) fn hex(digest: &[u8; 32]) -> String {
             output
         })
 }
+
+/// The keys of every operation, against which an operation that names no
+/// known `op` is checked.
+const ANY_OPERATION_KEYS: &[&str] = &[
+    "op",
+    "path",
+    "object",
+    "pointer",
+    "value",
+    "expect",
+    "key",
+    "before",
+    "after",
+    "colon",
+    "separator",
+    "absent",
+    "plane",
+    "layer",
+    "at",
+    "index",
+    "grid",
+    "cells",
+    "document",
+    "text",
+    "like",
+    "to",
+];

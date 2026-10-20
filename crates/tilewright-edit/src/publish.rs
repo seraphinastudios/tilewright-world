@@ -114,7 +114,19 @@ fn not_applied(problems: Vec<Diagnostic>) -> PublishError {
     }
 }
 
-/// The directories of a publish, opened once each.
+/// Whether publishing is supported here: only on Unix are files reached
+/// through directory handles and replaced with their permissions kept.
+pub const PUBLISH_SUPPORTED: bool = cfg!(unix);
+
+/// Why publishing is refused where it is not supported.
+const UNSUPPORTED: &str = "applying a transaction is supported only on Unix, where files are reached through directory handles and keep their permissions; preview and rebase work everywhere";
+
+/// How many directory handles a publish keeps open at once; past it, one
+/// is closed and opened again when needed, so that a transaction across
+/// many directories does not run out of file descriptors.
+pub(crate) const OPEN_DIRECTORIES: usize = 64;
+
+/// The directories of a publish, the most recent kept open.
 struct Directories<'r> {
     root: &'r SourceRoot,
     open: BTreeMap<String, SourceDirectory>,
@@ -153,6 +165,9 @@ impl Directories<'_> {
             }
             match self.root.directory(path, false)? {
                 Some(directory) => {
+                    if self.open.len() >= OPEN_DIRECTORIES {
+                        self.open.pop_first();
+                    }
                     self.open.insert(path.to_owned(), directory);
                 }
                 None => return Ok(None),
@@ -536,8 +551,13 @@ impl Plan {
     /// restores the files already published and names any it could not.
     /// Cleanup that could not be done and directories that could not be
     /// synced are reported too, with `cleaned` or `durable` unset, whether
-    /// or not every file was published.
+    /// or not every file was published. Where [`PUBLISH_SUPPORTED`] is
+    /// false, publishing is refused with a `tx.io` diagnostic and nothing is
+    /// written.
     pub fn publish(&self) -> Result<Published, PublishError> {
+        if !PUBLISH_SUPPORTED {
+            return Err(not_applied(problem(".", Code::Io, UNSUPPORTED)));
+        }
         let root = &self.source;
         let _lock = root.lock().map_err(|error| {
             not_applied(match error {

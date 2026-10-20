@@ -255,12 +255,17 @@ applying it twice does nothing the second time.
 
 ## 9. Applying
 
+Publishing is supported on Unix only. Other platforms cannot reach files
+through directory handles, so a process changing the tree could redirect a
+write outside it, and a file replaced there would not keep its own access
+control list; publishing is refused there, with `tx.io`, and nothing is
+written. Previewing and rebasing work everywhere.
+
 Publishing a carried-out transaction works on the root it was carried out
-on: on Unix the directory opened then, whatever its path names later, and
-elsewhere the absolute path it resolved to then. It:
+on: the directory opened then, whatever its path names later. It:
 
 1. takes the source root's exclusive lock (an advisory `flock` of the root
-   directory on Unix), so two applies cannot interleave;
+   directory), so two applies cannot interleave;
 2. writes each new file beside its target as `.<name>.tilewright-tmp`,
    created fresh (whatever was at that name is removed first, so a link or
    hard link there is never written through), with the permissions given
@@ -292,11 +297,13 @@ A file written where a file is keeps that file's permissions. A file a
 rename made, or one created `like` another, is also restricted to what the
 file it came from allows, as it is on disk when publishing, and, when the
 transaction made that file from another too, to what each file before it
-allows: on Unix to the mode bits all of them have, elsewhere to read-only
-if any is. So no file allows more than the files it came from did. Any
-other new file has the platform's default. A file whose bytes end as they
-began is not written, and keeps its permissions. Restoring after a failure
-gives every file back the permissions it had.
+allows: to the mode bits all of them have. So no file allows more than the
+files it came from did. Any other new file has the platform's default. A
+file whose bytes end as they began is not written, and keeps its
+permissions. Restoring after a failure gives every file back the
+permissions it had. Permissions here are the mode bits: a file's access
+control list, other extended attributes and owner are not carried to the
+file that replaces it, which has the directory's defaults for them.
 
 Each rename and removal is atomic, but there is no atomic publication of
 several files. If a step of 4 fails, the files already published are
@@ -321,12 +328,10 @@ Carrying out ignores whatever is at the staging name beside every file a
 transaction touches or consults, a link or special file included.
 
 Staging names, `.<name>.tilewright-tmp`, are reserved beside source files.
-Other platforms than Unix check each path component for links before use,
-have no lock and cannot sync a directory: a publish there, and the command
-line's write of the inverse, say that their names may not be durable yet. A
-process changing the tree at the same moment can race them, as can a
-program other than the toolkit on any platform: the lock only orders
-applies.
+A program other than the toolkit changing the tree at the same moment can
+race a publish: the lock only orders applies. Where a directory cannot be
+synced, the command line's writes of its outputs say that their names may
+not be durable yet.
 
 ## 10. Canonical layout
 

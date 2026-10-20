@@ -1847,3 +1847,20 @@ fn a_failed_load_says_why_even_with_no_room_for_diagnostics() {
     let found = load_with(copy.path(), &options).expect_err("the definition is invalid");
     assert!(!found.is_empty());
 }
+
+#[test]
+fn overlay_keys_must_be_paths() {
+    let root = workspace();
+    for key in [
+        format!("defs/{}/x.jsonc", "a".repeat(300)),
+        "defs/../x.jsonc".to_owned(),
+        String::new(),
+    ] {
+        let mut overlay = Overlay::new();
+        overlay.insert(key.clone(), Some("{}".to_owned()));
+        let found = load_edited(root.path(), &LoadOptions::default(), &overlay).unwrap_err();
+        assert_eq!(found.len(), 1, "{key}: {found:?}");
+        assert_eq!(found[0].code, "source.path", "{found:?}");
+        assert!(found[0].message.len() < 200, "{found:?}");
+    }
+}

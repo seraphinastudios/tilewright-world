@@ -185,6 +185,11 @@ fn rebase(transaction: &Path, root: &Path, output: &Path) -> Result<String, Fail
 }
 
 fn apply(transaction: &Path, root: &Path, inverse: &Path) -> Result<String, Failure> {
+    if !tilewright_edit::PUBLISH_SUPPORTED {
+        return Err(Failure::message(
+            "tx apply is supported only on Unix, where files are reached through directory handles and keep their permissions; tx preview and tx rebase work here",
+        ));
+    }
     outside(root, inverse)?;
     let plan = plan(&read(transaction, false)?, root, false, false)?;
     // The inverse is durable before any file changes, so an interrupted

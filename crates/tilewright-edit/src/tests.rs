@@ -2358,3 +2358,45 @@ fn an_oversized_file_stops_carrying_out() {
     assert_eq!(found.len(), 1, "{found:#?}");
     assert_eq!(found[0].code, "tx.limit", "{found:#?}");
 }
+
+#[test]
+fn an_operation_without_a_known_op_still_has_its_keys_checked() {
+    let found = Transaction::parse(
+        "t.jsonc",
+        wrap(r#"{"bogus": true}, 7, {"op": "frob", "path": "world.jsonc", "nope": 1}"#),
+    )
+    .unwrap_err();
+    for text in [
+        "missing key \"op\"",
+        "unknown key \"bogus\"",
+        "an operation is an object, found",
+        "unknown operation \"frob\"",
+        "unknown key \"nope\"",
+    ] {
+        assert!(has(&found, "tx.shape", text), "{text}: {found:#?}");
+    }
+    assert!(
+        !has(&found, "tx.shape", "unknown key \"path\""),
+        "{found:#?}"
+    );
+}
+
+#[test]
+fn a_publish_across_more_directories_than_it_keeps_open() {
+    let tree = copy();
+    let operations: Vec<String> = (2..=(2 + 2 * publish::OPEN_DIRECTORIES))
+        .map(|layer| {
+            format!(
+                "{{\"op\": \"object.insert\", \"plane\": \"overworld\", \"layer\": {layer}, \"at\": [1, 1], \"object\": {{\"proto\": \"tree\"}}}}"
+            )
+        })
+        .collect();
+    let after = round_trip(tree.path(), &transaction(&operations.join(",\n    ")));
+    assert_eq!(
+        after
+            .keys()
+            .filter(|path| path.ends_with("/0_0.jsonc"))
+            .count(),
+        2 * publish::OPEN_DIRECTORIES + 5
+    );
+}

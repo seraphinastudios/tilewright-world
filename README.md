@@ -60,7 +60,8 @@ between two worlds, each a source root or a pack, and exits 1 when one was
 removed or renamed without the allowlist accepting it. `tx preview` carries
 out a transaction in memory and lists the files it would change; `tx
 rebase` replays it on the tree as it is and records the new base; `tx
-apply` writes its inverse, then applies it. `fixtures/basic` is a small
+apply` writes its inverse, then applies it (on Unix only; see
+docs/spec/TRANSACTIONS.md section 9). `fixtures/basic` is a small
 synthetic world that uses every feature of the format.
 
 ## Development
