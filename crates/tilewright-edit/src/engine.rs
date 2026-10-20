@@ -174,10 +174,14 @@ impl Entry {
     }
 
     /// The bytes and operations the inverse holds for this file: none for
-    /// a file the transaction created, which it deletes; the text of one it
-    /// deleted, whatever was done to it before; otherwise the inverse of
-    /// each edit.
+    /// a file the transaction created, which it deletes, or one that ends
+    /// as it began; the text of one it deleted, whatever was done to it
+    /// before; otherwise the inverse of each edit. Comparing costs no more
+    /// than the edit that asks, which is charged its text.
     fn inverse_size(&self) -> (u64, usize) {
+        if !self.is_changed() {
+            return (0, 0);
+        }
         match (&self.base, &self.current) {
             (None, _) => (0, 0),
             (Some(base), Current::Absent) => (u64::try_from(base.len()).unwrap_or(u64::MAX), 1),

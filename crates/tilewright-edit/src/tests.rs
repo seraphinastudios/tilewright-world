@@ -2467,3 +2467,41 @@ fn the_edited_world_reports_at_most_the_diagnostic_limit() {
     assert_eq!(found.len(), limits::DIAGNOSTICS, "{:#?}", &found[..3]);
     assert!(found.iter().any(|problem| problem.code == "source.budget"));
 }
+
+#[test]
+fn edits_that_cancel_out_do_not_fill_the_inverse() {
+    let tree = copy();
+    // A grass cell in each of the 32 rows: one inverse step per row.
+    let rows: Vec<String> = read(tree.path(), CHUNK)
+        .lines()
+        .map(|line| {
+            line.trim()
+                .trim_end_matches(',')
+                .trim_matches('"')
+                .to_owned()
+        })
+        .filter(|line| line.len() == 32 && line.chars().all(|cell| cell == 'g' || cell == 's'))
+        .take(32)
+        .collect();
+    assert_eq!(rows.len(), 32);
+    let cells = |value: &str| {
+        rows.iter()
+            .enumerate()
+            .map(|(y, row)| {
+                let x = row.find('g').unwrap();
+                format!("{{\"at\": [{x}, {y}], \"value\": \"{value}\"}}")
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let pair = format!(
+        "{{\"op\": \"terrain.set\", \"plane\": \"overworld\", \"layer\": 0, \"grid\": \"floor\", \"cells\": [{}]}},\n    {{\"op\": \"terrain.set\", \"plane\": \"overworld\", \"layer\": 0, \"grid\": \"floor\", \"cells\": [{}]}}",
+        cells("sand"),
+        cells("grass")
+    );
+    // Were each step counted, these would hold more than a transaction may.
+    let pairs = limits::OPERATIONS / 64 + 1;
+    let operations = vec![pair; pairs].join(",\n    ");
+    let plan = planned(tree.path(), &transaction(&operations));
+    assert!(plan.files().iter().all(|file| !file.is_changed()));
+}
