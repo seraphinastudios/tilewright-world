@@ -8,8 +8,8 @@
 //! checked by [`Pack::verify`].
 
 use super::{
-    bounded_identifier, bounded_text, maximum_document_bytes, stairwell_row, stored_document, text,
-    utf8_column,
+    bounded_identifier, bounded_text, maximum_document_bytes, stairwell_row_within,
+    stored_document, text, utf8_column,
 };
 use crate::{Error, ErrorCode, Pack, is_identifier};
 use rusqlite::{Row, ToSql, params, types};
@@ -610,12 +610,28 @@ impl Pack {
         page: Page<&str>,
         visit: &mut dyn FnMut(Stairwell) -> Result<(), Error>,
     ) -> Result<(), Error> {
+        self.visit_stairwells_within(plane, page, u64::MAX, visit)
+    }
+
+    /// [`Pack::visit_stairwells`], with a budget of `maximum_steps` steps
+    /// for each stairwell; see [`Pack::stairwell_within`].
+    ///
+    /// # Errors
+    /// Returns an error if SQLite fails, a stored stairwell is invalid or
+    /// lists more steps than the budget, or `visit` fails.
+    pub fn visit_stairwells_within(
+        &self,
+        plane: &str,
+        page: Page<&str>,
+        maximum_steps: u64,
+        visit: &mut dyn FnMut(Stairwell) -> Result<(), Error>,
+    ) -> Result<(), Error> {
         let columns = format!("{}, {}", bounded_identifier("id"), bounded_text("document"));
         self.walk(
             Self::in_plane(&columns, "stairwells", true, plane, page),
             page.after.map(str::to_owned),
             page.bytes,
-            stairwell_row,
+            |row| stairwell_row_within(row, maximum_steps),
             |stairwell| {
                 let steps: usize = stairwell.steps.iter().map(|step| step.proto.len()).sum();
                 let custom = stairwell.custom.as_ref().map_or(0, String::len);

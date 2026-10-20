@@ -509,14 +509,31 @@ fn utf8_column(
 
 /// A stairwell from a row of `id, document`, bounded in SQL by
 /// [`bounded_identifier`] and [`bounded_text`] (NULL when out of bounds),
-/// after checking that the document has the row's ID.
-pub(super) fn stairwell_row(row: &rusqlite::Row<'_>) -> Result<Stairwell, Error> {
+/// after checking that the document has the row's ID. It fails with
+/// [`ErrorCode::DecodeBudget`] when the document lists more than
+/// `maximum_steps` steps, before they are built.
+pub(super) fn stairwell_row_within(
+    row: &rusqlite::Row<'_>,
+    maximum_steps: u64,
+) -> Result<Stairwell, Error> {
     let id = utf8_column(row, 0, ErrorCode::Stairwell)?;
-    let stairwell = stored_stairwell(&stored_document(
+    let document = stored_document(
         utf8_column(row, 1, ErrorCode::Stairwell)?,
         "a stairwell document",
         ErrorCode::Stairwell,
-    )?)?;
+    )?;
+    let steps = document
+        .root()
+        .get("steps")
+        .and_then(Value::as_array)
+        .map_or(0, <[Value]>::len);
+    if u64::try_from(steps).unwrap_or(u64::MAX) > maximum_steps {
+        return Err(Error::Rejected(
+            ErrorCode::DecodeBudget,
+            format!("a stairwell lists more than {maximum_steps} steps, the read's budget"),
+        ));
+    }
+    let stairwell = stored_stairwell(&document)?;
     if id.as_deref() != Some(stairwell.id.as_str()) {
         return Err(Error::Rejected(
             ErrorCode::Stairwell,
@@ -814,13 +831,32 @@ impl Pack {
     /// Returns an error if SQLite fails, or the stored stairwell does not
     /// have the source format's shape or disagrees with its row.
     pub fn stairwell(&self, plane: &str, id: &str) -> Result<Option<Stairwell>, Error> {
+        self.stairwell_within(plane, id, u64::MAX)
+    }
+
+    /// [`Pack::stairwell`], with a budget of `maximum_steps` steps. A stored
+    /// document can list about a quarter of a million, so a caller that
+    /// builds a value for each, such as a browser, can bound them; the read
+    /// fails with [`ErrorCode::DecodeBudget`] before it builds any step.
+    ///
+    /// # Errors
+    /// Returns an error if SQLite fails, the stored stairwell is invalid or
+    /// disagrees with its row, or it lists more steps than the budget.
+    pub fn stairwell_within(
+        &self,
+        plane: &str,
+        id: &str,
+        maximum_steps: u64,
+    ) -> Result<Option<Stairwell>, Error> {
         let mut statement = self.connection.prepare(&format!(
             "SELECT {}, {} FROM stairwells WHERE plane = ?2 AND id = ?3",
             bounded_identifier("id"),
             bounded_text("document"),
         ))?;
         let mut rows = statement.query(params![maximum_document_bytes(), plane, id])?;
-        rows.next()?.map(stairwell_row).transpose()
+        rows.next()?
+            .map(|row| stairwell_row_within(row, maximum_steps))
+            .transpose()
     }
 
     /// The stairwell step on a tile of a plane, if any. It checks the shape
@@ -2232,6 +2268,46 @@ mod tests {
         let uid = "o.k3vq7zr2mxa5d6wfh4pnyt2cgu";
         assert!(pack.object_within(uid, entries).unwrap().is_some());
         let error = pack.object_within(uid, entries - 1).unwrap_err();
+        assert_eq!(error.code(), crate::ErrorCode::DecodeBudget);
+    }
+
+    #[test]
+    fn stairwell_reads_keep_to_their_step_budget() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../fixtures/packs/5830e26e449a1f0d0c786b32801b7ed68e351777db5f586532478cb4384844b2.twpack",
+        );
+        let pack = Pack::open(&path).unwrap();
+        let mut stairwells = Vec::new();
+        pack.visit_stairwells("overworld", crate::Page::all(), &mut |stairwell| {
+            stairwells.push(stairwell);
+            Ok(())
+        })
+        .unwrap();
+        let longest = stairwells
+            .iter()
+            .max_by_key(|stairwell| stairwell.steps.len())
+            .unwrap();
+        let steps = u64::try_from(longest.steps.len()).unwrap();
+        assert_eq!(
+            pack.stairwell_within("overworld", &longest.id, steps)
+                .unwrap()
+                .as_ref(),
+            Some(longest)
+        );
+        let error = pack
+            .stairwell_within("overworld", &longest.id, steps - 1)
+            .unwrap_err();
+        assert_eq!(error.code(), crate::ErrorCode::DecodeBudget);
+        let mut listed = 0;
+        pack.visit_stairwells_within("overworld", crate::Page::all(), steps, &mut |_| {
+            listed += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(listed, stairwells.len());
+        let error = pack
+            .visit_stairwells_within("overworld", crate::Page::all(), steps - 1, &mut |_| Ok(()))
+            .unwrap_err();
         assert_eq!(error.code(), crate::ErrorCode::DecodeBudget);
     }
 

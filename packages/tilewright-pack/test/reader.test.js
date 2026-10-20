@@ -318,6 +318,33 @@ test("stairwell reads keep to their budget of steps", async () => {
   }
 });
 
+test("options are read from the bag's own properties only", async () => {
+  await initialize(module);
+  const inherited = {
+    digest: "0".repeat(64),
+    maxPackBytes: 1,
+    maxDecodedBytes: 1,
+    maxEntries: 0n,
+  };
+  for (const [key, value] of Object.entries(inherited)) {
+    Object.defineProperty(Object.prototype, key, { value, configurable: true, writable: true });
+  }
+  try {
+    // Neither a missing bag nor an empty one picks up inherited options.
+    for (const bag of [undefined, {}]) {
+      const pack = openPack(valid, bag);
+      assert.equal(pack.verify(bag).chunks, 5);
+      assert.ok(pack.chunk("overworld", 0, 0, 0, bag).objects.length > 0);
+      assert.ok(pack.stairwell("overworld", "cave.chute", bag));
+      pack.close();
+    }
+  } finally {
+    for (const key of Object.keys(inherited)) {
+      delete Object.prototype[key];
+    }
+  }
+});
+
 test("a pack collected without being closed is freed", async () => {
   await initialize(module);
   const freed = await counting("free", async (calls) => {

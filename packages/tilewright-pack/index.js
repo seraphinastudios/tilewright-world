@@ -36,7 +36,7 @@ let loading;
  * `WebAssembly.Module`, a URL or a `Response`.
  */
 export function initialize(source) {
-  if (stopped !== undefined) {
+  if (stopped) {
     return Promise.reject(stoppedError());
   }
   if (state === "ready") {
@@ -155,12 +155,21 @@ function limit(value, name) {
   return value === undefined ? undefined : big(value, name, U64);
 }
 
-function options(value, name) {
+// An option bag's own properties of `keys`, in an object without a
+// prototype: what a page adds to Object.prototype cannot set an option,
+// least of all one that lifts a limit.
+function options(value, name, keys) {
+  const own = { __proto__: null };
   if (value === undefined) {
-    return {};
+    return own;
   }
   argument(typeof value === "object" && value !== null, `${name} must be an object`);
-  return value;
+  for (const key of keys) {
+    if (Object.hasOwn(value, key)) {
+      own[key] = value[key];
+    }
+  }
+  return own;
 }
 
 // Brand checks that hold for buffers from another realm, such as an iframe:
@@ -188,7 +197,7 @@ function isBuffer(value) {
 const DEFAULT_MAX_ENTRIES = 65536n;
 
 function entryBudget(limits) {
-  const { maxEntries } = options(limits, "limits");
+  const { maxEntries } = options(limits, "limits", ["maxEntries"]);
   return maxEntries === undefined ? DEFAULT_MAX_ENTRIES : big(maxEntries, "limits.maxEntries", U64);
 }
 
@@ -202,7 +211,10 @@ function bytesOf(bytes) {
 
 // A trap, such as running out of memory, stops the module in the middle of
 // a call, so its state is no longer known: it is not used again.
-let stopped;
+// Whether it has stopped, and the error that stopped it, which can be any
+// value a call threw, `undefined` included.
+let stopped = false;
+let stoppedBy;
 
 // Frees the reader of a pack that is collected without being closed. The
 // registry holds each reader until its pack is collected, so this, and not
@@ -212,7 +224,7 @@ const unclosed =
   typeof FinalizationRegistry === "function" ? new FinalizationRegistry((reader) => release(reader)) : undefined;
 
 function release(reader) {
-  if (stopped !== undefined) {
+  if (stopped) {
     // Unregisters wasm-bindgen's finalizer without calling into the module.
     reader.__destroy_into_raw();
     return;
@@ -225,17 +237,20 @@ function release(reader) {
 }
 
 function stop(error) {
-  stopped = error;
+  if (!stopped) {
+    stopped = true;
+    stoppedBy = error;
+  }
 }
 
 function stoppedError() {
   return new Error("the pack reader stopped after a WebAssembly error; load the page or process again", {
-    cause: stopped,
+    cause: stoppedBy,
   });
 }
 
 function usable() {
-  if (stopped !== undefined) {
+  if (stopped) {
     throw stoppedError();
   }
 }
@@ -266,7 +281,7 @@ export function openPack(bytes, settings) {
     throw new Error("call initialize() or initializeSync() before openPack()");
   }
   const image = bytesOf(bytes);
-  const { digest, maxPackBytes } = options(settings, "options");
+  const { digest, maxPackBytes } = options(settings, "options", ["digest", "maxPackBytes"]);
   if (digest !== undefined) {
     argument(
       typeof digest === "string" && /^[0-9a-f]{64}$/.test(digest),
@@ -492,7 +507,10 @@ export class Pack {
   }
 
   verify(limits) {
-    const { maxPackBytes: pack, maxDecodedBytes: decoded } = options(limits, "limits");
+    const { maxPackBytes: pack, maxDecodedBytes: decoded } = options(limits, "limits", [
+      "maxPackBytes",
+      "maxDecodedBytes",
+    ]);
     const maxPackBytes = limit(pack, "limits.maxPackBytes");
     const maxDecodedBytes = limit(decoded, "limits.maxDecodedBytes");
     return this.#call((reader) => reader.verify(maxPackBytes, maxDecodedBytes));
