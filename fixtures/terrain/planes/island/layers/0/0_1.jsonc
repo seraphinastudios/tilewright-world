@@ -1,0 +1,45 @@
+{
+  "format": "tilewright.chunk/1",
+  "plane": "island",
+  "layer": 0,
+  "chunk": [0, 1],
+  "terrain": {
+    "floor": {
+      "palette": {"w": "water", "s": "sand", "d": "dirt"},
+      "rows": [
+        "sssssssssssssdddddddsssddddddddd",
+        "sssssssssssssddddddddddddddddddd",
+        "dddddddddddddddddddddddddddddddd",
+        "dddddddddddddddddddddddddddddddd",
+        "dddddddddddddddddddddddddddddddd",
+        "dddddddddddddddddddddddddddddddd",
+        "dddddddddddddddddddddddddddddddd",
+        "dddddddddddddddddddddddddddddddd",
+        "dddddddddddddddddddddddddddddddd",
+        "dddddddddddddddddddddddddddddddd",
+        "ddddwwwwdddddddddddddddddddddddd",
+        "ddddwwwwdddddddddddddddddddddddd",
+        "ddddwwwwdddddddddddddddddddddddd",
+        "ddddwwwwdddddddddddddddddddddddd",
+        "dddddddddddddddddddddddddddddddd",
+        "dddddddddddddddddddddddddddddddd",
+        "dddddddddddddddddddddddddddddddd",
+        "dddddddddddddddddddddddddddddddd",
+        "dddddddddddddddddddddddddddddddd",
+        "dddddddddddddddddddddddddddddddd",
+        "dddddddddddddddddddddddddddddddd",
+        "dddddddddddddddddddddddddddddddd",
+        "dddddddddddddddddddddddddddddddd",
+        "dddddddddddddddddddddddddddddddd",
+        "dddddddddddddddddddddddddddddddd",
+        "dddddddddddddddddddddddddddddddd",
+        "dddddddddddddddddddddddddddddddd",
+        "dddddddddddddddddddddddddddddddd",
+        "dddddddddddddddddddddddddddddddd",
+        "dddddddddddddddddddddddddddddddd",
+        "dddddddddddddddddddddddddddddddd",
+        "dddddddddddddddddddddddddddddddd"
+      ]
+    }
+  }
+}

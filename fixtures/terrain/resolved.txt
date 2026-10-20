@@ -1,0 +1,335 @@
+# The fixture's tiles as Transitions::resolve_chunk resolves them, one
+# character per tile, `.` for an empty one. Generated; regenerate with
+# TILEWRIGHT_UPDATE_TERRAIN_FIXTURES=1 cargo test --locked -p tilewright-source resolved_fixture_is_current
+a bush
+b dirt
+c dirt_pebbles
+d grass
+e grass_edge_1
+f grass_edge_12
+g grass_edge_2
+h grass_edge_3
+i grass_edge_4
+j grass_edge_6
+k grass_edge_8
+l grass_edge_9
+m grass_flowers
+n pond
+o sand
+p sand_e
+q sand_n
+r sand_s
+s sand_w
+t shore_e
+u shore_n
+v shore_s
+w shore_w
+x stone
+y water
+z water_ripple
+
+island layer 0 chunk 0 0 floor
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbybbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbdddddd
+bbbbbbbbbbbbbbbbbbbbbbbbbbdddddd
+bbbbbbbbbbbbbbbbbbbbbbbbbbddmddd
+bbbbbbbbbbbbbbbbbbbbbbbbbbdddddd
+bbbbbbyyyyyyyyybbbbbbbbbbbdddddd
+bbbbbbyyyyyyyyybbbbbbbbbbbdddddd
+bbbbbbyyyyyyyyybbbbbbbbbbbdddddd
+bbbbbbyyyyyyyyyxbbbbbbbbbbbbbbbb
+bbbbbbyyyyyyyyybbbbbbbbbbbbbbbbb
+bbbbbbyyyyyyyyybbbbbbbbbbbbbbbbb
+bbbbbbyyyyyyyyybbbbbbbbbbbbbbbbb
+bbbbbbyyyyyyyyybbbbb....bbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbyyyy
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbyyyy
+bbbbbbbbbbbbbbbbbbbbbbbbbbbxyyyy
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbyyyy
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbyyyy
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+ooooooooooooobdddbbbbbbbbbbbbbbb
+ooooooooooooobdddbbbbbbbbbbbbbbb
+ooooooooooooobdddbbbbbbbbbbbbbbb
+
+island layer 0 chunk 0 0 decal
+bbbbbbbbbbcbbbbcbcbbbcbbccbbbbcb
+bcbbbbbbcbbcbbbbbbccbbbbcbcbbbbb
+ccbbbcbbbbbbcbccbbbbbbbcbbbbbcbb
+cbb.bccbbbccbbbbbbbcbbbbbbbbbbcc
+bbbbcbbcbbbcbbcbbbcbbbbbcb......
+bbbbcbbbbbbbbbbbbbbbbbbcbb......
+bcbccbbbbbbcccbbbbbbbbcbbb......
+bbbbbbbbbbbbbbbbcbcbcbbbbb......
+bbbbbb.........bbbbbbbbbbb......
+bbbbbb.........bbbcbbbcbbb......
+cbbbbb.........bcbcbbcbbcb......
+bbbcbb..........bbbbbbbcbbbcbbbb
+cbbbcc.........bbbbbbbbbbcbcbbbc
+bbbbcb.........bbbbbbbbbbbbbbbbb
+bbbcbb.........bbbcbbbbbbbbcccbb
+cbcbbb.........bbbbb....bcbcbbbb
+bbbbbbbbcbbbbbbbcbbbcbbbbcbbcbbb
+bbbbcbbbcbbcbbbbcbbbbccbbbcbbcbb
+bcbccccbbccbbbbbbbcbbbbbbbcbbcbc
+bbbbbbbbcbbcbbbbbbccbbbbbbbbbbbb
+cbbbbbbbbbbbcbbcbbbbcbcbbbcb....
+bbbbcbcbcbbbbbbbbbbcbbbbbccb....
+bcbcbbbbbbcbbbbcbcbbbbbbbbb.....
+bbbbbcbbbbbbbccbbbbbbbcbbbbb....
+bbbbbcbbbccbbbbcbbbbbbbbbbbb....
+bbbbbcbbbbbcbbbbbbbbcbbbcbbbbbcb
+bcbbbcbbbcccbbbbcbcbcbbbbccbbbbb
+cbccbbcbcbbbbbbccbbbbbcbbbcbbcbb
+bbbcbbbbbbbbbcbbcbbbbbcbbbcbbbcb
+.............b...bbbbbbbbbbbbbbb
+.............b...cbcccbcbbbbbbbb
+.............b...bbbbbbbbbcbcbbb
+
+island layer 0 chunk 0 0 edge
+................................
+................................
+................................
+...n.....................gjjjjjj
+.........................h......
+.........................h......
+.........................a......
+.........................h......
+.......uuuuuuu...........h......
+......wzyyyyyyt..........h......
+......wyyyyzyyt..........h......
+......wyyyyyyy...........ellllll
+......wzyyyyyyt.................
+......wyyzyyyyt................g
+......wyyyyyyyt................h
+.......vvvvvvv.................h
+...............................h
+...............................e
+................................
+................................
+.............................uuu
+............................wyzz
+.............................yyy
+............................wzyy
+.............................vvv
+................................
+................................
+................................
+rrrrrrrrrrrrrgjjji..............
+.............h...f..............
+.............h...f..............
+.............h...f..rrr.........
+
+island layer 0 chunk 0 1 floor
+ooooooooooooobbbbbbbooobbbbbbbbb
+ooooooooooooobbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbyyyybbbbbbbbbbbbbbbbbbbbbbbb
+bbbbyyyybbbbbbbbbbbbbbbbbbbbbbbb
+bbbbyyyybbbbbbbbbbbbbbbbbbbbbbbb
+bbbbyyyybbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+
+island layer 0 chunk 0 1 decal
+.............cbbcbbb...bbccbbbbb
+.............bbcbbbbbbcbbbbbbbcc
+bbbccbbbbbbbcbbbbbbbccbcbbcbbbbb
+bbbbbbbbbbbbbbbbbbcbbbbbccbbbbbb
+cbcbbbbbbcbcbbbbbcbccbbbbbbbcbbb
+bcbbbbbbbcbbcbbbbcbbbbbbbbbbbcbb
+bbbbbbbbbbcbbbcccbcbbbcbbbbcbbbb
+bbbbbcbbcbbbbbbbbbbbbbbbbbcbbbcb
+cbbbcbbbbbbcbbbcbbbbbbbcbbbbbbbb
+cbbbbbbbcbbbcbccbcbccbbbbbbcbbbb
+bbbb....cbbcbcbbbbcbbbbbcbbbbbbc
+cbbb....bbbbbbcbbcbcbbcbbbbbccbb
+cbcb....bbbbbbbbbbbbbbcbcbcbbbbb
+bbbb....cbcbbbbcbbbbbbbbbbbcbbbc
+cbbbbbbbbbbcbbccbbcbcbbbcbbbcbbb
+bbbcbbbbbbbbbbbbbbcbbbbccbbbbbcb
+bbbcbbbbbbbbbbccbbbcccbbbbbcbbbc
+cbbbbbbcbbbbbbcbbcbccbbbbcbbbbbb
+bbbbbbbbbbbbcbccbbbbcbbbbbccbbbb
+bbbbbccccbbcbbbbbbbbcbbbbbccbbcb
+bbcbcbbcbbbbbbbbbcbcccccbbbbcbbb
+cbbbbbbbbbbbbbcbbbbbbbbbbbcbbccc
+bcccbbbbccbbbbbbbbbbbbbccbbbbbbb
+cbbbbbcccbbbbbbbcbcbbbcbbbcbcbcb
+bbbbbbbcbbbbbbbbcbbcbbbbbcbbcbbc
+bbccbbbbbbcbbbbbbbbbbbbcbbbbcbbb
+cbbbbcbbcbbbbcbcbcbcbbcbcbbbbbbb
+bbbcbbbbccbbbbbbbbbbcbcbbbbbbbbb
+bbbbbbbbbcbbcbbbbbbbbbcbbbbbcbbb
+bbbbbbbbbcbbbbbbbccccbbcbbbbbcbb
+bbbbbbbbbbbbbbbbcbbbcbbcbbbbbbbb
+bbbbbcbbcbbbbbbbbbcbbcbbbcbbbbbb
+
+island layer 0 chunk 0 1 edge
+.............elllk.p...s........
+.............s......qqq.........
+qqqqqqqqqqqqq...................
+................................
+................................
+................................
+................................
+................................
+................................
+................................
+.....uu.........................
+....wyyt........................
+....wyyt........................
+.....vv.........................
+................................
+................................
+................................
+................................
+................................
+................................
+................................
+................................
+................................
+................................
+................................
+................................
+................................
+................................
+................................
+................................
+................................
+................................
+
+island layer 0 chunk 1 0 floor
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+ddddddbbbbbbbbbbbbbbbbbbbbbbbbbb
+ddddddbbbbbbbbbbbbbbbbbbbbbbbbbb
+ddddddbbbbbbbbbbbbbbbbbbbbbbbbbb
+ddddddbbbbbbbbbbbbbbbbbbbbbbbbbb
+ddddddbbbbbbbbbbbbbbbbbbbbbbbbbb
+ddddddbbbbbbbbbbbbbbbbbbbbbbbbbb
+ddddddbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+dddbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+dddbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+dddbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+yyyybbbbbbbbbbbbbbbbbbbbbbbbbbbb
+yyyybbbbbbbbbbbbbbbbbbbbbbbbbbbb
+yyyybbbbbbbbbbbbbbbbbbbbbbbbbbbb
+yyyybbbbbbbbbbbbbbbbbbbbbbbbbbbb
+yyyybbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+
+island layer 0 chunk 1 0 decal
+bbbbbcbbcbcbbbbccbbbbcbbbbcbbbcb
+cbbbbbbbccbbbcbbbbbbcbcbbbcbbcbb
+bbbcbbbbbcccbbbcbbbbbbbbbbbbbbbc
+cbcbbccbbccbcbbccbcbbbbbbbbbccbb
+......bbcbcbbbbbbcbbbbbbbcbbbcbb
+......bccbbbbbbcbccbbbbbbcbbbbbc
+......bbbbbbbbbbcbcbbbbbbbbbbbbb
+......ccbbbbbbbbbbbbbcbbbbbbbcbb
+......bbbbbcbbbbcbbbbcbcbcbbbbcb
+......cbcbbbbbbbbbbbbbccbbbbbbbb
+......cbbbbcbbbcbbbbbbbbbbbcbbbb
+bcbbbcbbcbbbbbbcbcbbbbbbbbbbbcbb
+bbbbbbbbbbcbbcbbbbbbbbbbbbbbbcbb
+bbbcbbcbbbbbbbbccbbbbbbbbbbbbbcb
+...bcbbbbccbbcbbbbcbcbccbbbbbbbb
+...bbbcbbbcbbcbbbbbbbbbbbbbbbbbb
+...cbbbbbbbbbbbbbcbbcbcbbcccbbbb
+cbbbccbbbcbbcbbbbcbbbbbbbcbcbcbb
+bbbcbbbbbbbbbbbbbbbcbbbbbbbbcbbb
+bbbcbbbbbbbcbbbbbcbbcbcbcbbbbbbc
+....bbbbbbcbbbbbbbccbbccbbbbbcbb
+....bcbbbbccbbbbbbbcbbbbbbbbcbbb
+....bbbcbbbbbbbbbcbbbccbbbbbbbbb
+....cbbcbbbbbbbcbbcbbbbbbccbbbbb
+....bbbbbbbbcbbcbbbcbbbbbbbcbbbb
+bbbbbbbbbbcbbcbcbbcbbbbbcbbbbbbb
+bcbcbcbcbbbbcbbbbbcbbbbbbbbbbbbb
+cbcbbbbbcbbbcbbbbbcbbbbbbbcbbbbb
+bbbcbbbbbbbcbbcbbbcbbbbbbbcbbbbb
+bbbbbbbbbcbbbbbbbbbbbbbbbbbbbcbb
+bbbbbbbbbcbbbbcccbbbcbbbcbbbcbbb
+bbbcbbbbbbbbbbbbbcbcbbbbbbbbbbbb
+
+island layer 0 chunk 1 0 edge
+................................
+................................
+................................
+jjjjjji.........................
+......f.........................
+......f.........................
+......f.........................
+......f.........................
+......f.........................
+......f.........................
+......f.........................
+llllllk.........................
+................................
+jjji............................
+...f............................
+...f............................
+...f............................
+lllk............................
+................................
+................................
+uuu.............................
+yyyt............................
+yyzt............................
+yyzt............................
+vvv.............................
+................................
+................................
+................................
+................................
+................................
+................................
+................................

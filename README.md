@@ -17,7 +17,7 @@ game-specific code.
 - [World format](docs/spec/FORMAT.md): planes, stacked layers, chunks,
   terrain grids, objects with stable uids, zones, portals, anchors,
   stairwells, definitions, typed field schemas with nested lists and
-  objects, and the strict JSONC dialect.
+  objects, terrain transitions, and the strict JSONC dialect.
 - [Content pack](docs/spec/PACK.md): the SQLite pack and the binary chunk
   encoding.
 - [ID diff](docs/spec/DIFF.md): the ID kinds, rename and allowlist rules,
@@ -33,7 +33,7 @@ All are drafts until format 1.0 is frozen.
 | Crate | Purpose |
 | --- | --- |
 | `tilewright-jsonc` | Strict, lossless, bounded JSONC parser with byte spans, span edits and canonical JSON output |
-| `tilewright-source` | Loads and validates a source tree into a typed world model, reporting every problem with file, span and a stable code |
+| `tilewright-source` | Loads and validates a source tree into a typed world model, reporting every problem with file, span and a stable code, and resolves terrain transitions |
 | `tilewright-pack` | Deterministic pack compiler, the `twc1+zstd` chunk codec, and a verifying pack reader |
 | `tilewright-diff` | Compares the IDs of two worlds, source trees or packs, and reports removals, additions and renames |
 | `tilewright-edit` | Transactions: lossless structural edits, preview, rebase, staged apply with rollback, and inverses |
@@ -79,7 +79,8 @@ out a transaction in memory and lists the files it would change; `tx
 rebase` replays it on the tree as it is and records the new base; `tx
 apply` writes its inverse, then applies it (on Linux only; see
 docs/spec/TRANSACTIONS.md section 9). `fixtures/basic` is a small
-synthetic world that uses every feature of the format.
+synthetic world that uses every feature of the format except terrain
+transitions, which `fixtures/terrain` shows.
 
 ## Development
 
