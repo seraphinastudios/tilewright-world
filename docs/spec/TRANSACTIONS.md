@@ -386,9 +386,12 @@ applying. A
 file written where a file is keeps that file's mode and group. A new file
 takes the mode of the directory above it without the execute bits, and its
 group, and a new directory the mode and group of the directory above it;
-the empty file staged beside a deleted file must be readable by the users
-who could read the deleted one, so that a file is deleted only if its
-inverse makes it again for them. A group the user may not give is an
+every file staged, the empty one beside a deleted file included, every
+file restored and every directory made must then be reachable by the same
+users as the entry it stands for, its owner, the user applying, counting
+where not everyone may read: so another user's restricted file is not
+replaced, and a file is deleted only if its inverse makes it again for the
+users who could read it. A group the user may not give is an
 error, since the group bits would otherwise apply to another group. The
 owner of every file written is the user applying, who could read them all.
 Where there are no modes (Windows), only the read-only attribute is
