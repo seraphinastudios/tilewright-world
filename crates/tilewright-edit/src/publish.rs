@@ -174,6 +174,17 @@ impl Directories<'_> {
                         self.changed.insert(split(&prefix).0.to_owned());
                         if let Some(made) = self.root.directory(&prefix, false)? {
                             made.set_own_access(access)?;
+                            // Owned by the user applying, it must still be
+                            // searchable by the same users.
+                            if made.own_access()?.audience(true) != access.audience(true) {
+                                return Err(AccessError::Io(
+                                    prefix.clone(),
+                                    std::io::Error::new(
+                                        std::io::ErrorKind::Unsupported,
+                                        "a directory made here could be searched by other users than the one above it, such as by being another user's",
+                                    ),
+                                ));
+                            }
                         }
                     }
                 }
@@ -572,17 +583,27 @@ fn stage_all<'f>(
                 // The new inode must have no access publishing could not
                 // keep, such as a list or label the system gave it.
                 let given = directory.access(&staging_name(name))?;
-                // A deleted file's inverse must make it again for the users
-                // who could read it.
-                if let (None, Some(Some(deleted)), Some(given)) =
-                    (&file.after, known.files.get(&file.path), given)
-                    && given.audience(false) != deleted.audience(false)
+                // Each staged file must be readable by the users who could
+                // read the file it replaces, or, beside a deleted file, the
+                // one its inverse would make again; a new one by those a
+                // new file there has. The owner it gets, the user applying,
+                // counts where not everyone may read.
+                let expected = match known.files.get(&file.path) {
+                    Some(Some(before)) => Some(*before),
+                    _ => access,
+                };
+                if let (Some(given), Some(expected)) = (given, expected)
+                    && given.audience(false) != expected.audience(false)
                 {
                     return Err(AccessError::Io(
                         file.path.clone(),
                         std::io::Error::new(
                             std::io::ErrorKind::Unsupported,
-                            "a file made here again, as its inverse would make it, could be read by other users than this one",
+                            if file.after.is_none() {
+                                "a file made here again, as its inverse would make it, could be read by other users than this one"
+                            } else {
+                                "the file written here could be read by other users than the one it replaces, such as by being another user's"
+                            },
                         ),
                     ));
                 }
@@ -912,15 +933,19 @@ fn publish_one<'f>(
             ));
             return Err(error);
         }
-        // Recorded first: a removal that fails part way, as one Windows
-        // leaves pending while another program has the file open, is
-        // rolled back with the rest.
-        published.push(file);
-        directories.changed.insert(parent.to_owned());
         let Some(directory) = directories.get(parent, None)? else {
             return Err(AccessError::Unexpected(parent.to_owned()));
         };
-        directory.remove_file(name)?;
+        let removed = directory.remove_file(name);
+        // A removal that failed and left the file as it was is not rolled
+        // back; one that took effect, or that Windows left pending while
+        // another program has the file open, is.
+        let untouched = removed.is_err() && matches!(directory.access(name), Ok(Some(_)));
+        if !untouched {
+            published.push(file);
+            directories.changed.insert(parent.to_owned());
+        }
+        removed?;
         return Ok(());
     }
     published.push(file);
@@ -954,8 +979,20 @@ fn roll_back<'f>(
                         let directory =
                             directory.ok_or_else(|| AccessError::Unexpected(parent.to_owned()))?;
                         directory.write(&staging_name(name), access.as_ref(), text.as_bytes())?;
-                        // Restored only with no access beyond its mode bits.
-                        directory.access(&staging_name(name))?;
+                        // Restored only with no access beyond its mode bits,
+                        // and for the users who could read it.
+                        let given = directory.access(&staging_name(name))?;
+                        if let (Some(given), Some(access)) = (given, access)
+                            && given.audience(false) != access.audience(false)
+                        {
+                            return Err(AccessError::Io(
+                                file.path.clone(),
+                                std::io::Error::new(
+                                    std::io::ErrorKind::Unsupported,
+                                    "restored, it could be read by other users than before",
+                                ),
+                            ));
+                        }
                         directory.rename(&staging_name(name), name)
                     })
             }
