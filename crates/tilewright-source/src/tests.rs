@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 use super::{
-    FieldValue, LoadOptions, PlaneKind, Portal, Projection, StairwellDirection, StairwellStep,
-    load, load_with,
+    FieldValue, LoadOptions, Overlay, PlaneKind, Portal, Projection, StairwellDirection,
+    StairwellStep, load, load_edited, load_with,
 };
 use std::{
     fs,
@@ -1680,4 +1680,77 @@ fn every_key_of_a_spec_is_checked() {
             .collect();
         assert_eq!(found, expected, "{spec}");
     }
+}
+
+#[test]
+fn an_overlay_edits_the_tree_in_memory() {
+    let root = workspace();
+    let before = load(root.path()).unwrap();
+    let chunk = fs::read_to_string(root.path().join(CHUNK)).unwrap();
+    let new_chunk = "{\"format\": \"tilewright.chunk/1\", \"plane\": \"overworld\", \"layer\": 5, \"chunk\": [0, 0],\n \"objects\": [{\"at\": [1, 1], \"proto\": \"tree\"}]}\n";
+    let mut overlay = Overlay::new();
+    overlay.insert(
+        CHUNK.to_owned(),
+        Some(chunk.replacen("\"proto\": \"wall\"", "\"proto\": \"tree\"", 1)),
+    );
+    overlay.insert(
+        "planes/overworld/layers/5/0_0.jsonc".to_owned(),
+        Some(new_chunk.to_owned()),
+    );
+    overlay.insert("planes/overworld/layers/0/-1_0.jsonc".to_owned(), None);
+    // An entry that removes a file that is not there changes nothing.
+    overlay.insert("planes/overworld/layers/0/.x.tmp".to_owned(), None);
+    let world = load_edited(root.path(), &LoadOptions::default(), &overlay).unwrap();
+    let chunks = &world.planes()["overworld"].chunks;
+    assert!(chunks.contains_key(&(5, 0, 0)));
+    assert!(!chunks.contains_key(&(0, -1, 0)));
+    assert_eq!(chunks[&(0, 0, 0)].objects[1].proto, "tree");
+    assert_ne!(world.source_digest(), before.source_digest());
+    // Nothing was written.
+    assert_eq!(fs::read_to_string(root.path().join(CHUNK)).unwrap(), chunk);
+    assert!(!root.path().join("planes/overworld/layers/5").exists());
+    assert_eq!(load(root.path()).unwrap(), before);
+
+    // The digest is the digest of the tree as edited.
+    fs::create_dir_all(root.path().join("planes/overworld/layers/5")).unwrap();
+    fs::write(
+        root.path().join("planes/overworld/layers/5/0_0.jsonc"),
+        new_chunk,
+    )
+    .unwrap();
+    fs::write(
+        root.path().join(CHUNK),
+        chunk.replacen("\"proto\": \"wall\"", "\"proto\": \"tree\"", 1),
+    )
+    .unwrap();
+    fs::remove_file(root.path().join("planes/overworld/layers/0/-1_0.jsonc")).unwrap();
+    assert_eq!(load(root.path()).unwrap(), world);
+
+    // Overlay files are checked like files on disk, at their own positions.
+    let mut broken = Overlay::new();
+    broken.insert(CHUNK.to_owned(), Some("{\n  \"format\": 1,\n}".to_owned()));
+    broken.insert("world.jsonc".to_owned(), None);
+    let found = load_edited(root.path(), &LoadOptions::default(), &broken).unwrap_err();
+    assert!(
+        found
+            .iter()
+            .any(|problem| problem.code == "source.missing_file" && problem.path == "world.jsonc"),
+        "{found:#?}"
+    );
+    broken.remove("world.jsonc");
+    let found = load_edited(root.path(), &LoadOptions::default(), &broken).unwrap_err();
+    assert!(
+        found
+            .iter()
+            .any(|problem| problem.code == "jsonc.trailing_comma"
+                && problem.path == CHUNK
+                && problem.line == 2),
+        "{found:#?}"
+    );
+    let small = LoadOptions {
+        maximum_total_bytes: 10,
+        ..LoadOptions::default()
+    };
+    let found = load_edited(root.path(), &small, &Overlay::new()).unwrap_err();
+    assert!(found.iter().any(|problem| problem.code == "source.budget"));
 }

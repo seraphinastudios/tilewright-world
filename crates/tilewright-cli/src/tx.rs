@@ -1,0 +1,335 @@
+// Copyright 2026 Seraphina Studios
+// SPDX-License-Identifier: MIT
+
+//! `tilewright tx`: preview, rebase and apply transactions
+//! (`docs/spec/TRANSACTIONS.md`).
+
+use super::{Failure, USAGE, diagnostics_text, field, hex, json_string};
+use std::{ffi::OsStr, fmt::Write as _, io::Read as _, path::Path};
+use tilewright_edit::{FileChange, Options, Plan, Transaction, digest};
+
+pub(super) fn run(arguments: &[&OsStr]) -> Result<String, Failure> {
+    match arguments {
+        [command, transaction, root] if *command == "preview" => {
+            preview(Path::new(transaction), Path::new(root), false)
+        }
+        [command, flag, transaction, root] if *command == "preview" && *flag == "--json" => {
+            preview(Path::new(transaction), Path::new(root), true)
+        }
+        [command, transaction, root, output] if *command == "rebase" => {
+            rebase(Path::new(transaction), Path::new(root), Path::new(output))
+        }
+        [command, transaction, root, inverse] if *command == "apply" => {
+            apply(Path::new(transaction), Path::new(root), Path::new(inverse))
+        }
+        _ => Err(Failure::message(USAGE)),
+    }
+}
+
+fn shown(path: &Path) -> String {
+    field(&path.display().to_string())
+}
+
+/// Reads a transaction file of at most the format's 64 MiB.
+fn read(path: &Path, json: bool) -> Result<Transaction, Failure> {
+    let limit =
+        u64::try_from(tilewright_jsonc::Limits::default().max_input_bytes).unwrap_or(u64::MAX);
+    let cannot = |error: &dyn std::fmt::Display| {
+        Failure::message(format!("{}: {}", shown(path), field(&error.to_string())))
+    };
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|file| file.take(limit + 1).read_to_end(&mut bytes))
+        .map_err(|error| cannot(&error))?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > limit {
+        return Err(cannot(&format!("larger than {limit} bytes")));
+    }
+    let text = String::from_utf8(bytes).map_err(|_| cannot(&"not UTF-8"))?;
+    let name = path.display().to_string();
+    Transaction::parse(&name, text).map_err(|problems| failed(&problems, json, path))
+}
+
+fn failed(problems: &[tilewright_source::Diagnostic], json: bool, path: &Path) -> Failure {
+    Failure {
+        output: diagnostics_text(problems, json),
+        message: format!("{} problem(s) in {}", problems.len(), shown(path)),
+    }
+}
+
+fn plan(transaction: &Transaction, root: &Path, rebase: bool, json: bool) -> Result<Plan, Failure> {
+    let options = Options {
+        rebase,
+        ..Options::default()
+    };
+    tilewright_edit::plan(root, transaction, &options)
+        .map_err(|problems| failed(&problems, json, Path::new(transaction.name())))
+}
+
+fn change(file: &FileChange) -> &'static str {
+    match (&file.before, &file.after) {
+        (None, Some(_)) => "created",
+        (Some(_), None) => "deleted",
+        _ => "modified",
+    }
+}
+
+/// One line per changed file: `A`, `M` or `D` and the path.
+fn changes(plan: &Plan) -> String {
+    let mut output = String::new();
+    for file in plan.files().iter().filter(|file| file.is_changed()) {
+        let mark = match change(file) {
+            "created" => 'A',
+            "deleted" => 'D',
+            _ => 'M',
+        };
+        let _ = writeln!(output, "{mark} {}", field(&file.path));
+    }
+    output
+}
+
+fn preview(transaction: &Path, root: &Path, json: bool) -> Result<String, Failure> {
+    let plan = plan(&read(transaction, json)?, root, false, json)?;
+    let source = hex(&plan.world().source_digest());
+    if !json {
+        return Ok(format!("{}valid: source {source}\n", changes(&plan)));
+    }
+    let digest_text = |text: Option<&str>| {
+        digest(text).map_or_else(
+            || "null".to_owned(),
+            |digest| format!("\"{}\"", hex(&digest)),
+        )
+    };
+    let mut output = String::from("{\"files\":[");
+    for (index, file) in plan
+        .files()
+        .iter()
+        .filter(|file| file.is_changed())
+        .enumerate()
+    {
+        if index > 0 {
+            output.push(',');
+        }
+        output.push_str("{\"path\":");
+        json_string(&file.path, &mut output);
+        let _ = write!(
+            output,
+            ",\"change\":\"{}\",\"base\":{},\"result\":{}}}",
+            change(file),
+            digest_text(file.before.as_deref()),
+            digest_text(file.after.as_deref())
+        );
+    }
+    let _ = writeln!(output, "],\"source_digest\":\"{source}\"}}");
+    Ok(output)
+}
+
+fn write(path: &Path, text: &str) -> Result<(), Failure> {
+    tilewright_edit::write_new(path, text).map_err(|error| {
+        Failure::message(format!(
+            "cannot write {}: {}",
+            shown(path),
+            field(&error.to_string())
+        ))
+    })
+}
+
+fn rebase(transaction: &Path, root: &Path, output: &Path) -> Result<String, Failure> {
+    let transaction = read(transaction, false)?;
+    let plan = plan(&transaction, root, true, false)?;
+    write(output, plan.sealed())?;
+    Ok(format!(
+        "{}rebased: {} operation(s) on {} file(s), written to {}\n",
+        changes(&plan),
+        transaction.len(),
+        plan.files().len(),
+        shown(output)
+    ))
+}
+
+fn apply(transaction: &Path, root: &Path, inverse: &Path) -> Result<String, Failure> {
+    let plan = plan(&read(transaction, false)?, root, false, false)?;
+    // The inverse is durable before any file changes, so an interrupted
+    // apply can be undone with it.
+    write(inverse, plan.inverse())?;
+    plan.publish().map_err(|problems| Failure {
+        output: diagnostics_text(&problems, false),
+        message: format!(
+            "the transaction was not applied; {} problem(s)",
+            problems.len()
+        ),
+    })?;
+    Ok(format!(
+        "{}applied; the inverse is in {}\n",
+        changes(&plan),
+        shown(inverse)
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{ffi::OsStr, fs, path::Path};
+
+    fn run(arguments: &[&str]) -> Result<String, super::Failure> {
+        let arguments: Vec<&OsStr> = arguments.iter().map(OsStr::new).collect();
+        crate::run(&arguments)
+    }
+
+    fn copy(from: &Path, to: &Path) {
+        fs::create_dir_all(to).unwrap();
+        for entry in fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let target = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy(&entry.path(), &target);
+            } else {
+                fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+
+    /// A copy of the fixture and a transaction beside it.
+    fn setup() -> (tempfile::TempDir, String) {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("source");
+        copy(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/basic"),
+            &root,
+        );
+        fs::write(
+            directory.path().join("tx.jsonc"),
+            r#"{
+  "format": "tilewright.transaction/1",
+  "title": "Plant a tree",
+  "operations": [
+    // Chunks are found from the tile.
+    {"op": "object.insert", "plane": "overworld", "layer": 0, "at": [40, 2], "object": {"proto": "tree"}}
+  ]
+}
+"#,
+        )
+        .unwrap();
+        let root = root.display().to_string();
+        (directory, root)
+    }
+
+    #[test]
+    fn preview_and_rebase_write_nothing_but_their_output() {
+        let (directory, root) = setup();
+        let path = |name: &str| directory.path().join(name).display().to_string();
+        let layer = Path::new(&root).join("planes/overworld/layers/0");
+        let before = fs::read_dir(&layer).unwrap().count();
+        let preview = run(&["tx", "preview", &path("tx.jsonc"), &root]).unwrap();
+        assert!(
+            preview.starts_with("A planes/overworld/layers/0/1_0.jsonc\nvalid: source "),
+            "{preview}"
+        );
+        let json = run(&["tx", "preview", "--json", &path("tx.jsonc"), &root]).unwrap();
+        let parsed = tilewright_jsonc::Document::parse(
+            json.trim_end(),
+            &tilewright_jsonc::Limits::default(),
+        )
+        .unwrap();
+        let files = parsed.root().get("files").unwrap().as_array().unwrap();
+        assert_eq!(files[0].get("change").unwrap().as_str(), Some("created"));
+        assert_eq!(files[0].get("base").unwrap().kind(), "null");
+        assert_eq!(fs::read_dir(&layer).unwrap().count(), before);
+
+        let rebased = run(&[
+            "tx",
+            "rebase",
+            &path("tx.jsonc"),
+            &root,
+            &path("sealed.jsonc"),
+        ])
+        .unwrap();
+        assert!(
+            rebased.contains("rebased: 1 operation(s) on 1 file(s)"),
+            "{rebased}"
+        );
+        let sealed = fs::read_to_string(path("sealed.jsonc")).unwrap();
+        assert!(sealed.contains("// Chunks are found from the tile."));
+        assert!(sealed.contains("\"planes/overworld/layers/0/1_0.jsonc\": null"));
+        let again = run(&[
+            "tx",
+            "rebase",
+            &path("tx.jsonc"),
+            &root,
+            &path("sealed.jsonc"),
+        ]);
+        assert!(again.unwrap_err().message.contains("cannot write"));
+        assert_eq!(fs::read_dir(&layer).unwrap().count(), before);
+
+        fs::write(
+            path("bad.jsonc"),
+            "{\"format\": \"tilewright.transaction/1\"}",
+        )
+        .unwrap();
+        let bad = run(&["tx", "preview", &path("bad.jsonc"), &root]).unwrap_err();
+        assert!(
+            bad.output.contains("tx.shape: missing key \"operations\""),
+            "{}",
+            bad.output
+        );
+        for arguments in [
+            &["tx"][..],
+            &["tx", "preview"],
+            &["tx", "apply", "a", "b"],
+            &["tx", "frob", "a", "b"],
+        ] {
+            assert!(run(arguments).unwrap_err().message.starts_with("usage:"));
+        }
+    }
+
+    #[test]
+    fn apply_writes_the_inverse_and_the_inverse_undoes_it() {
+        let (directory, root) = setup();
+        let path = |name: &str| directory.path().join(name).display().to_string();
+        let chunk = Path::new(&root).join("planes/overworld/layers/0/1_0.jsonc");
+        run(&[
+            "tx",
+            "rebase",
+            &path("tx.jsonc"),
+            &root,
+            &path("sealed.jsonc"),
+        ])
+        .unwrap();
+        let applied = run(&[
+            "tx",
+            "apply",
+            &path("sealed.jsonc"),
+            &root,
+            &path("undo.jsonc"),
+        ])
+        .unwrap();
+        assert!(applied.contains("applied; the inverse is in"), "{applied}");
+        assert!(chunk.exists());
+
+        // Its base no longer holds, so applying it again is a conflict, and
+        // the inverse is not written.
+        let conflict = run(&[
+            "tx",
+            "apply",
+            &path("sealed.jsonc"),
+            &root,
+            &path("undo2.jsonc"),
+        ])
+        .unwrap_err();
+        assert!(
+            conflict.output.contains("tx.conflict"),
+            "{}",
+            conflict.output
+        );
+        assert!(!Path::new(&path("undo2.jsonc")).exists());
+
+        run(&[
+            "tx",
+            "apply",
+            &path("undo.jsonc"),
+            &root,
+            &path("redo.jsonc"),
+        ])
+        .unwrap();
+        assert!(!chunk.exists());
+        assert!(run(&["validate", &root]).unwrap().starts_with("valid: "));
+    }
+}

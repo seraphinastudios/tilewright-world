@@ -97,7 +97,8 @@ Parsers enforce these limits while reading, not after building a tree:
 | Physical line | 1 MiB UTF-8 |
 
 Tools preserve comments, key order, whitespace and untouched bytes. An edit
-replaces the exact byte span of the values it changes.
+replaces the exact byte span of the values it changes. Edits are made through
+transactions ([TRANSACTIONS.md](TRANSACTIONS.md)).
 
 ## 4. Project manifest: `world.jsonc`
 

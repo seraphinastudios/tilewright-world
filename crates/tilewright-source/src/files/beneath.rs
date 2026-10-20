@@ -4,13 +4,19 @@
 //! Unix access beneath the root through directory handles. Each component
 //! is opened relative to the directory before it with `O_NOFOLLOW`, so a
 //! symbolic link is never followed, not even one swapped in after a check.
+//! Writes, renames and removals act on names inside a directory opened that
+//! way, so they never follow a link either.
 
 use super::{Found, RawEntry, RawKind, Refused};
 use rustix::{
-    fs::{AtFlags, CWD, Dir, FileType, Mode, OFlags, fstat, openat, statat},
+    fs::{
+        AtFlags, CWD, Dir, FileType, FlockOperation, Mode, OFlags, fchmod, flock, fstat, fsync,
+        mkdirat, openat, renameat, statat, unlinkat,
+    },
     io::Errno,
 };
 use std::{
+    io::Write as _,
     os::fd::{AsFd, BorrowedFd, OwnedFd},
     path::Path,
 };
@@ -122,6 +128,51 @@ impl Root {
         })
     }
 
+    /// Opens the directory `components`, creating missing ones when
+    /// `create`.
+    pub(crate) fn directory(
+        &self,
+        components: &[&str],
+        create: bool,
+    ) -> Result<Directory, Refused> {
+        let root = self.root()?;
+        let mut current: Option<OwnedFd> = None;
+        for (index, component) in components.iter().enumerate() {
+            let directory = current.as_ref().map_or(root, AsFd::as_fd);
+            let opened = match openat(directory, *component, directory_flags(), Mode::empty()) {
+                Err(Errno::NOENT) if create => {
+                    match mkdirat(directory, *component, Mode::from_raw_mode(0o777)) {
+                        Ok(()) | Err(Errno::EXIST) => {}
+                        Err(errno) => return Err(Refused::Io(errno.into())),
+                    }
+                    openat(directory, *component, directory_flags(), Mode::empty())
+                }
+                opened => opened,
+            }
+            .map_err(|errno| classify(directory, component, errno, &components[..=index]))?;
+            current = Some(opened);
+        }
+        match current {
+            Some(directory) => Ok(Directory(directory)),
+            None => root
+                .try_clone_to_owned()
+                .map(Directory)
+                .map_err(Refused::Io),
+        }
+    }
+
+    /// Takes an exclusive advisory lock on the root directory, held until
+    /// the returned lock is dropped; `None` when another holds it.
+    pub(crate) fn lock(&self) -> Result<Option<Lock>, Refused> {
+        let fd = openat(self.root()?, ".", directory_flags(), Mode::empty())
+            .map_err(|errno| Refused::Io(errno.into()))?;
+        match flock(&fd, FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => Ok(Some(Lock(fd))),
+            Err(Errno::WOULDBLOCK) => Ok(None),
+            Err(errno) => Err(Refused::Io(errno.into())),
+        }
+    }
+
     /// Lists a directory. Entries are read as they are iterated.
     pub(crate) fn list(&self, components: &[&str]) -> Result<Listing, Refused> {
         let directory = if components.is_empty() {
@@ -178,5 +229,70 @@ impl Iterator for Listing {
             }));
         }
         None
+    }
+}
+
+/// An exclusive lock on the root, released when dropped.
+pub(crate) struct Lock(#[allow(dead_code)] OwnedFd);
+
+/// A directory beneath the root, opened without following links.
+pub(crate) struct Directory(OwnedFd);
+
+impl Directory {
+    /// Writes a new file `name` holding `bytes` and syncs it. Whatever was at
+    /// `name` is removed first, so a link or a second hard link there is
+    /// never written through. The file takes the permissions of the regular
+    /// file `like`, if there is one.
+    pub(crate) fn write(&self, name: &str, like: &str, bytes: &[u8]) -> Result<(), Refused> {
+        let permissions = match statat(&self.0, like, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) if kind_of(FileType::from_raw_mode(stat.st_mode)) == RawKind::File => {
+                Some(Mode::from_raw_mode(stat.st_mode))
+            }
+            _ => None,
+        };
+        self.remove_file(name)?;
+        let flags = OFlags::WRONLY
+            | OFlags::CREATE
+            | OFlags::EXCL
+            | OFlags::NOFOLLOW
+            | OFlags::CLOEXEC
+            | OFlags::NOCTTY;
+        let fd = openat(&self.0, name, flags, Mode::from_raw_mode(0o666))
+            .map_err(|errno| classify(self.0.as_fd(), name, errno, &[name]))?;
+        if let Some(permissions) = permissions {
+            fchmod(&fd, permissions).map_err(|errno| Refused::Io(errno.into()))?;
+        }
+        let mut file = std::fs::File::from(fd);
+        file.write_all(bytes).map_err(Refused::Io)?;
+        file.sync_all().map_err(Refused::Io)
+    }
+
+    /// Renames `from` to `to` in this directory, replacing `to`.
+    pub(crate) fn rename(&self, from: &str, to: &str) -> Result<(), Refused> {
+        renameat(&self.0, from, &self.0, to).map_err(|errno| Refused::Io(errno.into()))
+    }
+
+    /// Removes the file or link `name`; `false` when there was none.
+    pub(crate) fn remove_file(&self, name: &str) -> Result<bool, Refused> {
+        match unlinkat(&self.0, name, AtFlags::empty()) {
+            Ok(()) => Ok(true),
+            Err(Errno::NOENT) => Ok(false),
+            Err(errno) => Err(Refused::Io(errno.into())),
+        }
+    }
+
+    /// Removes the empty directory `name`; `false` when it is missing or
+    /// not empty.
+    pub(crate) fn remove_directory(&self, name: &str) -> Result<bool, Refused> {
+        match unlinkat(&self.0, name, AtFlags::REMOVEDIR) {
+            Ok(()) => Ok(true),
+            Err(Errno::NOENT | Errno::NOTEMPTY | Errno::EXIST) => Ok(false),
+            Err(errno) => Err(Refused::Io(errno.into())),
+        }
+    }
+
+    /// Syncs the directory, so renames and removals in it are durable.
+    pub(crate) fn sync(&self) -> Result<(), Refused> {
+        fsync(&self.0).map_err(|errno| Refused::Io(errno.into()))
     }
 }

@@ -8,17 +8,17 @@
 //! before use (`portable`).
 
 #[cfg(unix)]
-mod beneath;
+pub(crate) mod beneath;
 #[cfg(any(not(unix), test))]
-mod portable;
+pub(crate) mod portable;
 
 #[cfg(unix)]
-use beneath as platform;
+pub(crate) use beneath as platform;
 #[cfg(not(unix))]
-use portable as platform;
+pub(crate) use portable as platform;
 
 use crate::{
-    Code, Diagnostic, LoadOptions,
+    Code, Diagnostic, LoadOptions, Overlay,
     diagnostic::{Diagnostics, Positions},
 };
 use sha2::{Digest, Sha256};
@@ -61,7 +61,7 @@ pub(crate) struct RawEntry {
 }
 
 /// The components of a relative path.
-fn components(path: &str) -> Vec<&str> {
+pub(crate) fn components(path: &str) -> Vec<&str> {
     path.split('/')
         .filter(|component| !component.is_empty())
         .collect()
@@ -89,6 +89,7 @@ pub(crate) struct Entry {
 pub(crate) struct Tree<'o> {
     root: platform::Root,
     options: &'o LoadOptions,
+    overlay: &'o Overlay,
     files: usize,
     entries: usize,
     bytes: u64,
@@ -97,8 +98,11 @@ pub(crate) struct Tree<'o> {
     exhausted: bool,
 }
 
-/// Whether `path` is a safe relative path ending in `.jsonc`.
-pub(crate) fn is_jsonc_path(path: &str) -> bool {
+/// Whether `path` is a safe relative path ending in `.jsonc`: at most 1,024
+/// bytes and 32 `/`-separated components of at most 128 ASCII letters,
+/// digits, `_`, `.` and `-`, none starting with `.` or `-`.
+#[must_use]
+pub fn is_jsonc_path(path: &str) -> bool {
     is_safe_relative(path) && path.as_bytes().ends_with(b".jsonc")
 }
 
@@ -119,11 +123,24 @@ pub(crate) fn is_safe_relative(path: &str) -> bool {
         })
 }
 
+/// The overlay of a load that edits nothing.
+#[cfg(test)]
+static NO_OVERLAY: Overlay = BTreeMap::new();
+
 impl<'o> Tree<'o> {
+    #[cfg(test)]
     pub fn new(root: &Path, options: &'o LoadOptions) -> Self {
+        Self::with_overlay(root, options, &NO_OVERLAY)
+    }
+
+    /// A tree whose files are those on disk with `overlay` applied: an
+    /// entry's text replaces or creates the file at its path, and an entry
+    /// of `None` removes it. Directories that hold an overlay file exist.
+    pub fn with_overlay(root: &Path, options: &'o LoadOptions, overlay: &'o Overlay) -> Self {
         Self {
             root: platform::Root::new(root),
             options,
+            overlay,
             files: 0,
             entries: 0,
             bytes: 0,
@@ -176,11 +193,18 @@ impl<'o> Tree<'o> {
     /// Whether a regular file or directory exists at `path`. A symbolic
     /// link anywhere in the path is reported and counts as neither.
     pub fn kind(&mut self, path: &str) -> Option<EntryKind> {
+        match self.overlay.get(path) {
+            Some(Some(_)) => return Some(EntryKind::File),
+            Some(None) => return None,
+            None => {}
+        }
         match self.root.kind(&components(path)) {
             Ok(Found::File) => Some(EntryKind::File),
             Ok(Found::Directory) => Some(EntryKind::Directory),
             Ok(Found::Other) => Some(EntryKind::Other),
-            Ok(Found::Missing) | Err(Refused::Missing | Refused::Unexpected) => None,
+            Ok(Found::Missing) | Err(Refused::Missing | Refused::Unexpected) => self
+                .holds_overlay_files(path)
+                .then_some(EntryKind::Directory),
             Err(Refused::Link(link)) => {
                 self.link(&link);
                 None
@@ -194,6 +218,11 @@ impl<'o> Tree<'o> {
                 None
             }
         }
+    }
+
+    /// Whether the overlay puts a file beneath the directory `path`.
+    fn holds_overlay_files(&self, path: &str) -> bool {
+        overlay_beneath(self.overlay, path).any(|(_, value)| value.is_some())
     }
 
     /// Whether the optional directory `path` is present. An entry of
@@ -216,12 +245,51 @@ impl<'o> Tree<'o> {
     /// Lists a directory, sorted by name. Symbolic links, special files and
     /// non-UTF-8 names are reported and skipped.
     pub fn list(&mut self, path: &str) -> Vec<Entry> {
+        let mut entries = self.list_disk(path);
+        // Overlay files replace, add or remove entries; a directory that
+        // holds an overlay file is listed.
+        let mut added: BTreeMap<&str, EntryKind> = BTreeMap::new();
+        let mut removed = Vec::new();
+        for (rest, value) in overlay_beneath(self.overlay, path) {
+            match (rest.split_once('/'), value) {
+                (None, Some(_)) => {
+                    added.insert(rest, EntryKind::File);
+                }
+                (None, None) => removed.push(rest),
+                (Some((directory, _)), Some(_)) => {
+                    added.entry(directory).or_insert(EntryKind::Directory);
+                }
+                (Some(_), None) => {}
+            }
+        }
+        entries.retain(|entry| !removed.contains(&entry.name.as_str()));
+        for (name, kind) in added {
+            if !entries.iter().any(|entry| entry.name == name) {
+                self.entries += 1;
+                if self.entries > self.options.maximum_entries {
+                    self.exhaust(path);
+                    break;
+                }
+                entries.push(Entry {
+                    name: name.to_owned(),
+                    kind,
+                });
+            }
+        }
+        entries.sort_by(|left, right| left.name.cmp(&right.name));
+        entries
+    }
+
+    /// Lists a directory on disk. A directory that is missing on disk but
+    /// holds overlay files is empty there.
+    fn list_disk(&mut self, path: &str) -> Vec<Entry> {
         let directory = match self.root.list(&components(path)) {
             Ok(directory) => directory,
             Err(Refused::Link(link)) => {
                 self.link(&link);
                 return Vec::new();
             }
+            Err(Refused::Missing) if self.holds_overlay_files(path) => return Vec::new(),
             Err(refused) => {
                 let reason = match refused {
                     Refused::Io(error) => error.to_string(),
@@ -283,13 +351,20 @@ impl<'o> Tree<'o> {
                 )),
             }
         }
-        entries.sort_by(|left, right| left.name.cmp(&right.name));
         entries
     }
 
     /// Reads and parses a JSONC document. Every problem is reported.
-    #[allow(clippy::too_many_lines)]
     pub fn document(&mut self, path: &str) -> Option<Source> {
+        match self.overlay.get(path) {
+            Some(Some(text)) => return self.overlay_document(path, text),
+            Some(None) => {
+                self.diagnostics
+                    .push(Diagnostic::file(path, Code::MissingFile, "file is missing"));
+                return None;
+            }
+            None => {}
+        }
         // The file is opened first and its opened handle checked, so what is
         // checked is what is read.
         let (file, length) = match self.root.file(&components(path)) {
@@ -365,6 +440,32 @@ impl<'o> Tree<'o> {
             self.exhaust(path);
             return None;
         }
+        self.parse(path, bytes)
+    }
+
+    /// Reads an overlay file under the same limits and budget as a file on
+    /// disk.
+    fn overlay_document(&mut self, path: &str, text: &str) -> Option<Source> {
+        let limit = u64::try_from(self.options.limits.max_input_bytes).unwrap_or(u64::MAX);
+        let length = u64::try_from(text.len()).unwrap_or(u64::MAX);
+        if length > limit {
+            self.diagnostics.push(Diagnostic::file(
+                path,
+                ErrorCode::InputTooLarge,
+                format!("file is larger than {limit} bytes"),
+            ));
+            return None;
+        }
+        if !self.within_budget(length) {
+            self.exhaust(path);
+            return None;
+        }
+        self.parse(path, text.as_bytes().to_vec())
+    }
+
+    /// Counts, digests and parses the bytes of a file that fits the budget.
+    fn parse(&mut self, path: &str, bytes: Vec<u8>) -> Option<Source> {
+        let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         self.files += 1;
         self.bytes = self.bytes.saturating_add(length);
         self.digests
@@ -412,6 +513,22 @@ impl<'o> Tree<'o> {
         }
         hasher.finalize().into()
     }
+}
+
+/// The overlay entries beneath the directory `path`, with the rest of
+/// their paths.
+fn overlay_beneath<'a>(
+    overlay: &'a Overlay,
+    path: &str,
+) -> impl Iterator<Item = (&'a str, &'a Option<String>)> + 'a {
+    let prefix = if path.is_empty() {
+        String::new()
+    } else {
+        format!("{path}/")
+    };
+    overlay
+        .range(prefix.clone()..)
+        .map_while(move |(key, value)| key.strip_prefix(prefix.as_str()).map(|rest| (rest, value)))
 }
 
 pub(crate) fn join(directory: &str, name: &str) -> String {
@@ -494,4 +611,88 @@ mod tests {
 
     access_tests!(beneath_refuses_links, beneath);
     access_tests!(portable_refuses_links, portable);
+
+    macro_rules! write_tests {
+        ($name:ident, $module:ident) => {
+            #[test]
+            fn $name() {
+                let directory = tree();
+                let root = super::$module::Root::new(directory.path());
+                // Directories are created as asked, never through a link.
+                assert!(matches!(
+                    root.directory(&["new", "deeper"], false),
+                    Err(Refused::Missing)
+                ));
+                let made = root.directory(&["new", "deeper"], true).unwrap();
+                assert!(directory.path().join("new/deeper").is_dir());
+                assert_eq!(link(root.directory(&["link", "inside"], true)), "link");
+                assert!(!directory.path().join("dir/inside").exists());
+                assert!(matches!(
+                    root.directory(&["dir", "file.jsonc"], true),
+                    Err(Refused::Unexpected)
+                ));
+
+                // A write replaces a link or hard link instead of writing
+                // through it, and takes the permissions of `like`.
+                let dir = root.directory(&["dir"], false).unwrap();
+                let outside = tempfile::tempdir().unwrap();
+                let target = outside.path().join("target");
+                fs::write(&target, "outside").unwrap();
+                symlink(&target, directory.path().join("dir/staged")).unwrap();
+                dir.write("staged", "file.jsonc", b"new").unwrap();
+                assert_eq!(fs::read_to_string(&target).unwrap(), "outside");
+                fs::hard_link(&target, directory.path().join("dir/hard")).unwrap();
+                dir.write("hard", "file.jsonc", b"new").unwrap();
+                assert_eq!(fs::read_to_string(&target).unwrap(), "outside");
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    let file = directory.path().join("dir/file.jsonc");
+                    fs::set_permissions(&file, fs::Permissions::from_mode(0o640)).unwrap();
+                    dir.write("moded", "file.jsonc", b"x").unwrap();
+                    let mode = fs::metadata(directory.path().join("dir/moded"))
+                        .unwrap()
+                        .permissions()
+                        .mode();
+                    assert_eq!(mode & 0o777, 0o640);
+                }
+
+                dir.rename("staged", "file.jsonc").unwrap();
+                assert_eq!(
+                    fs::read_to_string(directory.path().join("dir/file.jsonc")).unwrap(),
+                    "new"
+                );
+                assert!(dir.remove_file("hard").unwrap());
+                assert!(!dir.remove_file("hard").unwrap());
+                assert!(dir.remove_file("file-link.jsonc").unwrap());
+                assert!(target.exists());
+                dir.sync().unwrap();
+                made.sync().unwrap();
+
+                let top = root.directory(&["new"], false).unwrap();
+                fs::write(directory.path().join("new/deeper/x"), "").unwrap();
+                assert!(!top.remove_directory("deeper").unwrap());
+                fs::remove_file(directory.path().join("new/deeper/x")).unwrap();
+                assert!(top.remove_directory("deeper").unwrap());
+                assert!(!top.remove_directory("deeper").unwrap());
+
+                let lock = root.lock().unwrap();
+                assert!(lock.is_some());
+            }
+        };
+    }
+
+    write_tests!(beneath_writes_beneath_the_root, beneath);
+    write_tests!(portable_writes_beneath_the_root, portable);
+
+    #[test]
+    fn the_lock_excludes_a_second_holder() {
+        let directory = tree();
+        let root = super::beneath::Root::new(directory.path());
+        let other = super::beneath::Root::new(directory.path());
+        let held = root.lock().unwrap();
+        assert!(held.is_some());
+        assert!(other.lock().unwrap().is_none());
+        drop(held);
+        assert!(other.lock().unwrap().is_some());
+    }
 }

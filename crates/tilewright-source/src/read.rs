@@ -17,8 +17,9 @@ use std::{
 };
 use tilewright_jsonc::{MAX_SAFE_INTEGER, Member, Span, Value};
 
-/// Whether `text` matches `^[a-z0-9][a-z0-9_.-]{0,127}$`.
-pub(crate) fn is_identifier(text: &str) -> bool {
+/// Whether `text` is an identifier: it matches `^[a-z0-9][a-z0-9_.-]{0,127}$`.
+#[must_use]
+pub fn is_identifier(text: &str) -> bool {
     let bytes = text.as_bytes();
     !bytes.is_empty()
         && bytes.len() <= 128
@@ -30,7 +31,8 @@ pub(crate) fn is_identifier(text: &str) -> bool {
 
 /// Whether `text` is a domain-qualified namespace for `custom` data, such
 /// as `example.org` or `example.org/tool`.
-pub(crate) fn is_namespace(text: &str) -> bool {
+#[must_use]
+pub fn is_namespace(text: &str) -> bool {
     let (domain, rest) = text.split_once('/').unwrap_or((text, ""));
     domain.contains('.')
         && is_identifier(domain)

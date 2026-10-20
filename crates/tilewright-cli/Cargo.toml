@@ -13,6 +13,7 @@ name = "tilewright"
 path = "src/main.rs"
 
 [dependencies]
+tilewright-edit.workspace = true
 tilewright-jsonc.workspace = true
 tilewright-pack.workspace = true
 tilewright-source.workspace = true

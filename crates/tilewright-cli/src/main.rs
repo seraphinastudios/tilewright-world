@@ -1,7 +1,10 @@
 // Copyright 2026 Seraphina Studios
 // SPDX-License-Identifier: MIT
 
-//! `tilewright`: validate world sources, compile packs and inspect them.
+//! `tilewright`: validate world sources, compile packs and inspect them,
+//! and preview, rebase and apply transactions.
+
+mod tx;
 
 use std::{
     ffi::{OsStr, OsString},
@@ -15,11 +18,18 @@ const USAGE: &str = "usage:
   tilewright validate [--json] ROOT
   tilewright compile ROOT OUTPUT_DIRECTORY
   tilewright inspect [--max-decoded-bytes BYTES] [--max-pack-bytes BYTES] PACK
+  tilewright tx preview [--json] TRANSACTION ROOT
+  tilewright tx rebase TRANSACTION ROOT OUTPUT
+  tilewright tx apply TRANSACTION ROOT INVERSE
   tilewright --version
 
 inspect verifies the pack. It stops once the chunks decode to more than
 --max-decoded-bytes, and rejects a pack file longer than --max-pack-bytes
-before opening or hashing it. Both default to 8589934592 (8 GiB).";
+before opening or hashing it. Both default to 8589934592 (8 GiB).
+
+tx preview validates a transaction's result without writing; tx rebase
+writes it replayed on ROOT as it is now; tx apply writes the inverse to
+INVERSE, then applies it. OUTPUT and INVERSE must not exist.";
 
 fn main() -> ExitCode {
     // Paths need not be UTF-8, so arguments are read as OS strings.
@@ -135,6 +145,7 @@ fn run_command(arguments: &[&OsStr]) -> Result<String, Failure> {
         [command, root, output] if *command == "compile" => {
             compile(Path::new(root), Path::new(output))
         }
+        [command, rest @ ..] if *command == "tx" => tx::run(rest),
         [command, options @ ..] if *command == "inspect" => {
             let (pack, limits) = inspect_options(options)?;
             inspect(Path::new(pack), limits)

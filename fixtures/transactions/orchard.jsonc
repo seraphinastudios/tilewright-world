@@ -1,0 +1,39 @@
+// Plants an orchard east of the village. It spans two chunks, one of which
+// does not exist yet, and touches every kind of operation.
+{
+  "format": "tilewright.transaction/1",
+  "title": "Plant the village orchard",
+  "actor": "example:fixture",
+  "operations": [
+    // A new prototype for the orchard trees.
+    {"op": "document.create", "path": "defs/proto/apple_tree.jsonc", "document": {
+      "format": "tilewright.def/1", "type": "proto", "id": "apple_tree",
+      "fields": {"face": "apple_tree.png", "layer": "item", "blocks_view": true}
+    }},
+    // Trees across the chunk edge: the second chunk is created.
+    {"op": "object.insert", "plane": "overworld", "layer": 0, "at": [30, 10], "object": {"proto": "apple_tree"}},
+    {"op": "object.insert", "plane": "overworld", "layer": 0, "at": [33, 10], "object": {"proto": "apple_tree", "z": 1}},
+    // The old tree makes way, and the wall moves into the gap.
+    {"op": "object.remove", "plane": "overworld", "layer": 0, "at": [12, 12], "index": 0,
+     "expect": {"proto": "tree"}},
+    {"op": "object.move", "plane": "overworld", "layer": 0, "at": [15, 0], "index": 0,
+     "expect": {"proto": "wall"}, "to": {"at": [12, 12]}},
+    {"op": "set", "object": {"plane": "overworld", "layer": 0, "at": [12, 12], "index": 0},
+     "pointer": ["fields", "name"], "value": "Orchard wall", "expect": "Old wall"},
+    // Sand paths between the rows, on both sides of the edge.
+    {"op": "terrain.set", "plane": "overworld", "layer": 0, "grid": "floor", "cells": [
+      {"at": [31, 10], "value": "sand", "expect": "grass"},
+      {"at": [32, 10], "value": "sand"},
+      {"at": [-1, 0], "value": "sand", "expect": "grass"}
+    ]},
+    {"op": "terrain.set", "plane": "overworld", "layer": 0, "grid": "height", "cells": [
+      {"at": [33, 10], "value": 2}
+    ]},
+    // The orchard joins the village.
+    {"op": "set", "path": "planes/overworld/zones.jsonc", "pointer": ["zones", {"id": "village"}, "name"],
+     "value": "Orchard Village", "expect": "Little Village"},
+    {"op": "insert", "path": "planes/overworld/anchors.jsonc", "pointer": ["anchors", 2],
+     "value": {"id": "orchard.gate", "layer": 0, "at": [32, 9]}},
+    {"op": "test", "path": "world.jsonc", "pointer": ["planes", 0], "value": "overworld"}
+  ]
+}

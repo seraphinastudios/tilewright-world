@@ -25,6 +25,7 @@
 //! # Ok::<(), usize>(())
 //! ```
 
+mod access;
 mod chunk;
 mod defs;
 mod diagnostic;
@@ -38,8 +39,11 @@ mod stairwell;
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 use tilewright_jsonc::Limits;
 
+pub use access::{AccessError, SourceDirectory, SourceLock, SourceRoot};
 use diagnostic::Diagnostics;
 pub use diagnostic::{Code, Diagnostic};
+pub use files::is_jsonc_path;
+pub use read::{is_identifier, is_namespace};
 pub use schema::{FieldSpec, FieldType, MAXIMUM_FIELD_DEPTH, MAXIMUM_LIST_ITEMS, Schema};
 
 /// Tiles along each side of a chunk in format 1.
@@ -425,11 +429,30 @@ pub fn load(root: &Path) -> Result<World, Vec<Diagnostic>> {
 /// # Errors
 /// Returns every diagnostic found, sorted by path and position.
 pub fn load_with(root: &Path, options: &LoadOptions) -> Result<World, Vec<Diagnostic>> {
+    load_edited(root, options, &Overlay::new())
+}
+
+/// Edits applied over the files of a tree for [`load_edited`], keyed by
+/// root-relative `/`-separated path: `Some(text)` replaces or creates the
+/// file, and `None` removes it.
+pub type Overlay = BTreeMap<String, Option<String>>;
+
+/// Loads a source tree as it would be with `overlay` applied, without
+/// writing anything. Overlay files are read under the same limits and
+/// budget as files on disk, and a directory that holds one exists.
+///
+/// # Errors
+/// Returns every diagnostic found, sorted by path and position.
+pub fn load_edited(
+    root: &Path,
+    options: &LoadOptions,
+    overlay: &Overlay,
+) -> Result<World, Vec<Diagnostic>> {
     let options = &LoadOptions {
         limits: within_format(options.limits),
         ..*options
     };
-    let mut tree = files::Tree::new(root, options);
+    let mut tree = files::Tree::with_overlay(root, options, overlay);
     let mut diagnostics = Diagnostics::new(options.maximum_diagnostics);
     let world = load_tree(&mut tree, &mut diagnostics);
     diagnostics.append(tree.take_diagnostics());

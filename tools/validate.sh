@@ -21,4 +21,16 @@ pack=$(find "${first}" -name '*.twpack')
 cmp "${pack}" "${second}/$(basename "${pack}")"
 cargo run --locked --quiet --package tilewright-cli -- inspect "${pack}"
 
+# A transaction replays to the same bytes in separate processes, applies,
+# and its inverse restores the fixture byte for byte.
+cp -R fixtures/basic "${first}/source"
+for output in "${first}/sealed.jsonc" "${second}/sealed.jsonc"; do
+  cargo run --locked --quiet --package tilewright-cli -- tx rebase fixtures/transactions/orchard.jsonc "${first}/source" "${output}"
+done
+cmp "${first}/sealed.jsonc" "${second}/sealed.jsonc"
+cargo run --locked --quiet --package tilewright-cli -- tx apply "${first}/sealed.jsonc" "${first}/source" "${first}/undo.jsonc"
+cargo run --locked --quiet --package tilewright-cli -- validate "${first}/source"
+cargo run --locked --quiet --package tilewright-cli -- tx apply "${first}/undo.jsonc" "${first}/source" "${first}/redo.jsonc"
+diff -r fixtures/basic "${first}/source"
+
 git diff --check
