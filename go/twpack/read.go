@@ -232,13 +232,26 @@ type ChunkKey struct {
 	CX, CY int64
 }
 
+// layersSQL lists a plane's layers. Grouping by the stored layer lets
+// SQLite read them in primary-key order instead of collecting them first;
+// the bounded value is what is loaded.
+func layersSQL() string {
+	return "SELECT " + boundedInteger("layer", -1<<31, 1<<31-1) +
+		" FROM chunks WHERE plane = ?1 GROUP BY layer ORDER BY layer"
+}
+
+// chunkKeysSQL lists a layer's chunk positions, each NULL unless every tile
+// of a format 1 chunk there is within the source format's integer range.
+func chunkKeysSQL() string {
+	low, high := int64(-(MaxSafeInteger / formatChunkSize)), int64((MaxSafeInteger-formatChunkSize+1)/formatChunkSize)
+	return "SELECT " + boundedInteger("cx", low, high) + ", " + boundedInteger("cy", low, high) +
+		" FROM chunks WHERE plane = ?1 AND layer = ?2 ORDER BY cx, cy"
+}
+
 // Layers yields the layers of a plane that have chunks, in order.
 func (p *Pack) Layers(ctx context.Context, plane string) iter.Seq2[int32, error] {
 	return func(yield func(int32, error) bool) {
-		rows, err := p.conn.QueryContext(ctx,
-			"SELECT DISTINCT "+boundedInteger("layer", -1<<31, 1<<31-1)+" FROM chunks WHERE plane = ?1 ORDER BY 1",
-			plane,
-		)
+		rows, err := p.conn.QueryContext(ctx, layersSQL(), plane)
 		if err != nil {
 			yield(0, sqliteError(ctx, err))
 			return
@@ -264,15 +277,12 @@ func (p *Pack) Layers(ctx context.Context, plane string) iter.Seq2[int32, error]
 	}
 }
 
-// ChunkKeys yields the positions of a layer's chunks, by cx then cy.
+// ChunkKeys yields the positions of a layer's chunks, by cx then cy. A
+// position must keep every tile of its chunk within the source format's
+// integer range.
 func (p *Pack) ChunkKeys(ctx context.Context, plane string, layer int32) iter.Seq2[ChunkKey, error] {
 	return func(yield func(ChunkKey, error) bool) {
-		rows, err := p.conn.QueryContext(ctx,
-			"SELECT "+boundedInteger("cx", -MaxSafeInteger, MaxSafeInteger)+", "+
-				boundedInteger("cy", -MaxSafeInteger, MaxSafeInteger)+
-				" FROM chunks WHERE plane = ?1 AND layer = ?2 ORDER BY cx, cy",
-			plane, int64(layer),
-		)
+		rows, err := p.conn.QueryContext(ctx, chunkKeysSQL(), plane, int64(layer))
 		if err != nil {
 			yield(ChunkKey{}, sqliteError(ctx, err))
 			return
@@ -285,7 +295,7 @@ func (p *Pack) ChunkKeys(ctx context.Context, plane string, layer int32) iter.Se
 				return
 			}
 			if !cx.Valid || !cy.Valid {
-				yield(ChunkKey{}, reject(CodeChunk, "a chunk's position is not an integer within the source format's range"))
+				yield(ChunkKey{}, reject(CodeChunk, "a chunk's position puts tiles outside the source format's integer range"))
 				return
 			}
 			if !yield(ChunkKey{CX: cx.Int64, CY: cy.Int64}, nil) {

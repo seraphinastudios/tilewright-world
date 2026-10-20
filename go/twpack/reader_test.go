@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -292,5 +293,71 @@ func TestVerificationCapsZonesPerPlane(t *testing.T) {
 	expectCode(t, "a plane with too many zones", err, CodeZone)
 	if !strings.Contains(err.Error(), "more zones") {
 		t.Fatal(err)
+	}
+}
+
+// Every ordered scan streams rows in primary-key order: none makes SQLite
+// collect rows into a temporary B-tree first.
+func TestScansStreamInPrimaryKeyOrder(t *testing.T) {
+	ctx := context.Background()
+	pack := openPack(t, validFixture(t, "", ""), Limits{})
+	for _, scan := range []struct {
+		sql       string
+		arguments []any
+	}{
+		{layersSQL(), []any{"overworld"}},
+		{chunkKeysSQL(), []any{"overworld", 0}},
+		{planeSQL("ORDER BY id"), []any{maxDocumentBytes}},
+		{zoneSQL("WHERE plane = ?2 ORDER BY id"), []any{maxDocumentBytes, "overworld"}},
+		{anchorSQL("WHERE plane = ?1 ORDER BY id"), []any{"overworld"}},
+		{stairwellSQL("WHERE plane = ?2 ORDER BY id"), []any{maxDocumentBytes, "overworld"}},
+		{definitionSQL("ORDER BY type, id"), []any{maxDocumentBytes}},
+		{definitionSQL("WHERE type = ?2 ORDER BY id"), []any{maxDocumentBytes, "proto"}},
+		{chunkPassSQL(), nil},
+		{planeDocumentsSQL, []any{maxDocumentBytes}},
+		{zoneDocumentsSQL, []any{maxDocumentBytes}},
+		{definitionDocumentsSQL, []any{maxDocumentBytes}},
+		{stairwellDocumentsSQL, []any{maxDocumentBytes}},
+		{"SELECT value FROM strings ORDER BY id", nil},
+	} {
+		rows, err := pack.conn.QueryContext(ctx, "EXPLAIN QUERY PLAN "+scan.sql, scan.arguments...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var plan []string
+		for rows.Next() {
+			var id, parent, unused int64
+			var detail string
+			if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+				t.Fatal(err)
+			}
+			plan = append(plan, detail)
+		}
+		if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(strings.Join(plan, "; "), "TEMP B-TREE") {
+			t.Errorf("%s: %v", scan.sql, plan)
+		}
+	}
+}
+
+func TestChunkKeysKeepEveryTileInRange(t *testing.T) {
+	ctx := context.Background()
+	for cx, ok := range map[int64]bool{
+		(MaxSafeInteger - formatChunkSize + 1) / formatChunkSize: true,
+		(MaxSafeInteger-formatChunkSize+1)/formatChunkSize + 1:   false,
+		-(MaxSafeInteger / formatChunkSize):                      true,
+		-(MaxSafeInteger / formatChunkSize) - 1:                  false,
+	} {
+		path := tampered(t, fmt.Sprintf("UPDATE chunks SET cx = %d WHERE plane = 'vault'; VACUUM", cx))
+		pack := openPack(t, path, Limits{})
+		var err error
+		for _, keyErr := range pack.ChunkKeys(ctx, "vault", 0) {
+			err = keyErr
+		}
+		if (err == nil) != ok || (err != nil && CodeOf(err) != CodeChunk) {
+			t.Errorf("cx %d: %v", cx, err)
+		}
 	}
 }

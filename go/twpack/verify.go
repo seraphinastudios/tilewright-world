@@ -184,10 +184,24 @@ func (p *Pack) verifyContents(ctx context.Context, maxDecoded uint64) (Summary, 
 	return summary, nil
 }
 
+// chunkPassSQL streams every chunk with its plane's chunk size, in
+// primary-key order.
+func chunkPassSQL() string {
+	return "SELECT p.id, p.chunk_size, " + chunkDataSQL() +
+		" FROM chunks c JOIN planes p ON p.id = c.plane ORDER BY c.plane, c.layer, c.cx, c.cy"
+}
+
+// The ordered scans of checkDocuments and checkStairwells, whose ?1 is the
+// largest stored document.
+var (
+	planeDocumentsSQL      = "SELECT id, kind, chunk_size, " + boundedText("document", "?1") + " FROM planes ORDER BY id"
+	zoneDocumentsSQL       = "SELECT plane, id, parent, " + boundedText("document", "?1") + " FROM zones ORDER BY plane, id"
+	definitionDocumentsSQL = "SELECT type, id, " + boundedText("document", "?1") + " FROM definitions ORDER BY type, id"
+	stairwellDocumentsSQL  = "SELECT plane, id, " + boundedText("document", "?1") + " FROM stairwells ORDER BY plane, id"
+)
+
 func (p *Pack) checkChunks(ctx context.Context, targets *targets, groundLayers int, maxDecoded uint64) (objects, checked uint64, err error) {
-	rows, err := p.conn.QueryContext(ctx,
-		"SELECT p.id, p.chunk_size, "+chunkDataSQL()+
-			" FROM chunks c JOIN planes p ON p.id = c.plane ORDER BY c.plane, c.layer, c.cx, c.cy")
+	rows, err := p.conn.QueryContext(ctx, chunkPassSQL())
 	if err != nil {
 		return 0, 0, sqliteError(ctx, err)
 	}
@@ -389,13 +403,12 @@ func (p *Pack) checkStringEncoding(ctx context.Context) error {
 // of an object whose identity keys agree with its row, and that a plane's
 // default_zone is one of its zones.
 func (p *Pack) checkDocuments(ctx context.Context) error {
-	document := boundedText("document", "?1")
 	hasZone, err := p.conn.PrepareContext(ctx, "SELECT EXISTS (SELECT 1 FROM zones WHERE plane = ?1 AND id = ?2)")
 	if err != nil {
 		return sqliteError(ctx, err)
 	}
 	defer hasZone.Close()
-	err = eachRow(ctx, p.conn, "SELECT id, kind, chunk_size, "+document+" FROM planes ORDER BY id", []any{maxDocumentBytes},
+	err = eachRow(ctx, p.conn, planeDocumentsSQL, []any{maxDocumentBytes},
 		func(scan func(...any) error) error {
 			var id, kind string
 			var chunkSize int64
@@ -425,7 +438,7 @@ func (p *Pack) checkDocuments(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	err = eachRow(ctx, p.conn, "SELECT plane, id, parent, "+document+" FROM zones ORDER BY plane, id", []any{maxDocumentBytes},
+	err = eachRow(ctx, p.conn, zoneDocumentsSQL, []any{maxDocumentBytes},
 		func(scan func(...any) error) error {
 			var plane, id string
 			var parent, text sql.NullString
@@ -452,7 +465,7 @@ func (p *Pack) checkDocuments(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return eachRow(ctx, p.conn, "SELECT type, id, "+document+" FROM definitions ORDER BY type, id", []any{maxDocumentBytes},
+	return eachRow(ctx, p.conn, definitionDocumentsSQL, []any{maxDocumentBytes},
 		func(scan func(...any) error) error {
 			var kind, id string
 			var text sql.NullString
@@ -513,7 +526,7 @@ func (p *Pack) checkStairwells(ctx context.Context) error {
 	// holds at most the array limit of stairwells and the value limit of
 	// steps.
 	current, count, steps := "", 0, 0
-	err = eachRow(ctx, p.conn, "SELECT plane, id, "+boundedText("document", "?1")+" FROM stairwells ORDER BY plane, id", []any{maxDocumentBytes},
+	err = eachRow(ctx, p.conn, stairwellDocumentsSQL, []any{maxDocumentBytes},
 		func(scan func(...any) error) error {
 			var plane, id string
 			var text sql.NullString
