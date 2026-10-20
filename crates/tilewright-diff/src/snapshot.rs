@@ -101,15 +101,14 @@ impl Snapshot {
         }))
     }
 
-    /// The snapshot of a content pack. [`crate::load`] verifies the pack
-    /// first; on its own, this checks the shape and bounds of each row it
-    /// reads, as [`Pack::visit_identities`] does. Rows are read one at a
-    /// time, and reading stops as soon as the pack has more IDs than
-    /// `limits` allow.
+    /// The snapshot of a content pack. The pack is fully verified first,
+    /// as [`Pack::verify`] does, and its IDs are then read through
+    /// [`Pack::visit_identities`] one row at a time; reading stops as soon
+    /// as the pack has more IDs than `limits` allow.
     ///
     /// # Errors
     /// Returns [`Error::TooManyIds`] past the limit, or [`Error::Pack`] if
-    /// SQLite fails or a row or the stored profile is invalid.
+    /// the pack does not verify or SQLite fails.
     pub fn from_pack(pack: &Pack, limits: &Limits) -> Result<Self, Error> {
         let mut builder = Builder::new(*limits);
         // The visit checks the stored profile before anything else, and

@@ -205,8 +205,8 @@ impl std::error::Error for Error {}
 /// [`Error::TooManyIds`].
 pub fn load(path: &Path, limits: &Limits) -> Result<Snapshot, Error> {
     if std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) {
+        // Reading a pack's IDs verifies it first.
         let pack = tilewright_pack::Pack::open(path).map_err(Error::Pack)?;
-        pack.verify().map_err(Error::Pack)?;
         Snapshot::from_pack(&pack, limits)
     } else {
         let world = tilewright_source::load(path).map_err(Error::Source)?;

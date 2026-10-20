@@ -181,24 +181,36 @@ impl Pack {
         Ok(())
     }
 
-    /// Calls `visit` with every render layer of the profile, in the
-    /// profile's order, then with every plane, zone, stairwell, definition
-    /// and anchor, and then with the address of every chunk: table by table
-    /// in that order, each table in primary-key order. One stored document
-    /// is held at a time.
-    ///
-    /// The stored profile is checked first, as a full verification checks
-    /// it. Like [`Pack::chunk`], it then checks the shape and bounds of what it
-    /// loads: keys are identifiers, documents are canonical JSON of objects
-    /// whose identity agrees with their row, stairwells have the source
-    /// format's shape, layers and positions are integers within the
-    /// format's range, and chunk coordinates keep every tile of a format 1
-    /// chunk within it. Whether the planes and targets they name exist is
-    /// checked by [`Pack::verify`].
+    /// Verifies the whole pack, as [`Pack::verify`] does, and then calls
+    /// `visit` with every render layer of the profile, in the profile's
+    /// order, then with every plane, zone, stairwell, definition and
+    /// anchor, and then with the address of every chunk: table by table in
+    /// that order, each table in primary-key order. Every identity listed
+    /// is therefore one a valid pack holds. One stored document is held at
+    /// a time.
     ///
     /// # Errors
-    /// Returns an error if SQLite fails, a row is invalid, or `visit` fails.
+    /// Returns the first problem verification finds, an error if SQLite
+    /// fails or a row is invalid, or the error `visit` returns.
     pub fn visit_identities(
+        &self,
+        visit: &mut dyn FnMut(Identity<'_>) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        self.verify()?;
+        self.visit_rows(visit)
+    }
+
+    /// The listing of [`Pack::visit_identities`], without verifying the
+    /// pack first. Each value is read within the bounds a single read uses,
+    /// and checked against what its row or document repeats, so that a
+    /// file that changed after verification still cannot yield an
+    /// unbounded or inconsistent identity: the stored profile is checked as
+    /// verification checks it, keys are identifiers, documents are
+    /// canonical JSON of objects that agree with their rows, stairwells
+    /// have the source format's shape, layers and positions are integers
+    /// within the format's range, and chunk coordinates keep every tile of
+    /// a format 1 chunk within it.
+    fn visit_rows(
         &self,
         visit: &mut dyn FnMut(Identity<'_>) -> Result<(), Error>,
     ) -> Result<(), Error> {
@@ -304,7 +316,7 @@ impl Pack {
         self.visit_positions(visit)
     }
 
-    /// The anchors and chunk addresses of [`Pack::visit_identities`].
+    /// The anchors and chunk addresses of [`Pack::visit_rows`].
     fn visit_positions(
         &self,
         visit: &mut dyn FnMut(Identity<'_>) -> Result<(), Error>,
@@ -375,9 +387,11 @@ mod tests {
         (directory, copy)
     }
 
+    /// Every identity [`Pack::visit_rows`] lists, without verifying the
+    /// pack first.
     fn visit(path: &Path) -> Result<Vec<String>, Error> {
         let mut listed = Vec::new();
-        Pack::open(path)?.visit_identities(&mut |identity| {
+        Pack::open(path)?.visit_rows(&mut |identity| {
             listed.push(match identity {
                 Identity::RenderLayer { name, position } => {
                     format!("render_layer {name} {position}")
@@ -471,6 +485,43 @@ mod tests {
             })
             .unwrap_err();
         assert_eq!((seen, error.to_string()), (1, "stop".to_owned()));
+
+        // The verified listing is the same.
+        let mut verified = 0;
+        Pack::open(&path)
+            .unwrap()
+            .visit_identities(&mut |_| {
+                verified += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(verified, expected.len());
+    }
+
+    #[test]
+    fn identities_are_listed_only_from_packs_that_verify() {
+        // Each change passes the row checks but not verification, which
+        // relates rows to each other.
+        for sql in [
+            "UPDATE stairwell_steps SET proto = 'stairs_up' WHERE stairwell = 'cave.chute' AND step = 0",
+            "INSERT INTO stairwell_steps VALUES ('overworld', 5, 1, 1, 'cave.chute', 7, 'coin')",
+            "UPDATE planes SET document = replace(document, '\"wilderness\"', '\"nowhere\"') WHERE id = 'overworld'",
+            "UPDATE zones SET plane = 'ghost' WHERE id = 'village'",
+            "UPDATE zones SET parent = 'village', document = replace(document, '\"name\"', '\"parent\":\"village\",\"name\"') WHERE id = 'wilderness'",
+            "UPDATE anchors SET plane = 'ghost' WHERE id = 'village.well'",
+            "UPDATE chunks SET plane = 'ghost' WHERE plane = 'vault'",
+            "UPDATE stairwells SET plane = 'ghost' WHERE id = 'cave.chute'",
+        ] {
+            let (_directory, path) = pack(sql);
+            assert!(visit(&path).is_ok(), "{sql}: the row checks accept it");
+            let mut seen = 0;
+            let result = Pack::open(&path).unwrap().visit_identities(&mut |_| {
+                seen += 1;
+                Ok(())
+            });
+            assert!(result.is_err(), "{sql}");
+            assert_eq!(seen, 0, "{sql}");
+        }
     }
 
     /// Changes to a pack, each with what the error for it says.
