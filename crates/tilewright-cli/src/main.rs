@@ -1,7 +1,10 @@
 // Copyright 2026 Seraphina Studios
 // SPDX-License-Identifier: MIT
 
-//! `tilewright`: validate world sources, compile packs and inspect them.
+//! `tilewright`: validate world sources, compile packs, inspect them and
+//! compare the IDs of two worlds.
+
+mod diff;
 
 use std::{
     ffi::{OsStr, OsString},
@@ -15,16 +18,28 @@ const USAGE: &str = "usage:
   tilewright validate [--json] ROOT
   tilewright compile ROOT OUTPUT_DIRECTORY
   tilewright inspect [--max-decoded-bytes BYTES] [--max-pack-bytes BYTES] PACK
+  tilewright diff [--json] [--allow ALLOWLIST] OLD NEW
   tilewright --version
 
 inspect verifies the pack. It stops once the chunks decode to more than
 --max-decoded-bytes, and rejects a pack file longer than --max-pack-bytes
-before opening or hashing it. Both default to 8589934592 (8 GiB).";
+before opening or hashing it. Both default to 8589934592 (8 GiB).
+
+diff compares the IDs of two worlds, each a source root or a pack. It exits
+0 when no ID was removed or renamed, or the allowlist accepts each one; 1
+when one was not accepted; and 2 when a side, the allowlist or the
+arguments could not be read.";
 
 fn main() -> ExitCode {
     // Paths need not be UTF-8, so arguments are read as OS strings.
     let arguments: Vec<OsString> = std::env::args_os().skip(1).collect();
     let arguments: Vec<&OsStr> = arguments.iter().map(OsString::as_os_str).collect();
+    // `diff` has exit codes of its own.
+    if let [command, options @ ..] = arguments.as_slice()
+        && *command == "diff"
+    {
+        return diff::main(options);
+    }
     match run(&arguments) {
         Ok(output) => {
             print!("{output}");

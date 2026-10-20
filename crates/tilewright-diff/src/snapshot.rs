@@ -1,0 +1,355 @@
+// Copyright 2026 Seraphina Studios
+// SPDX-License-Identifier: MIT
+
+//! What a comparison reads of one world: every ID, with a fingerprint of the
+//! content that the rename rule of `docs/spec/DIFF.md` compares.
+
+use crate::{Error, Kind, is_identifier};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::Write as _,
+    ops::Bound,
+};
+use tilewright_jsonc::{Document, Limits, Value, write_json_string};
+use tilewright_pack::{Identity, Pack};
+use tilewright_source::World;
+
+/// SHA-256 of the content an ID's rename rule compares.
+pub(crate) type Fingerprint = [u8; 32];
+
+/// What a side of a comparison was read from.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Input {
+    Source,
+    Pack,
+}
+
+impl Input {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::Pack => "pack",
+        }
+    }
+}
+
+/// Where a snapshot came from.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Side {
+    pub input: Input,
+    /// The profile's `id`.
+    pub profile: String,
+    /// The profile's `version`.
+    pub profile_version: String,
+    /// Lowercase hex SHA-256 over the source files, as `docs/spec/PACK.md`
+    /// defines it, so a source tree and the pack compiled from it agree.
+    pub source_digest: String,
+}
+
+/// The IDs of one world, each with a fingerprint of its content.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Snapshot {
+    pub(crate) side: Side,
+    pub(crate) ids: BTreeMap<Kind, BTreeMap<String, Fingerprint>>,
+}
+
+impl Snapshot {
+    /// The snapshot of a loaded source tree.
+    ///
+    /// # Errors
+    /// Returns [`Error::Invalid`] if a document of the world cannot be read
+    /// again, which a world that loaded never has.
+    pub fn from_world(world: &World) -> Result<Self, Error> {
+        let profile = world.profile();
+        let mut builder = Builder::default();
+        let mut read = || -> Result<(), String> {
+            builder.render_layers(profile.render_layers.iter().map(String::as_str))?;
+            for (id, plane) in world.planes() {
+                builder.plane(id, &plane.canonical)?;
+                for (zone, entry) in &plane.zones {
+                    builder.zone(id, zone, &entry.canonical)?;
+                }
+                for (anchor, entry) in &plane.anchors {
+                    builder.anchor(id, anchor, entry.layer, entry.at)?;
+                }
+                for (stairwell, entry) in &plane.stairwells {
+                    builder.stairwell(id, stairwell, &entry.canonical)?;
+                }
+                for (layer, cx, cy) in plane.chunks.keys() {
+                    builder.chunk(id, *layer, *cx, *cy)?;
+                }
+            }
+            for ((kind, id), definition) in world.definitions() {
+                builder.definition(kind, id, &definition.canonical)?;
+            }
+            Ok(())
+        };
+        read().map_err(Error::Invalid)?;
+        Ok(builder.finish(Side {
+            input: Input::Source,
+            profile: profile.id.clone(),
+            profile_version: profile.version.clone(),
+            source_digest: hex(&world.source_digest()),
+        }))
+    }
+
+    /// The snapshot of a content pack. [`crate::load`] verifies the pack
+    /// first; on its own, this checks the shape and bounds of each row it
+    /// reads, as [`Pack::visit_identities`] does.
+    ///
+    /// # Errors
+    /// Returns [`Error::Pack`] if SQLite fails or a row or the stored
+    /// profile is invalid.
+    pub fn from_pack(pack: &Pack) -> Result<Self, Error> {
+        let invalid = |message: String| Error::Pack(tilewright_pack::Error::Invalid(message));
+        let meta = |key: &str| -> Result<String, Error> {
+            pack.meta(key)
+                .map_err(Error::Pack)?
+                .ok_or_else(|| invalid(format!("the pack has no {key}")))
+        };
+        let profile = Document::parse(meta("profile")?, &canonical_limits())
+            .map_err(|_| invalid("the stored profile is not JSON".into()))?;
+        let render_layers: Vec<&str> = profile
+            .root()
+            .get("render_layers")
+            .and_then(Value::as_array)
+            .and_then(|items| items.iter().map(Value::as_str).collect())
+            .ok_or_else(|| invalid("the stored profile has no render_layers list".into()))?;
+        let mut builder = Builder::default();
+        builder
+            .render_layers(render_layers.into_iter())
+            .map_err(invalid)?;
+        pack.visit_identities(&mut |identity| {
+            match identity {
+                Identity::Plane { id, document } => builder.plane(id, document),
+                Identity::Zone {
+                    plane,
+                    id,
+                    document,
+                } => builder.zone(plane, id, document),
+                Identity::Anchor {
+                    plane,
+                    id,
+                    layer,
+                    at,
+                } => builder.anchor(plane, id, layer, at),
+                Identity::Stairwell {
+                    plane,
+                    id,
+                    document,
+                } => builder.stairwell(plane, id, document),
+                Identity::Definition { kind, id, document } => {
+                    builder.definition(kind, id, document)
+                }
+                Identity::Chunk {
+                    plane,
+                    layer,
+                    cx,
+                    cy,
+                } => builder.chunk(plane, layer, cx, cy),
+            }
+            .map_err(tilewright_pack::Error::Invalid)
+        })
+        .map_err(Error::Pack)?;
+        Ok(builder.finish(Side {
+            input: Input::Pack,
+            profile: meta("profile_id")?,
+            profile_version: meta("profile_version")?,
+            source_digest: meta("source_digest")?,
+        }))
+    }
+
+    /// Where the snapshot came from.
+    #[must_use]
+    pub const fn side(&self) -> &Side {
+        &self.side
+    }
+
+    /// Whether the world has ID `id` of `kind`.
+    #[must_use]
+    pub fn contains(&self, kind: Kind, id: &str) -> bool {
+        self.ids.get(&kind).is_some_and(|ids| ids.contains_key(id))
+    }
+
+    /// The IDs of `kind`, in byte order.
+    pub fn ids(&self, kind: Kind) -> impl Iterator<Item = &str> {
+        self.ids
+            .get(&kind)
+            .into_iter()
+            .flat_map(|ids| ids.keys().map(String::as_str))
+    }
+
+    /// The IDs of `kind` with their fingerprints, in byte order.
+    pub(crate) fn entries(&self, kind: Kind) -> impl Iterator<Item = (&str, &Fingerprint)> {
+        self.ids.get(&kind).into_iter().flat_map(|ids| {
+            ids.iter()
+                .map(|(id, fingerprint)| (id.as_str(), fingerprint))
+        })
+    }
+}
+
+/// Collects a snapshot. A plane's fingerprint covers its zones, anchors and
+/// stairwells, so it is finished once everything has been read.
+#[derive(Default)]
+struct Builder {
+    ids: BTreeMap<Kind, BTreeMap<String, Fingerprint>>,
+    /// Each plane's document fingerprint and a hash of its chunk addresses,
+    /// fed in `(layer, cx, cy)` order.
+    planes: BTreeMap<String, (Fingerprint, Sha256)>,
+}
+
+impl Builder {
+    fn insert(&mut self, kind: Kind, id: String, fingerprint: Fingerprint) -> Result<(), String> {
+        let ids = self.ids.entry(kind).or_default();
+        if ids.contains_key(&id) {
+            return Err(format!("{kind} {id} is listed twice"));
+        }
+        ids.insert(id, fingerprint);
+        Ok(())
+    }
+
+    /// Render layers stand in for their content with their position in the
+    /// profile's list.
+    fn render_layers<'a>(&mut self, layers: impl Iterator<Item = &'a str>) -> Result<(), String> {
+        for (index, layer) in layers.enumerate() {
+            if !is_identifier(layer) {
+                return Err("a render layer is not an identifier".into());
+            }
+            let fingerprint = Sha256::digest(index.to_string()).into();
+            self.insert(Kind::RenderLayer, layer.to_owned(), fingerprint)?;
+        }
+        Ok(())
+    }
+
+    fn plane(&mut self, id: &str, document: &str) -> Result<(), String> {
+        let fingerprint = document_fingerprint(document, &["id", "title"])?;
+        if self
+            .planes
+            .insert(id.to_owned(), (fingerprint, Sha256::new()))
+            .is_some()
+        {
+            return Err(format!("plane {id} is listed twice"));
+        }
+        Ok(())
+    }
+
+    fn zone(&mut self, plane: &str, id: &str, document: &str) -> Result<(), String> {
+        let fingerprint = document_fingerprint(document, &["id", "name"])?;
+        self.insert(Kind::Zone, format!("{plane}/{id}"), fingerprint)
+    }
+
+    fn anchor(&mut self, plane: &str, id: &str, layer: i32, at: [i64; 2]) -> Result<(), String> {
+        let content = format!("{{\"layer\":{layer},\"at\":[{},{}]}}", at[0], at[1]);
+        self.insert(
+            Kind::Anchor,
+            format!("{plane}/{id}"),
+            Sha256::digest(content).into(),
+        )
+    }
+
+    fn stairwell(&mut self, plane: &str, id: &str, document: &str) -> Result<(), String> {
+        let fingerprint = document_fingerprint(document, &["id"])?;
+        self.insert(Kind::Stairwell, format!("{plane}/{id}"), fingerprint)
+    }
+
+    fn definition(&mut self, kind: &str, id: &str, document: &str) -> Result<(), String> {
+        let fingerprint = document_fingerprint(document, &["id"])?;
+        self.insert(Kind::Definition, format!("{kind}/{id}"), fingerprint)
+    }
+
+    fn chunk(&mut self, plane: &str, layer: i32, cx: i64, cy: i64) -> Result<(), String> {
+        let (_, chunks) = self
+            .planes
+            .get_mut(plane)
+            .ok_or_else(|| format!("a chunk names unknown plane {plane}"))?;
+        chunks.update(layer.to_le_bytes());
+        chunks.update(cx.to_le_bytes());
+        chunks.update(cy.to_le_bytes());
+        Ok(())
+    }
+
+    fn finish(self, side: Side) -> Snapshot {
+        let Self { mut ids, planes } = self;
+        let mut fingerprints = BTreeMap::new();
+        for (plane, (document, chunks)) in planes {
+            let mut hasher = Sha256::new();
+            hasher.update(document);
+            hasher.update(chunks.finalize());
+            let prefix = format!("{plane}/");
+            for kind in [Kind::Anchor, Kind::Stairwell, Kind::Zone] {
+                let Some(children) = ids.get(&kind) else {
+                    continue;
+                };
+                let range = children
+                    .range::<str, _>((Bound::Included(prefix.as_str()), Bound::Unbounded))
+                    .take_while(|(id, _)| id.starts_with(&prefix));
+                for (id, fingerprint) in range {
+                    feed(&mut hasher, kind.as_str().as_bytes());
+                    feed(&mut hasher, &id.as_bytes()[prefix.len()..]);
+                    hasher.update(fingerprint);
+                }
+            }
+            fingerprints.insert(plane, hasher.finalize().into());
+        }
+        ids.insert(Kind::Plane, fingerprints);
+        Snapshot { side, ids }
+    }
+}
+
+/// Feeds `bytes` to `hasher`, prefixed with their length, so consecutive
+/// fields cannot run together.
+fn feed(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(bytes);
+}
+
+/// Limits for reading back canonical JSON, which is one line: the format's
+/// limits, with the line limit raised to the input limit.
+fn canonical_limits() -> Limits {
+    let limits = Limits::default();
+    Limits {
+        max_line_bytes: limits.max_input_bytes,
+        ..limits
+    }
+}
+
+/// SHA-256 of a canonical JSON object without the members named `without`,
+/// as canonical JSON.
+fn document_fingerprint(document: &str, without: &[&str]) -> Result<Fingerprint, String> {
+    let parsed = Document::parse(document, &canonical_limits())
+        .map_err(|error| format!("a stored document cannot be read again: {error}"))?;
+    let members = parsed
+        .root()
+        .as_object()
+        .ok_or("a stored document is not an object")?;
+    let excluded: BTreeSet<&str> = without.iter().copied().collect();
+    let mut hasher = Sha256::new();
+    hasher.update(b"{");
+    let mut first = true;
+    let mut key = String::new();
+    for member in members
+        .iter()
+        .filter(|member| !excluded.contains(member.key.as_str()))
+    {
+        if !first {
+            hasher.update(b",");
+        }
+        first = false;
+        key.clear();
+        write_json_string(&member.key, &mut key);
+        hasher.update(key.as_bytes());
+        hasher.update(b":");
+        hasher.update(parsed.canonical(&member.value).as_bytes());
+    }
+    hasher.update(b"}");
+    Ok(hasher.finalize().into())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().fold(String::new(), |mut output, byte| {
+        let _ = write!(output, "{byte:02x}");
+        output
+    })
+}
