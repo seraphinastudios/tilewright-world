@@ -6,7 +6,8 @@
 //! handle as its root, so no path is resolved again and a reparse point at
 //! the name (a symbolic link, junction or mount point) is opened itself,
 //! never followed. Renames name their target relative to a directory
-//! handle in the same way. Everything else acts on an open handle.
+//! handle in the same way, through `NtSetInformationFile`, which resolves
+//! the name relative to that handle. Everything else acts on an open handle.
 
 use std::{
     io,
@@ -18,31 +19,31 @@ use windows_sys::{
     Wdk::{
         Foundation::OBJECT_ATTRIBUTES,
         Storage::FileSystem::{
-            FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT, NtCreateFile,
+            FILE_OPEN_REPARSE_POINT, FILE_RENAME_INFORMATION, FILE_RENAME_INFORMATION_0,
+            FILE_RENAME_POSIX_SEMANTICS, FILE_RENAME_REPLACE_IF_EXISTS,
+            FILE_SYNCHRONOUS_IO_NONALERT, FileRenameInformation, FileRenameInformationEx,
+            NtCreateFile, NtSetInformationFile,
         },
     },
     Win32::{
         Foundation::{
             ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER,
             ERROR_NO_MORE_FILES, ERROR_NOT_SUPPORTED, HANDLE, OBJ_CASE_INSENSITIVE,
-            RtlNtStatusToDosError, STATUS_OBJECT_NAME_INVALID, UNICODE_STRING,
+            RtlNtStatusToDosError, STATUS_INVALID_DEVICE_REQUEST, STATUS_INVALID_INFO_CLASS,
+            STATUS_INVALID_PARAMETER, STATUS_NOT_IMPLEMENTED, STATUS_NOT_SUPPORTED,
+            STATUS_OBJECT_NAME_INVALID, UNICODE_STRING,
         },
         Security::GetKernelObjectSecurity,
         Storage::FileSystem::{
             FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_TAG_INFO, FILE_DISPOSITION_FLAG_DELETE,
             FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX,
-            FILE_FULL_DIR_INFO, FILE_RENAME_INFO, FILE_RENAME_INFO_0, FileAttributeTagInfo,
-            FileDispositionInfo, FileDispositionInfoEx, FileFullDirectoryInfo,
-            FileFullDirectoryRestartInfo, FileRenameInfo, FileRenameInfoEx,
-            GetFileInformationByHandleEx, SYNCHRONIZE, SetFileInformationByHandle,
+            FILE_FULL_DIR_INFO, FileAttributeTagInfo, FileDispositionInfo, FileDispositionInfoEx,
+            FileFullDirectoryInfo, FileFullDirectoryRestartInfo, GetFileInformationByHandleEx,
+            SYNCHRONIZE, SetFileInformationByHandle,
         },
         System::IO::IO_STATUS_BLOCK,
     },
 };
-
-/// `FILE_RENAME_INFO` flags of `FileRenameInfoEx`.
-const FILE_RENAME_FLAG_REPLACE_IF_EXISTS: u32 = 0x1;
-const FILE_RENAME_FLAG_POSIX_SEMANTICS: u32 = 0x2;
 
 /// The `NTSTATUS` an open failed with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -182,10 +183,23 @@ fn unsupported(error: &io::Error) -> bool {
         })
 }
 
+/// Whether a failed `NtSetInformationFile` says only that this file system
+/// does not have the newer information class.
+fn unsupported_class(status: i32) -> bool {
+    matches!(
+        status,
+        STATUS_INVALID_PARAMETER
+            | STATUS_INVALID_INFO_CLASS
+            | STATUS_NOT_SUPPORTED
+            | STATUS_NOT_IMPLEMENTED
+            | STATUS_INVALID_DEVICE_REQUEST
+    )
+}
+
 /// Renames the file `file` is open on to `name` in the directory
 /// `directory` is a handle on, replacing an entry by that name that is
 /// not a directory. `file` must be open with `DELETE` access. The new name
-/// is resolved relative to `directory`, never through a path.
+/// is resolved by the kernel relative to `directory`, never through a path.
 pub fn rename_beneath(
     file: BorrowedHandle<'_>,
     directory: BorrowedHandle<'_>,
@@ -194,23 +208,23 @@ pub fn rename_beneath(
     let Some(wide) = wide(name, false) else {
         return Err(io::Error::from(io::ErrorKind::InvalidInput));
     };
-    let header = offset_of!(FILE_RENAME_INFO, FileName);
+    let header = offset_of!(FILE_RENAME_INFORMATION, FileName);
     debug_assert_eq!(header % 2, 0);
     let name_bytes = wide.len() * 2;
-    let size = (header + name_bytes).max(size_of::<FILE_RENAME_INFO>());
+    let size = (header + name_bytes).max(size_of::<FILE_RENAME_INFORMATION>());
     let length = u32::try_from(name_bytes).map_err(|_| io::ErrorKind::InvalidInput)?;
     let size_u32 = u32::try_from(size).map_err(|_| io::ErrorKind::InvalidInput)?;
-    let set = |class, flags: FILE_RENAME_INFO_0| -> io::Result<()> {
-        // Zeroed and as aligned as a `u64`, which `FILE_RENAME_INFO` is.
+    let set = |class, flags: FILE_RENAME_INFORMATION_0| -> Result<(), Status> {
+        // Zeroed and as aligned as a `u64`, which the structure is.
         let mut buffer = vec![0_u64; size.div_ceil(8)];
         let base = buffer.as_mut_ptr();
-        let information = base.cast::<FILE_RENAME_INFO>();
+        let information = base.cast::<FILE_RENAME_INFORMATION>();
         // The name starts at `header`, an even offset into the buffer.
         let destination = base.cast::<u16>().wrapping_add(header / 2);
         // SAFETY: the buffer is aligned for and at least as large as a
-        // `FILE_RENAME_INFO`, and `information` points to its start.
+        // `FILE_RENAME_INFORMATION`, and `information` points to its start.
         unsafe {
-            information.write(FILE_RENAME_INFO {
+            information.write(FILE_RENAME_INFORMATION {
                 Anonymous: flags,
                 RootDirectory: directory.as_raw_handle(),
                 FileNameLength: length,
@@ -221,18 +235,21 @@ pub fn rename_beneath(
         // fit between `header` and `size`, inside the buffer, which does not
         // overlap `wide`.
         unsafe { ptr::copy_nonoverlapping(wide.as_ptr(), destination, wide.len()) };
-        // SAFETY: the buffer holds a complete `FILE_RENAME_INFO` with its
-        // name, `size_u32` bytes long; both handles are open.
-        let done = unsafe {
-            SetFileInformationByHandle(
+        let mut status_block = IO_STATUS_BLOCK::default();
+        // SAFETY: the buffer holds a complete `FILE_RENAME_INFORMATION`
+        // with its name, `size_u32` bytes long; the status block is a live
+        // local; both handles are open.
+        let status = unsafe {
+            NtSetInformationFile(
                 file.as_raw_handle(),
-                class,
+                &raw mut status_block,
                 buffer.as_ptr().cast(),
                 size_u32,
+                class,
             )
         };
-        if done == 0 {
-            Err(io::Error::last_os_error())
+        if status < 0 {
+            Err(Status(status))
         } else {
             Ok(())
         }
@@ -240,15 +257,19 @@ pub fn rename_beneath(
     // POSIX semantics replace a target others have open; file systems
     // without them get the older class.
     match set(
-        FileRenameInfoEx,
-        FILE_RENAME_INFO_0 {
-            Flags: FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS,
+        FileRenameInformationEx,
+        FILE_RENAME_INFORMATION_0 {
+            Flags: FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS,
         },
     ) {
         // `ReplaceIfExists`, the union's first byte, set and the rest zero.
-        Err(error) if unsupported(&error) => set(FileRenameInfo, FILE_RENAME_INFO_0 { Flags: 1 }),
+        Err(status) if unsupported_class(status.0) => set(
+            FileRenameInformation,
+            FILE_RENAME_INFORMATION_0 { Flags: 1 },
+        ),
         result => result,
     }
+    .map_err(Status::io_error)
 }
 
 /// Deletes the file, or empty directory, `handle` is open on, which must

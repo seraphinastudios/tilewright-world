@@ -1280,8 +1280,10 @@ fn packs_past_the_size_limit_are_not_opened_or_hashed() {
     let grown = directory.path().join("grown.twpack");
     std::fs::copy(&written.path, &grown).unwrap();
     let pack = Pack::open_with(&grown, &exact).unwrap();
+    // Opened to write, since Windows does not set the length through a
+    // handle that may only append.
     std::fs::OpenOptions::new()
-        .append(true)
+        .write(true)
         .open(&grown)
         .unwrap()
         .set_len(written.bytes + 1)
@@ -1296,8 +1298,10 @@ fn packs_past_the_size_limit_are_not_opened_or_hashed() {
     let copy = named.path().join(written.path.file_name().unwrap());
     std::fs::copy(&written.path, &copy).unwrap();
     let pack = Pack::open_with(&copy, &exact).unwrap();
+    // Opened to write, since Windows does not set the length through a
+    // handle that may only append.
     std::fs::OpenOptions::new()
-        .append(true)
+        .write(true)
         .open(&copy)
         .unwrap()
         .set_len(written.bytes + 1)

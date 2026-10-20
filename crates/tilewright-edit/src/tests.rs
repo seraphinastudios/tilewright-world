@@ -1208,8 +1208,11 @@ fn a_blocked_deletion_keeps_its_file() {
             .any(|problem| problem.path == "defs/recipe/.chest.jsonc.tilewright-tmp"),
         "{failure:#?}"
     );
+    // Where a file is staged beside a deleted one (Windows), staging fails
+    // and nothing is published; elsewhere the deletion fails and what was
+    // published is restored.
     assert!(
-        failure.problems[0].message.contains("restored"),
+        cfg!(windows) || failure.problems[0].message.contains("restored"),
         "{failure:#?}"
     );
     assert_eq!(snapshot(root), before);
@@ -1350,13 +1353,18 @@ fn a_stale_staging_entry_that_cannot_go_is_reported() {
     fs::create_dir(root.join("planes/overworld/.plane.jsonc.tilewright-tmp")).unwrap();
     let plan = planned(root, &tx);
     let failure = plan.publish().unwrap_err();
+    // Windows cannot sync a directory, so there nothing is durable.
     assert!(
-        failure.applied && failure.durable && !failure.cleaned,
+        failure.applied && failure.durable == cfg!(unix) && !failure.cleaned,
         "{failure:#?}"
     );
     assert_eq!(
         failure.summary(),
-        "the transaction was applied, but its cleanup is incomplete"
+        if cfg!(unix) {
+            "the transaction was applied, but its cleanup is incomplete"
+        } else {
+            "the transaction was applied, but not made durable and its cleanup is incomplete"
+        }
     );
     assert!(
         failure.problems[0]
