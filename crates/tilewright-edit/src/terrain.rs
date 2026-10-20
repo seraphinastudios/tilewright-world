@@ -484,6 +484,17 @@ fn edit_characters(
         return workspace.set(path, &grid_pointer, &text);
     }
     let palette_pointer = [key_step("terrain"), key_step(grid), key_step("palette")];
+    // Entries the edit leaves unused go first, so that a new entry may take
+    // a key one of them had.
+    let used = after.used();
+    for cell in before.used() {
+        if !used.contains(&cell) {
+            let (key, _) = &before.palette[cell - 1];
+            let mut pointer = palette_pointer.to_vec();
+            pointer.push(key_step(key));
+            workspace.remove(path, &pointer, None)?;
+        }
+    }
     for position in before.palette.len()..after.palette.len() {
         let (key, value) = &after.palette[position];
         let key_text = json_string(key);
@@ -494,7 +505,11 @@ fn edit_characters(
             layout: None,
             colon: None,
         };
-        workspace.insert(path, &palette_pointer, position, &insertion)?;
+        let document = workspace.document(path)?;
+        let members = splice::find(document.root(), &palette_pointer)
+            .and_then(Value::as_object)
+            .map_or(0, <[_]>::len);
+        workspace.insert(path, &palette_pointer, members, &insertion)?;
     }
     let same = after.cells.iter().all(|cell| *cell == after.cells[0]);
     if before.fill && same {
@@ -526,15 +541,6 @@ fn edit_characters(
             }
         }
         workspace.replace_spans(path, edits, inverse)?;
-    }
-    let used = after.used();
-    for cell in before.used() {
-        if !used.contains(&cell) {
-            let (key, _) = &before.palette[cell - 1];
-            let mut pointer = palette_pointer.to_vec();
-            pointer.push(key_step(key));
-            workspace.remove(path, &pointer, None)?;
-        }
     }
     Ok(())
 }
@@ -724,38 +730,76 @@ fn set_chunk_cells(
             Some(value) => Some(read_characters(value).ok_or_else(malformed)?),
             None => None,
         };
-        let mut after = before.clone().unwrap_or_else(Characters::empty);
-        let mut overflow = false;
-        for (index, cell) in cells {
-            if problems.len() >= limits::DIAGNOSTICS {
-                break;
-            }
-            let found = after.value(after.cells[*index]);
-            if let Some(expect) = &cell.expect
-                && *expect != found
-            {
-                problems.push((Some(cell.span), mismatch(path, grid, cell, &found, expect)));
-            }
-            if let Some(value) = after.cell_for(&cell.value) {
-                after.cells[*index] = value;
-            } else {
-                overflow = true;
-                // Keep the value for widening: add it with a placeholder
-                // key, which widening replaces.
-                if let CellValue::Id(id) = &cell.value {
-                    after.cells[*index] = after.push(String::new(), id.clone());
-                }
-            }
-        }
-        if !problems.is_empty() {
-            return Err(problems);
-        }
+        let (after, overflow) = characters_after(before.as_ref(), cells, path, grid)?;
         if before.is_none() && after.cells.iter().all(|cell| *cell == 0) {
             return Ok(());
         }
         ensure_chunk(workspace, plane, layer, site).map_err(fail)?;
         edit_characters(workspace, path, grid, before.as_ref(), after, overflow).map_err(fail)
     }
+}
+
+/// A character grid after setting `cells`, and whether it needs wider
+/// keys: values with an entry take it, entries the edit leaves unused free
+/// their keys, and new values get free keys.
+fn characters_after(
+    before: Option<&Characters>,
+    cells: &[(usize, &Cell)],
+    path: &str,
+    grid: &str,
+) -> Result<(Characters, bool), TerrainFailures> {
+    let mut problems = Vec::new();
+    let mut after = before.cloned().unwrap_or_else(Characters::empty);
+    // First the expectations, and the cells whose value has an entry;
+    // values without one wait until the keys the edit frees are known.
+    let mut pending = Vec::new();
+    for (index, cell) in cells {
+        if problems.len() >= limits::DIAGNOSTICS {
+            break;
+        }
+        let found = after.value(after.cells[*index]);
+        if let Some(expect) = &cell.expect
+            && *expect != found
+        {
+            problems.push((Some(cell.span), mismatch(path, grid, cell, &found, expect)));
+        }
+        after.cells[*index] = match &cell.value {
+            CellValue::Id(id) => {
+                if let Some(cell) = after.values.get(id) {
+                    *cell
+                } else {
+                    pending.push((*index, id.clone()));
+                    0
+                }
+            }
+            CellValue::Empty | CellValue::Height(_) => 0,
+        };
+    }
+    if !problems.is_empty() {
+        return Err(problems);
+    }
+    // An entry the edit leaves unused is removed, so its key is free.
+    if let Some(before) = &before {
+        let used = after.used();
+        for cell in before.used() {
+            if !used.contains(&cell) {
+                after.keys.remove(&before.palette[cell - 1].0);
+            }
+        }
+    }
+    let mut overflow = false;
+    for (index, id) in pending {
+        let value = CellValue::Id(id.clone());
+        if let Some(cell) = after.cell_for(&value) {
+            after.cells[index] = cell;
+        } else {
+            overflow = true;
+            // Keep the value for widening: add it with a placeholder
+            // key, which widening replaces.
+            after.cells[index] = after.push(String::new(), id);
+        }
+    }
+    Ok((after, overflow))
 }
 
 fn mismatch(path: &str, grid: &str, cell: &Cell, found: &CellValue, expect: &CellValue) -> Failure {

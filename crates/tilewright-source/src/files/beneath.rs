@@ -173,6 +173,20 @@ impl Root {
         }
     }
 
+    /// Makes the directory `components` in its existing parent; `false`
+    /// when an entry by that name was already there.
+    pub(crate) fn make_directory(&self, components: &[&str]) -> Result<bool, Refused> {
+        let Some((name, parent)) = components.split_last() else {
+            return Ok(false);
+        };
+        let parent = self.directory(parent, false)?;
+        match mkdirat(&parent.0, *name, Mode::from_raw_mode(0o777)) {
+            Ok(()) => Ok(true),
+            Err(Errno::EXIST) => Ok(false),
+            Err(errno) => Err(classify(parent.0.as_fd(), name, errno, components)),
+        }
+    }
+
     /// Takes an exclusive advisory lock on the root directory, held until
     /// the returned lock is dropped; `None` when another holds it.
     pub(crate) fn lock(&self) -> Result<Option<Lock>, Refused> {

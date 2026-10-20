@@ -1772,3 +1772,29 @@ fn an_overlay_file_replaces_whatever_has_its_name() {
     let world = load_edited(root.path(), &LoadOptions::default(), &overlay).unwrap();
     assert!(world.planes()["overworld"].chunks.contains_key(&(0, 5, 5)));
 }
+
+#[test]
+fn diagnostics_of_many_files_share_one_cap() {
+    let copy = workspace();
+    for index in 0..30 {
+        fs::write(
+            copy.path().join(format!("defs/proto/bad{index}.jsonc")),
+            "{\"format\": \"tilewright.def/1\", \"type\": \"proto\"}\n",
+        )
+        .unwrap();
+    }
+    let options = LoadOptions {
+        maximum_diagnostics: 10,
+        ..LoadOptions::default()
+    };
+    let found = load_with(copy.path(), &options).expect_err("the definitions lack ids");
+    assert_eq!(found.len(), 11, "{found:?}");
+    assert_eq!(
+        found
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "source.budget")
+            .count(),
+        1,
+        "{found:?}"
+    );
+}

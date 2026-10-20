@@ -1920,3 +1920,123 @@ fn a_rename_over_a_deleted_file_keeps_the_renamed_permissions() {
         .mode();
     assert_eq!(mode & 0o777, 0o600);
 }
+
+#[test]
+fn a_freed_palette_key_is_reused_before_widening() {
+    let tree = copy();
+    let root = tree.path();
+    // Fill the floor palette: grass, sand and 89 more prototypes.
+    let mut operations = String::new();
+    let mut cells = String::new();
+    for index in 0..89 {
+        let _ = write!(
+            operations,
+            "{{\"op\": \"document.create\", \"path\": \"defs/proto/p{index}.jsonc\", \"document\": {{\"format\": \"tilewright.def/1\", \"type\": \"proto\", \"id\": \"p{index}\", \"fields\": {{\"face\": \"p.png\", \"layer\": \"floor\"}}}}}},\n    "
+        );
+        let _ = write!(
+            cells,
+            "{}{{\"at\": [{}, {}], \"value\": \"p{index}\"}}",
+            if cells.is_empty() { "" } else { ", " },
+            index % 32,
+            index / 32 + 10
+        );
+    }
+    apply(
+        root,
+        &transaction(&format!(
+            "{operations}{{\"op\": \"document.create\", \"path\": \"defs/proto/fresh.jsonc\", \"document\": {{\"format\": \"tilewright.def/1\", \"type\": \"proto\", \"id\": \"fresh\", \"fields\": {{\"face\": \"f.png\", \"layer\": \"floor\"}}}}}},\n    {{\"op\": \"terrain.set\", \"plane\": \"overworld\", \"layer\": 0, \"grid\": \"floor\", \"cells\": [{cells}]}}"
+        )),
+    );
+    assert!(!read(root, CHUNK).contains("cell_width"));
+    // The one cell of p5 becomes a new value: p5's key is free for it.
+    let after = round_trip(
+        root,
+        &transaction(
+            r#"{"op": "terrain.set", "plane": "overworld", "layer": 0, "grid": "floor", "cells": [{"at": [5, 10], "value": "fresh", "expect": "p5"}]}"#,
+        ),
+    );
+    let chunk = String::from_utf8(after[CHUNK].clone()).unwrap();
+    assert!(!chunk.contains("cell_width"), "no widening");
+    assert!(chunk.contains("\"fresh\"") && !chunk.contains("\"p5\""));
+}
+
+#[test]
+fn a_create_reports_every_field_problem() {
+    let found =
+        Transaction::parse("t.jsonc", wrap(r#"{"op": "document.create", "like": 1}"#)).unwrap_err();
+    assert!(
+        has(&found, "tx.shape", "missing key \"path\""),
+        "{found:#?}"
+    );
+    assert!(
+        has(&found, "tx.shape", "give exactly one of document or text"),
+        "{found:#?}"
+    );
+    assert!(has(&found, "tx.shape", "expected a string"), "{found:#?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn rollback_restores_the_permissions_a_file_had() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let tree = copy();
+    let root = tree.path();
+    let mode = |path: &str| fs::metadata(root.join(path)).unwrap().permissions().mode() & 0o777;
+    fs::set_permissions(
+        root.join("defs/proto/coin.jsonc"),
+        fs::Permissions::from_mode(0o640),
+    )
+    .unwrap();
+    fs::set_permissions(
+        root.join("defs/proto/edge_n.jsonc"),
+        fs::Permissions::from_mode(0o604),
+    )
+    .unwrap();
+    let tx = transaction(
+        r#"{"op": "document.delete", "path": "defs/proto/coin.jsonc"},
+    {"op": "document.rename", "path": "defs/proto/edge_n.jsonc", "to": "defs/proto/coin.jsonc"},
+    {"op": "set", "path": "defs/proto/coin.jsonc", "pointer": ["id"], "value": "coin"},
+    {"op": "set", "path": "planes/overworld/layers/0/0_0.jsonc", "pointer": ["terrain", "mask", "palette", "n"], "value": "coin"}"#,
+    );
+    let plan = planned(root, &tx);
+    // Writes come first; failing at the deletion rolls the writes back.
+    publish::FAIL_STEP.with(|fail| fail.set(Some(2)));
+    let failure = plan.publish().unwrap_err();
+    publish::FAIL_STEP.with(|fail| fail.set(None));
+    assert!(!failure.applied, "{failure:#?}");
+    assert_eq!(mode("defs/proto/coin.jsonc"), 0o640);
+    assert_eq!(mode("defs/proto/edge_n.jsonc"), 0o604);
+    // Published, the replaced file allows no more than either file did.
+    plan.publish().unwrap();
+    assert_eq!(mode("defs/proto/coin.jsonc"), 0o600);
+}
+
+#[test]
+fn a_differing_result_names_ten_files_and_counts_the_rest() {
+    let tree = copy();
+    let entries: Vec<String> = (0..12)
+        .map(|index| {
+            format!(
+                "{{\"path\": \"defs/proto/x{index}.jsonc\", \"sha256\": \"{}\"}}",
+                "0".repeat(64)
+            )
+        })
+        .collect();
+    let text = format!(
+        "{{\"format\": \"tilewright.transaction/1\", \"result\": [\n{}\n], \"operations\": [\n{}\n]}}\n",
+        entries.join(",\n"),
+        r#"{"op": "set", "path": "defs/proto/coin.jsonc", "pointer": ["fields", "face"], "value": "c.png"}"#
+    );
+    let transaction = Transaction::parse("tx.jsonc", text).unwrap();
+    let found = problems(tree.path(), &transaction);
+    let result: Vec<&Diagnostic> = found
+        .iter()
+        .filter(|problem| problem.code == "tx.result")
+        .collect();
+    assert_eq!(result.len(), 1, "{found:#?}");
+    assert!(result[0].message.ends_with(" and 3 more"), "{found:#?}");
+    assert!(
+        result[0].message.contains("defs/proto/coin.jsonc"),
+        "{found:#?}"
+    );
+}

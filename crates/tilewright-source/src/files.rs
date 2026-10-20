@@ -141,20 +141,20 @@ impl<'o> Tree<'o> {
             platform::Root::new(root),
             options,
             &NO_OVERLAY,
-            Rc::new(Cell::new(false)),
+            Rc::new(Cell::new(0)),
         )
     }
 
     /// A tree over an opened root whose files are those on disk with
     /// `overlay` applied: an entry's text replaces or creates the file at
     /// its path, and an entry of `None` removes it. Directories that hold
-    /// an overlay file exist. `full` is the load's flag that its
-    /// diagnostics are full; once it is set, nothing more is read.
+    /// an overlay file exist. `total` is the load's shared diagnostic
+    /// count; once it reaches the maximum, nothing more is read.
     pub fn in_root(
         root: platform::Root,
         options: &'o LoadOptions,
         overlay: &'o Overlay,
-        full: Rc<Cell<bool>>,
+        total: Rc<Cell<usize>>,
     ) -> Self {
         Self {
             root,
@@ -164,7 +164,7 @@ impl<'o> Tree<'o> {
             entries: 0,
             bytes: 0,
             digests: BTreeMap::new(),
-            diagnostics: Diagnostics::sharing(options.maximum_diagnostics, full),
+            diagnostics: Diagnostics::sharing(options.maximum_diagnostics, total),
             exhausted: false,
         }
     }
@@ -194,16 +194,16 @@ impl<'o> Tree<'o> {
     }
 
     pub fn take_diagnostics(&mut self) -> Diagnostics {
-        let full = self.diagnostics.full();
+        let total = self.diagnostics.total();
         std::mem::replace(
             &mut self.diagnostics,
-            Diagnostics::sharing(self.options.maximum_diagnostics, full),
+            Diagnostics::sharing(self.options.maximum_diagnostics, total),
         )
     }
 
     /// Whether the load's diagnostics are full, so reading on is useless.
     fn stopped(&self) -> bool {
-        self.diagnostics.full().get()
+        self.diagnostics.is_full()
     }
 
     /// Reports a symbolic link at `path`.
@@ -722,6 +722,14 @@ mod tests {
                 assert!(!top.remove_directory("deeper").unwrap());
 
                 assert!(root.lock().unwrap().is_some());
+                // Making a directory says whether this call made it.
+                assert!(root.make_directory(&["made"]).unwrap());
+                assert!(!root.make_directory(&["made"]).unwrap());
+                assert!(!root.make_directory(&["dir", "file.jsonc"]).unwrap());
+                assert!(matches!(
+                    root.make_directory(&["nope", "deeper"]),
+                    Err(Refused::Missing)
+                ));
                 // A clone is a handle on the same directory.
                 let clone = root.try_clone();
                 assert_eq!(clone.kind(&["dir"]).unwrap(), Found::Directory);

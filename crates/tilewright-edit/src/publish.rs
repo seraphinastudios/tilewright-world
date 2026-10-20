@@ -120,10 +120,12 @@ struct Directories<'r> {
     created: Vec<String>,
     /// Directories whose entries changed, to sync.
     changed: BTreeSet<String>,
-    /// The permissions of each deleted file, to restore it with.
-    deleted: BTreeMap<String, std::fs::Permissions>,
-    /// Cleanup that could not be done.
+    /// The permissions each changed file had before publishing, to
+    /// restore it with.
+    original: BTreeMap<String, std::fs::Permissions>,
+    /// Cleanup that could not be done, and how many more past the limit.
     leftovers: Vec<Diagnostic>,
+    dropped: usize,
 }
 
 impl Directories<'_> {
@@ -137,12 +139,13 @@ impl Directories<'_> {
                         prefix.push('/');
                     }
                     prefix.push_str(component);
-                    if self.root.directory(&prefix, false)?.is_none() {
-                        // Recorded before creating, which may make the
-                        // directory and still fail.
+                    // Only a directory this call made is this publish's to
+                    // remove again; one another writer made meanwhile is not.
+                    if self.root.directory(&prefix, false)?.is_none()
+                        && self.root.make_directory(&prefix)?
+                    {
                         self.created.push(prefix.clone());
                         self.changed.insert(split(&prefix).0.to_owned());
-                        self.root.directory(&prefix, true)?;
                     }
                 }
             }
@@ -182,13 +185,23 @@ impl Directories<'_> {
         match self.remove(path, directory) {
             Ok(removed) => removed,
             Err(error) => {
-                self.leftovers.push(diagnostic::file(
+                self.leftover(diagnostic::file(
                     path,
                     Code::Io.as_str(),
                     format!("could not be removed ({error}); remove it by hand"),
                 ));
                 false
             }
+        }
+    }
+
+    /// Keeps a leftover, up to the diagnostic limit; past it, the rest are
+    /// counted.
+    fn leftover(&mut self, problem: Diagnostic) {
+        if self.leftovers.len() < crate::limits::DIAGNOSTICS {
+            self.leftovers.push(problem);
+        } else {
+            self.dropped += 1;
         }
     }
 
@@ -222,6 +235,18 @@ impl Directories<'_> {
         let (failures, platform) = self.sync();
         let durable = failures.is_empty() && platform;
         problems.extend(failures);
+        // Every problem counts toward the limit; past it, one says how many
+        // more there were.
+        let limit = crate::limits::DIAGNOSTICS;
+        let more = self.dropped + problems.len().saturating_sub(limit);
+        problems.truncate(limit);
+        if more > 0 {
+            problems.push(diagnostic::file(
+                ".",
+                Code::Limit.as_str(),
+                format!("{more} more problem(s) are not reported"),
+            ));
+        }
         if applied && problems.is_empty() {
             Ok(Published { durable: platform })
         } else {
@@ -258,6 +283,57 @@ impl Directories<'_> {
     }
 }
 
+/// The permissions a written file gets, and keeps a note of the ones it had
+/// for rollback. A file written where a file is keeps that file's
+/// permissions; one renamed or created like another takes that file's,
+/// restricted to those of the file it replaces, if any; any other new file
+/// gets the platform's default (`None`). Access is never broader than
+/// either file's.
+fn permissions_for(
+    directories: &mut Directories<'_>,
+    path: &str,
+    renames: &BTreeMap<String, String>,
+) -> Result<Option<std::fs::Permissions>, AccessError> {
+    let mut of = |path: &str| {
+        let (parent, name) = split(path);
+        directories
+            .get(parent, false)
+            .and_then(|directory| match directory {
+                Some(directory) => directory.permissions(name),
+                None => Ok(None),
+            })
+    };
+    let existing = of(path)?;
+    let source = match renames.get(path) {
+        Some(from) => of(from)?,
+        None => None,
+    };
+    if let Some(existing) = &existing {
+        directories
+            .original
+            .insert(path.to_owned(), existing.clone());
+    }
+    Ok(match (existing, source) {
+        (Some(existing), Some(source)) => Some(narrowest(&existing, &source)),
+        (existing, source) => existing.or(source),
+    })
+}
+
+/// Permissions that allow only what both allow.
+fn narrowest(left: &std::fs::Permissions, right: &std::fs::Permissions) -> std::fs::Permissions {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::Permissions::from_mode(left.mode() & right.mode())
+    }
+    #[cfg(not(unix))]
+    {
+        let mut narrowest = left.clone();
+        narrowest.set_readonly(left.readonly() || right.readonly());
+        narrowest
+    }
+}
+
 /// Writes `text` to the staging file of `path` in `directory`.
 fn stage(directory: &SourceDirectory, path: &str, text: &str) -> Result<(), AccessError> {
     let name = split(path).1;
@@ -280,30 +356,12 @@ fn stage_all<'f>(
         // Writing removes whatever was at the staging name first, so the
         // directory may change even if the write fails.
         directories.changed.insert(split(&file.path).0.to_owned());
-        // A renamed file keeps the permissions of the file it came from,
-        // which is still there while staging.
-        let inherited = match renames.get(&file.path) {
-            Some(from) => {
-                let (parent, name) = split(from);
-                directories
-                    .get(parent, false)
-                    .and_then(|directory| match directory {
-                        Some(directory) => directory.permissions(name),
-                        None => Ok(None),
-                    })
-            }
-            None => Ok(None),
-        };
-        let result = inherited.and_then(|permissions| {
-            match (directories.get(split(&file.path).0, true)?, permissions) {
-                (Some(directory), Some(permissions)) => directory.write_with(
-                    &staging_name(split(&file.path).1),
-                    Some(&permissions),
-                    text.as_bytes(),
-                ),
-                (Some(directory), None) => stage(directory, &file.path, text),
-                (None, _) => Err(AccessError::Unexpected(file.path.clone())),
-            }
+        let (parent, name) = split(&file.path);
+        let result = permissions_for(directories, &file.path, renames).and_then(|permissions| {
+            let directory = directories
+                .get(parent, true)?
+                .ok_or_else(|| AccessError::Unexpected(file.path.clone()))?;
+            directory.write_with(&staging_name(name), permissions.as_ref(), text.as_bytes())
         });
         if let Err(error) = result {
             discard(directories, &staged);
@@ -368,8 +426,9 @@ impl Plan {
             open: BTreeMap::new(),
             created: Vec::new(),
             changed: BTreeSet::new(),
-            deleted: BTreeMap::new(),
+            original: BTreeMap::new(),
             leftovers: Vec::new(),
+            dropped: 0,
         };
         // Files are written first and removed last, so that whatever stops
         // a publish halfway, a renamed file is never only removed.
@@ -475,7 +534,7 @@ fn publish_one<'f>(
         // recorded to sync whatever happens next. The target's permissions
         // are kept to restore it with.
         if let Err(error) = directories.remove(&staging_path(&file.path), false) {
-            directories.leftovers.push(diagnostic::file(
+            directories.leftover(diagnostic::file(
                 &staging_path(&file.path),
                 Code::Io.as_str(),
                 format!("could not be removed ({error}); remove it by hand"),
@@ -488,7 +547,7 @@ fn publish_one<'f>(
         let permissions = directory.permissions(name)?;
         directory.remove_file(name)?;
         if let Some(permissions) = permissions {
-            directories.deleted.insert(file.path.clone(), permissions);
+            directories.original.insert(file.path.clone(), permissions);
         }
     }
     published.push(file);
@@ -511,9 +570,8 @@ fn roll_back(directories: &mut Directories<'_>, published: &[&FileChange]) -> Ve
         let (parent, name) = split(&file.path);
         let restored = match &file.before {
             Some(text) => {
-                // A deleted file comes back with its own permissions; a
-                // replaced one keeps those of the file now in its place.
-                let permissions = directories.deleted.get(&file.path).cloned();
+                // A file comes back with the permissions it had.
+                let permissions = directories.original.get(&file.path).cloned();
                 directories.get(parent, true).and_then(|directory| {
                     let directory =
                         directory.ok_or_else(|| AccessError::Unexpected(parent.to_owned()))?;

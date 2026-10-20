@@ -306,6 +306,9 @@ fn check_base(
     };
     let resumable = transaction.documents_only();
     for (path, expected) in base {
+        if workspace.exhausted() || problems.found.len() >= limits::DIAGNOSTICS {
+            break;
+        }
         if let Err(failure) = workspace.exists(path) {
             problems.report(*span, failure);
             continue;
@@ -381,14 +384,25 @@ fn check_recorded(
             .filter(|path| computed.get(*path) != result.get(*path))
             .collect();
         if !differing.is_empty() {
-            let differing: Vec<&str> = differing.into_iter().map(String::as_str).collect();
+            // The first few paths are named, and the rest counted.
+            let named: Vec<String> = differing
+                .iter()
+                .take(10)
+                .map(|path| diagnostic::quoted(path))
+                .collect();
+            let more = differing.len().saturating_sub(named.len());
+            let rest = if more > 0 {
+                format!(" and {more} more")
+            } else {
+                String::new()
+            };
             problems.report(
                 transaction.document.root().span(),
                 Failure {
                     code: Code::Result,
                     message: format!(
-                        "replaying the transaction gives other bytes than its result records for {}",
-                        differing.join(", ")
+                        "replaying the transaction gives other bytes than its result records for {}{rest}",
+                        named.join(", ")
                     ),
                 },
             );

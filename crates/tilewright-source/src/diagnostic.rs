@@ -227,42 +227,43 @@ pub(crate) struct Diagnostics {
     items: Vec<Diagnostic>,
     maximum: usize,
     dropped: bool,
-    /// Set once a collection of the load holds its limit, shared by the
-    /// collections of one load, so that the load stops reading: nothing
-    /// more could be reported.
-    full: Rc<Cell<bool>>,
+    /// The diagnostics kept by every collection of one load, shared, so
+    /// that the load stops reading once their sum reaches the maximum:
+    /// nothing more could be reported.
+    total: Rc<Cell<usize>>,
 }
 
 impl Diagnostics {
     pub(crate) fn new(maximum: usize) -> Self {
-        Self::sharing(maximum, Rc::new(Cell::new(false)))
+        Self::sharing(maximum, Rc::new(Cell::new(0)))
     }
 
-    /// A collection that shares `full` with others of the same load.
-    pub(crate) const fn sharing(maximum: usize, full: Rc<Cell<bool>>) -> Self {
+    /// A collection that shares its count with others of the same load.
+    pub(crate) const fn sharing(maximum: usize, total: Rc<Cell<usize>>) -> Self {
         Self {
             items: Vec::new(),
             maximum,
             dropped: false,
-            full,
+            total,
         }
     }
 
-    /// The flag set once any collection of this load is full.
-    pub(crate) fn full(&self) -> Rc<Cell<bool>> {
-        Rc::clone(&self.full)
+    /// The count shared by the collections of this load.
+    pub(crate) fn total(&self) -> Rc<Cell<usize>> {
+        Rc::clone(&self.total)
+    }
+
+    /// Whether the collections of this load together hold the maximum.
+    pub(crate) fn is_full(&self) -> bool {
+        self.total.get() >= self.maximum
     }
 
     pub(crate) fn push(&mut self, diagnostic: Diagnostic) {
-        if self.items.len() < self.maximum {
-            self.items.push(diagnostic);
-        } else {
+        if self.is_full() {
             self.dropped = true;
-        }
-        // Full as soon as the limit is reached: reading on could only find
-        // problems that would not be reported.
-        if self.items.len() >= self.maximum {
-            self.full.set(true);
+        } else {
+            self.items.push(diagnostic);
+            self.total.set(self.total.get() + 1);
         }
     }
 
@@ -270,10 +271,10 @@ impl Diagnostics {
         self.items.is_empty() && !self.dropped
     }
 
+    /// Takes in another collection of the same load, whose diagnostics are
+    /// already counted.
     pub(crate) fn append(&mut self, other: Self) {
-        for diagnostic in other.items {
-            self.push(diagnostic);
-        }
+        self.items.extend(other.items);
         self.dropped |= other.dropped;
     }
 

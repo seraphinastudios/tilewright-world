@@ -5,23 +5,53 @@
 
 use tilewright_source::Diagnostic;
 
-/// Line starts of a text, for 1-based line and character-column lookup.
+/// Bytes between character-count checkpoints in [`Lines`].
+const STRIDE: usize = 256;
+
+/// Line starts of a text, and character counts every [`STRIDE`] bytes, for
+/// 1-based line and character-column lookup: each lookup is a binary
+/// search and a scan of at most [`STRIDE`] bytes, however long the line.
 pub(crate) struct Lines<'s> {
     source: &'s str,
     starts: Vec<usize>,
+    /// Characters before byte `i * STRIDE`.
+    characters: Vec<usize>,
 }
 
 impl<'s> Lines<'s> {
     pub(crate) fn new(source: &'s str) -> Self {
         let mut starts = vec![0];
-        starts.extend(
-            source
-                .bytes()
-                .enumerate()
-                .filter(|(_, byte)| *byte == b'\n')
-                .map(|(index, _)| index + 1),
-        );
-        Self { source, starts }
+        let mut characters = Vec::with_capacity(source.len() / STRIDE + 1);
+        let mut count = 0;
+        for (index, byte) in source.bytes().enumerate() {
+            if index.is_multiple_of(STRIDE) {
+                characters.push(count);
+            }
+            if byte == b'\n' {
+                starts.push(index + 1);
+            }
+            if byte & 0xC0 != 0x80 {
+                count += 1;
+            }
+        }
+        if source.len().is_multiple_of(STRIDE) {
+            characters.push(count);
+        }
+        Self {
+            source,
+            starts,
+            characters,
+        }
+    }
+
+    /// Characters before `offset`, a character boundary within the text.
+    fn characters_before(&self, offset: usize) -> usize {
+        let block = offset / STRIDE;
+        self.characters[block]
+            + self.source.as_bytes()[block * STRIDE..offset]
+                .iter()
+                .filter(|byte| **byte & 0xC0 != 0x80)
+                .count()
     }
 
     fn locate(&self, offset: usize) -> (usize, usize) {
@@ -31,7 +61,10 @@ impl<'s> Lines<'s> {
         }
         let line = self.starts.partition_point(|start| *start <= boundary);
         let start = self.starts[line - 1];
-        (line, self.source[start..boundary].chars().count() + 1)
+        (
+            line,
+            self.characters_before(boundary) - self.characters_before(start) + 1,
+        )
     }
 }
 

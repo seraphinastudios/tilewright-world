@@ -105,6 +105,20 @@ impl Root {
         Ok(Directory(current))
     }
 
+    pub(crate) fn make_directory(&self, components: &[&str]) -> Result<bool, Refused> {
+        let Some((_, parent)) = components.split_last() else {
+            return Ok(false);
+        };
+        self.directory(parent, false)?;
+        let mut path = self.0.clone();
+        path.extend(components);
+        match fs::create_dir(&path) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(false),
+            Err(error) => Err(Refused::Io(error)),
+        }
+    }
+
     #[allow(clippy::unnecessary_wraps, clippy::unused_self)]
     pub(crate) fn lock(&self) -> Result<Option<Lock>, Refused> {
         Ok(Some(Lock))

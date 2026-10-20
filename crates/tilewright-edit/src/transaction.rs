@@ -704,34 +704,15 @@ impl<'a> Shape<'a> {
             "insert" => self.insert(item),
             "remove" => self.remove(item),
             "test" => self.test(item),
-            "object.insert" => {
-                let tile = self.tile(item)?;
-                let index = match item.get("index") {
-                    Some(value) => Some(self.index(value)?),
-                    None => None,
-                };
-                let object = self.required(item, "object")?;
-                if !matches!(object, Value::Object { .. }) {
-                    self.shape(object.span(), "object must be an object");
-                    return None;
-                }
-                if let Some(at) = object.member("at") {
-                    self.shape(
-                        at.key_span,
-                        "the object's tile comes from the operation; leave out \"at\"",
-                    );
-                    return None;
-                }
-                Some(Action::ObjectInsert {
-                    tile,
-                    index,
-                    object: object.span(),
+            "object.insert" => self.object_insert(item),
+            "object.remove" => {
+                let address = self.address(item);
+                let expect = self.object_expect(item);
+                Some(Action::ObjectRemove {
+                    address: address?,
+                    expect: expect?,
                 })
             }
-            "object.remove" => Some(Action::ObjectRemove {
-                address: self.address(item)?,
-                expect: self.object_expect(item)?,
-            }),
             "object.move" => self.object_move(item),
             "terrain.set" => self.terrain(item),
             "document.create" => self.create(item),
@@ -756,30 +737,57 @@ impl<'a> Shape<'a> {
     }
 
     fn create(&mut self, item: &'a Value) -> Option<Action> {
-        let path = self.required(item, "path")?;
-        let path = self.path(path)?;
+        let path = self.required(item, "path").and_then(|path| self.path(path));
         let content = match (item.get("document"), item.get("text")) {
             (Some(value), None) => {
-                if !matches!(value, Value::Object { .. }) {
+                if matches!(value, Value::Object { .. }) {
+                    Some(Content::Document(value.span()))
+                } else {
                     self.shape(value.span(), "document must be an object");
-                    return None;
+                    None
                 }
-                Content::Document(value.span())
             }
-            (None, Some(value)) => Content::Text(self.text_pieces(value)?),
+            (None, Some(value)) => self.text_pieces(value).map(Content::Text),
             _ => {
                 self.shape(item.span(), "give exactly one of document or text");
-                return None;
+                None
             }
         };
         let like = match item.get("like") {
-            Some(value) => Some(self.path(value)?),
-            None => None,
+            Some(value) => self.path(value).map(Some),
+            None => Some(None),
         };
         Some(Action::Create {
-            path,
-            content,
-            like,
+            path: path?,
+            content: content?,
+            like: like?,
+        })
+    }
+
+    fn object_insert(&mut self, item: &'a Value) -> Option<Action> {
+        let tile = self.tile(item);
+        let index = match item.get("index") {
+            Some(value) => self.index(value).map(Some),
+            None => Some(None),
+        };
+        let object = self.required(item, "object").and_then(|object| {
+            if !matches!(object, Value::Object { .. }) {
+                self.shape(object.span(), "object must be an object");
+                return None;
+            }
+            if let Some(at) = object.member("at") {
+                self.shape(
+                    at.key_span,
+                    "the object's tile comes from the operation; leave out \"at\"",
+                );
+                return None;
+            }
+            Some(object.span())
+        });
+        Some(Action::ObjectInsert {
+            tile: tile?,
+            index: index?,
+            object: object?,
         })
     }
 
@@ -1029,30 +1037,37 @@ impl<'a> Shape<'a> {
     fn object_move(&mut self, item: &'a Value) -> Option<Action> {
         let address = self.address(item);
         let expect = self.object_expect(item);
-        let (address, expect) = (address?, expect?);
-        let to = self.required(item, "to")?;
-        let to = self.object(to, &["plane", "layer", "at", "index"])?;
-        let plane = match to.get("plane") {
-            Some(value) => self.identifier(value)?,
-            None => address.tile.plane.clone(),
+        let to = self
+            .required(item, "to")
+            .and_then(|to| self.object(to, &["plane", "layer", "at", "index"]));
+        // The destination's fields are checked whether or not the source's
+        // passed; a missing one is the source's.
+        let plane = match to.and_then(|to| to.get("plane")) {
+            Some(value) => self.identifier(value),
+            None => address.as_ref().map(|address| address.tile.plane.clone()),
         };
-        let layer = match to.get("layer") {
-            Some(value) => self.layer(value)?,
-            None => address.tile.layer,
+        let layer = match to.and_then(|to| to.get("layer")) {
+            Some(value) => self.layer(value),
+            None => address.as_ref().map(|address| address.tile.layer),
         };
-        let at = match to.get("at") {
-            Some(value) => self.at(value)?,
-            None => address.tile.at,
+        let at = match to.and_then(|to| to.get("at")) {
+            Some(value) => self.at(value),
+            None => address.as_ref().map(|address| address.tile.at),
         };
-        let index = match to.get("index") {
-            Some(value) => Some(self.index(value)?),
-            None => None,
+        let index = match to.and_then(|to| to.get("index")) {
+            Some(value) => self.index(value).map(Some),
+            None => Some(None),
         };
+        to?;
         Some(Action::ObjectMove {
-            address,
-            expect,
-            to: Tile { plane, layer, at },
-            index,
+            address: address?,
+            expect: expect?,
+            to: Tile {
+                plane: plane?,
+                layer: layer?,
+                at: at?,
+            },
+            index: index?,
         })
     }
 
@@ -1066,8 +1081,8 @@ impl<'a> Shape<'a> {
         let grid = self
             .required(item, "grid")
             .and_then(|value| self.identifier(value));
-        let (plane, layer, grid) = (plane?, layer?, grid?);
-        let height = grid == "height";
+        // The cells are checked even when the address is not.
+        let height = grid.as_deref() == Some("height");
         let cells_value = self.required(item, "cells")?;
         let Some(items) = cells_value.as_array() else {
             self.shape(cells_value.span(), "cells must be an array");
@@ -1114,10 +1129,13 @@ impl<'a> Shape<'a> {
                 expect,
             });
         }
-        ok.then_some(Action::TerrainSet {
-            plane,
-            layer,
-            grid,
+        if !ok {
+            return None;
+        }
+        Some(Action::TerrainSet {
+            plane: plane?,
+            layer: layer?,
+            grid: grid?,
             cells,
         })
     }

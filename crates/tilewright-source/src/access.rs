@@ -160,6 +160,15 @@ impl SourceRoot {
         }
     }
 
+    /// Makes the directory `path` in its existing parent. Returns whether
+    /// this call made it: `false` when something by that name was already
+    /// there, which the caller then did not create.
+    pub fn make_directory(&self, path: &str) -> Result<bool, AccessError> {
+        self.root
+            .make_directory(&checked(path)?)
+            .map_err(|error| refused(path, error))
+    }
+
     /// Takes the root's exclusive advisory lock, held until the returned
     /// value is dropped. It fails at once with [`AccessError::Locked`] if
     /// another holder, in this process or another, has it. Only Unix has

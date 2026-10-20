@@ -101,9 +101,9 @@ an error.
 | `object.remove` | tile, `index`, `expect` | Removes an object. |
 | `object.move` | tile, `index`, `expect`, `to` | Moves an object to `to`: `{"plane"?, "layer"?, "at"?, "index"?}`, each defaulting to the object's own (and `index` to after the destination's objects). `to.index` counts the destination's objects without the moved one, so a move on one tile reorders it, and a move to where the object already is changes nothing. |
 | `terrain.set` | `plane`, `layer`, `grid`, `cells` | Sets terrain cells of one grid (section 5). |
-| `document.create` | `path`, `document` or `text`, `like`? | Creates a document: `document` is written in canonical layout (section 10), `text` exactly; `text` is a string or an array of strings joined, for a file longer than a string or a line may be. Either must be valid JSONC. The new file takes the permissions of the file at `like`, if it is there when publishing. |
+| `document.create` | `path`, `document` or `text`, `like`? | Creates a document: `document` is written in canonical layout (section 10), `text` exactly; `text` is a string or an array of strings joined, for a file longer than a string or a line may be. Either must be valid JSONC. The new file takes the permissions of the file at `like`, if it is there when publishing (section 9). |
 | `document.delete` | `path` | Deletes a document. |
-| `document.rename` | `path`, `to` | Moves a document to a path that is free, unchanged, with its permissions. A rename that changes identity also sets it, such as a definition's `id` or a chunk's `chunk`, in the same transaction; references to it are updated by operations of their own. |
+| `document.rename` | `path`, `to` | Moves a document to a path that is free, unchanged, with its permissions (section 9). A rename that changes identity also sets it, such as a definition's `id` or a chunk's `chunk`, in the same transaction; references to it are updated by operations of their own. |
 
 Target is `"path"` or `"object"` (section 2). An object operation's `expect`
 is an object that names at least `proto` and not `at`; each member it names
@@ -252,16 +252,17 @@ elsewhere the absolute path it resolved to then. It:
    directory on Unix), so two applies cannot interleave;
 2. writes each new file beside its target as `.<name>.tilewright-tmp`,
    created fresh (whatever was at that name is removed first, so a link or
-   hard link there is never written through), with the target's
-   permissions, and synced; a failure removes every staging file it wrote
+   hard link there is never written through), with the permissions given
+   below, and synced; a failure removes every staging file it wrote
    and the directories it created;
 3. reads every file the transaction touched or consulted again and compares
    it with the files it was carried out on, then validates the tree with
    the transaction's files again, and its terrain addresses against that
    tree, since files it did not touch may have changed since it was carried
    out: two transactions that are valid alone can be invalid together. A
-   difference is a `tx.conflict`, and a result that no longer validates is reported with the loader's diagnostics; in
-   both cases the staged files are removed and nothing is written;
+   difference is a `tx.conflict`, and a result that no longer validates is
+   reported with the loader's diagnostics; in both cases the staged files
+   are removed and nothing is written;
 4. renames each staged file over its target, in path order, and then
    removes each deleted file, in path order, so that a renamed file is
    never only removed. Before a deleted file is removed, any staging file
@@ -272,10 +273,19 @@ elsewhere the absolute path it resolved to then. It:
    directory that cannot be removed is reported, the former since the tree
    does not validate while it is there.
 
+A file written where a file is keeps that file's permissions. A file a
+rename made, or one created `like` another, takes the permissions of the
+file it came from as they are when publishing, and where it replaces a file
+(one the transaction deleted at that path), only what both allow: on Unix
+the mode bits both have, elsewhere read-only if either is. So no file
+allows more than the files it came from did. Any other new file has the
+platform's default. Restoring after a failure gives every file back the
+permissions it had.
+
 Each rename and removal is atomic, but there is no atomic publication of
 several files. If a step of 4 fails, the files already published are
-restored from the transaction's copy of them, a deleted file with its own
-permissions, the staged files and created directories are removed, the
+restored from the transaction's copy of them, each with the permissions
+it had, the staged files and created directories are removed, the
 directories involved are synced, and the error names any file that could
 not be restored. Whenever nothing is published, the cleanup is synced too.
 An error always says three things: whether every file was published,
@@ -297,9 +307,10 @@ transaction touches or consults, a link or special file included.
 Staging names, `.<name>.tilewright-tmp`, are reserved beside source files.
 Other platforms than Unix check each path component for links before use,
 have no lock and cannot sync a directory: a publish there, and the command
-line's write of the inverse, say that their names may not be durable yet. A process changing the tree at the same
-moment can race them, as can a program other than the toolkit on any
-platform: the lock only orders applies.
+line's write of the inverse, say that their names may not be durable yet. A
+process changing the tree at the same moment can race them, as can a
+program other than the toolkit on any platform: the lock only orders
+applies.
 
 ## 10. Canonical layout
 

@@ -467,7 +467,7 @@ pub fn load_edited_in(
         ..*options
     };
     let mut diagnostics = Diagnostics::new(options.maximum_diagnostics);
-    let mut tree = files::Tree::in_root(root.platform(), options, overlay, diagnostics.full());
+    let mut tree = files::Tree::in_root(root.platform(), options, overlay, diagnostics.total());
     let world = load_tree(&mut tree, &mut diagnostics);
     diagnostics.append(tree.take_diagnostics());
     match world {
