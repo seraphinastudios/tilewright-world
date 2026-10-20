@@ -1,0 +1,7 @@
+{
+  "format": "tilewright.plane/1",
+  "id": "island",
+  "title": "Island",
+  "kind": "shared",
+  "chunk_size": 32
+}

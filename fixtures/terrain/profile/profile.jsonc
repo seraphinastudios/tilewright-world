@@ -1,0 +1,15 @@
+{
+  "format": "tilewright.profile/1",
+  "id": "terrain-example",
+  "version": "1.0.0",
+  "projection": {"kind": "top_down", "tile_size": 32},
+  "render_layers": ["floor", "decal", "edge", "item"],
+  // Painted terrain stays in floor; transitions draw into decal and edge.
+  "ground_layers": ["floor", "decal", "edge"],
+  "definition_types": {
+    "proto": {"schema": "schema/proto.jsonc"}
+  },
+  "object_fields": "schema/empty.jsonc",
+  "zone_properties": "schema/empty.jsonc",
+  "transitions": "transitions.jsonc"
+}

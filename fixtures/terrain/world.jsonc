@@ -1,0 +1,8 @@
+// A small top-down island whose source paints only terrain: water, sand,
+// dirt and grass. The profile's transitions derive every shore, edge and
+// variant tile; resolved.txt shows what they resolve to.
+{
+  "format": "tilewright.world/1",
+  "profile": "profile/profile.jsonc",
+  "planes": ["island"]
+}

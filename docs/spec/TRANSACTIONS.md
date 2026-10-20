@@ -454,7 +454,7 @@ before anything is written, and should be split.
 
 Problems of a transaction are reported at byte spans of its document, with
 these codes; problems of the edited world use the loader's codes (FORMAT.md
-section 13) at the edited files.
+section 14) at the edited files.
 
 | Code | Meaning |
 | --- | --- |
