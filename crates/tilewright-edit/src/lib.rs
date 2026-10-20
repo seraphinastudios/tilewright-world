@@ -433,6 +433,14 @@ pub fn plan(
     transaction: &Transaction,
     options: &Options,
 ) -> Result<Plan, Vec<Diagnostic>> {
+    // The edited world's diagnostics are a transaction's too.
+    let options = &Options {
+        load: LoadOptions {
+            maximum_diagnostics: options.load.maximum_diagnostics.min(limits::DIAGNOSTICS),
+            ..options.load
+        },
+        ..*options
+    };
     let source = SourceRoot::new(root);
     let mut workspace = Workspace::new(&source);
     let mut problems = Problems {
@@ -663,18 +671,18 @@ impl Bounded {
         self.push("\n]")
     }
 
+    /// Appends a pointer with each step on a line of its own, so that long
+    /// keys never share a line.
     fn pointer(&mut self, pointer: &[Step]) -> Result<(), TooLarge> {
         self.push("[")?;
         for (index, step) in pointer.iter().enumerate() {
-            if index > 0 {
-                self.push(", ")?;
-            }
+            self.push(if index > 0 { ",\n" } else { "\n" })?;
             match step {
                 Step::Key(key) => self.push_json(key)?,
                 Step::Index(index) => self.push(&index.to_string())?,
             }
         }
-        self.push("]")
+        self.push("\n]")
     }
 }
 
@@ -715,7 +723,7 @@ fn write_operation(
             output.pointer(&full)?;
             if let Some((key, colon)) = key {
                 output.push(", \"key\": ")?;
-                output.push(key)?;
+                output.push_value(key)?;
                 output.push(", \"colon\": ")?;
                 output.push_json(colon)?;
             }

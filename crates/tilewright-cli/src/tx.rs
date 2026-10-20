@@ -167,9 +167,13 @@ fn rebase(transaction: &Path, root: &Path, output: &Path) -> Result<String, Fail
     outside(root, output)?;
     let transaction = read(transaction, false)?;
     let plan = plan(&transaction, root, true, false)?;
-    write(output, plan.sealed())?;
+    let durable = if write(output, plan.sealed())? {
+        ""
+    } else {
+        " (its name could not be synced, so it may not be durable yet)"
+    };
     Ok(format!(
-        "{}rebased: {} operation(s) on {} file(s), written to {}\n",
+        "{}rebased: {} operation(s) on {} file(s), written to {}{durable}\n",
         changes(&plan),
         transaction.len(),
         plan.files().len(),

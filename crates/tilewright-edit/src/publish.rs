@@ -138,9 +138,11 @@ impl Directories<'_> {
                     }
                     prefix.push_str(component);
                     if self.root.directory(&prefix, false)?.is_none() {
-                        self.root.directory(&prefix, true)?;
+                        // Recorded before creating, which may make the
+                        // directory and still fail.
                         self.created.push(prefix.clone());
                         self.changed.insert(split(&prefix).0.to_owned());
+                        self.root.directory(&prefix, true)?;
                     }
                 }
             }
@@ -495,6 +497,8 @@ fn roll_back(directories: &mut Directories<'_>, published: &[&FileChange]) -> Ve
         directories.changed.insert(parent.to_owned());
         if restored.is_err() {
             unrestored.push(file.path.clone());
+            // A staging file the failed restore left goes, or is reported.
+            directories.clean(&staging_path(&file.path), false);
         }
     }
     unrestored

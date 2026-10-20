@@ -605,12 +605,21 @@ impl<'a> Shape<'a> {
         if let Some(custom) = root.get("custom") {
             ok &= self.custom(custom);
         }
+        // A malformed digest list is reported, and the rest still checked.
         let base = match root.get("base") {
-            Some(value) => Some((value.span(), self.digests(value)?)),
+            Some(value) => {
+                let digests = self.digests(value);
+                ok &= digests.is_some();
+                digests.map(|digests| (value.span(), digests))
+            }
             None => None,
         };
         let result = match root.get("result") {
-            Some(value) => Some(self.digests(value)?),
+            Some(value) => {
+                let digests = self.digests(value);
+                ok &= digests.is_some();
+                digests
+            }
             None => None,
         };
         let items = self.required(root, "operations")?;

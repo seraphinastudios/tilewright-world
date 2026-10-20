@@ -11,6 +11,9 @@ use tilewright_jsonc::{Document, Value, write_json_string};
 /// scalars.
 pub(crate) const INLINE_WIDTH: usize = 80;
 
+/// Longest array of non-string scalars written on one line.
+pub(crate) const SCALAR_LINE_WIDTH: usize = 4_096;
+
 /// A value to write in canonical layout.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Node {
@@ -146,12 +149,17 @@ impl Node {
     }
 
     fn write(&self, indent: &str, expand: bool, output: &mut String) {
-        let scalars = match self {
-            Self::Array(items) => items.iter().all(|item| matches!(item, Self::Scalar(_))),
-            Self::Object(members) => members.is_empty(),
+        // An array of numbers, booleans and nulls stays on one line while
+        // that line is not long; any other container while it is short.
+        let one_line = match self {
+            Self::Array(items) if items.iter().all(|item| matches!(item, Self::Scalar(_))) => {
+                self.fits(&mut SCALAR_LINE_WIDTH.clone())
+            }
+            Self::Object(members) if members.is_empty() => true,
             Self::Scalar(_) | Self::String(_) => true,
+            Self::Array(_) | Self::Object(_) => !expand && self.fits(&mut INLINE_WIDTH.clone()),
         };
-        if scalars || (!expand && self.fits(&mut INLINE_WIDTH.clone())) {
+        if one_line {
             self.inline(output);
             return;
         }

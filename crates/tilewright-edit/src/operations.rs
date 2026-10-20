@@ -454,6 +454,26 @@ fn test_value(
             _ => Err(Failure::conflict(format!("{path} does not exist"))),
         };
     }
+    // An absent test may end in an `{"id": ...}` selector that matches no
+    // entry: then there is none, as the test expects.
+    if let (Expected::Absent, Some((Segment::Id(id), parent))) = (expected, pointer.split_last()) {
+        let (path, steps) = resolved(workspace, aim, parent)?;
+        let document = workspace.document(&path)?;
+        let matching = splice::find(document.root(), &steps)
+            .and_then(Value::as_array)
+            .unwrap_or_default()
+            .iter()
+            .filter(|item| item.get("id").and_then(Value::as_str) == Some(id.as_str()))
+            .count();
+        return if matching == 0 {
+            Ok(())
+        } else {
+            Err(Failure::conflict(format!(
+                "{path} {} has an entry with id \"{id}\", expected none",
+                describe(&steps)
+            )))
+        };
+    }
     let (path, steps) = resolved(workspace, aim, pointer)?;
     if let Expected::Value(expect) = expected {
         return check_value(workspace, &path, &steps, transaction, *expect);

@@ -1514,3 +1514,70 @@ fn a_large_document_can_be_deleted_and_restored() {
     round_trip(root, &tx);
     assert_eq!(read(root, "defs/proto/big.jsonc"), text);
 }
+
+#[test]
+fn an_absent_test_may_name_an_entry_by_id() {
+    let tree = copy();
+    let root = tree.path();
+    planned(
+        root,
+        &transaction(
+            r#"{"op": "test", "path": "planes/overworld/zones.jsonc", "pointer": ["zones", {"id": "desert"}], "absent": true}"#,
+        ),
+    );
+    let found = problems(
+        root,
+        &transaction(
+            r#"{"op": "test", "path": "planes/overworld/zones.jsonc", "pointer": ["zones", {"id": "island"}], "absent": true}"#,
+        ),
+    );
+    assert!(
+        has(&found, "tx.conflict", "has an entry with id \"island\""),
+        "{found:#?}"
+    );
+}
+
+#[test]
+fn every_problem_is_reported_past_a_bad_digest_list() {
+    let text = "{\"format\": \"tilewright.transaction/1\", \"base\": [{\"path\": \"world.jsonc\"}], \"result\": 1, \"operations\": [{\"op\": \"frobnicate\"}]}";
+    let found = Transaction::parse("t.jsonc", text).unwrap_err();
+    assert!(
+        has(&found, "tx.shape", "missing key \"sha256\""),
+        "{found:#?}"
+    );
+    assert!(has(&found, "tx.shape", "expected an array"), "{found:#?}");
+    assert!(has(&found, "tx.shape", "unknown operation"), "{found:#?}");
+}
+
+#[test]
+fn long_keys_and_scalar_arrays_keep_lines_short() {
+    let tree = copy();
+    let root = tree.path();
+    // A key of 600 KiB, twice in one pointer, and a long array of numbers.
+    let key = "k".repeat(600 << 10);
+    let numbers: Vec<String> = (0..200_000).map(|number| number.to_string()).collect();
+    let numbers = numbers
+        .chunks(1_000)
+        .map(|chunk| chunk.join(", "))
+        .collect::<Vec<_>>()
+        .join(",\n");
+    let tx = transaction(&format!(
+        r#"{{"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["custom"], "value": {{"example.org/a": {{"{key}":
+{{"{key}": 1}}}}}}}},
+    {{"op": "remove", "path": "planes/overworld/plane.jsonc", "pointer": ["custom", "example.org/a", "{key}",
+"{key}"]}},
+    {{"op": "document.create", "path": "defs/proto/numbers.jsonc", "document": {{"format": "tilewright.def/1", "type": "proto", "id": "numbers",
+      "fields": {{"face": "n.png", "layer": "item"}}, "custom": {{"example.org/n": [
+{numbers}
+]}}}}}}"#
+    ));
+    let plan = planned(root, &tx);
+    Transaction::parse("inverse.jsonc", plan.inverse()).unwrap();
+    let created = plan
+        .files()
+        .iter()
+        .find(|file| file.path == "defs/proto/numbers.jsonc")
+        .and_then(|file| file.after.clone())
+        .unwrap();
+    assert!(created.lines().all(|line| line.len() < 1 << 20));
+}

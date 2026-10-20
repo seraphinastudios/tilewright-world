@@ -96,7 +96,7 @@ an error.
 | `set` | target, `pointer`, `value`, `expect`? | Replaces the value at `pointer`, or adds a missing member at the end of its object. |
 | `insert` | target, `pointer`, `key`?, `value`, `before`?, `after`?, `colon`? | Inserts an item into the array or object named by `pointer` without its last step, at the index that last step gives. An object member needs `key`. |
 | `remove` | target, `pointer`, `expect`?, `separator`? | Removes an array item or object member. |
-| `test` | target, `pointer`, `value` or `"absent": true` | Checks a value, or that there is none. |
+| `test` | target, `pointer`, `value` or `"absent": true` | Checks a value, or that there is none; an absent test may end in `{"id": ...}` to check that no entry has that identity. |
 | `object.insert` | tile, `index`?, `object` | Inserts `object` (without `at`) at `index` among the tile's objects; by default after them. |
 | `object.remove` | tile, `index`, `expect` | Removes an object. |
 | `object.move` | tile, `index`, `expect`, `to` | Moves an object to `to`: `{"plane"?, "layer"?, "at"?, "index"?}`, each defaulting to the object's own (and `index` to after the destination's objects). `to.index` counts the destination's objects without the moved one, so a move on one tile reorders it. |
@@ -227,8 +227,9 @@ the transaction changed, in path order:
   of at most 128 KiB, one a line;
 - otherwise the exact inverse of each edit, last first: `set` with the old
   value's text, `insert` with the old item, key, colon and regions, `remove`
-  with the old region. An old value is written on lines of its own, so no
-  line of the inverse is longer than a line of the file.
+  with the old region. An old value or key, and each step of a pointer, is
+  written on a line of its own, so no line of the inverse is longer than a
+  line of the file.
 
 Its `base` is the changed files after the transaction, and its `result` the
 files before. Every operation of an inverse names one file by path, so its
@@ -300,9 +301,10 @@ platform: the lock only orders applies.
 Text the toolkit creates, new files and new values, uses two-space
 indentation and `"key": value` members with minimal string escaping. A
 container is written on one line when it is empty, when it is an array of
-numbers, booleans and nulls only, or when its one-line form is at most 80
-bytes; otherwise each item is on its own line one level deeper. A file's
-root is always on several lines and the file ends with a newline.
+numbers, booleans and nulls only whose one-line form is at most 4,096
+bytes, or when its one-line form is at most 80 bytes; otherwise each item
+is on its own line one level deeper. A file's root is always on several
+lines and the file ends with a newline.
 
 ## 11. Limits
 
@@ -319,7 +321,7 @@ FORMAT.md section 3 and these, while they are read and carried out:
 | Terrain cells | 1,000,000 |
 | Bytes read from touched files | 256 MiB |
 | Work, in bytes: each operation's own size, the size of each document it reads (once per operation) and of each edit it makes | 4 GiB |
-| Diagnostics reported | 1,000 |
+| Diagnostics reported, the edited world's included | 1,000 |
 
 Whatever an operation does within a document, finding values, scanning
 members or objects and comparing values, is bounded by a constant times
