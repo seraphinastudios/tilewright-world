@@ -6,7 +6,7 @@ click and an agent call produce the same document. It is a log of operations
 against a base revision, not a byte patch:
 
 - operations address content by identity (a tile, an object's place on its
-  tile, a document path and a pointer), never by byte offset;
+  tile or its uid, a document path and a pointer), never by byte offset;
 - each operation carries every value it writes, so replaying a transaction on
   the same files gives the same bytes;
 - when the base moves on, the transaction is rebased by replaying its
@@ -35,6 +35,7 @@ A transaction is a strict JSONC document (FORMAT.md section 3):
   "result": [ ... ],                             // optional, the same shape
   "operations": [
     {"op": "object.insert", "plane": "overworld", "layer": 0, "at": [40, 6], "object": {"proto": "tree"}},
+    {"op": "object.move", "uid": "village.chest", "expect": {"proto": "chest"}, "to": {"at": [41, 6]}},
     {"op": "terrain.set", "plane": "overworld", "layer": 0, "grid": "floor",
      "cells": [{"at": [5, 5], "value": "sand", "expect": "grass"}]}
   ],
@@ -67,13 +68,15 @@ transaction out records every file it read, created or checked for absence
   `cx = floor(x / 32)`, and its chunk-local position is `x - 32 cx`;
   likewise for `y`. Positions are limited to the chunks a plane can hold
   (FORMAT.md section 2).
-- **Objects** are a tile and an `"index"`: the object's place among the
-  objects on that tile, in list order, which is their stacking order. Edits
-  elsewhere in the chunk do not move it. Operations that remove or move an
-  object name what they expect it to be, so that an object that moved or
-  changed is a conflict, not an edit of another object. An object address
-  with any other key is an error; addressing an object by its `uid`
-  (FORMAT.md) is planned as a second form. An object keeps every member as
+- **Objects** are named in one of two ways. A tile and an `"index"` name
+  the object at that place among the objects on the tile, in list order,
+  which is their stacking order; edits elsewhere in the chunk do not move
+  it. A `"uid"` alone names the object with that uid (FORMAT.md section 7)
+  wherever it is, on any tile, chunk, layer or plane or in an inventory
+  (section 2.1). An object address that mixes the two, or has any other
+  key, is an error. Operations that remove or move an object name what
+  they expect it to be, so that an object that moved or changed is a
+  conflict, not an edit of another object. An object keeps every member as
   written, its `uid` included, when it is moved, and an inverse restores it
   byte for byte; a transaction that would leave two objects with one `uid`
   fails validation with the loader's `ref.duplicate`.
@@ -82,14 +85,50 @@ transaction out records every file it read, created or checked for absence
   `{"id": "<identifier>"}`, the one array item that is an object whose `id`
   is that identifier. `["zones", {"id": "island"}, "name"]` names a zone's
   name whatever its position. An object target, `"object": {"plane",
-  "layer", "at", "index"}`, takes the place of `"path"` and makes the pointer
-  relative to the object. That pointer names a part of the object: it is
-  not empty and does not start with `at`, which is the object's tile, and an
-  `insert` inserts into a part of the object, so its pointer has a step
-  before the index. A `set` adds a member to the object itself.
+  "layer", "at", "index"}` or `"object": {"uid"}`, takes the place of
+  `"path"` and makes the pointer relative to the object. That pointer names
+  a part of the object: it is not empty and does not start with `at`, which
+  is the object's tile, and an `insert` inserts into a part of the object,
+  so its pointer has a step before the index. A `set` adds a member to the
+  object itself.
 
 Values in operations are written exactly as they appear in the transaction,
 comments and spacing included, and keys exactly as spelled there.
+
+### 2.1 Uid addresses
+
+A uid address is resolved when its operation is carried out, in the world
+as loaded before the transaction and as the operations before it left it.
+So it names its object after an insertion before it on its tile, a
+reorder, or a move to another tile, chunk, layer or plane, whether an
+earlier operation made the change or the base did and the transaction is
+rebased (section 7).
+
+- The tree is loaded once, before the operations. A tree that does not
+  load resolves no uid: every operation with a uid address is then a
+  `tx.conflict` naming the loader's first problem.
+- A uid that no object has, such as one an earlier operation removed or
+  changed, or that more than one object has, is a `tx.conflict`, as is an
+  object that is not what the operation's `expect` says.
+- Resolving consults the chunk that holds the object, which `base` records
+  as it does a chunk a tile names. Uids are unique in a valid world and the
+  result is validated, so that chunk names the object as surely as a tile
+  does.
+- An inventory entry's uid makes a value pointer relative to the entry, and
+  `object.remove` takes the entry out of its inventory. `object.move` moves
+  objects that are on tiles: an entry is moved by removing it from its
+  inventory and inserting it where it goes, and moving it is a
+  `tx.conflict`.
+- An object a transaction creates has the uid the transaction writes, in an
+  `object.insert` object, an inserted value or a `set` of its `uid`; later
+  operations can address it by that uid. The toolkit never assigns a uid,
+  since a transaction carries every value it writes: a tool that writes the
+  transaction chooses it, as FORMAT.md section 7 recommends.
+
+The uid form was reserved when this version was drafted. A transaction
+without one means what it did, and a reader that predates it rejects one
+with it as `tx.shape` rather than misreading it, so it does not change the
+`format`.
 
 ## 3. Operations
 
@@ -103,14 +142,16 @@ an error.
 | `remove` | target, `pointer`, `expect`?, `separator`? | Removes an array item or object member. |
 | `test` | target, `pointer`, `value` or `"absent": true` | Checks a value, or that there is none; an absent test may end in `{"id": ...}` to check that no entry has that identity. |
 | `object.insert` | tile, `index`?, `object` | Inserts `object` (without `at`) at `index` among the tile's objects; by default after them. |
-| `object.remove` | tile, `index`, `expect` | Removes an object. |
-| `object.move` | tile, `index`, `expect`, `to` | Moves an object to `to`: `{"plane"?, "layer"?, "at"?, "index"?}`, each defaulting to the object's own (and `index` to after the destination's objects). `to.index` counts the destination's objects without the moved one, so a move on one tile reorders it, and a move to where the object already is changes nothing. |
+| `object.remove` | object, `expect` | Removes an object. |
+| `object.move` | object, `expect`, `to` | Moves an object to `to`: `{"plane"?, "layer"?, "at"?, "index"?}`, each defaulting to the object's own (and `index` to after the destination's objects). `to.index` counts the destination's objects without the moved one, so a move on one tile reorders it, and a move to where the object already is changes nothing. |
 | `terrain.set` | `plane`, `layer`, `grid`, `cells` | Sets terrain cells of one grid (section 5). |
 | `document.create` | `path`, `document` or `text` | Creates a document: `document` is written in canonical layout (section 10), `text` exactly; `text` is a string or an array of strings joined, for a file longer than a string or a line may be. Either must be valid JSONC. |
 | `document.delete` | `path` | Deletes a document. |
 | `document.rename` | `path`, `to` | Moves a document to a path that is free, unchanged. A rename that changes identity also sets it, such as a definition's `id` or a chunk's `chunk`, in the same transaction; references to it are updated by operations of their own. |
 
-Target is `"path"` or `"object"` (section 2). An object operation's `expect`
+Target is `"path"` or `"object"` (section 2). Object is an object address
+(section 2) given in the operation itself: `"plane"`, `"layer"`, `"at"` and
+`"index"`, or `"uid"`. An object operation's `expect`
 is an object that names at least `proto` and not `at`; each member it names
 must equal the object's. A `set` or `remove` with `expect` requires the
 current value to equal it; equality is equality of canonical JSON (PACK.md
@@ -224,8 +265,9 @@ are still carried out on the files without it, so every failing operation
 is reported, not only the first.
 
 Rebasing replays the operations on the tree as it is, ignoring `base` and
-`result`, with every other check. When it succeeds, the sealed transaction
-records the new base. A rebase that fails reports the conflicts; the change
+`result`, with every other check. Uid addresses are resolved again, so an
+operation follows its object wherever the base moved it. When it succeeds,
+the sealed transaction records the new base. A rebase that fails reports the conflicts; the change
 that caused them is in the files they name.
 
 ## 8. Inverse
@@ -242,6 +284,10 @@ the transaction changed, in path order:
   with the old region. An old value or key, and each step of a pointer, is
   written on a line of its own, so no line of the inverse is longer than a
   line of the file.
+
+An inverse names files by path and values by pointer, never objects by
+place or uid, whatever addresses the transaction used: it restores bytes,
+so each of its operations depends on its own file alone.
 
 An inverse holds text, not permissions: a file it creates again takes the
 permissions of the directory it is in, which were the file's own as far
@@ -384,7 +430,10 @@ FORMAT.md section 3 and these, while they are read and carried out:
 
 Whatever an operation does within a document, finding values, scanning
 members or objects and comparing values, is bounded by a constant times
-the work it is charged, so no lookup is metered on its own. A file is read
+the work it is charged, so no lookup is metered on its own. A transaction
+with uid addresses also loads the tree once, within the load's own bounds
+as validating does; a uid lookup reads the chunk that holds the object and
+each chunk changed since the last lookup, as documents the operation reads. A file is read
 only as far as the read allowance left; the inverse's text and operations
 are counted as operations run and must fit a transaction; one terrain operation names at
 most 10,000 chunks; and carrying out stops as soon as a budget is spent or
