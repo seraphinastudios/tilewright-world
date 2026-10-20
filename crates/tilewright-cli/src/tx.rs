@@ -136,16 +136,26 @@ fn outside(root: &Path, path: &Path) -> Result<(), Failure> {
     else {
         return Ok(());
     };
-    let documents = ["planes", "defs", "profile"].map(std::ffi::OsStr::new);
-    let staging = tilewright_edit::staging_name("world.jsonc");
-    let inside = parent.join(name).strip_prefix(&root).is_ok_and(|relative| {
-        relative == Path::new("world.jsonc")
-            || relative == Path::new(&staging)
-            || relative
-                .components()
-                .next()
-                .is_some_and(|first| documents.contains(&first.as_os_str()))
-    });
+    // Compared without case, as macOS and Windows compare names by default.
+    let folded = |path: &Path| -> Vec<String> {
+        path.components()
+            .map(|component| component.as_os_str().to_string_lossy().to_lowercase())
+            .collect()
+    };
+    let (root, target) = (folded(&root), folded(&parent.join(name)));
+    let reserved = [
+        "world.jsonc".to_owned(),
+        tilewright_edit::staging_name("world.jsonc"),
+        tilewright_source::LOCK_NAME.to_owned(),
+    ];
+    let inside = target
+        .strip_prefix(root.as_slice())
+        .is_some_and(|relative| {
+            matches!(relative, [only] if reserved.contains(only))
+                || relative
+                    .first()
+                    .is_some_and(|first| ["planes", "defs", "profile"].contains(&first.as_str()))
+        });
     if inside {
         return Err(Failure::message(format!(
             "{} is inside the source tree's documents; write it elsewhere",
@@ -385,7 +395,12 @@ mod tests {
         assert!(!Path::new(&path("undo2.jsonc")).exists());
 
         // Neither inside the documents nor where world.jsonc is staged.
-        for inside in ["planes/overworld/undo.jsonc", ".world.jsonc.tilewright-tmp"] {
+        for inside in [
+            "planes/overworld/undo.jsonc",
+            ".world.jsonc.tilewright-tmp",
+            ".WORLD.JSONC.tilewright-tmp",
+            ".tilewright.lock",
+        ] {
             let inside = Path::new(&root).join(inside);
             let inside_text = inside.display().to_string();
             let refused =

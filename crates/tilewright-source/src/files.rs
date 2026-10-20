@@ -4,23 +4,18 @@
 //! Bounded access to a source tree. Every path is relative to the root,
 //! `/`-separated and validated; symbolic links are never followed. On Unix
 //! every component is opened through its parent's directory handle without
-//! following links (`beneath`), and on Windows likewise without following
-//! reparse points (`windows`); elsewhere components are checked by path
-//! before use (`portable`).
+//! following links (`beneath`); elsewhere components are checked by path
+//! before use (`portable`), on Windows for any reparse point.
 
 #[cfg(unix)]
 pub(crate) mod beneath;
-#[cfg(any(not(any(unix, windows)), all(test, unix)))]
+#[cfg(any(not(unix), test))]
 pub(crate) mod portable;
-#[cfg(windows)]
-pub(crate) mod windows;
 
 #[cfg(unix)]
 pub(crate) use beneath as platform;
-#[cfg(not(any(unix, windows)))]
+#[cfg(not(unix))]
 pub(crate) use portable as platform;
-#[cfg(windows)]
-pub(crate) use windows as platform;
 
 use crate::{
     Code, Diagnostic, LoadOptions, Overlay,
@@ -53,8 +48,6 @@ pub(crate) enum Refused {
 pub(crate) enum Found {
     File,
     Directory,
-    /// Windows has no other kind of entry.
-    #[cfg_attr(windows, allow(dead_code))]
     Other,
     Missing,
 }
@@ -64,7 +57,6 @@ pub(crate) enum RawKind {
     File,
     Directory,
     Link,
-    #[cfg_attr(windows, allow(dead_code))]
     Other,
 }
 
@@ -840,7 +832,7 @@ mod tests {
         assert_eq!(labelled.mode, unlabelled.mode);
         assert_ne!(labelled.control, unlabelled.control);
         assert_ne!(labelled.audience(false), unlabelled.audience(false));
-        assert_eq!(labelled.new_file().unwrap().control, labelled.control);
+        assert_eq!(labelled.new_file().control, labelled.control);
         // A new file the system labels otherwise is refused before anything
         // is written, and none is left.
         assert!(dir.write("new", Some(&labelled), b"secret").is_err());
@@ -871,280 +863,6 @@ mod tests {
     }
 }
 
-/// The Windows implementation refuses reparse points, at the component
-/// where they occur, and keeps access control lists by refusing ones it
-/// could not keep.
-#[cfg(all(test, windows))]
-mod windows_tests {
-    use super::{Found, RawKind, Refused, windows::Root};
-    use crate::access::Access;
-    use std::{
-        fs,
-        path::Path,
-        process::{Command, Stdio},
-    };
-
-    /// Runs a program, which must succeed.
-    fn run(program: &str, arguments: &[&std::ffi::OsStr]) {
-        let status = Command::new(program)
-            .args(arguments)
-            .stdout(Stdio::null())
-            .status()
-            .unwrap();
-        assert!(status.success(), "{program} {arguments:?}");
-    }
-
-    /// `path` with Windows separators, as programs that take `/` for an
-    /// option need.
-    fn native(path: &Path) -> std::path::PathBuf {
-        path.components().collect()
-    }
-
-    /// Makes `link` a junction to the directory `target`.
-    fn junction(link: &Path, target: &Path) {
-        run(
-            "cmd",
-            &[
-                "/C".as_ref(),
-                "mklink".as_ref(),
-                "/J".as_ref(),
-                native(link).as_os_str(),
-                native(target).as_os_str(),
-            ],
-        );
-    }
-
-    /// Runs `icacls` on `path` with `arguments`.
-    fn icacls(path: &Path, arguments: &[&str]) {
-        let path = native(path);
-        let mut all = vec![path.as_os_str()];
-        all.extend(arguments.iter().map(std::ffi::OsStr::new));
-        run("icacls", &all);
-    }
-
-    fn tree() -> tempfile::TempDir {
-        let root = tempfile::tempdir().unwrap();
-        fs::create_dir(root.path().join("dir")).unwrap();
-        fs::write(root.path().join("dir/file.jsonc"), "{}").unwrap();
-        junction(&root.path().join("link"), &root.path().join("dir"));
-        root
-    }
-
-    /// The link prefix a refusal names.
-    fn link<T>(result: Result<T, Refused>) -> String {
-        match result {
-            Err(Refused::Link(prefix)) => prefix,
-            Err(other) => panic!("expected a link, got {other:?}"),
-            Ok(_) => panic!("expected a link, got success"),
-        }
-    }
-
-    #[test]
-    fn handles_refuse_reparse_points() {
-        let directory = tree();
-        let root = Root::new(directory.path());
-        assert_eq!(root.file(&["dir", "file.jsonc"]).unwrap().1, 2);
-        assert_eq!(link(root.file(&["link", "file.jsonc"])), "link");
-        assert!(matches!(root.file(&["dir"]), Err(Refused::Unexpected)));
-        assert!(matches!(root.file(&["dir", "nope"]), Err(Refused::Missing)));
-        assert!(matches!(
-            root.file(&["dir", "file.jsonc", "x"]),
-            Err(Refused::Unexpected)
-        ));
-        assert_eq!(root.kind(&["dir"]).unwrap(), Found::Directory);
-        assert_eq!(root.kind(&["dir", "file.jsonc"]).unwrap(), Found::File);
-        assert_eq!(root.kind(&["nope"]).unwrap(), Found::Missing);
-        assert_eq!(link(root.kind(&["link"])), "link");
-        assert_eq!(link(root.list(&["link"])), "link");
-        let mut entries: Vec<(Option<String>, RawKind)> = root
-            .list(&[])
-            .unwrap()
-            .map(|entry| entry.map(|entry| (entry.name, entry.kind)))
-            .collect::<Result<_, _>>()
-            .unwrap();
-        entries.sort_by(|left, right| left.0.cmp(&right.0));
-        assert_eq!(
-            entries,
-            [
-                (Some("dir".to_owned()), RawKind::Directory),
-                (Some("link".to_owned()), RawKind::Link),
-            ]
-        );
-        // A file symbolic link, where the user may make one.
-        let file_link = directory.path().join("dir/file-link.jsonc");
-        if std::os::windows::fs::symlink_file(directory.path().join("dir/file.jsonc"), &file_link)
-            .is_ok()
-        {
-            assert_eq!(
-                link(root.file(&["dir", "file-link.jsonc"])),
-                "dir/file-link.jsonc"
-            );
-            let kinds: Vec<RawKind> = root
-                .list(&["dir"])
-                .unwrap()
-                .map(|entry| entry.unwrap().kind)
-                .collect();
-            assert!(kinds.contains(&RawKind::Link), "{kinds:?}");
-        }
-    }
-
-    #[test]
-    fn handles_write_beneath_the_root() {
-        let directory = tree();
-        let root = Root::new(directory.path());
-        // Directories are created as asked, never through a link.
-        assert!(matches!(
-            root.directory(&["new", "deeper"], false),
-            Err(Refused::Missing)
-        ));
-        root.directory(&["new", "deeper"], true).unwrap();
-        assert!(directory.path().join("new/deeper").is_dir());
-        assert_eq!(link(root.directory(&["link", "inside"], true)), "link");
-        assert!(!directory.path().join("dir/inside").exists());
-        assert!(matches!(
-            root.directory(&["dir", "file.jsonc"], true),
-            Err(Refused::Unexpected)
-        ));
-
-        // A write replaces a junction or a hard link instead of writing
-        // through it.
-        let dir = root.directory(&["dir"], false).unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        let target = outside.path().join("target");
-        fs::write(&target, "outside").unwrap();
-        junction(&directory.path().join("dir/staged"), outside.path());
-        dir.write("staged", None, b"new").unwrap();
-        assert_eq!(fs::read_to_string(&target).unwrap(), "outside");
-        assert_eq!(
-            fs::read_to_string(directory.path().join("dir/staged")).unwrap(),
-            "new"
-        );
-        fs::hard_link(&target, directory.path().join("dir/hard")).unwrap();
-        dir.write("hard", None, b"new").unwrap();
-        assert_eq!(fs::read_to_string(&target).unwrap(), "outside");
-
-        // A file takes the list its directory gives it, which must be the
-        // one asked for.
-        let like = dir.access("file.jsonc").unwrap().unwrap();
-        assert!(dir.access("nope").unwrap().is_none());
-        dir.write("kept", Some(&like), b"x").unwrap();
-        assert_eq!(dir.access("kept").unwrap().unwrap(), like);
-        let other = Access {
-            control: [1; 32],
-            ..like
-        };
-        assert!(dir.write("refused", Some(&other), b"secret").is_err());
-        assert!(!directory.path().join("dir/refused").exists());
-        let own = dir.own_access().unwrap();
-        dir.set_own_access(&own).unwrap();
-        assert!(dir.set_own_access(&other).is_err());
-
-        dir.rename("staged", "file.jsonc").unwrap();
-        assert_eq!(
-            fs::read_to_string(directory.path().join("dir/file.jsonc")).unwrap(),
-            "new"
-        );
-        assert!(dir.remove_file("hard").unwrap());
-        assert!(!dir.remove_file("hard").unwrap());
-        assert!(target.exists());
-        assert!(!dir.sync().unwrap());
-
-        let top = root.directory(&["new"], false).unwrap();
-        fs::write(directory.path().join("new/deeper/x"), "").unwrap();
-        assert!(!top.remove_directory("deeper").unwrap());
-        fs::remove_file(directory.path().join("new/deeper/x")).unwrap();
-        assert!(top.remove_directory("deeper").unwrap());
-        assert!(!top.remove_directory("deeper").unwrap());
-        // A junction is removed as the link it is, not as a directory, and
-        // what it names stays.
-        let base = root.directory(&[], false).unwrap();
-        assert!(base.remove_directory("link").is_err());
-        assert!(base.remove_file("link").unwrap());
-        assert!(directory.path().join("dir/file.jsonc").exists());
-
-        // Making a directory says whether this call made it.
-        assert!(root.make_directory(&["made"]).unwrap());
-        assert!(!root.make_directory(&["made"]).unwrap());
-        assert!(!root.make_directory(&["dir", "file.jsonc"]).unwrap());
-        assert!(matches!(
-            root.make_directory(&["nope", "deeper"]),
-            Err(Refused::Missing)
-        ));
-        // A clone is a handle on the same directory.
-        let clone = root.try_clone();
-        assert_eq!(clone.kind(&["dir"]).unwrap(), Found::Directory);
-    }
-
-    #[test]
-    fn the_lock_excludes_a_second_holder() {
-        let directory = tree();
-        let root = Root::new(directory.path());
-        let other = Root::new(directory.path());
-        let lock_file = directory.path().join(super::windows::LOCK_NAME);
-        let held = root.lock().unwrap();
-        assert!(held.is_some());
-        assert!(other.lock().unwrap().is_none());
-        // Others may still read the tree, and a file renamed into the root
-        // may replace another.
-        assert_eq!(other.kind(&["dir"]).unwrap(), Found::Directory);
-        assert!(Root::new(directory.path()).list(&[]).unwrap().count() > 0);
-        let base = root.directory(&[], false).unwrap();
-        base.write(".world.jsonc.tilewright-tmp", None, b"{}")
-            .unwrap();
-        base.write("world.jsonc", None, b"old").unwrap();
-        base.rename(".world.jsonc.tilewright-tmp", "world.jsonc")
-            .unwrap();
-        // The lock file goes with the lock.
-        drop(held);
-        assert!(!lock_file.exists());
-        assert!(other.lock().unwrap().is_some());
-        // One that no edit holds is not taken over.
-        fs::write(&lock_file, "someone's").unwrap();
-        assert!(matches!(root.lock(), Err(Refused::Io(_))));
-        assert_eq!(fs::read_to_string(&lock_file).unwrap(), "someone's");
-    }
-
-    #[test]
-    fn access_control_lists_are_compared_and_kept() {
-        let directory = tree();
-        fs::write(directory.path().join("dir/other.jsonc"), "{}").unwrap();
-        let root = Root::new(directory.path());
-        let dir = root.directory(&["dir"], false).unwrap();
-        let file = directory.path().join("dir/file.jsonc");
-        let sibling = dir.access("other.jsonc").unwrap().unwrap();
-        assert_eq!(dir.access("file.jsonc").unwrap().unwrap(), sibling);
-        // An entry of its own makes another list, which a file written
-        // there would not get.
-        icacls(&file, &["/grant", "*S-1-1-0:(R)"]);
-        let granted = dir.access("file.jsonc").unwrap().unwrap();
-        assert_ne!(granted, sibling);
-        assert!(dir.write("staged", Some(&granted), b"secret").is_err());
-        assert!(!directory.path().join("dir/staged").exists());
-        dir.write("staged", Some(&sibling), b"x").unwrap();
-        // A list protected from inheritance is refused.
-        icacls(&file, &["/reset"]);
-        assert_eq!(dir.access("file.jsonc").unwrap().unwrap(), sibling);
-        icacls(&file, &["/inheritance:d"]);
-        assert!(matches!(dir.access("file.jsonc"), Err(Refused::Io(_))));
-        // A directory with an entry of its own has another list.
-        let own = dir.own_access().unwrap();
-        icacls(
-            &directory.path().join("dir"),
-            &["/grant", "*S-1-1-0:(OI)(CI)(R)"],
-        );
-        assert_ne!(dir.own_access().unwrap(), own);
-        // A read-only file is refused.
-        let plain = directory.path().join("plain.jsonc");
-        fs::write(&plain, "{}").unwrap();
-        let base = root.directory(&[], false).unwrap();
-        assert!(base.access("plain.jsonc").is_ok());
-        let mut permissions = fs::metadata(&plain).unwrap().permissions();
-        permissions.set_readonly(true);
-        fs::set_permissions(&plain, permissions).unwrap();
-        assert!(matches!(base.access("plain.jsonc"), Err(Refused::Io(_))));
-    }
-}
-
 #[cfg(all(test, target_os = "linux"))]
 mod selinux_tests {
     use super::beneath::selinux::{request, trimmed};
@@ -1168,5 +886,111 @@ mod selinux_tests {
         assert!(request(b"", b"c", 1, "x").is_err());
         assert_eq!(trimmed(b"label\0\n"), b"label");
         assert_eq!(trimmed(b"\0"), b"");
+    }
+}
+
+/// On Windows the path-based implementation refuses every reparse point,
+/// junctions included, at the component where it occurs, removes one
+/// without touching what it names, and holds its lock in a file.
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::{Found, RawKind, Refused, portable::Root};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        process::{Command, Stdio},
+    };
+
+    /// Makes `link` a junction to the directory `target`.
+    fn junction(link: &Path, target: &Path) {
+        // `mklink` takes `/` for an option, so the paths use `\\`.
+        let native = |path: &Path| path.components().collect::<PathBuf>();
+        let status = Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(native(link))
+            .arg(native(target))
+            .stdout(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    fn link<T>(result: Result<T, Refused>) -> String {
+        match result {
+            Err(Refused::Link(prefix)) => prefix,
+            Err(other) => panic!("expected a link, got {other:?}"),
+            Ok(_) => panic!("expected a link, got success"),
+        }
+    }
+
+    #[test]
+    fn junctions_are_links() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir(directory.path().join("dir")).unwrap();
+        fs::write(directory.path().join("dir/file.jsonc"), "{}").unwrap();
+        junction(
+            &directory.path().join("link"),
+            &directory.path().join("dir"),
+        );
+        let root = Root::new(directory.path());
+        assert_eq!(root.file(&["dir", "file.jsonc"]).unwrap().1, 2);
+        assert_eq!(link(root.file(&["link", "file.jsonc"])), "link");
+        assert_eq!(link(root.kind(&["link"])), "link");
+        assert_eq!(link(root.directory(&["link"], false)), "link");
+        assert_eq!(link(root.directory(&["link", "inside"], true)), "link");
+        assert!(!directory.path().join("dir/inside").exists());
+        let kinds: Vec<(Option<String>, RawKind)> = root
+            .list(&[])
+            .unwrap()
+            .map(|entry| entry.map(|entry| (entry.name, entry.kind)))
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(kinds.contains(&(Some("link".to_owned()), RawKind::Link)));
+        assert!(kinds.contains(&(Some("dir".to_owned()), RawKind::Directory)));
+
+        // A write over a junction replaces it, not what it names.
+        let base = root.directory(&[], false).unwrap();
+        base.write("link", None, b"x").unwrap();
+        assert!(directory.path().join("dir/file.jsonc").exists());
+        assert_eq!(root.kind(&["link"]).unwrap(), Found::File);
+    }
+
+    #[test]
+    fn read_only_files_are_refused() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("file.jsonc");
+        fs::write(&file, "{}").unwrap();
+        let base = Root::new(directory.path()).directory(&[], false).unwrap();
+        assert!(base.access("file.jsonc").unwrap().is_some());
+        let mut permissions = fs::metadata(&file).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&file, permissions).unwrap();
+        assert!(matches!(base.access("file.jsonc"), Err(Refused::Io(_))));
+    }
+
+    #[test]
+    fn the_lock_is_a_file_held_alone() {
+        let directory = tempfile::tempdir().unwrap();
+        let lock_file = directory.path().join(crate::access::LOCK_NAME);
+        let root = Root::new(directory.path());
+        let other = Root::new(directory.path());
+        let held = root.lock().unwrap();
+        assert!(held.is_some());
+        assert!(other.lock().unwrap().is_none());
+        // A file renamed into the root may replace another meanwhile.
+        let base = root.directory(&[], false).unwrap();
+        base.write(".world.jsonc.tilewright-tmp", None, b"{}")
+            .unwrap();
+        base.write("world.jsonc", None, b"old").unwrap();
+        base.rename(".world.jsonc.tilewright-tmp", "world.jsonc")
+            .unwrap();
+        // The lock file goes with the lock.
+        drop(held);
+        assert!(!lock_file.exists());
+        assert!(other.lock().unwrap().is_some());
+        // One that no edit holds is not taken over.
+        fs::write(&lock_file, "someone's").unwrap();
+        assert!(matches!(root.lock(), Err(Refused::Io(_))));
+        assert_eq!(fs::read_to_string(&lock_file).unwrap(), "someone's");
     }
 }

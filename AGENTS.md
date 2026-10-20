@@ -12,9 +12,6 @@
   bytes; edits replace exact byte spans and are re-validated.
 - Compilation is deterministic: identical source and compiler version produce
   byte-identical packs.
-- Every crate forbids `unsafe` except `tilewright-platform`, which holds
-  the operating-system calls confined file access needs and nothing else.
-  Keep each of its unsafe blocks to one call, with a `// SAFETY:` comment.
 - New code, tests, docs and fixtures are MIT. Do not copy, adapt or depend on
   GPL/AGPL source. Record any reuse of outside MIT-compatible material in
   `PROVENANCE.md`.

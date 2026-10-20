@@ -11,7 +11,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
 };
-use tilewright_source::{Access, AccessError, Audience, Diagnostic, SourceDirectory, SourceRoot};
+use tilewright_source::{Access, AccessError, Diagnostic, SourceDirectory, SourceRoot};
 
 #[cfg(test)]
 thread_local! {
@@ -112,15 +112,24 @@ fn not_applied(problems: Vec<Diagnostic>) -> PublishError {
     }
 }
 
-/// Whether publishing is supported here: on Linux, macOS and Windows,
-/// where files are reached through directory handles and access control a
-/// replacement could not keep can be told apart and refused. Other systems
-/// have other access control lists and labels to check, so publishing is
-/// refused there.
+/// Whether publishing is supported here: on Linux, macOS and Windows.
+/// Only on Linux does it keep every guarantee: there files are reached
+/// through directory handles and access control lists and labels are
+/// checked. On macOS files are reached through directory handles, but
+/// access control lists are neither checked nor kept; on Windows files are
+/// reached by path after checking it for links, which a local process
+/// changing the tree at the same moment can race, and access control lists
+/// are neither checked nor kept. So publishing there is supported only in
+/// trees that no one else can change. Other systems, the BSDs among them,
+/// are untested, and publishing is refused there.
 pub const PUBLISH_SUPPORTED: bool = cfg!(any(target_os = "linux", target_os = "macos", windows));
 
+/// Whether publishing here keeps every guarantee of the specification:
+/// only on Linux (see [`PUBLISH_SUPPORTED`]).
+pub const PUBLISH_CONFINED: bool = cfg!(target_os = "linux");
+
 /// Why publishing is refused where it is not supported.
-const UNSUPPORTED: &str = "applying a transaction is supported only on Linux, macOS and Windows, where files are reached through directory handles and checked for access control a replacement could not keep; preview and rebase work everywhere";
+const UNSUPPORTED: &str = "applying a transaction is supported only on Linux, macOS and Windows; preview and rebase work everywhere";
 
 /// How many directory handles a publish keeps open at once; past it, one
 /// is closed and opened again when needed, so that a transaction across
@@ -187,6 +196,11 @@ impl Directories<'_> {
     /// parent as changed, to sync.
     fn remove(&mut self, path: &str, directory: bool) -> Result<bool, AccessError> {
         let (parent, name) = split(path);
+        // A directory's own handle is closed first: on Windows a removal
+        // may otherwise wait for it.
+        if directory {
+            self.open.remove(path);
+        }
         let removed = match self.get(parent, None)? {
             Some(handle) if directory => handle.remove_directory(name)?,
             Some(handle) => handle.remove_file(name)?,
@@ -369,14 +383,10 @@ impl Known {
         }
     }
 
-    /// The access a new file at `path` gets: on Unix from the nearest
-    /// directory above it that was there; on Windows, where a new file
-    /// takes the access its directory gives it, that of the changed files,
-    /// which is one access, when there are any.
+    /// The access a new file at `path` gets, from the nearest directory
+    /// above it that was there.
     fn new_file(&self, path: &str) -> Option<Access> {
-        self.nearest(path)?
-            .new_file()
-            .or_else(|| self.files.values().flatten().next().copied())
+        self.nearest(path).map(Access::new_file)
     }
 
     /// The access the directories made for a file at `path` get.
@@ -384,14 +394,6 @@ impl Known {
         self.nearest(path)
     }
 }
-
-/// What the files a transaction changes, and the directories above them,
-/// must share to be one unit of access.
-const ONE_AUDIENCE: &str = if cfg!(windows) {
-    "the files a transaction changes must have one access control list, and the directories above them one, each inherited from the directory above"
-} else {
-    "the files a transaction changes must be readable, and the directories above them searchable, by the same classes, by the same group where only the group may, and under the same labels"
-};
 
 fn shown(path: &str) -> &str {
     if path.is_empty() { "." } else { path }
@@ -436,7 +438,7 @@ fn survey(
             directory = split(directory).0;
         }
     }
-    let audiences = known
+    let mut audiences = known
         .files
         .iter()
         .filter_map(|(path, access)| Some((path.as_str(), access.as_ref()?.audience(false))))
@@ -446,20 +448,16 @@ fn survey(
                 .iter()
                 .map(|(path, access)| (shown(path), access.audience(true))),
         );
-    // Each audience is compared with the first one it can be compared with.
-    let mut firsts: Vec<(&str, Audience)> = Vec::new();
-    for (path, audience) in audiences {
-        match firsts.iter().find(|(_, first)| first.comparable(&audience)) {
-            Some((first, expected)) if *expected != audience => {
-                return Err(problem(
-                    path,
-                    Code::Io,
-                    format!("{path} and {first} can be reached by different users; {ONE_AUDIENCE}"),
-                ));
-            }
-            Some(_) => {}
-            None => firsts.push((path, audience)),
-        }
+    if let Some((first, expected)) = audiences.next()
+        && let Some((other, _)) = audiences.find(|(_, found)| *found != expected)
+    {
+        return Err(problem(
+            other,
+            Code::Io,
+            format!(
+                "{other} and {first} can be reached by different users; the files a transaction changes must be readable, and the directories above them searchable, by the same classes, by the same group where only the group may, and under the same labels"
+            ),
+        ));
     }
     Ok(known)
 }
@@ -537,7 +535,21 @@ fn stage_all<'f>(
                 directory.write(&staging_name(name), access.as_ref(), text)?;
                 // The new inode must have no access publishing could not
                 // keep, such as a list or label the system gave it.
-                directory.access(&staging_name(name))?;
+                let given = directory.access(&staging_name(name))?;
+                // A deleted file's inverse must make it again for the users
+                // who could read it.
+                if let (None, Some(Some(deleted)), Some(given)) =
+                    (&file.after, known.files.get(&file.path), given)
+                    && given.audience(false) != deleted.audience(false)
+                {
+                    return Err(AccessError::Io(
+                        file.path.clone(),
+                        std::io::Error::new(
+                            std::io::ErrorKind::Unsupported,
+                            "a file made here again, as its inverse would make it, could be read by other users than this one",
+                        ),
+                    ));
+                }
                 if new {
                     directory.check_final_name(&staging_name(name), name)?;
                 }

@@ -267,9 +267,10 @@ pub(crate) struct Directory(OwnedFd);
 
 impl Directory {
     /// Who may use the regular file `name`, if there is one. A file whose
-    /// access publishing could not keep is refused: on Linux and macOS one
-    /// with an access control list, since its mode bits do not say who may
-    /// read it and a file replacing it could not keep the list.
+    /// access publishing could not keep is refused: on Linux one with an
+    /// access control list, since its mode bits do not say who may read it
+    /// and a file replacing it could not keep the list. Other systems' lists
+    /// are not read.
     pub(crate) fn access(&self, name: &str) -> Result<Option<Access>, Refused> {
         match statat(&self.0, name, AtFlags::SYMLINK_NOFOLLOW) {
             Ok(stat) if kind_of(FileType::from_raw_mode(stat.st_mode)) == RawKind::File => {
@@ -282,7 +283,7 @@ impl Directory {
 
     /// The access of the regular file `name`, opened to check what its
     /// status does not show.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     fn file_access(&self, name: &str, _: &Stat) -> Result<Option<Access>, Refused> {
         let flags =
             OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC | OFlags::NOCTTY;
@@ -300,18 +301,17 @@ impl Directory {
         }))
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(target_os = "linux"))]
     #[allow(clippy::unnecessary_wraps, clippy::unused_self)]
     fn file_access(&self, _: &str, stat: &Stat) -> Result<Option<Access>, Refused> {
         Ok(Some(access_of(stat)))
     }
 
-    /// Who may use this directory. On Linux and macOS, a directory with an
-    /// access control list, its own or, on Linux, one it gives new files,
-    /// is refused.
+    /// Who may use this directory. On Linux, a directory with an access
+    /// control list, its own or one it gives new files, is refused.
     pub(crate) fn own_access(&self) -> Result<Access, Refused> {
         let stat = fstat(&self.0).map_err(|errno| Refused::Io(errno.into()))?;
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(target_os = "linux")]
         refuse_access_control_lists(&self.0, true)?;
         Ok(Access {
             control: labels(&self.0)?,
@@ -361,8 +361,6 @@ impl Directory {
                 // audience; both are dealt with before a byte is written.
                 #[cfg(target_os = "linux")]
                 strip_access_control_list(&file)?;
-                #[cfg(target_os = "macos")]
-                refuse_access_control_lists(&file, false)?;
                 check_labels(&file, access)?;
             }
             file.write_all(bytes).map_err(Refused::Io)?;
@@ -521,19 +519,13 @@ fn unkept(what: &str) -> Refused {
     ))
 }
 
-/// Refuses an open file or directory that has an access control list: on
-/// Linux a POSIX, NFS version 4 or rich one, and for a `directory` also a
-/// default list it gives new files; on macOS any.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+/// Refuses an open file or directory that has a POSIX, NFS version 4 or
+/// rich access control list, and for a `directory` also a default list it
+/// gives new files.
+#[cfg(target_os = "linux")]
 fn refuse_access_control_lists(fd: impl AsFd, directory: bool) -> Result<(), Refused> {
-    #[cfg(target_os = "linux")]
     let found = has_any(&fd, &ACCESS_CONTROL_LISTS)?
         || (directory && has_any(&fd, &["system.posix_acl_default"])?);
-    #[cfg(target_os = "macos")]
-    let found = {
-        let _ = directory;
-        tilewright_platform::macos::has_access_control_list(fd.as_fd()).map_err(Refused::Io)?
-    };
     if found {
         return Err(unkept("it has an access control list"));
     }

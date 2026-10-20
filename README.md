@@ -38,7 +38,6 @@ All are drafts until format 1.0 is frozen.
 | `tilewright-diff` | Compares the IDs of two worlds, source trees or packs, and reports removals, additions and renames |
 | `tilewright-edit` | Transactions: lossless structural edits, preview, rebase, staged apply with rollback, and inverses |
 | `tilewright-cli` | The `tilewright` command |
-| `tilewright-platform` | Safe wrappers over the few Windows and macOS calls confined file access needs beyond the standard library and rustix; the only crate that may use `unsafe` |
 
 ## Go pack reader
 
@@ -69,8 +68,10 @@ between two worlds, each a source root or a pack, and exits 1 when one was
 removed or renamed without the allowlist accepting it. `tx preview` carries
 out a transaction in memory and lists the files it would change; `tx
 rebase` replays it on the tree as it is and records the new base; `tx
-apply` writes its inverse, then applies it (on Linux, macOS and Windows; see
-docs/spec/TRANSACTIONS.md section 9). `fixtures/basic` is a small
+apply` writes its inverse, then applies it: with every guarantee on Linux,
+and as a best effort on macOS and Windows, where it is supported only in
+trees no one else can change and without access control lists of their
+own (see SECURITY.md and docs/spec/TRANSACTIONS.md section 9). `fixtures/basic` is a small
 synthetic world that uses every feature of the format.
 
 ## Development

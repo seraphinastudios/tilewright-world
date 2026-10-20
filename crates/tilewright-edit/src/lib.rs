@@ -46,7 +46,7 @@ mod splice;
 mod terrain;
 mod transaction;
 
-pub use publish::{PUBLISH_SUPPORTED, PublishError, Published};
+pub use publish::{PUBLISH_CONFINED, PUBLISH_SUPPORTED, PublishError, Published};
 pub use transaction::{Digests, FORMAT, Transaction};
 
 use engine::{Failure, Primitive, Workspace};
