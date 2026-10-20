@@ -969,6 +969,30 @@ mod windows_tests {
     }
 
     #[test]
+    fn encrypted_files_and_directories_are_refused() {
+        let directory = tempfile::tempdir().unwrap();
+        let inside = directory.path().join("inside");
+        fs::create_dir(&inside).unwrap();
+        fs::write(inside.join("file.jsonc"), "{}").unwrap();
+        // EFS is not on every volume; where it is not, there is nothing to
+        // refuse.
+        let encrypted = Command::new("cipher")
+            .arg("/e")
+            .arg("/s:".to_owned() + &inside.display().to_string())
+            .stdout(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        let root = Root::new(directory.path());
+        let dir = root.directory(&["inside"], false).unwrap();
+        if encrypted {
+            assert!(matches!(dir.access("file.jsonc"), Err(Refused::Io(_))));
+            assert!(matches!(dir.own_access(), Err(Refused::Io(_))));
+        } else {
+            assert!(dir.access("file.jsonc").unwrap().is_some());
+        }
+    }
+
+    #[test]
     fn the_lock_is_a_file_held_alone() {
         let directory = tempfile::tempdir().unwrap();
         let lock_file = directory.path().join(crate::access::LOCK_NAME);

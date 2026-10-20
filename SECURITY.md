@@ -37,26 +37,27 @@ platform:
   changing the tree cannot redirect it. A file or directory with an access
   control list is refused, since a replacement could not keep it. The
   mandatory access control labels (SELinux, Smack) of the entries compared
-  must be the same, and the system's policy must give every file
-  publishing writes, and directory it creates, that label, which is
-  checked before a byte is written; publishing never sets a label. For a
-  new file, which is staged under another name, SELinux is also asked
-  which label the policy gives its final name, and publishing refuses if
-  that differs or SELinux cannot be asked. Smack's execution, mapping and
-  transmuting labels are refused.
-- **macOS** reaches files through directory handles too, so a link
-  swapped in is never followed. But access control lists are neither
-  checked nor kept: a replaced file, or one an inverse makes again, takes
-  the access a new file there gets, so a file whose list narrows who may
-  read it loses that list.
+  must be the same, and the system's policy must give every file publishing
+  writes, and directory it creates, that label, which is checked before a
+  byte is written; publishing never sets a label. For a new file, which is
+  staged under another name, SELinux is also asked which label the policy
+  gives its final name, and publishing refuses if that differs or SELinux
+  cannot be asked. Smack's execution, mapping and transmuting labels are
+  refused.
+- **macOS** reaches files through directory handles too, so a link swapped
+  in is never followed. But access control lists are neither checked nor
+  kept: a replaced file, or one an inverse makes again, takes the access a
+  new file there gets, so a file whose list narrows who may read it loses
+  that list.
 - **Windows** reaches files by path, after checking each component for a
-  reparse point (a symbolic link, junction or mount point, or any other),
-  so a local process that swaps a link in between the check and the use
-  can redirect a write, rename or removal outside the tree. Access control
-  lists are neither checked nor kept: a replaced file, or one an inverse
-  makes again, takes the list its directory gives a new file. A read-only
-  file is refused. The lock is a file in the root, `.tilewright.lock`,
-  shared with no one and deleted when released.
+  reparse point (a symbolic link, junction or mount point, or any other), so
+  a local process that swaps a link in between the check and the use can
+  redirect a write, rename or removal outside the tree. Access control lists
+  are neither checked nor kept: a replaced file, or one an inverse makes
+  again, takes the list its directory gives a new file. A read-only file,
+  and an encrypted (EFS) file or directory, is refused. The lock is a file
+  in the root, `.tilewright.lock`, shared with no one and deleted when
+  released.
 
 So on macOS and Windows applying transactions is supported only in a tree
 that no one else can change and in which no file or directory has an

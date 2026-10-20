@@ -155,6 +155,8 @@ fn outside(root: &Path, path: &Path) -> Result<(), Failure> {
         tilewright_edit::staging_name("world.jsonc"),
         tilewright_source::LOCK_NAME.to_owned(),
     ];
+    // Within the tree, a name that is not ASCII is refused too: a file
+    // system may fold it into a reserved one by rules of its own.
     let inside = target
         .strip_prefix(root.as_slice())
         .is_some_and(|relative| {
@@ -162,10 +164,11 @@ fn outside(root: &Path, path: &Path) -> Result<(), Failure> {
                 || relative
                     .first()
                     .is_some_and(|first| ["planes", "defs", "profile"].contains(&first.as_str()))
+                || relative.iter().any(|component| !component.is_ascii())
         });
     if inside {
         return Err(Failure::message(format!(
-            "{} is inside the source tree's documents; write it elsewhere",
+            "{} is inside the source tree where publishing writes, or may be taken for such a name; write it elsewhere",
             shown(path)
         )));
     }
@@ -407,6 +410,7 @@ mod tests {
             ".world.jsonc.tilewright-tmp",
             ".WORLD.JSONC.tilewright-tmp",
             ".world.jsonc.tilewright-tmp.",
+            ".world.j\u{17f}onc.tilewright-tmp",
             ".tilewright.lock",
         ] {
             let inside = Path::new(&root).join(inside);

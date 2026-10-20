@@ -37,6 +37,26 @@ fn reparse_point(metadata: &fs::Metadata) -> bool {
     }
 }
 
+/// Refuses an entry that is encrypted (Windows EFS): a file written in its
+/// place would not be, and a directory's encryption is a choice of who may
+/// read what is made in it.
+#[cfg_attr(not(windows), allow(clippy::unnecessary_wraps))]
+fn refuse_encrypted(metadata: &fs::Metadata) -> Result<(), Refused> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        const FILE_ATTRIBUTE_ENCRYPTED: u32 = 0x4000;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_ENCRYPTED != 0 {
+            return Err(Refused::Io(std::io::Error::new(
+                ErrorKind::Unsupported,
+                "it is encrypted, which publishing could not keep",
+            )));
+        }
+    }
+    let _ = metadata;
+    Ok(())
+}
+
 /// Whether an entry, as `symlink_metadata` gives it, is a link: a symbolic
 /// link, or on Windows any reparse point.
 fn is_link(metadata: &fs::Metadata) -> bool {
@@ -276,7 +296,7 @@ impl Directory {
 
     /// Who may use the regular file `name`; `None` when there is none, or a
     /// link. Where there are no modes, a read-only file is refused, since
-    /// replacing it would drop that.
+    /// replacing it would drop that, and on Windows an encrypted one.
     pub(crate) fn access(&self, name: &str) -> Result<Option<Access>, Refused> {
         let Some(metadata) = self
             .entry(name)?
@@ -290,13 +310,15 @@ impl Directory {
                 "it is read-only, which publishing could not keep",
             )));
         }
+        refuse_encrypted(&metadata)?;
         Ok(Some(access_of(&metadata)))
     }
 
+    /// Who may use this directory; on Windows an encrypted one is refused.
     pub(crate) fn own_access(&self) -> Result<Access, Refused> {
-        fs::metadata(&self.0)
-            .map(|metadata| access_of(&metadata))
-            .map_err(Refused::Io)
+        let metadata = fs::metadata(&self.0).map_err(Refused::Io)?;
+        refuse_encrypted(&metadata)?;
+        Ok(access_of(&metadata))
     }
 
     pub(crate) fn set_own_access(&self, access: &Access) -> Result<(), Refused> {

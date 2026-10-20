@@ -386,7 +386,8 @@ inverse makes it again for them. A group the user may not give is an
 error, since the group bits would otherwise apply to another group. The
 owner of every file written is the user applying, who could read them all.
 Where there are no modes (Windows), only the read-only attribute is
-compared, and a read-only file is refused.
+compared, and a read-only file is refused, as is an encrypted (EFS) file
+or directory, since a file written in its place would not be encrypted.
 
 On Linux, a file or directory with an access control list (POSIX, NFS
 version 4 or rich, or a default one a directory gives new files), whose

@@ -194,10 +194,15 @@ impl SourceRoot {
     /// What is at `path`, not following it, if anything: as the file
     /// system finds it by that name, which on one that ignores case, or as
     /// on Windows drops trailing dots, can be an entry named otherwise.
+    /// A path through a file names nothing; a link on the way is an error.
     pub fn exists(&self, path: &str) -> Result<bool, AccessError> {
         match self.root.kind(&checked(path)?) {
-            Ok(crate::files::Found::Missing) | Err(Refused::Missing) => Ok(false),
-            Ok(_) | Err(Refused::Link(_) | Refused::Unexpected) => Ok(true),
+            Ok(crate::files::Found::Missing) | Err(Refused::Missing | Refused::Unexpected) => {
+                Ok(false)
+            }
+            Ok(_) => Ok(true),
+            // The entry itself is a link.
+            Err(Refused::Link(prefix)) if prefix == path => Ok(true),
             Err(other) => Err(refused(path, other)),
         }
     }
@@ -335,7 +340,7 @@ impl SourceDirectory {
     /// Who may use the regular file `name`; `None` when there is no regular
     /// file there. A file whose access publishing could not keep is
     /// refused: on Linux one with an access control list, and on Windows a
-    /// read-only one or a reparse point other than a link. macOS and
+    /// read-only or encrypted one. macOS and
     /// Windows access control lists are neither read nor kept.
     pub fn access(&self, name: &str) -> Result<Option<Access>, AccessError> {
         self.directory
