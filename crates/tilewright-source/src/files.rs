@@ -5,7 +5,7 @@
 //! `/`-separated and validated; symbolic links are never followed. On Unix
 //! every component is opened through its parent's directory handle without
 //! following links (`beneath`); elsewhere components are checked by path
-//! before use (`portable`).
+//! before use (`portable`), on Windows for any reparse point.
 
 #[cfg(unix)]
 pub(crate) mod beneath;
@@ -808,6 +808,52 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn labels_are_compared_and_never_given() {
+        use std::os::unix::fs::MetadataExt as _;
+        let label = |path: &std::path::Path, value: &[u8]| {
+            let metadata = fs::metadata(path).unwrap();
+            super::beneath::GIVEN_LABELS.with(|labels| {
+                labels
+                    .borrow_mut()
+                    .insert((metadata.dev(), metadata.ino()), value.to_vec())
+            });
+        };
+        let directory = tree();
+        let root = super::beneath::Root::new(directory.path());
+        let dir = root.directory(&["dir"], false).unwrap();
+        let unlabelled = dir.access("file.jsonc").unwrap().unwrap();
+        label(
+            &directory.path().join("dir/file.jsonc"),
+            b"system_u:object_r:secret_t:s0\0",
+        );
+        let labelled = dir.access("file.jsonc").unwrap().unwrap();
+        assert_eq!(labelled.mode, unlabelled.mode);
+        assert_ne!(labelled.control, unlabelled.control);
+        assert_ne!(labelled.audience(false), unlabelled.audience(false));
+        assert_eq!(labelled.new_file().control, labelled.control);
+        assert_eq!(
+            labelled.new_file().user,
+            rustix::process::geteuid().as_raw()
+        );
+        // A new file the system labels otherwise is refused before anything
+        // is written, and none is left.
+        assert!(dir.write("new", Some(&labelled), b"secret").is_err());
+        assert!(!directory.path().join("dir/new").exists());
+        dir.write("new", Some(&unlabelled), b"x").unwrap();
+        // So is a directory.
+        label(
+            &directory.path().join("dir"),
+            b"system_u:object_r:secret_t:s0\0",
+        );
+        let own = dir.own_access().unwrap();
+        assert_ne!(own.control, [0; 32]);
+        let made = root.directory(&["made"], true).unwrap();
+        assert!(made.set_own_access(&own).is_err());
+        made.set_own_access(&made.own_access().unwrap()).unwrap();
+    }
+
     #[test]
     fn the_lock_excludes_a_second_holder() {
         let directory = tree();
@@ -818,5 +864,161 @@ mod tests {
         assert!(other.lock().unwrap().is_none());
         drop(held);
         assert!(other.lock().unwrap().is_some());
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod selinux_tests {
+    use super::beneath::selinux::{request, trimmed};
+
+    #[test]
+    fn label_questions_are_one_line_with_the_name_encoded() {
+        let query = request(
+            b"unconfined_u:unconfined_r:unconfined_t:s0-s0:c0.c1023\0",
+            b"unconfined_u:object_r:user_home_t:s0\0",
+            7,
+            "0_0.jsonc",
+        )
+        .unwrap();
+        assert_eq!(
+            query,
+            b"unconfined_u:unconfined_r:unconfined_t:s0-s0:c0.c1023 unconfined_u:object_r:user_home_t:s0 7 0_0.jsonc"
+        );
+        let odd = request(b"a", b"b", 1, "x y%+\u{e9}").unwrap();
+        assert_eq!(odd, b"a b 1 x%20y%25%2b%c3%a9");
+        assert!(request(b"a b", b"c", 1, "x").is_err());
+        assert!(request(b"", b"c", 1, "x").is_err());
+        assert_eq!(trimmed(b"label\0\n"), b"label");
+        assert_eq!(trimmed(b"\0"), b"");
+    }
+}
+
+/// On Windows the path-based implementation refuses every reparse point,
+/// junctions included, at the component where it occurs, removes one
+/// without touching what it names, and holds its lock in a file.
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::{Found, RawKind, Refused, portable::Root};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        process::{Command, Stdio},
+    };
+
+    /// Makes `link` a junction to the directory `target`.
+    fn junction(link: &Path, target: &Path) {
+        // `mklink` takes `/` for an option, so the paths use `\\`.
+        let native = |path: &Path| path.components().collect::<PathBuf>();
+        let status = Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(native(link))
+            .arg(native(target))
+            .stdout(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    fn link<T>(result: Result<T, Refused>) -> String {
+        match result {
+            Err(Refused::Link(prefix)) => prefix,
+            Err(other) => panic!("expected a link, got {other:?}"),
+            Ok(_) => panic!("expected a link, got success"),
+        }
+    }
+
+    #[test]
+    fn junctions_are_links() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir(directory.path().join("dir")).unwrap();
+        fs::write(directory.path().join("dir/file.jsonc"), "{}").unwrap();
+        junction(
+            &directory.path().join("link"),
+            &directory.path().join("dir"),
+        );
+        let root = Root::new(directory.path());
+        assert_eq!(root.file(&["dir", "file.jsonc"]).unwrap().1, 2);
+        assert_eq!(link(root.file(&["link", "file.jsonc"])), "link");
+        assert_eq!(link(root.kind(&["link"])), "link");
+        assert_eq!(link(root.directory(&["link"], false)), "link");
+        assert_eq!(link(root.directory(&["link", "inside"], true)), "link");
+        assert!(!directory.path().join("dir/inside").exists());
+        let kinds: Vec<(Option<String>, RawKind)> = root
+            .list(&[])
+            .unwrap()
+            .map(|entry| entry.map(|entry| (entry.name, entry.kind)))
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(kinds.contains(&(Some("link".to_owned()), RawKind::Link)));
+        assert!(kinds.contains(&(Some("dir".to_owned()), RawKind::Directory)));
+
+        // A write over a junction replaces it, not what it names.
+        let base = root.directory(&[], false).unwrap();
+        base.write("link", None, b"x").unwrap();
+        assert!(directory.path().join("dir/file.jsonc").exists());
+        assert_eq!(root.kind(&["link"]).unwrap(), Found::File);
+    }
+
+    #[test]
+    fn read_only_files_are_refused() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("file.jsonc");
+        fs::write(&file, "{}").unwrap();
+        let base = Root::new(directory.path()).directory(&[], false).unwrap();
+        assert!(base.access("file.jsonc").unwrap().is_some());
+        let mut permissions = fs::metadata(&file).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&file, permissions).unwrap();
+        assert!(matches!(base.access("file.jsonc"), Err(Refused::Io(_))));
+    }
+
+    #[test]
+    fn encrypted_files_and_directories_are_refused() {
+        let directory = tempfile::tempdir().unwrap();
+        let inside = directory.path().join("inside");
+        fs::create_dir(&inside).unwrap();
+        fs::write(inside.join("file.jsonc"), "{}").unwrap();
+        // EFS is not on every volume; where it is not, there is nothing to
+        // refuse.
+        let encrypted = Command::new("cipher")
+            .arg("/e")
+            .arg("/s:".to_owned() + &inside.display().to_string())
+            .stdout(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        let root = Root::new(directory.path());
+        let dir = root.directory(&["inside"], false).unwrap();
+        if encrypted {
+            assert!(matches!(dir.access("file.jsonc"), Err(Refused::Io(_))));
+            assert!(matches!(dir.own_access(), Err(Refused::Io(_))));
+        } else {
+            assert!(dir.access("file.jsonc").unwrap().is_some());
+        }
+    }
+
+    #[test]
+    fn the_lock_is_a_file_held_alone() {
+        let directory = tempfile::tempdir().unwrap();
+        let lock_file = directory.path().join(crate::access::LOCK_NAME);
+        let root = Root::new(directory.path());
+        let other = Root::new(directory.path());
+        let held = root.lock().unwrap();
+        assert!(held.is_some());
+        assert!(other.lock().unwrap().is_none());
+        // A file renamed into the root may replace another meanwhile.
+        let base = root.directory(&[], false).unwrap();
+        base.write(".world.jsonc.tilewright-tmp", None, b"{}")
+            .unwrap();
+        base.write("world.jsonc", None, b"old").unwrap();
+        base.rename(".world.jsonc.tilewright-tmp", "world.jsonc")
+            .unwrap();
+        // The lock file goes with the lock.
+        drop(held);
+        assert!(!lock_file.exists());
+        assert!(other.lock().unwrap().is_some());
+        // One that no edit holds is not taken over.
+        fs::write(&lock_file, "someone's").unwrap();
+        assert!(matches!(root.lock(), Err(Refused::Io(_))));
+        assert_eq!(fs::read_to_string(&lock_file).unwrap(), "someone's");
     }
 }

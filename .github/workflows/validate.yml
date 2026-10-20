@@ -32,3 +32,27 @@ jobs:
 
       - name: Validate
         run: tools/validate.sh
+
+  # Applying transactions has its own code on macOS and Windows: build the
+  # workspace and run its tests there too.
+  platforms:
+    name: Platform tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      # The fixtures' bytes are hashed, so they are checked out as they are.
+      - name: Keep line endings
+        run: git config --global core.autocrlf false
+
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Lint
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --locked --workspace --all-targets --no-fail-fast

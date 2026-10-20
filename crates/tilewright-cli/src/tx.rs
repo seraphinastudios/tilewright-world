@@ -136,19 +136,42 @@ fn outside(root: &Path, path: &Path) -> Result<(), Failure> {
     else {
         return Ok(());
     };
-    let documents = ["planes", "defs", "profile"].map(std::ffi::OsStr::new);
-    let staging = tilewright_edit::staging_name("world.jsonc");
-    let inside = parent.join(name).strip_prefix(&root).is_ok_and(|relative| {
-        relative == Path::new("world.jsonc")
-            || relative == Path::new(&staging)
-            || relative
-                .components()
-                .next()
-                .is_some_and(|first| documents.contains(&first.as_os_str()))
-    });
+    // Compared as macOS and Windows compare names by default: without
+    // case, and, on Windows, without trailing dots and spaces.
+    let folded = |path: &Path| -> Vec<String> {
+        path.components()
+            .map(|component| {
+                component
+                    .as_os_str()
+                    .to_string_lossy()
+                    .trim_end_matches(['.', ' '])
+                    .to_lowercase()
+            })
+            .collect()
+    };
+    let (root, target) = (folded(&root), folded(&parent.join(name)));
+    let reserved = [
+        "world.jsonc".to_owned(),
+        tilewright_edit::staging_name("world.jsonc"),
+        tilewright_source::LOCK_NAME.to_owned(),
+    ];
+    // Within the tree, a name that is not ASCII is refused too: a file
+    // system may fold it into a reserved one by rules of its own.
+    let inside = target
+        .strip_prefix(root.as_slice())
+        .is_some_and(|relative| {
+            matches!(relative, [only] if reserved.contains(only))
+                || relative
+                    .first()
+                    .is_some_and(|first| ["planes", "defs", "profile"].contains(&first.as_str()))
+                || relative.iter().any(|component| !component.is_ascii())
+                // On Windows a colon names a stream of a file, which goes
+                // with the file when publishing replaces it.
+                || relative.iter().any(|component| component.contains(':'))
+        });
     if inside {
         return Err(Failure::message(format!(
-            "{} is inside the source tree's documents; write it elsewhere",
+            "{} is inside the source tree where publishing writes, or may be taken for such a name; write it elsewhere",
             shown(path)
         )));
     }
@@ -187,7 +210,7 @@ fn rebase(transaction: &Path, root: &Path, output: &Path) -> Result<String, Fail
 fn apply(transaction: &Path, root: &Path, inverse: &Path) -> Result<String, Failure> {
     if !tilewright_edit::PUBLISH_SUPPORTED {
         return Err(Failure::message(
-            "tx apply is supported only on Linux, where files are reached through directory handles and checked for access control lists; tx preview and tx rebase work here",
+            "tx apply is supported only on Linux, macOS and Windows (SECURITY.md says what it guarantees on each); tx preview and tx rebase work here",
         ));
     }
     outside(root, inverse)?;
@@ -341,8 +364,8 @@ mod tests {
         }
     }
 
-    // Publishing is supported on Linux only.
-    #[cfg(target_os = "linux")]
+    // Publishing is supported on Linux, macOS and Windows.
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     #[test]
     fn apply_writes_the_inverse_and_the_inverse_undoes_it() {
         let (directory, root) = setup();
@@ -385,7 +408,15 @@ mod tests {
         assert!(!Path::new(&path("undo2.jsonc")).exists());
 
         // Neither inside the documents nor where world.jsonc is staged.
-        for inside in ["planes/overworld/undo.jsonc", ".world.jsonc.tilewright-tmp"] {
+        for inside in [
+            "planes/overworld/undo.jsonc",
+            ".world.jsonc.tilewright-tmp",
+            ".WORLD.JSONC.tilewright-tmp",
+            ".world.jsonc.tilewright-tmp.",
+            ".world.j\u{17f}onc.tilewright-tmp",
+            "world.jsonc:undo",
+            ".tilewright.lock",
+        ] {
             let inside = Path::new(&root).join(inside);
             let inside_text = inside.display().to_string();
             let refused =
