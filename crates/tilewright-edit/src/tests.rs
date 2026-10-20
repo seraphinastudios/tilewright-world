@@ -736,6 +736,28 @@ fn a_link_swapped_in_after_planning_is_never_followed() {
 }
 
 #[test]
+fn a_path_named_otherwise_on_disk_is_not_published() {
+    let tree = copy();
+    let root = tree.path();
+    let tx = transaction(
+        r#"{"op": "test", "path": "defs/proto/TREE.jsonc", "pointer": [], "absent": true}"#,
+    );
+    match plan(root, &tx, &Options::default()) {
+        // A file system that ignores case finds tree.jsonc there.
+        Err(problems) => assert!(!problems.is_empty()),
+        Ok(plan) => {
+            let failure = plan.publish().unwrap_err();
+            assert!(!failure.applied);
+            assert!(
+                has(&failure.problems, "tx.path", "is named tree.jsonc on disk"),
+                "{failure:#?}"
+            );
+        }
+    }
+    assert_eq!(snapshot(root), snapshot(&fixture()));
+}
+
+#[test]
 fn files_whose_paths_differ_only_in_case_are_not_published() {
     let tree = copy();
     let root = tree.path();

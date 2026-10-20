@@ -419,7 +419,10 @@ filter, is refused as a link when it is checked. (A file NTFS compresses
 is not a reparse point; its compression, an attribute, is not kept.) A
 transaction that touches or consults two paths that differ only in case
 is refused with `tx.path`, since macOS and Windows, and some other file
-systems, take them for one file.
+systems, take them for one file; so is one that names a file, or a
+directory on its way, that is on disk under a name differing only in case
+(`TREE.jsonc` for `tree.jsonc`), which validation would take for another
+file.
 
 Each rename and removal is atomic, but there is no atomic publication of
 several files. If a step of 4 fails, the files already published are

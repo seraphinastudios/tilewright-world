@@ -236,6 +236,30 @@ impl SourceRoot {
             .map_err(|error| refused(path, error))
     }
 
+    /// The UTF-8 names of the entries of the directory `path`, links
+    /// included; `None` when it is missing. A directory with more than
+    /// `limit` entries is an error.
+    pub fn names(
+        &self,
+        path: &str,
+        limit: usize,
+    ) -> Result<Option<std::collections::BTreeSet<String>>, AccessError> {
+        let listing = match self.root.list(&checked(path)?) {
+            Ok(listing) => listing,
+            Err(Refused::Missing) => return Ok(None),
+            Err(other) => return Err(refused(path, other)),
+        };
+        let mut names = std::collections::BTreeSet::new();
+        for (count, entry) in listing.enumerate() {
+            if count >= limit {
+                return Err(AccessError::TooLarge(path.to_owned()));
+            }
+            let entry = entry.map_err(|error| AccessError::Io(path.to_owned(), error))?;
+            names.extend(entry.name);
+        }
+        Ok(Some(names))
+    }
+
     /// Takes the root's exclusive lock, held until the returned value is
     /// dropped. It fails at once with [`AccessError::Locked`] if another
     /// holder, in this process or another, has it. On Unix it is an

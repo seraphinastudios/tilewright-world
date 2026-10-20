@@ -395,6 +395,15 @@ impl Known {
     }
 }
 
+/// `name` in the directory `directory`, the root when empty.
+fn joined(directory: &str, name: &str) -> String {
+    if directory.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{directory}/{name}")
+    }
+}
+
 fn shown(path: &str) -> &str {
     if path.is_empty() { "." } else { path }
 }
@@ -620,6 +629,56 @@ impl Plan {
         None
     }
 
+    /// Checks that each file of the plan, and each directory on its way,
+    /// that is on disk has there exactly the name the plan gives it. A file
+    /// system that ignores case, as macOS and Windows do by default, finds
+    /// `TREE.jsonc` for `tree.jsonc`, which validation, keyed by name, would
+    /// take for another file. Each directory is listed once, within the
+    /// load's entry budget.
+    fn named_exactly(&self, root: &SourceRoot) -> Result<(), Vec<Diagnostic>> {
+        let mut listed: BTreeMap<String, Option<BTreeSet<String>>> = BTreeMap::new();
+        for file in &self.files {
+            let mut directory = String::new();
+            for component in file.path.split('/') {
+                if !listed.contains_key(&directory) {
+                    let names =
+                        root.names(&directory, self.load.maximum_entries)
+                            .map_err(|error| match error {
+                                AccessError::TooLarge(_) => problem(
+                                    shown(&directory),
+                                    Code::Limit,
+                                    "the directory has more entries than a load reads",
+                                ),
+                                other => io(shown(&directory), &other),
+                            })?;
+                    listed.insert(directory.clone(), names);
+                }
+                // Nothing is on disk from a missing directory on.
+                let Some(Some(names)) = listed.get(&directory) else {
+                    break;
+                };
+                if !names.contains(component) {
+                    if let Some(other) = names
+                        .iter()
+                        .find(|name| name.eq_ignore_ascii_case(component))
+                    {
+                        return Err(problem(
+                            &file.path,
+                            Code::Path,
+                            format!(
+                                "{} is named {other} on disk; paths that differ only in case may name one file, so nothing was written",
+                                joined(&directory, component)
+                            ),
+                        ));
+                    }
+                    break;
+                }
+                directory = joined(&directory, component);
+            }
+        }
+        Ok(())
+    }
+
     /// Validates the tree with the plan's files again, and its terrain
     /// addresses against it, since files the plan did not read may have
     /// changed since it was made.
@@ -688,6 +747,9 @@ impl Plan {
                 other => io(".", &other),
             })
         })?;
+        if let Err(problems) = self.named_exactly(root) {
+            return Err(not_applied(problems));
+        }
         let mut directories = Directories {
             root,
             open: BTreeMap::new(),
