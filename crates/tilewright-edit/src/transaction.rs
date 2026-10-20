@@ -135,6 +135,9 @@ pub(crate) enum Action {
     Create {
         path: String,
         content: Content,
+        /// A file whose permissions the new one takes, if it is there when
+        /// publishing: the file a rename's inverse renames back from.
+        like: Option<String>,
     },
     Delete {
         path: String,
@@ -377,14 +380,17 @@ impl<'a> Shape<'a> {
             );
             return None;
         };
-        let mut ok = true;
+        // An unknown key is reported, and the rest of the object is still
+        // checked.
         for member in members {
             if !allowed.contains(&member.key.as_str()) {
-                self.shape(member.key_span, format!("unknown key \"{}\"", member.key));
-                ok = false;
+                self.shape(
+                    member.key_span,
+                    format!("unknown key {}", diagnostic::quoted(&member.key)),
+                );
             }
         }
-        ok.then_some(value)
+        Some(value)
     }
 
     fn required(&mut self, object: &'a Value, key: &str) -> Option<&'a Value> {
@@ -420,7 +426,10 @@ impl<'a> Shape<'a> {
         if is_identifier(text) {
             Some(text.to_owned())
         } else {
-            self.shape(value.span(), format!("\"{text}\" is not an identifier"));
+            self.shape(
+                value.span(),
+                format!("{} is not an identifier", diagnostic::quoted(text)),
+            );
             None
         }
     }
@@ -480,38 +489,28 @@ impl<'a> Shape<'a> {
                 value.span(),
                 Code::Path,
                 format!(
-                    "\"{text}\" is not a source document path: world.jsonc, or a .jsonc file under profile/, planes/ or defs/"
+                    "{} is not a source document path: world.jsonc, or a .jsonc file under profile/, planes/ or defs/",
+                    diagnostic::quoted(text)
                 ),
             );
             None
         }
     }
 
-    /// A separator string of at most [`limits::SEPARATOR`] bytes; its content
-    /// is checked where it is used.
+    /// A separator, colon or layout string; its content is checked where it
+    /// is used. Like file text, it may be given in pieces.
     fn separator(&mut self, value: &'a Value) -> Option<String> {
-        let text = self.string(value)?;
-        if text.len() > limits::SEPARATOR {
-            self.report(
-                value.span(),
-                Code::Limit,
-                format!("longer than {} bytes", limits::SEPARATOR),
-            );
-            return None;
-        }
-        Some(text.to_owned())
+        self.text_pieces(value)
     }
 
-    /// A digest list: `[{"path", "sha256"}, ...]`, each path once, with
-    /// `null` for a file that is absent.
-    /// Exact file text: a string, or an array of strings joined, so that a
-    /// file longer than a string or a line may be given in pieces.
+    /// Exact text: a string, or an array of strings joined, so that text
+    /// longer than a string or a line may be given in pieces.
     fn text_pieces(&mut self, value: &'a Value) -> Option<String> {
         if let Some(text) = value.as_str() {
             return Some(text.to_owned());
         }
         let Some(pieces) = value.as_array() else {
-            self.shape(value.span(), "text is a string or an array of strings");
+            self.shape(value.span(), "expected a string or an array of strings");
             return None;
         };
         let mut text = String::new();
@@ -521,6 +520,8 @@ impl<'a> Shape<'a> {
         Some(text)
     }
 
+    /// A digest list: `[{"path", "sha256"}, ...]`, each path once, with
+    /// `null` for a file that is absent.
     fn digests(&mut self, value: &'a Value) -> Option<Digests> {
         let Some(items) = value.as_array() else {
             self.shape(
@@ -659,8 +660,8 @@ impl<'a> Shape<'a> {
                 self.shape(
                     member.key_span,
                     format!(
-                        "custom key \"{}\" must be a domain-qualified namespace",
-                        member.key
+                        "custom key {} must be a domain-qualified namespace",
+                        diagnostic::quoted(&member.key)
                     ),
                 );
                 ok = false;
@@ -686,13 +687,13 @@ impl<'a> Shape<'a> {
             "object.remove" => &["op", "plane", "layer", "at", "index", "expect"],
             "object.move" => &["op", "plane", "layer", "at", "index", "expect", "to"],
             "terrain.set" => &["op", "plane", "layer", "grid", "cells"],
-            "document.create" => &["op", "path", "document", "text"],
+            "document.create" => &["op", "path", "document", "text", "like"],
             "document.delete" => &["op", "path"],
             "document.rename" => &["op", "path", "to"],
             _ => {
                 self.shape(
                     item.get("op").map_or(item.span(), Value::span),
-                    format!("unknown operation \"{kind}\""),
+                    format!("unknown operation {}", diagnostic::quoted(kind)),
                 );
                 return None;
             }
@@ -733,25 +734,7 @@ impl<'a> Shape<'a> {
             }),
             "object.move" => self.object_move(item),
             "terrain.set" => self.terrain(item),
-            "document.create" => {
-                let path = self.required(item, "path")?;
-                let path = self.path(path)?;
-                let content = match (item.get("document"), item.get("text")) {
-                    (Some(value), None) => {
-                        if !matches!(value, Value::Object { .. }) {
-                            self.shape(value.span(), "document must be an object");
-                            return None;
-                        }
-                        Content::Document(value.span())
-                    }
-                    (None, Some(value)) => Content::Text(self.text_pieces(value)?),
-                    _ => {
-                        self.shape(item.span(), "give exactly one of document or text");
-                        return None;
-                    }
-                };
-                Some(Action::Create { path, content })
-            }
+            "document.create" => self.create(item),
             "document.delete" => {
                 let path = self.required(item, "path")?;
                 Some(Action::Delete {
@@ -770,6 +753,34 @@ impl<'a> Shape<'a> {
             }
             _ => None,
         }
+    }
+
+    fn create(&mut self, item: &'a Value) -> Option<Action> {
+        let path = self.required(item, "path")?;
+        let path = self.path(path)?;
+        let content = match (item.get("document"), item.get("text")) {
+            (Some(value), None) => {
+                if !matches!(value, Value::Object { .. }) {
+                    self.shape(value.span(), "document must be an object");
+                    return None;
+                }
+                Content::Document(value.span())
+            }
+            (None, Some(value)) => Content::Text(self.text_pieces(value)?),
+            _ => {
+                self.shape(item.span(), "give exactly one of document or text");
+                return None;
+            }
+        };
+        let like = match item.get("like") {
+            Some(value) => Some(self.path(value)?),
+            None => None,
+        };
+        Some(Action::Create {
+            path,
+            content,
+            like,
+        })
     }
 
     fn target(&mut self, item: &'a Value) -> Option<Target> {

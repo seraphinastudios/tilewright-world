@@ -203,8 +203,17 @@ impl Node {
                     if index > 0 {
                         output.push_str(",\n");
                     }
+                    // A long key starts a line of its own, from its first
+                    // column, and the colon goes on the next line.
+                    if Self::String(key.clone()).is_long() {
+                        output.push('\n');
+                        write_json_string(key, output);
+                        output.push('\n');
+                    }
                     output.push_str(&inner);
-                    write_json_string(key, output);
+                    if !Self::String(key.clone()).is_long() {
+                        write_json_string(key, output);
+                    }
                     if value.is_long() {
                         output.push(':');
                         value.write_alone(&inner, output);

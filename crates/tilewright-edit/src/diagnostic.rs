@@ -68,3 +68,15 @@ pub(crate) fn file(path: &str, code: &'static str, message: impl Into<String>) -
         message: message.into(),
     }
 }
+
+/// A string for a message: quoted when short, described by its size when
+/// long, so that a message costs little whatever the string.
+pub(crate) fn quoted(text: &str) -> String {
+    if text.len() <= 128 {
+        let mut output = String::new();
+        tilewright_jsonc::write_json_string(text, &mut output);
+        output
+    } else {
+        format!("a string of {} bytes", text.len())
+    }
+}

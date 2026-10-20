@@ -369,7 +369,10 @@ pub(crate) fn insert(
     let item = match (sequence.object, insertion.key) {
         (true, Some((key, key_text))) => {
             if container.get(key).is_some() {
-                return Err(format!("the object already has the key \"{key}\""));
+                return Err(format!(
+                    "the object already has the key {}",
+                    crate::diagnostic::quoted(key)
+                ));
             }
             let colon = insertion.colon.unwrap_or_else(|| sequence.colon(source));
             if !is_trivia(colon, b':', 1) {

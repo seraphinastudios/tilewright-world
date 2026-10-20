@@ -285,7 +285,7 @@ fn describe(steps: &[Step]) -> String {
     let parts: Vec<String> = steps
         .iter()
         .map(|step| match step {
-            Step::Key(key) => json_string(key),
+            Step::Key(key) => crate::diagnostic::quoted(key),
             Step::Index(index) => index.to_string(),
         })
         .collect();
@@ -540,6 +540,16 @@ fn object_operation(
         } => {
             let (path, pointer, mut moved) =
                 expected_object(workspace, transaction, address, *expect)?;
+            // A move to where the object already is changes nothing, not even
+            // its separators.
+            if *to == address.tile {
+                let site = site(&to.plane, to.layer, to.at);
+                let document = workspace.document(&path)?;
+                let count = tile_objects(document, &path, site.local)?.0.len();
+                if index.unwrap_or(count - 1) == address.index {
+                    return Ok(());
+                }
+            }
             workspace.remove(&path, &pointer, None)?;
             let from = site(&address.tile.plane, address.tile.layer, address.tile.at).local;
             let local = site(&to.plane, to.layer, to.at).local;
@@ -610,14 +620,24 @@ fn document_operation(
             pointer,
             expected,
         } => test_value(workspace, transaction, target, pointer, expected),
-        Action::Create { path, content } => {
+        Action::Create {
+            path,
+            content,
+            like,
+        } => {
             let text = match content {
                 Content::Document(span) => {
                     Node::from_value(&transaction.document, transaction.value(*span)).file()
                 }
                 Content::Text(text) => text.clone(),
             };
-            workspace.create(path, text)
+            workspace.create(path, text)?;
+            // An explicit creation has its own provenance.
+            match like {
+                Some(like) => workspace.renames.insert(path.clone(), like.clone()),
+                None => workspace.renames.remove(path),
+            };
+            Ok(())
         }
         Action::Delete { path } => workspace.delete(path).map(|_| ()),
         Action::Rename { path, to } => {

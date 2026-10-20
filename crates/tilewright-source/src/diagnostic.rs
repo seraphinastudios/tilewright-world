@@ -1,7 +1,7 @@
 // Copyright 2026 Seraphina Studios
 // SPDX-License-Identifier: MIT
 
-use std::fmt;
+use std::{cell::Cell, fmt, rc::Rc};
 use tilewright_jsonc::ErrorCode;
 
 /// Anything with a stable diagnostic code string.
@@ -227,15 +227,30 @@ pub(crate) struct Diagnostics {
     items: Vec<Diagnostic>,
     maximum: usize,
     dropped: bool,
+    /// Set once a diagnostic is dropped, shared by the collections of one
+    /// load, so that the load stops reading: nothing more could be
+    /// reported.
+    full: Rc<Cell<bool>>,
 }
 
 impl Diagnostics {
-    pub(crate) const fn new(maximum: usize) -> Self {
+    pub(crate) fn new(maximum: usize) -> Self {
+        Self::sharing(maximum, Rc::new(Cell::new(false)))
+    }
+
+    /// A collection that shares `full` with others of the same load.
+    pub(crate) const fn sharing(maximum: usize, full: Rc<Cell<bool>>) -> Self {
         Self {
             items: Vec::new(),
             maximum,
             dropped: false,
+            full,
         }
+    }
+
+    /// The flag set once any collection of this load is full.
+    pub(crate) fn full(&self) -> Rc<Cell<bool>> {
+        Rc::clone(&self.full)
     }
 
     pub(crate) fn push(&mut self, diagnostic: Diagnostic) {
@@ -243,6 +258,7 @@ impl Diagnostics {
             self.items.push(diagnostic);
         } else {
             self.dropped = true;
+            self.full.set(true);
         }
     }
 

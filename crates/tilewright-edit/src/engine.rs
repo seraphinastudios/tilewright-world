@@ -481,7 +481,12 @@ impl<'r> Workspace<'r> {
                 (Step::Key(key), Value::Object { members, .. }) => members
                     .iter()
                     .position(|member| &member.key == key)
-                    .ok_or_else(|| Failure::conflict(format!("{path} has no member \"{key}\"")))?,
+                    .ok_or_else(|| {
+                        Failure::conflict(format!(
+                            "{path} has no member {}",
+                            crate::diagnostic::quoted(key)
+                        ))
+                    })?,
                 _ => return Err(Failure::conflict(format!("{path} has no value there"))),
             };
             let removed = splice::remove(document.source(), container, index, separator)

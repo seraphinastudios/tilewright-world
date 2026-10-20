@@ -25,8 +25,10 @@ use sha2::{Digest, Sha256};
 #[cfg(test)]
 use std::path::Path;
 use std::{
+    cell::Cell,
     collections::{BTreeMap, BTreeSet},
     io::Read as _,
+    rc::Rc,
 };
 use tilewright_jsonc::{Document, ErrorCode};
 
@@ -135,14 +137,25 @@ static NO_OVERLAY: Overlay = BTreeMap::new();
 impl<'o> Tree<'o> {
     #[cfg(test)]
     pub fn new(root: &Path, options: &'o LoadOptions) -> Self {
-        Self::in_root(platform::Root::new(root), options, &NO_OVERLAY)
+        Self::in_root(
+            platform::Root::new(root),
+            options,
+            &NO_OVERLAY,
+            Rc::new(Cell::new(false)),
+        )
     }
 
     /// A tree over an opened root whose files are those on disk with
     /// `overlay` applied: an entry's text replaces or creates the file at
     /// its path, and an entry of `None` removes it. Directories that hold
-    /// an overlay file exist.
-    pub fn in_root(root: platform::Root, options: &'o LoadOptions, overlay: &'o Overlay) -> Self {
+    /// an overlay file exist. `full` is the load's flag that its
+    /// diagnostics are full; once it is set, nothing more is read.
+    pub fn in_root(
+        root: platform::Root,
+        options: &'o LoadOptions,
+        overlay: &'o Overlay,
+        full: Rc<Cell<bool>>,
+    ) -> Self {
         Self {
             root,
             options,
@@ -151,7 +164,7 @@ impl<'o> Tree<'o> {
             entries: 0,
             bytes: 0,
             digests: BTreeMap::new(),
-            diagnostics: Diagnostics::new(options.maximum_diagnostics),
+            diagnostics: Diagnostics::sharing(options.maximum_diagnostics, full),
             exhausted: false,
         }
     }
@@ -181,10 +194,16 @@ impl<'o> Tree<'o> {
     }
 
     pub fn take_diagnostics(&mut self) -> Diagnostics {
+        let full = self.diagnostics.full();
         std::mem::replace(
             &mut self.diagnostics,
-            Diagnostics::new(self.options.maximum_diagnostics),
+            Diagnostics::sharing(self.options.maximum_diagnostics, full),
         )
+    }
+
+    /// Whether the load's diagnostics are full, so reading on is useless.
+    fn stopped(&self) -> bool {
+        self.diagnostics.full().get()
     }
 
     /// Reports a symbolic link at `path`.
@@ -251,6 +270,9 @@ impl<'o> Tree<'o> {
     /// Lists a directory, sorted by name. Symbolic links, special files and
     /// non-UTF-8 names are reported and skipped.
     pub fn list(&mut self, path: &str) -> Vec<Entry> {
+        if self.stopped() {
+            return Vec::new();
+        }
         // Overlay files replace, add or remove entries; a directory that
         // holds an overlay file is listed. Names are looked up in sets, so
         // merging costs a logarithm per entry.
@@ -373,6 +395,9 @@ impl<'o> Tree<'o> {
 
     /// Reads and parses a JSONC document. Every problem is reported.
     pub fn document(&mut self, path: &str) -> Option<Source> {
+        if self.stopped() {
+            return None;
+        }
         match self.overlay.get(path) {
             Some(Some(text)) => return self.overlay_document(path, text),
             Some(None) => {

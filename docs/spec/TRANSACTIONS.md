@@ -99,9 +99,9 @@ an error.
 | `test` | target, `pointer`, `value` or `"absent": true` | Checks a value, or that there is none; an absent test may end in `{"id": ...}` to check that no entry has that identity. |
 | `object.insert` | tile, `index`?, `object` | Inserts `object` (without `at`) at `index` among the tile's objects; by default after them. |
 | `object.remove` | tile, `index`, `expect` | Removes an object. |
-| `object.move` | tile, `index`, `expect`, `to` | Moves an object to `to`: `{"plane"?, "layer"?, "at"?, "index"?}`, each defaulting to the object's own (and `index` to after the destination's objects). `to.index` counts the destination's objects without the moved one, so a move on one tile reorders it. |
+| `object.move` | tile, `index`, `expect`, `to` | Moves an object to `to`: `{"plane"?, "layer"?, "at"?, "index"?}`, each defaulting to the object's own (and `index` to after the destination's objects). `to.index` counts the destination's objects without the moved one, so a move on one tile reorders it, and a move to where the object already is changes nothing. |
 | `terrain.set` | `plane`, `layer`, `grid`, `cells` | Sets terrain cells of one grid (section 5). |
-| `document.create` | `path`, `document` or `text` | Creates a document: `document` is written in canonical layout (section 10), `text` exactly; `text` is a string or an array of strings joined, for a file longer than a string or a line may be. Either must be valid JSONC. |
+| `document.create` | `path`, `document` or `text`, `like`? | Creates a document: `document` is written in canonical layout (section 10), `text` exactly; `text` is a string or an array of strings joined, for a file longer than a string or a line may be. Either must be valid JSONC. The new file takes the permissions of the file at `like`, if it is there when publishing. |
 | `document.delete` | `path` | Deletes a document. |
 | `document.rename` | `path`, `to` | Moves a document to a path that is free, unchanged, with its permissions. A rename that changes identity also sets it, such as a definition's `id` or a chunk's `chunk`, in the same transaction; references to it are updated by operations of their own. |
 
@@ -121,9 +121,10 @@ change:
 - `insert` at index `i` replaces region `Ri` with `before`, the item and
   `after`. Given, `before` holds the comma unless the item is first and
   `after` holds it unless the item is last; both are otherwise whitespace and
-  complete comments, at most 4,096 bytes. A member's key and value are joined
+  complete comments. A member's key and value are joined
   by `colon` (whitespace and comments around one `:`), which only an
-  insertion with `key` may give.
+  insertion with `key` may give. Like `text`, each of these, and a
+  removal's `separator`, is a string or an array of strings joined.
 - Without them, the new item takes its neighbours' line style: in a
   container that puts items on their own lines it gets its own line at their
   indentation, in one that does not it follows a comma and a space, and
@@ -226,7 +227,8 @@ the transaction changed, in path order:
 
 - `document.delete` for a file it created;
 - `document.create` with the exact `text` for a file it deleted, in pieces
-  of at most 128 KiB, one a line;
+  of at most 128 KiB, one a line, and, for a file it renamed, `like` naming
+  the file it became, so that undoing the rename keeps the permissions;
 - otherwise the exact inverse of each edit, last first: `set` with the old
   value's text, `insert` with the old item, key, colon and regions, `remove`
   with the old region. An old value or key, and each step of a pointer, is
@@ -305,8 +307,8 @@ indentation and `"key": value` members with minimal string escaping. A
 container is written on one line when it is empty, when it is an array of
 numbers, booleans and nulls only whose one-line form is at most 4,096
 bytes, or when its one-line form is at most 80 bytes; otherwise each item
-is on its own line one level deeper; a string value or item longer than
-4,096 bytes is on a line of its own, from the line's first column. A file's root is
+is on its own line one level deeper; a string value, item or key longer
+than 4,096 bytes is on a line of its own, from the line's first column. A file's root is
 always on several lines and the file ends with a newline.
 
 ## 11. Limits
@@ -320,7 +322,6 @@ FORMAT.md section 3 and these, while they are read and carried out:
 | Files touched or consulted, and `base` or `result` entries | 10,000 |
 | Pointer steps | 64 |
 | Index in a pointer or address | 250,000 |
-| `before`, `after`, `separator` or `colon` | 4,096 bytes |
 | Terrain cells | 1,000,000 |
 | Bytes read from touched files | 256 MiB |
 | Work, in bytes: each operation's own size, the size of each document it reads (once per operation) and of each edit it makes | 4 GiB |

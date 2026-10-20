@@ -919,14 +919,6 @@ fn transactions_are_bounded() {
             "at most 64 steps",
         ),
         (
-            wrap(&format!(
-                r#"{{"op": "remove", "path": "world.jsonc", "pointer": ["a"], "separator": "{}"}}"#,
-                " ".repeat(limits::SEPARATOR + 1)
-            )),
-            "tx.limit",
-            "longer than",
-        ),
-        (
             wrap(&many.join(",\n")),
             "tx.limit",
             "more than 100000 operations",
@@ -1744,4 +1736,119 @@ fn a_chain_of_renames_keeps_the_first_file_permissions() {
         .permissions()
         .mode();
     assert_eq!(mode & 0o777, 0o600);
+}
+
+#[test]
+fn a_removal_beside_a_large_comment_has_an_exact_inverse() {
+    let tree = copy();
+    let root = tree.path();
+    let comment = format!("    // {}\n", "c".repeat(512 << 10));
+    let zones = format!(
+        "{{\n  \"format\": \"tilewright.zones/1\",\n  \"zones\": [\n    {{\"id\": \"wilderness\", \"name\": \"Wilderness\"}},\n{}    {{\"id\": \"island\", \"parent\": \"wilderness\", \"name\": \"Green Island\", \"properties\": {{\"music\": \"calm\"}}}},\n    {{\"id\": \"village\", \"parent\": \"island\", \"name\": \"Little Village\", \"properties\": {{\"safe\": true}}}}\n  ]\n}}\n",
+        comment.repeat(3)
+    );
+    fs::write(root.join("planes/overworld/zones.jsonc"), &zones).unwrap();
+    // The island zone, after the comment, goes, and the comment with it;
+    // what referred to it is moved to its parent.
+    let tx = transaction(
+        r#"{"op": "remove", "path": "planes/overworld/zones.jsonc", "pointer": ["zones", {"id": "island"}]},
+    {"op": "set", "path": "planes/overworld/zones.jsonc", "pointer": ["zones", {"id": "village"}, "parent"], "value": "wilderness"},
+    {"op": "set", "path": "planes/overworld/layers/0/0_0.jsonc", "pointer": ["terrain", "zone", "palette", "i"], "value": "wilderness"}"#,
+    );
+    let plan = planned(root, &tx);
+    assert!(
+        plan.inverse().len() > 3 * (512 << 10),
+        "the inverse holds the comment"
+    );
+    round_trip(root, &tx);
+}
+
+#[test]
+fn shape_checks_go_on_past_unknown_keys_and_bound_what_they_quote() {
+    let found = Transaction::parse("t.jsonc", "{\"bogus\": true}").unwrap_err();
+    assert!(
+        has(&found, "tx.shape", "unknown key \"bogus\""),
+        "{found:#?}"
+    );
+    assert!(
+        has(&found, "tx.shape", "missing key \"format\""),
+        "{found:#?}"
+    );
+    assert!(
+        has(&found, "tx.shape", "missing key \"operations\""),
+        "{found:#?}"
+    );
+    let long = "x".repeat(10_000);
+    let found = Transaction::parse("t.jsonc", wrap(&format!(r#"{{"op": "{long}"}}"#))).unwrap_err();
+    assert!(
+        has(
+            &found,
+            "tx.shape",
+            "unknown operation a string of 10000 bytes"
+        ),
+        "{found:#?}"
+    );
+    assert!(found.iter().all(|problem| problem.message.len() < 200));
+}
+
+#[test]
+fn a_move_to_where_the_object_is_changes_nothing() {
+    let tree = copy();
+    let tx = transaction(
+        r#"{"op": "object.move", "plane": "overworld", "layer": 0, "at": [2, 2], "index": 0, "expect": {"proto": "chest"}, "to": {"index": 0}},
+    {"op": "object.move", "plane": "overworld", "layer": 0, "at": [2, 2], "index": 0, "expect": {"proto": "chest"}, "to": {}}"#,
+    );
+    let plan = planned(tree.path(), &tx);
+    assert!(plan.files().iter().all(|file| !file.is_changed()));
+}
+
+#[test]
+fn a_long_key_gets_a_line_of_its_own() {
+    let tree = copy();
+    let key = "k".repeat(900 << 10);
+    let tx = transaction(&format!(
+        r#"{{"op": "document.create", "path": "defs/proto/keyed.jsonc", "document": {{"format": "tilewright.def/1", "type": "proto", "id": "keyed",
+      "fields": {{"face": "k.png", "layer": "item"}}, "custom": {{"example.org/k": {{
+"{key}"
+: 1}}}}}}}}"#
+    ));
+    let plan = planned(tree.path(), &tx);
+    let created = plan.files()[0].after.clone().unwrap();
+    assert!(created.lines().all(|line| line.len() < 1 << 20));
+}
+
+#[cfg(unix)]
+#[test]
+fn permissions_follow_renames_and_their_inverses_only() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let tree = copy();
+    let root = tree.path();
+    let mode = |path: &str| fs::metadata(root.join(path)).unwrap().permissions().mode() & 0o777;
+    fs::write(root.join("profile/probe"), "").unwrap();
+    let default = mode("profile/probe");
+    fs::remove_file(root.join("profile/probe")).unwrap();
+    let private = if default == 0o600 { 0o640 } else { 0o600 };
+    fs::set_permissions(
+        root.join("defs/recipe/chest.jsonc"),
+        fs::Permissions::from_mode(private),
+    )
+    .unwrap();
+    // Undoing a rename brings the file back with its permissions.
+    let rename = transaction(
+        r#"{"op": "document.rename", "path": "defs/recipe/chest.jsonc", "to": "defs/recipe/box.jsonc"},
+    {"op": "set", "path": "defs/recipe/box.jsonc", "pointer": ["id"], "value": "box"}"#,
+    );
+    let plan = apply(root, &rename);
+    assert_eq!(mode("defs/recipe/box.jsonc"), private);
+    let inverse = Transaction::parse("inverse.jsonc", plan.inverse()).unwrap();
+    apply(root, &inverse);
+    assert_eq!(mode("defs/recipe/chest.jsonc"), private);
+    // A file created where a renamed one was deleted is new.
+    let replace = transaction(
+        r#"{"op": "document.rename", "path": "defs/recipe/chest.jsonc", "to": "defs/recipe/box.jsonc"},
+    {"op": "document.delete", "path": "defs/recipe/box.jsonc"},
+    {"op": "document.create", "path": "defs/recipe/box.jsonc", "document": {"format": "tilewright.def/1", "type": "recipe", "id": "box", "fields": {"output": "chest", "ingredients": [{"item": "coin", "count": 1}]}}}"#,
+    );
+    apply(root, &replace);
+    assert_eq!(mode("defs/recipe/box.jsonc"), default);
 }

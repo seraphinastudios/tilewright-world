@@ -64,8 +64,6 @@ pub mod limits {
     pub const FILES: usize = 10_000;
     /// Most steps in a pointer.
     pub const POINTER: usize = 64;
-    /// Longest separator, colon or layout string, in bytes.
-    pub const SEPARATOR: usize = 4_096;
     /// Most terrain cells in one transaction.
     pub const CELLS: usize = 1_000_000;
     /// Largest index in a pointer or address.
@@ -595,12 +593,14 @@ pub fn plan(
         }
     }
     let (terrain, renames) = publish_inputs(transaction, &workspace, &files);
+    // The plan keeps the very root it was carried out on.
+    drop(workspace);
     Ok(Plan {
         root: root.to_path_buf(),
         name: transaction.name.clone(),
         terrain,
         renames,
-        source: source.try_clone(),
+        source,
         load: options.load,
         files,
         world,
@@ -797,20 +797,20 @@ fn write_operation(
                 output.push(", \"key\": ")?;
                 output.push_value(key)?;
                 output.push(", \"colon\": ")?;
-                output.push_json(colon)?;
+                output.push_text(colon)?;
             }
             output.push(", \"value\": ")?;
             output.push_value(value)?;
             output.push(", \"before\": ")?;
-            output.push_json(&layout.before)?;
+            output.push_text(&layout.before)?;
             output.push(", \"after\": ")?;
-            output.push_json(&layout.after)?;
+            output.push_text(&layout.after)?;
         }
         Primitive::Remove { pointer, separator } => {
             output.push(", \"pointer\": ")?;
             output.pointer(pointer)?;
             output.push(", \"separator\": ")?;
-            output.push_json(separator)?;
+            output.push_text(separator)?;
         }
         Primitive::Create { text } => {
             output.push(", \"text\": ")?;
@@ -819,6 +819,21 @@ fn write_operation(
         Primitive::Delete => {}
     }
     output.push("}")
+}
+
+/// The file `path` was renamed to, if the transaction created it so.
+fn renamed_to<'w>(workspace: &'w Workspace<'_>, path: &str) -> Option<&'w str> {
+    workspace
+        .renames
+        .iter()
+        .find(|(to, from)| {
+            from.as_str() == path
+                && workspace
+                    .entries
+                    .get(to.as_str())
+                    .is_some_and(|entry| entry.base.is_none() && entry.current.text().is_some())
+        })
+        .map(|(to, _)| to.as_str())
 }
 
 /// The exact inverse of the workspace's edits: per changed file, in path
@@ -865,10 +880,16 @@ fn inverse(workspace: &Workspace<'_>) -> Result<String, TooLarge> {
             (None, _) => write(&Primitive::Delete)?,
             (Some(text), None) => {
                 // The text is written straight from the entry, not copied.
+                // A file renamed away comes back with the permissions of
+                // the file it became.
                 output.push(if first { "\n    " } else { ",\n    " })?;
                 first = false;
                 output.push("{\"op\": \"document.create\", \"path\": ")?;
                 output.push_json(path)?;
+                if let Some(like) = renamed_to(workspace, path) {
+                    output.push(", \"like\": ")?;
+                    output.push_json(like)?;
+                }
                 output.push(", \"text\": ")?;
                 output.push_text(text)?;
                 output.push("}")?;
