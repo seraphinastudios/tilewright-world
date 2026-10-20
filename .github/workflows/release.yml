@@ -10,6 +10,9 @@ name: Release
 # - workflow_dispatch: the same, and the only way to cut the first release.
 # - pull_request: builds and packages everything as a check; never attests
 #   or publishes.
+#
+# npm publication is off until the repository variable TILEWRIGHT_NPM_PUBLISH
+# is "true"; docs/RELEASING.md says how to turn it on.
 
 on:
   push:
@@ -20,7 +23,6 @@ on:
   pull_request:
     paths:
       - .github/workflows/release.yml
-      - .github/workflows/publish-npm.yml
       - .github/workflows/validate.yml
       - .releaserc.json
       - scripts/release/**
@@ -33,8 +35,12 @@ on:
 
 permissions: {}
 
+# Releases of one branch run one at a time. GitHub keeps one pending run per
+# group and drops an older pending run for a newer one, which is safe within
+# a branch: the newer run's commit contains the older one's. Each branch has
+# its own group, so a maintenance release never displaces a release of main.
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('world-release-check-{0}', github.event.pull_request.number) || 'world-release' }}
+  group: ${{ github.event_name == 'pull_request' && format('world-release-check-{0}', github.event.pull_request.number) || format('world-release-{0}', github.ref) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -49,6 +55,7 @@ jobs:
       contents: read
     outputs:
       revision: ${{ steps.plan.outputs.revision }}
+      branch: ${{ steps.plan.outputs.branch }}
       version: ${{ steps.plan.outputs.version }}
       tag: ${{ steps.plan.outputs.tag }}
       go_tag: ${{ steps.plan.outputs.go_tag }}
@@ -116,6 +123,7 @@ jobs:
           fi
           {
             echo "revision=$(jq -r .revision "${plan}")"
+            echo "branch=$(jq -r .branch "${plan}")"
             echo "version=${version}"
             echo "tag=$(jq -r '.tag // empty' "${plan}")"
             echo "go_tag=$(jq -r '.go_tag // empty' "${plan}")"
@@ -191,7 +199,7 @@ jobs:
           name: cli-${{ matrix.target }}
           path: dist/cli/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30
           # A re-run of this job replaces its artifact.
           overwrite: true
 
@@ -236,7 +244,7 @@ jobs:
           name: npm-package
           path: dist/npm/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30
           # A re-run of this job replaces its artifact.
           overwrite: true
 
@@ -302,7 +310,7 @@ jobs:
           name: release-assets
           path: dist/release/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30
           # A re-run of this job replaces its artifact.
           overwrite: true
 
@@ -362,6 +370,7 @@ jobs:
       TAG: ${{ needs.plan.outputs.tag }}
       GO_TAG: ${{ needs.plan.outputs.go_tag }}
       REVISION: ${{ needs.plan.outputs.revision }}
+      BRANCH: ${{ needs.plan.outputs.branch }}
       PREVIOUS_TAG: ${{ needs.plan.outputs.previous_tag }}
       LATEST: ${{ needs.plan.outputs.latest }}
       NPM: ${{ needs.plan.outputs.npm }}
@@ -384,27 +393,36 @@ jobs:
           if [[ ${NPM} == true ]]; then npm_flag=(--npm); fi
           python3 tools/release/package.py verify --version "${VERSION}" "${npm_flag[@]}" dist/release
 
-      # gh would attach the release to an existing tag wherever it points.
-      - name: Check that the tag is new
+      # The tag is created first, as a plain ref to the revision. Creating a
+      # ref fails if it exists, so the release cannot end up on a tag that
+      # someone else created at another commit. A re-run accepts the tag a
+      # failed attempt left at the revision, as long as it has no release.
+      - name: Create the tag
         run: |
           set -euo pipefail
-          existing=$(gh api "repos/${GH_REPO}/git/matching-refs/tags/${TAG}" \
-            | jq --arg ref "refs/tags/${TAG}" '[.[] | select(.ref == $ref)] | length')
-          if [[ ${existing} != 0 ]]; then
-            echo "::error::${TAG} already exists"
-            exit 1
+          if ! gh api --method POST "repos/${GH_REPO}/git/refs" -f "ref=refs/tags/${TAG}" \
+            -f "sha=${REVISION}" >/dev/null; then
+            tagged=$(gh api "repos/${GH_REPO}/git/ref/tags/${TAG}" --jq '.object.type + " " + .object.sha' || true)
+            if [[ ${tagged} != "commit ${REVISION}" ]]; then
+              echo "::error::${TAG} exists and does not point at ${REVISION}"
+              exit 1
+            fi
+            if gh api "repos/${GH_REPO}/releases/tags/${TAG}" >/dev/null 2>&1; then
+              echo "::error::${TAG} already has a release"
+              exit 1
+            fi
+            echo "::notice::${TAG} already points at ${REVISION}; publishing its release"
           fi
 
       - name: Write the release notes
         run: bash tools/release/notes.sh dist/release/assets >"${RUNNER_TEMP}/notes.md"
 
-      # gh creates a draft, uploads every asset, then publishes it. Publishing
-      # creates the tag at the revision and, with immutable releases on,
-      # locks the tag and the assets.
+      # gh creates a draft, uploads every asset, then publishes it. With
+      # immutable releases on, publishing locks the tag and the assets.
       - name: Publish
         run: |
           set -euo pipefail
-          options=(--target "${REVISION}" --title "${TAG}" --notes-file "${RUNNER_TEMP}/notes.md"
+          options=(--verify-tag --title "${TAG}" --notes-file "${RUNNER_TEMP}/notes.md"
             --generate-notes "--latest=${LATEST}")
           if [[ -n ${PREVIOUS_TAG} ]]; then
             options+=(--notes-start-tag "${PREVIOUS_TAG}")
@@ -459,19 +477,107 @@ jobs:
           echo "${GO_TAG} -> ${REVISION}" >>"${GITHUB_STEP_SUMMARY}"
 
   npm-publish:
-    name: Start npm publication
+    name: Publish to npm
     needs: [plan, release]
     # Off until the owner sets the repository variable TILEWRIGHT_NPM_PUBLISH
-    # to true; see docs/RELEASING.md.
-    if: ${{ !cancelled() && needs.plan.outputs.publish == 'true' && needs.plan.outputs.npm == 'true' && needs.release.result == 'success' && vars.TILEWRIGHT_NPM_PUBLISH == 'true' }}
+    # to true; see docs/RELEASING.md. Only releases from main are published,
+    # and the npm environment admits only main. Publishing in the release's
+    # own run gives npm's provenance the release's commit.
+    if: ${{ !cancelled() && needs.plan.outputs.publish == 'true' && needs.plan.outputs.npm == 'true' && needs.plan.outputs.branch == 'main' && needs.release.result == 'success' && vars.TILEWRIGHT_NPM_PUBLISH == 'true' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 15
+    environment: npm
     permissions:
-      actions: write
+      contents: read
+      attestations: read
+      id-token: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ needs.plan.outputs.tag }}
+      VERSION: ${{ needs.plan.outputs.version }}
+      REVISION: ${{ needs.plan.outputs.revision }}
+      PACKAGE: '@seraphinastudios/tilewright-pack'
     steps:
-      - name: Dispatch publish-npm.yml for the release
+      # The job checks out nothing: it publishes the tarball the immutable
+      # release carries, byte for byte, once it matches SHA256SUMS, GitHub's
+      # asset digest and the provenance this run attested.
+      - name: Download and check the release's npm tarball
+        id: tarball
+        run: |
+          set -euo pipefail
+          if [[ ${GITHUB_SHA} != "${REVISION}" ]]; then
+            echo "::error::this run is at ${GITHUB_SHA}, not the release revision ${REVISION}"
+            exit 1
+          fi
+          gh api "repos/${GH_REPO}/releases/tags/${TAG}" >"${RUNNER_TEMP}/release.json"
+          if ! jq -e '.draft == false and .prerelease == false and .immutable == true' "${RUNNER_TEMP}/release.json" >/dev/null; then
+            echo "::error::${TAG} is not a published, immutable release"
+            exit 1
+          fi
+          mkdir dist
+          gh release download "${TAG}" --dir dist --pattern SHA256SUMS --pattern '*.tgz'
+          cd dist
+          tarballs=(*.tgz)
+          if [[ ${#tarballs[@]} -ne 1 || ! -f ${tarballs[0]} ]]; then
+            echo "::error::${TAG} does not carry exactly one npm tarball"
+            exit 1
+          fi
+          tarball=${tarballs[0]}
+          listed=$(awk -v name="${tarball}" '$2 == name' SHA256SUMS)
+          if [[ $(wc -l <<<"${listed}") -ne 1 || -z ${listed} ]]; then
+            echo "::error::SHA256SUMS does not list ${tarball} once"
+            exit 1
+          fi
+          sha256sum --check --strict <<<"${listed}"
+          recorded=$(jq -r --arg name "${tarball}" '.assets[] | select(.name == $name) | .digest' "${RUNNER_TEMP}/release.json")
+          if [[ ${recorded} != "sha256:$(sha256sum "${tarball}" | cut -d' ' -f1)" ]]; then
+            echo "::error::${tarball} does not match the digest of the release asset"
+            exit 1
+          fi
+          # Provenance from release.yml on main at the release commit only:
+          # anyone who can push a branch can run a modified release.yml
+          # there, so the signer's ref is pinned along with its path.
+          gh attestation verify "${tarball}" --repo "${GH_REPO}" \
+            --cert-identity "https://github.com/${GH_REPO}/.github/workflows/release.yml@refs/heads/main" \
+            --source-ref refs/heads/main --source-digest "${REVISION}" --deny-self-hosted-runners
+          manifest=$(tar -xOzf "${tarball}" package/package.json)
+          if [[ $(jq -r .name <<<"${manifest}") != "${PACKAGE}" || $(jq -r .version <<<"${manifest}") != "${VERSION}" ]]; then
+            echo "::error::${tarball} is not ${PACKAGE}@${VERSION}"
+            exit 1
+          fi
+          # The newest release is npm's latest. A re-run after a newer
+          # release gives this one a dist-tag for its line instead (a
+          # dist-tag must not parse as a semver range, so "0.4" would not do).
+          if [[ $(gh api "repos/${GH_REPO}/releases/latest" --jq .tag_name) == "${TAG}" ]]; then
+            dist_tag=latest
+          else
+            dist_tag="release-$(cut -d. -f1-2 <<<"${VERSION}")"
+          fi
+          {
+            echo "path=dist/${tarball}"
+            echo "dist_tag=${dist_tag}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.18.1
+          registry-url: https://registry.npmjs.org
+
+      # Trusted publishing exchanges this job's OIDC token for a short-lived
+      # npm credential and adds npm's provenance statement; it needs npm
+      # 11.5.1 or later.
+      - name: Publish the attested tarball
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          TAG: ${{ needs.plan.outputs.tag }}
-        run: gh workflow run publish-npm.yml --ref main -f "tag=${TAG}"
+          TARBALL: ${{ steps.tarball.outputs.path }}
+          DIST_TAG: ${{ steps.tarball.outputs.dist_tag }}
+        run: |
+          set -euo pipefail
+          node -e '
+            const [major, minor, patch] = process.argv[1].split(".").map(Number);
+            if (major < 11 || (major === 11 && (minor < 5 || (minor === 5 && patch < 1)))) {
+              console.error("npm " + process.argv[1] + " is too old for trusted publishing");
+              process.exit(1);
+            }' "$(npm --version)"
+          npm publish "${TARBALL}" --access public --tag "${DIST_TAG}"

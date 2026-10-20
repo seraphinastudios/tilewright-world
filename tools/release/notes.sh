@@ -3,7 +3,8 @@
 # digests, the Go module tag and how to verify a download. GitHub's generated
 # notes follow it.
 #
-# usage: TAG=vX.Y.Z GO_TAG=go/vX.Y.Z GH_REPO=OWNER/REPO tools/release/notes.sh ASSETS
+# usage: TAG=vX.Y.Z GO_TAG=go/vX.Y.Z GH_REPO=OWNER/REPO BRANCH=main REVISION=SHA \
+#   tools/release/notes.sh ASSETS
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
@@ -11,7 +12,7 @@ if [[ $# -ne 1 ]]; then
   exit 2
 fi
 assets=$1
-: "${TAG:?}" "${GO_TAG:?}" "${GH_REPO:?}"
+: "${TAG:?}" "${GO_TAG:?}" "${GH_REPO:?}" "${BRANCH:?}" "${REVISION:?}"
 version=${TAG#v}
 
 describe() {
@@ -47,8 +48,9 @@ echo "## Verify a download"
 echo
 echo '```sh'
 echo "sha256sum --check --ignore-missing SHA256SUMS"
-echo "gh attestation verify tilewright-${version}-linux-amd64.tar.gz \\"
-echo "  --repo ${GH_REPO} --signer-workflow ${GH_REPO}/.github/workflows/release.yml"
+echo "gh attestation verify tilewright-${version}-linux-amd64.tar.gz --repo ${GH_REPO} \\"
+echo "  --cert-identity https://github.com/${GH_REPO}/.github/workflows/release.yml@refs/heads/${BRANCH} \\"
+echo "  --source-ref refs/heads/${BRANCH} --source-digest ${REVISION}"
 echo "gh release verify-asset ${TAG} tilewright-${version}-linux-amd64.tar.gz --repo ${GH_REPO}"
 echo '```'
 echo

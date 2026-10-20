@@ -85,8 +85,9 @@ the Actions tab or with:
 gh workflow run release.yml --ref main -R seraphinastudios/tilewright-world
 ```
 
-Releases run one at a time. If several merges land while a release runs,
-the next run releases them together.
+Releases of a branch run one at a time. If several merges land while a
+release runs, the next run releases them together. Each branch queues on
+its own, so a maintenance release never displaces a release of `main`.
 
 ## The pipeline
 
@@ -98,9 +99,9 @@ the next run releases them together.
 | Build the npm package | ubuntu-24.04 | `contents: read` | `tools/build-wasm.sh`, then `npm pack` at the release version (only when `packages/tilewright-pack/package.json` exists) |
 | Package release assets | ubuntu-24.04 | `contents: read` | `tools/release/package.py assemble`: archives, license bundles, the source archive and `SHA256SUMS`; checks that all five platforms compiled the fixture to the same pack |
 | Attest build provenance | ubuntu-24.04 | `contents: read`, `id-token: write`, `attestations: write` | Verifies the assets, then `actions/attest-build-provenance` for every asset and each bare binary |
-| Publish the GitHub release | ubuntu-24.04 | `contents: write` | Checks the tag is new, publishes the release with every asset at once, then checks that it is immutable, that its tag points at the commit, and that GitHub's asset digests equal `SHA256SUMS` |
+| Publish the GitHub release | ubuntu-24.04 | `contents: write` | Creates the tag at the commit (creating a ref fails if it exists), publishes the release on it with every asset at once, then checks that it is immutable, that its tag points at the commit, and that GitHub's asset digests equal `SHA256SUMS` |
 | Tag the Go module | ubuntu-24.04 | `contents: write` | Creates `go/vX.Y.Z` at the commit, or accepts it if it is already there |
-| Start npm publication | ubuntu-24.04 | `actions: write` | Dispatches `publish-npm.yml`; skipped unless npm publication is on |
+| Publish to npm | ubuntu-24.04 | `contents: read`, `attestations: read`, `id-token: write`, environment `npm` | Publishes the release's npm tarball for a release from `main`; skipped unless npm publication is on |
 
 The build runners are `ubuntu-24.04` (x86_64 Linux), `ubuntu-24.04-arm`
 (ARM64 Linux), `macos-15-intel`, `macos-15` (Apple silicon) and
@@ -140,12 +141,19 @@ Check build provenance with the GitHub CLI. This works for any asset,
 ```sh
 gh attestation verify tilewright-X.Y.Z-linux-amd64.tar.gz \
   --repo seraphinastudios/tilewright-world \
-  --signer-workflow seraphinastudios/tilewright-world/.github/workflows/release.yml
+  --cert-identity https://github.com/seraphinastudios/tilewright-world/.github/workflows/release.yml@refs/heads/main \
+  --source-ref refs/heads/main --source-digest COMMIT
 ```
 
-It shows that the file was built by this repository's release workflow from
-the commit the release names. The attestations are public in the
-repository's Attestations page and in Sigstore's transparency log.
+`COMMIT` is the commit the release's tag points at; the release notes
+print this command with it filled in. The check shows that the file was
+built by `release.yml` running on `main` at that commit. Pin the ref: any
+writer to the repository can run a modified `release.yml` on another
+branch, and its attestations name the same workflow path with that
+branch's ref. Only `main` changes solely through reviewed pull requests.
+For a release from a maintenance branch, use that branch's ref instead,
+and see below. The attestations are public in the repository's
+Attestations page and in Sigstore's transparency log.
 
 Immutable releases also carry GitHub's own release attestation. With a
 recent GitHub CLI, check it with:
@@ -174,35 +182,47 @@ The pipeline changes no settings. It relies on:
 - **The Actions allowlist**, for checkout, setup-node, upload-artifact,
   download-artifact and attest-build-provenance.
 
+Only the default branch is protected by rulesets. A maintenance branch
+`MAJOR.MINOR.x` is not, so a release from one is only as trustworthy as
+the pushes to that branch. Before using maintenance branches, protect
+`[0-9]*.[0-9]*.x` with the same rules as `main`. Until then, only releases
+from `main` are published to npm.
+
 ## Turning on npm publication
 
-`.github/workflows/publish-npm.yml` publishes the npm tarball of a release,
-byte for byte. It first checks that the release is immutable, that the
+The "Publish to npm" job publishes a release's npm tarball, byte for byte,
+in the same run that released it, so the provenance npm records names the
+release's commit. It first checks that the release is immutable, that the
 tarball matches `SHA256SUMS` and GitHub's asset digest, that its build
-provenance was signed by `release.yml`, and that it holds
-`@seraphinastudios/tilewright-pack` at the release's version. It uses npm
-trusted publishing (OIDC), so no npm token or secret is involved. Its job is
-skipped unless the repository variable `TILEWRIGHT_NPM_PUBLISH` is `true`.
+provenance was signed by `release.yml` running on `main` at the release's
+commit, and that it holds `@seraphinastudios/tilewright-pack` at the
+release's version. It uses npm trusted publishing (OIDC), so no npm token or
+secret is involved. The job is skipped unless the repository variable
+`TILEWRIGHT_NPM_PUBLISH` is `true`, and it runs only for releases from
+`main`.
 
 To turn it on:
 
 1. Create the `seraphinastudios` organization on npmjs.com.
 2. npm configures trusted publishers in a package's settings, so the
    package has to exist first. Publish one release's tarball by hand after
-   verifying it as above: `npm publish seraphinastudios-tilewright-pack-X.Y.Z.tgz --access public`.
-3. In the package's settings on npmjs.com, add a trusted publisher:
+   verifying it as above:
+   `npm publish seraphinastudios-tilewright-pack-X.Y.Z.tgz --access public`.
+3. Create the repository environment `npm`, and under "Deployment branches
+   and tags" allow only `main`. This is required. Anyone who can push a
+   branch can run a modified `release.yml` on it, and the environment's
+   branch rule is what keeps such a run from publishing. Add required
+   reviewers as well if each publication should wait for approval.
+4. In the package's settings on npmjs.com, add a trusted publisher:
    GitHub Actions, organization `seraphinastudios`, repository
-   `tilewright-world`, workflow `publish-npm.yml`, environment `npm`.
-4. Optionally create the repository environment `npm` with required
-   reviewers. Without that, GitHub creates it on first use with no
-   protection.
+   `tilewright-world`, workflow `release.yml`, environment `npm`.
 5. Set the repository variable `TILEWRIGHT_NPM_PUBLISH` to `true`.
 
-From then on, each release dispatches `publish-npm.yml`. To publish an
-earlier release, run it by hand with that release's tag. The newest release
-gets npm's `latest` dist-tag, and an older one, such as a maintenance
-release, gets `release-MAJOR.MINOR`. To turn publishing off again, delete
-the variable or set it to anything else.
+From then on, each release from `main` is published to npm with the
+`latest` dist-tag. Releases cut before that are not published
+automatically. Publish one by hand after verifying its tarball as above.
+To turn publishing off again, delete the variable or set it to anything
+else.
 
 ## Turning on crates.io publication
 
@@ -228,14 +248,18 @@ source releases (its `docs/CRATE-RELEASE.md`):
 - **Anything before "Publish the GitHub release"**: nothing was published.
   Fix the cause. The next merge releases everything since the last
   release, or re-run the failed jobs.
-- **"Publish the GitHub release" failed before publishing**: no tag exists.
-  If a draft release was left behind, delete it, then re-run the failed
-  jobs.
+- **"Publish the GitHub release" failed before publishing**: the tag may
+  exist, but it has no release. Delete any draft release left behind, then
+  re-run the failed jobs within 30 days, while the run's artifacts last.
+  The re-run accepts a tag the failed attempt created at the same commit.
+  The ruleset keeps such a tag from being deleted, and the next release
+  counts from it, so do not leave it without its release.
 - **"Publish the GitHub release" failed its checks after publishing**: the
   release exists. Do not delete it. Read the error, for example immutable
   releases being off, and fix the setting. A release that came out mutable
   stays as it is for the owner to review.
 - **"Tag the Go module" failed**: re-run it. It creates the tag or accepts
   the one already at the commit.
-- **"Start npm publication" or `publish-npm.yml` failed**: run
-  `publish-npm.yml` by hand with the release tag.
+- **"Publish to npm" failed**: re-run it. It checks the release again and
+  publishes from the release's commit. If npm already has that version, the
+  publication succeeded earlier.
