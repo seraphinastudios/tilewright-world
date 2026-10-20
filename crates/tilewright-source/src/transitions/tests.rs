@@ -926,3 +926,86 @@ fn transitions_count_as_declared() {
         .count();
     assert_eq!(missing, 256);
 }
+
+#[test]
+fn overlong_lists_count_toward_the_document_cap() {
+    // 16 lists of 17 each break their terrain's cap, and together the
+    // document's.
+    let terrains: Vec<String> = (0..16)
+        .map(|index| {
+            format!(
+                "{{\"id\": \"t{index}\", \"protos\": [\"grass_edge_{}\"], \"transitions\": [{}]}}",
+                index + 1,
+                vec!["{}"; 17].join(", ")
+            )
+        })
+        .collect();
+    let document = format!(
+        "{{\"format\": \"tilewright.transitions/1\", \"layer\": \"floor\", \"terrains\": [{}]}}",
+        terrains.join(", ")
+    );
+    let directory = tempfile::tempdir().unwrap();
+    copy_tree(&fixture(), directory.path());
+    fs::write(directory.path().join(TRANSITIONS), document).unwrap();
+    let diagnostics = load(directory.path()).unwrap_err();
+    let count = |text: &str| {
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.message.contains(text))
+            .count()
+    };
+    assert_eq!(count("at most 256 transitions"), 1, "{diagnostics:?}");
+    assert_eq!(count("transitions must list 0 to 16 entries"), 16);
+    // No rule of an overlong list is read.
+    assert_eq!(count("missing key \"draw\""), 0);
+}
+
+#[test]
+fn every_member_of_a_list_is_checked() {
+    let messages = |document: &str| -> Vec<(&'static str, String)> {
+        let directory = tempfile::tempdir().unwrap();
+        copy_tree(&fixture(), directory.path());
+        fs::write(directory.path().join(TRANSITIONS), document).unwrap();
+        load(directory.path())
+            .unwrap_err()
+            .into_iter()
+            .map(|diagnostic| (diagnostic.code, diagnostic.message))
+            .collect()
+    };
+    // A bad prototype ID does not hide a later prototype that another
+    // terrain has.
+    let found =
+        messages(&document("").replace("[\"sand\"]", "[\"Bad\", \"sand\", \"sand\", \"water\"]"));
+    for (code, message) in [
+        ("shape.identifier", "\"Bad\" is not a valid identifier"),
+        ("ref.duplicate", "\"sand\" is listed twice"),
+        (
+            "ref.duplicate",
+            "prototype \"water\" already paints terrain \"water\"",
+        ),
+    ] {
+        assert!(
+            found
+                .iter()
+                .any(|(found, text)| *found == code && text == message),
+            "{message}: {found:?}"
+        );
+    }
+    // Nor does a bad terrain ID in `with` hide a later unknown one.
+    let found = messages(&document(&SIDES.replace(
+        "\"layer\": \"edge\"",
+        "\"layer\": \"edge\", \"with\": [\"Bad\", \"dirt\", \"dirt\", \"lava\"]",
+    )));
+    for (code, message) in [
+        ("shape.identifier", "\"Bad\" is not a valid identifier"),
+        ("ref.duplicate", "\"dirt\" is listed twice"),
+        ("ref.unresolved", "no terrain \"lava\""),
+    ] {
+        assert!(
+            found
+                .iter()
+                .any(|(found, text)| *found == code && text == message),
+            "{message}: {found:?}"
+        );
+    }
+}

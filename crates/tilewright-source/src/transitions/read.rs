@@ -70,6 +70,29 @@ fn count_within<'a>(
     within
 }
 
+/// The identifiers of a list's items, in order: `None` for an item that is
+/// not an identifier or repeats one before it. Every such item is reported,
+/// so one bad member does not hide the problems of the rest.
+fn each_identifier<'a>(reader: &Reader<'a>, items: &'a [Value]) -> Vec<Option<String>> {
+    let mut seen = BTreeSet::new();
+    items
+        .iter()
+        .map(|item| {
+            let id = reader.identifier(item)?;
+            if seen.insert(id.clone()) {
+                Some(id)
+            } else {
+                reader.report(
+                    item.span(),
+                    Code::Duplicate,
+                    format!("\"{id}\" is listed twice"),
+                );
+                None
+            }
+        })
+        .collect()
+}
+
 /// One variant: a prototype ID, or `{"proto": id, "weight": n}`.
 fn read_variant<'a>(
     reader: &Reader<'a>,
@@ -214,11 +237,14 @@ fn read_transition<'a>(
                     .then_some(items)
             });
             listed.and_then(|items| {
-                let names = reader.identifiers(value)?;
                 let mut blends = vec![false; terrains.count];
                 let mut ok = true;
-                for (name, item) in names.iter().zip(items) {
-                    match terrains.ids.get(name) {
+                for (name, item) in each_identifier(reader, items).into_iter().zip(items) {
+                    let Some(name) = name else {
+                        ok = false;
+                        continue;
+                    };
+                    match terrains.ids.get(&name) {
                         Some(&index) if index == terrain => {
                             reader.report(
                                 item.span(),
@@ -414,16 +440,26 @@ pub(crate) fn read_transitions(
         }
         let id = ids.get(index).cloned().flatten();
         let protos = reader.required(item, "protos").and_then(|value| {
-            let count = reader.array(value)?.len();
-            if !count_within(&reader, value, count, (1, MAXIMUM_TERRAIN_PROTOS), "protos") {
+            let items = reader.array(value)?;
+            if !count_within(
+                &reader,
+                value,
+                items.len(),
+                (1, MAXIMUM_TERRAIN_PROTOS),
+                "protos",
+            ) {
                 return None;
             }
-            let names = reader.identifiers(value)?;
+            let mut names = Vec::with_capacity(items.len());
             let mut ok = true;
-            for (name, item) in names.iter().zip(value.as_array().unwrap_or_default()) {
+            for (name, item) in each_identifier(&reader, items).into_iter().zip(items) {
+                let Some(name) = name else {
+                    ok = false;
+                    continue;
+                };
                 if proto(&reader, references, item).is_none() {
                     ok = false;
-                } else if let Some(&other) = by_proto.get(name) {
+                } else if let Some(&other) = by_proto.get(&name) {
                     let owner = ids
                         .get(other)
                         .and_then(Option::as_deref)
@@ -437,34 +473,34 @@ pub(crate) fn read_transitions(
                 } else {
                     by_proto.insert(name.clone(), index);
                 }
+                names.push(name);
             }
             ok.then_some(names)
         });
         let start = transitions.len();
         if let Some(value) = item.get("transitions") {
             match reader.array(value) {
-                Some(list)
-                    if !count_within(
+                Some(list) => {
+                    // Every list counts toward the document's cap, one that
+                    // breaks the terrain's cap too.
+                    declared = declared.saturating_add(list.len());
+                    let over_document = declared > MAXIMUM_TRANSITIONS;
+                    if over_document && !capped {
+                        reader.report(
+                            value.span(),
+                            Code::Range,
+                            format!("a document has at most {MAXIMUM_TRANSITIONS} transitions"),
+                        );
+                        capped = true;
+                    }
+                    let within_terrain = count_within(
                         &reader,
                         value,
                         list.len(),
                         (0, MAXIMUM_TERRAIN_TRANSITIONS),
                         "transitions",
-                    ) =>
-                {
-                    ok = false;
-                }
-                Some(list) => {
-                    declared = declared.saturating_add(list.len());
-                    if declared > MAXIMUM_TRANSITIONS {
-                        if !capped {
-                            reader.report(
-                                value.span(),
-                                Code::Range,
-                                format!("a document has at most {MAXIMUM_TRANSITIONS} transitions"),
-                            );
-                            capped = true;
-                        }
+                    );
+                    if over_document || !within_terrain {
                         ok = false;
                     } else {
                         for entry in list {
