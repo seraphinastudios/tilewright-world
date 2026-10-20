@@ -158,10 +158,7 @@ func TestTheNameDigestBindsToThePathAndIsLowercase(t *testing.T) {
 	directory := t.TempDir()
 	path := validFixture(t, directory, "")
 	stem := strings.TrimSuffix(filepath.Base(path), ".twpack")
-	upper := validFixture(t, directory, strings.ToUpper(stem)+".twpack")
-	if upper == path {
-		t.Skip("the file system ignores case")
-	}
+	upper := validFixture(t, t.TempDir(), strings.ToUpper(stem)+".twpack")
 	_, err := openPack(t, upper, Limits{}).Verify(ctx, Limits{})
 	expectCode(t, "an uppercase digest name", err, CodeDigest)
 
@@ -188,7 +185,8 @@ func TestPathsAreEncodedForSQLite(t *testing.T) {
 	for _, name := range []string{"with space", "a?b", "a#b", "100%", "a&_pragma=x", "é", "\xff", "file:x"} {
 		directory := filepath.Join(t.TempDir(), name)
 		if err := os.Mkdir(directory, 0o700); err != nil {
-			t.Skipf("the file system refuses %q: %v", name, err)
+			t.Logf("the file system refuses %q: %v", name, err)
+			continue
 		}
 		pack := openPack(t, validFixture(t, directory, ""), Limits{})
 		if _, err := pack.Verify(ctx, Limits{}); err != nil {
@@ -281,5 +279,18 @@ func TestZeroLimitsTakeTheDefaults(t *testing.T) {
 	limits := Limits{}.withDefaults()
 	if limits.MaxPackBytes != 8<<30 || limits.MaxDecodedBytes != 8<<30 {
 		t.Fatalf("%+v", limits)
+	}
+}
+
+func TestVerificationCapsZonesPerPlane(t *testing.T) {
+	// 250,001 root zones in one plane: more than its one source document
+	// holds, so the plane's parent chains are not followed.
+	path := tampered(t, `DELETE FROM zones WHERE plane = 'vault';
+		WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 250001)
+		INSERT INTO zones SELECT 'vault', 'z' || i, NULL, '{"id":"z' || i || '"}' FROM n;`)
+	_, err := openPack(t, path, Limits{}).Verify(context.Background(), Limits{})
+	expectCode(t, "a plane with too many zones", err, CodeZone)
+	if !strings.Contains(err.Error(), "more zones") {
+		t.Fatal(err)
 	}
 }

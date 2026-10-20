@@ -874,6 +874,7 @@ impl Pack {
             ));
         }
         self.check_rows()?;
+        self.check_zone_trees()?;
         self.check_string_encoding()?;
         self.check_documents()?;
         self.check_stairwells()?;
@@ -994,19 +995,6 @@ impl Pack {
                 "a zone has an invalid ID or names an unknown plane or parent",
             ),
             (
-                // Zones reached from a root by following children: with one
-                // parent each, a zone is reached once or, on or below a
-                // cycle, never.
-                "WITH RECURSIVE children(plane, parent, id) AS MATERIALIZED \
-                 (SELECT plane, parent, id FROM zones WHERE parent IS NOT NULL), \
-                 rooted(plane, id) AS (SELECT plane, id FROM zones WHERE parent IS NULL \
-                 UNION ALL SELECT c.plane, c.id FROM rooted r JOIN children c ON c.plane = r.plane AND c.parent = r.id) \
-                 SELECT (SELECT count(*) FROM zones) - (SELECT count(*) FROM rooted)"
-                    .to_owned(),
-                ErrorCode::Zone,
-                "zone parents form a cycle",
-            ),
-            (
                 format!(
                     "SELECT count(*) FROM anchors a WHERE {} OR NOT EXISTS (SELECT 1 FROM planes p WHERE p.id = a.plane) OR typeof(a.layer) != 'integer' OR a.layer NOT BETWEEN -2147483648 AND 2147483647 OR typeof(a.x) != 'integer' OR a.x NOT BETWEEN -{MAX_SAFE_INTEGER} AND {MAX_SAFE_INTEGER} OR typeof(a.y) != 'integer' OR a.y NOT BETWEEN -{MAX_SAFE_INTEGER} AND {MAX_SAFE_INTEGER}",
                     not_identifier("a.id")
@@ -1064,6 +1052,51 @@ impl Pack {
             let count: i64 = self.connection.query_row(&query, [], |row| row.get(0))?;
             if count != 0 {
                 return Err(Error::Rejected(code, problem.into()));
+            }
+        }
+        Ok(())
+    }
+
+    /// Checks that each plane has at most as many zones as one source
+    /// document holds, and that their parent chains end at a root. Planes
+    /// are checked one at a time, so what SQLite keeps while following the
+    /// chains is bounded by that limit rather than by the pack.
+    /// [`Pack::check_rows`] has already checked that every zone's plane
+    /// and parent exist.
+    fn check_zone_trees(&self) -> Result<(), Error> {
+        let limit = i64::try_from(Limits::default().max_array_items).unwrap_or(i64::MAX);
+        let mut planes = self
+            .connection
+            .prepare("SELECT id FROM planes ORDER BY id")?;
+        let mut count = self
+            .connection
+            .prepare("SELECT count(*) FROM zones WHERE plane = ?1")?;
+        // The plane's zones reached from a root by following children: with
+        // one parent each, a zone is reached once or, on or below a cycle,
+        // never.
+        let mut unrooted = self.connection.prepare(
+            "WITH RECURSIVE children(parent, id) AS MATERIALIZED \
+             (SELECT parent, id FROM zones WHERE plane = ?1 AND parent IS NOT NULL), \
+             rooted(id) AS (SELECT id FROM zones WHERE plane = ?1 AND parent IS NULL \
+             UNION ALL SELECT c.id FROM rooted r JOIN children c ON c.parent = r.id) \
+             SELECT (SELECT count(*) FROM zones WHERE plane = ?1) - (SELECT count(*) FROM rooted)",
+        )?;
+        let mut rows = planes.query([])?;
+        while let Some(row) = rows.next()? {
+            let plane: String = row.get(0)?;
+            let zones: i64 = count.query_row([&plane], |row| row.get(0))?;
+            if zones > limit {
+                return Err(Error::Rejected(
+                    ErrorCode::Zone,
+                    format!("plane {plane} has more zones than a source document holds"),
+                ));
+            }
+            let missing: i64 = unrooted.query_row([&plane], |row| row.get(0))?;
+            if missing != 0 {
+                return Err(Error::Rejected(
+                    ErrorCode::Zone,
+                    "zone parents form a cycle".into(),
+                ));
             }
         }
         Ok(())

@@ -22,7 +22,15 @@
 //	if _, err := pack.Verify(ctx, twpack.Limits{}); err != nil {
 //		return err
 //	}
-//	chunk, ok, err := pack.Chunk(ctx, "overworld", 0, 0, 0)
+//	chunk, found, err := pack.Chunk(ctx, "overworld", 0, 0, 0)
+//	if err != nil {
+//		return err
+//	}
+//	if found {
+//		fmt.Println(len(chunk.Objects), "objects")
+//	}
+//
+// The package example reads every chunk of every plane.
 //
 // Errors carry a stable Code, shared with the Rust reader; CodeOf returns
 // it. Errors from a canceled or expired context are the context's own.

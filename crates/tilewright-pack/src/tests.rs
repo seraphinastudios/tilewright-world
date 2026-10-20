@@ -1681,3 +1681,18 @@ fn verification_caps_stairwells_per_plane() {
     let error = Pack::open(&copy).unwrap().verify().unwrap_err();
     assert!(error.to_string().contains("more stairwells"), "{error}");
 }
+
+#[test]
+fn verification_caps_zones_per_plane() {
+    // 250,001 root zones in one plane: more than its one source document
+    // holds, so the plane's parent chains are not followed.
+    let (_directory, copy) = tampered(
+        "zones.twpack",
+        "DELETE FROM zones WHERE plane = 'vault'; \
+         WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 250001) \
+         INSERT INTO zones SELECT 'vault', 'z' || i, NULL, '{\"id\":\"z' || i || '\"}' FROM n;",
+    );
+    let error = Pack::open(&copy).unwrap().verify().unwrap_err();
+    assert_eq!(error.code(), super::ErrorCode::Zone);
+    assert!(error.to_string().contains("more zones"), "{error}");
+}

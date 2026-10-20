@@ -149,6 +149,9 @@ func (p *Pack) verifyContents(ctx context.Context, maxDecoded uint64) (Summary, 
 	if err := p.checkRows(ctx); err != nil {
 		return Summary{}, err
 	}
+	if err := p.checkZoneTrees(ctx); err != nil {
+		return Summary{}, err
+	}
 	if err := p.checkStringEncoding(ctx); err != nil {
 		return Summary{}, err
 	}
@@ -267,17 +270,6 @@ func (p *Pack) checkRows(ctx context.Context) error {
 			CodeZone, "a zone has an invalid ID or names an unknown plane or parent",
 		},
 		{
-			// Zones reached from a root by following children: with one
-			// parent each, a zone is reached once or, on or below a cycle,
-			// never.
-			"WITH RECURSIVE children(plane, parent, id) AS MATERIALIZED " +
-				"(SELECT plane, parent, id FROM zones WHERE parent IS NOT NULL), " +
-				"rooted(plane, id) AS (SELECT plane, id FROM zones WHERE parent IS NULL " +
-				"UNION ALL SELECT c.plane, c.id FROM rooted r JOIN children c ON c.plane = r.plane AND c.parent = r.id) " +
-				"SELECT (SELECT count(*) FROM zones) - (SELECT count(*) FROM rooted)",
-			CodeZone, "zone parents form a cycle",
-		},
-		{
 			fmt.Sprintf("SELECT count(*) FROM anchors a WHERE %s OR NOT EXISTS (SELECT 1 FROM planes p WHERE p.id = a.plane) OR typeof(a.layer) != 'integer' OR a.layer NOT BETWEEN -2147483648 AND 2147483647 OR typeof(a.x) != 'integer' OR a.x NOT BETWEEN -%[2]s AND %[2]s OR typeof(a.y) != 'integer' OR a.y NOT BETWEEN -%[2]s AND %[2]s",
 				notIdentifier("a.id"), safe),
 			CodeAnchor, "an anchor has an invalid ID, layer or position, or names an unknown plane",
@@ -323,6 +315,51 @@ func (p *Pack) checkRows(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// checkZoneTrees checks that each plane has at most as many zones as one
+// source document holds, and that their parent chains end at a root.
+// Planes are checked one at a time, so what SQLite keeps while following
+// the chains is bounded by that limit rather than by the pack. checkRows has
+// already checked that every zone's plane and parent exist.
+func (p *Pack) checkZoneTrees(ctx context.Context) error {
+	count, err := p.conn.PrepareContext(ctx, "SELECT count(*) FROM zones WHERE plane = ?1")
+	if err != nil {
+		return sqliteError(ctx, err)
+	}
+	defer count.Close()
+	// The plane's zones reached from a root by following children: with one
+	// parent each, a zone is reached once or, on or below a cycle, never.
+	unrooted, err := p.conn.PrepareContext(ctx,
+		"WITH RECURSIVE children(parent, id) AS MATERIALIZED "+
+			"(SELECT parent, id FROM zones WHERE plane = ?1 AND parent IS NOT NULL), "+
+			"rooted(id) AS (SELECT id FROM zones WHERE plane = ?1 AND parent IS NULL "+
+			"UNION ALL SELECT c.id FROM rooted r JOIN children c ON c.parent = r.id) "+
+			"SELECT (SELECT count(*) FROM zones WHERE plane = ?1) - (SELECT count(*) FROM rooted)")
+	if err != nil {
+		return sqliteError(ctx, err)
+	}
+	defer unrooted.Close()
+	return eachRow(ctx, p.conn, "SELECT id FROM planes ORDER BY id", nil, func(scan func(...any) error) error {
+		var plane string
+		if err := scan(&plane); err != nil {
+			return err
+		}
+		var zones, missing int64
+		if err := count.QueryRowContext(ctx, plane).Scan(&zones); err != nil {
+			return err
+		}
+		if zones > maxArrayItems {
+			return reject(CodeZone, "plane "+plane+" has more zones than a source document holds")
+		}
+		if err := unrooted.QueryRowContext(ctx, plane).Scan(&missing); err != nil {
+			return err
+		}
+		if missing != 0 {
+			return reject(CodeZone, "zone parents form a cycle")
+		}
+		return nil
+	})
 }
 
 // checkStringEncoding checks that every string is UTF-8, one bounded row at

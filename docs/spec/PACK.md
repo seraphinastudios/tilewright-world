@@ -179,7 +179,10 @@ A full verification also:
   values, and every string is UTF-8 text of at most 1 MiB without NUL;
 - checks that plane, zone, anchor, stairwell and definition keys are
   identifiers; plane kinds, and a chunk size of 32 as format 1 requires; zone
-  planes, parents and that parent chains end at a root; anchor planes, layers
+  planes, parents and that parent chains end at a root, following one
+  plane's chains at a time after checking that the plane has at most
+  250,000 zones, the array limit of the one source document that holds
+  them; anchor planes, layers
   and positions; stairwell planes; that every
   `stairwell_steps` row names a stairwell of its plane and a `proto`
   definition, with a 32-bit layer, a position within ±9,007,199,254,740,991

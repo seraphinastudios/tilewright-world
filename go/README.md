@@ -8,27 +8,53 @@ verifies all of it. It is pure Go, with no cgo: SQLite comes from
 reads packs; the Rust crates compile them.
 
 ```go
-import "github.com/seraphinastudios/tilewright-world/go/twpack"
+import (
+	"context"
+	"fmt"
 
-pack, err := twpack.Open(ctx, "dist/<sha256>.twpack", twpack.Limits{})
-if err != nil {
-	return err
-}
-defer pack.Close()
-summary, err := pack.Verify(ctx, twpack.Limits{})
-if err != nil {
-	return err
-}
-profile, err := pack.Profile(ctx)
-for plane, err := range pack.Planes(ctx) {
-	for layer, err := range pack.Layers(ctx, plane.ID) {
-		for key, err := range pack.ChunkKeys(ctx, plane.ID, layer) {
-			chunk, _, err := pack.Chunk(ctx, plane.ID, layer, key.CX, key.CY)
-			// chunk.Palette, chunk.Ground, chunk.Objects, ...
+	"github.com/seraphinastudios/tilewright-world/go/twpack"
+)
+
+// load opens and verifies a pack, then reads every chunk of every plane.
+func load(ctx context.Context, path string) error {
+	pack, err := twpack.Open(ctx, path, twpack.Limits{})
+	if err != nil {
+		return err
+	}
+	defer pack.Close()
+	if _, err := pack.Verify(ctx, twpack.Limits{}); err != nil {
+		return err
+	}
+	profile, err := pack.Profile(ctx)
+	if err != nil {
+		return err
+	}
+	for plane, err := range pack.Planes(ctx) {
+		if err != nil {
+			return err
+		}
+		for layer, err := range pack.Layers(ctx, plane.ID) {
+			if err != nil {
+				return err
+			}
+			for key, err := range pack.ChunkKeys(ctx, plane.ID, layer) {
+				if err != nil {
+					return err
+				}
+				chunk, _, err := pack.Chunk(ctx, plane.ID, layer, key.CX, key.CY)
+				if err != nil {
+					return err
+				}
+				fmt.Println(plane.ID, layer, key.CX, key.CY, len(chunk.Ground), "of",
+					len(profile.GroundLayers), "ground layers,", len(chunk.Objects), "objects")
+			}
 		}
 	}
+	return nil
 }
 ```
+
+This is the package example, so `go test` compiles it.
 
 The module needs Go 1.26 or later; `go.mod` sets `toolchain go1.27.2` for
 developing it.
