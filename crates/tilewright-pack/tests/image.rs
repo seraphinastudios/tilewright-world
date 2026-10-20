@@ -159,6 +159,24 @@ fn an_image_is_exactly_its_length() {
         )),
         ErrorCode::Io
     );
+    // A declared length of zero is checked too.
+    assert_eq!(
+        code(Pack::open_from(
+            bytes.as_slice(),
+            0,
+            None,
+            &VerifyLimits::default()
+        )),
+        ErrorCode::FileLength
+    );
+    let failing = Failing {
+        bytes: &[],
+        before: 0,
+    };
+    assert_eq!(
+        code(Pack::open_from(failing, 0, None, &VerifyLimits::default())),
+        ErrorCode::Io
+    );
     // Bytes past the pages are the file's own trailing bytes.
     assert_eq!(
         code(Pack::open_bytes(&longer, None, &VerifyLimits::default())),

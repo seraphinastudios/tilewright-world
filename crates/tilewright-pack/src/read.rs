@@ -34,7 +34,7 @@ use tilewright_source::{
 mod identities;
 mod rows;
 pub use identities::Identity;
-pub use rows::{Anchor, Definition, Plane, Zone};
+pub use rows::{Anchor, Definition, Page, Plane, Zone};
 
 /// The page size of every pack.
 const PAGE_SIZE: i64 = 4096;
@@ -510,7 +510,7 @@ fn utf8_column(
 /// A stairwell from a row of `id, document`, bounded in SQL by
 /// [`bounded_identifier`] and [`bounded_text`] (NULL when out of bounds),
 /// after checking that the document has the row's ID.
-fn stairwell_row(row: &rusqlite::Row<'_>) -> Result<Stairwell, Error> {
+pub(super) fn stairwell_row(row: &rusqlite::Row<'_>) -> Result<Stairwell, Error> {
     let id = utf8_column(row, 0, ErrorCode::Stairwell)?;
     let stairwell = stored_stairwell(&stored_document(
         utf8_column(row, 1, ErrorCode::Stairwell)?,
@@ -624,36 +624,35 @@ impl Pack {
         let mut connection = Connection::open_in_memory_with_flags(
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
+        let mut image = Filled {
+            inner: read,
+            missing: false,
+            failure: None,
+        };
         // An empty image is an empty database, as an empty file is; SQLite
         // cannot allocate a copy of no bytes.
         if size > 0 {
-            let mut image = Counted {
-                read,
-                started: false,
-                remaining: size,
-                failure: None,
-            };
-            let loaded =
-                connection.deserialize_read_exact(rusqlite::MAIN_DB, &mut image, size, true);
-            // SQLite reports a failed read as its own error; it is the
-            // image that could not be read.
-            if let Some(error) = image.failure {
-                return Err(Error::Io(error));
-            }
-            // Once reading started, SQLite has its copy, so an image that
-            // ended early is what failed.
-            if loaded.is_err() && image.started && image.remaining > 0 {
-                return Err(Error::Io(std::io::ErrorKind::UnexpectedEof.into()));
-            }
-            loaded?;
-            // The image is exactly `length` bytes: one that goes on is not
-            // the pack its length describes.
-            if std::io::Read::read(&mut image, &mut [0])? != 0 {
-                return Err(Error::Rejected(
-                    ErrorCode::FileLength,
-                    format!("the pack image is longer than {length} bytes"),
-                ));
-            }
+            // `Filled` never fails, so SQLite always takes ownership of its
+            // copy and frees it with the connection, even when the image
+            // could not be read.
+            connection.deserialize_read_exact(rusqlite::MAIN_DB, &mut image, size, true)?;
+        }
+        if let Some(error) = image.failure {
+            return Err(Error::Io(error));
+        }
+        if image.missing {
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("the pack image ends before its {length} bytes"),
+            )));
+        }
+        // The image is exactly `length` bytes: one that goes on is not the
+        // pack its length describes.
+        if read_some(&mut image.inner)? {
+            return Err(Error::Rejected(
+                ErrorCode::FileLength,
+                format!("the pack image is longer than {length} bytes"),
+            ));
         }
         harden(&connection)?;
         check_identity(&connection)?;
@@ -771,29 +770,6 @@ impl Pack {
         ))?;
         let mut rows = statement.query(params![maximum_document_bytes(), plane, id])?;
         rows.next()?.map(stairwell_row).transpose()
-    }
-
-    /// Calls `visit` with each stairwell of a plane, in ID order. One
-    /// stored document is held at a time.
-    ///
-    /// # Errors
-    /// Returns an error if SQLite fails, a stored stairwell is invalid, or
-    /// `visit` fails.
-    pub fn visit_stairwells(
-        &self,
-        plane: &str,
-        visit: &mut dyn FnMut(Stairwell) -> Result<(), Error>,
-    ) -> Result<(), Error> {
-        let mut statement = self.connection.prepare(&format!(
-            "SELECT {}, {} FROM stairwells WHERE plane = ?2 ORDER BY id",
-            bounded_identifier("id"),
-            bounded_text("document"),
-        ))?;
-        let mut rows = statement.query(params![maximum_document_bytes(), plane])?;
-        while let Some(row) = rows.next()? {
-            visit(stairwell_row(row)?)?;
-        }
-        Ok(())
     }
 
     /// The stairwell step on a tile of a plane, if any. It checks the shape
@@ -1600,30 +1576,41 @@ impl Pack {
     }
 }
 
-/// A pack image being read into SQLite's copy: whether reading started,
-/// how much of the image is left, and the error reading it failed with, if
-/// any.
-struct Counted<R> {
-    read: R,
-    started: bool,
-    remaining: usize,
+/// A pack image being read into SQLite's copy. Reading it never fails:
+/// once the image fails or ends, the rest of the copy is zeros, and whether
+/// it ended early or the error it failed with is kept for the caller.
+/// `rusqlite` frees its copy only once the copy is read in full.
+struct Filled<R> {
+    inner: R,
+    missing: bool,
     failure: Option<std::io::Error>,
 }
 
-impl<R: std::io::Read> std::io::Read for Counted<R> {
+impl<R: std::io::Read> std::io::Read for Filled<R> {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        self.started = true;
-        match self.read.read(buffer) {
-            Ok(read) => {
-                self.remaining = self.remaining.saturating_sub(read);
-                Ok(read)
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        while !self.missing && self.failure.is_none() {
+            match self.inner.read(buffer) {
+                Ok(0) => self.missing = true,
+                Ok(read) => return Ok(read),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => self.failure = Some(error),
             }
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => Err(error),
-            Err(error) => {
-                let kind = error.kind();
-                self.failure = Some(error);
-                Err(kind.into())
-            }
+        }
+        buffer.fill(0);
+        Ok(buffer.len())
+    }
+}
+
+/// Whether `read` yields at least one more byte.
+fn read_some(read: &mut impl std::io::Read) -> Result<bool, Error> {
+    loop {
+        match read.read(&mut [0]) {
+            Ok(read) => return Ok(read != 0),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(Error::Io(error)),
         }
     }
 }

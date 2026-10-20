@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 use super::{
-    ChunkData, FieldRecord, ObjectRecord, Pack, PortalRecord, VerifyLimits, compile, decode_chunk,
-    decode_record, encode_chunk, encode_record, write_pack,
+    ChunkData, FieldRecord, ObjectRecord, Pack, Page, PortalRecord, VerifyLimits, compile,
+    decode_chunk, decode_record, encode_chunk, encode_record, write_pack,
 };
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -1376,13 +1376,24 @@ fn stairwells_layer_heights_and_list_fields_compile_and_read_back() {
     assert!(pack.stairwell("overworld", "nowhere").unwrap().is_none());
     assert!(pack.stairwell("vault", "cliff.path").unwrap().is_none());
     let mut visited = Vec::new();
-    pack.visit_stairwells("overworld", &mut |stairwell| {
+    pack.visit_stairwells("overworld", Page::all(), &mut |stairwell| {
         visited.push(stairwell.id);
         Ok(())
     })
     .unwrap();
     assert_eq!(visited, ["cave.chute", "cliff.path", "tower.stairs"]);
-    pack.visit_stairwells("vault", &mut |_| panic!("the vault has none"))
+    let mut paged = Vec::new();
+    let page = Page {
+        after: Some("cave.chute"),
+        limit: 1,
+    };
+    pack.visit_stairwells("overworld", page, &mut |stairwell| {
+        paged.push(stairwell.id);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(paged, ["cliff.path"]);
+    pack.visit_stairwells("vault", Page::all(), &mut |_| panic!("the vault has none"))
         .unwrap();
 
     assert_eq!(
@@ -1554,7 +1565,10 @@ fn stored_stairwell_documents_have_the_source_shape_and_agree_with_their_rows() 
     );
     let pack = Pack::open(&copy).unwrap();
     assert!(pack.stairwell("overworld", "cave.chute").is_err());
-    assert!(pack.visit_stairwells("overworld", &mut |_| Ok(())).is_err());
+    assert!(
+        pack.visit_stairwells("overworld", Page::all(), &mut |_| Ok(()))
+            .is_err()
+    );
     // An ID longer than an identifier is not loaded.
     let (_directory, copy) = tampered(
         "read-long-id.twpack",
@@ -1567,7 +1581,10 @@ fn stored_stairwell_documents_have_the_source_shape_and_agree_with_their_rows() 
         error.to_string().contains("disagrees with its row"),
         "{error}"
     );
-    assert!(pack.visit_stairwells("overworld", &mut |_| Ok(())).is_err());
+    assert!(
+        pack.visit_stairwells("overworld", Page::all(), &mut |_| Ok(()))
+            .is_err()
+    );
     let (_directory, copy) = tampered(
         "read-step.twpack",
         "UPDATE stairwell_steps SET proto = 'Not a proto' WHERE stairwell = 'cave.chute' AND step = 0",

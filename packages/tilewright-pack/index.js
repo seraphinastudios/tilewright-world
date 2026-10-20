@@ -16,33 +16,51 @@ export class PackError extends Error {
   }
 }
 
-let initialized = false;
-let initializing;
+// The module is "unloaded", "loading" while initialize() waits for it, or
+// "ready". One instance is ever installed: a second would replace the
+// exports that open packs still call.
+let state = "unloaded";
+let loading;
 
 /**
- * Loads the WebAssembly module once. Without `source` it is fetched from
- * beside this file, which browsers and bundlers that understand
- * `new URL(..., import.meta.url)` resolve; elsewhere, such as in Node, pass
- * the module's bytes, a `WebAssembly.Module`, a URL or a `Response`.
+ * Loads the WebAssembly module once; later calls return the same promise.
+ * Without `source` it is fetched from beside this file, which browsers and
+ * bundlers that understand `new URL(..., import.meta.url)` resolve;
+ * elsewhere, such as in Node, pass the module's bytes, a
+ * `WebAssembly.Module`, a URL or a `Response`.
  */
 export function initialize(source) {
-  initializing ??= initialize_(source === undefined ? undefined : { module_or_path: source }).then(
-    () => {
-      initialized = true;
-    },
-    (error) => {
-      initializing = undefined;
-      throw error;
-    },
-  );
-  return initializing;
+  if (state === "ready") {
+    return Promise.resolve();
+  }
+  if (state === "unloaded") {
+    state = "loading";
+    loading = initialize_(source === undefined ? undefined : { module_or_path: source }).then(
+      () => {
+        state = "ready";
+      },
+      (error) => {
+        state = "unloaded";
+        loading = undefined;
+        throw error;
+      },
+    );
+  }
+  return loading;
 }
 
-/** Loads the WebAssembly module from its bytes or a compiled module, synchronously. */
+/**
+ * Loads the WebAssembly module from its bytes or a compiled module,
+ * synchronously; it does nothing once the module is loaded, and throws
+ * while `initialize()` is loading it.
+ */
 export function initializeSync(source) {
-  if (!initialized) {
+  if (state === "loading") {
+    throw new Error("initialize() is loading the module; await it instead");
+  }
+  if (state === "unloaded") {
     initSync({ module: source });
-    initialized = true;
+    state = "ready";
   }
 }
 
@@ -62,6 +80,9 @@ const U32 = [0, 2 ** 32 - 1];
 const I64 = [-(2n ** 63n), 2n ** 63n - 1n];
 const U64 = [0n, 2n ** 64n - 1n];
 const DEFAULT_MAX_PACK_BYTES = 8n * 2n ** 30n;
+
+// Rows a listing reads at a time.
+const PAGE = 64;
 
 // wasm-bindgen converts numbers to 32-bit integers silently, so each is
 // checked here: an integer number or bigint within the parameter's range.
@@ -89,15 +110,37 @@ function limit(value, name) {
   return value === undefined ? undefined : big(value, name, U64);
 }
 
+function options(value, name) {
+  if (value === undefined) {
+    return {};
+  }
+  argument(typeof value === "object" && value !== null, `${name} must be an object`);
+  return value;
+}
+
+// Brand checks that hold for buffers from another realm, such as an iframe:
+// the byteLength getter throws for anything else.
+const bufferLengths = [ArrayBuffer, globalThis.SharedArrayBuffer]
+  .filter((type) => typeof type === "function")
+  .map((type) => Object.getOwnPropertyDescriptor(type.prototype, "byteLength").get);
+
+function isBuffer(value) {
+  return bufferLengths.some((length) => {
+    try {
+      length.call(value);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
 function bytesOf(bytes) {
-  if (bytes instanceof Uint8Array) {
-    return bytes;
+  if (ArrayBuffer.isView(bytes)) {
+    return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   }
-  if (bytes instanceof ArrayBuffer) {
-    return new Uint8Array(bytes);
-  }
-  argument(ArrayBuffer.isView(bytes), "bytes must be a Uint8Array, an ArrayBuffer or a view of one");
-  return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  argument(isBuffer(bytes), "bytes must be an ArrayBuffer or a view of one, such as a Uint8Array");
+  return new Uint8Array(bytes);
 }
 
 // A trap, such as running out of memory, stops the module in the middle of
@@ -131,13 +174,13 @@ function rethrown(error) {
  * have, as 64 lowercase hex digits, which `verify` checks;
  * `options.maxPackBytes` is the pack size limit, 8 GiB by default.
  */
-export function openPack(bytes, options = {}) {
-  if (!initialized) {
+export function openPack(bytes, settings) {
+  if (state !== "ready") {
     throw new Error("call initialize() or initializeSync() before openPack()");
   }
   usable();
   const image = bytesOf(bytes);
-  const { digest, maxPackBytes } = options;
+  const { digest, maxPackBytes } = options(settings, "options");
   if (digest !== undefined) {
     argument(
       typeof digest === "string" && /^[0-9a-f]{64}$/.test(digest),
@@ -169,6 +212,23 @@ export class Pack {
   constructor(reader) {
     argument(reader instanceof Reader, "open a pack with openPack()");
     this.#reader = reader;
+  }
+
+  /**
+   * The rows of a listing, read a page at a time: `fetch` reads the page
+   * after a key, and `keyOf` gives a row's key. Only one page is held, and
+   * the reader's keys rise with every page, so the walk ends.
+   */
+  *#rows(fetch, keyOf) {
+    let after;
+    for (;;) {
+      const page = this.#call((reader) => fetch(reader, after));
+      if (page.length === 0) {
+        return;
+      }
+      yield* page;
+      after = keyOf(page[page.length - 1]);
+    }
   }
 
   #call(read) {
@@ -224,7 +284,10 @@ export class Pack {
   }
 
   planes() {
-    return this.#call((reader) => reader.planes());
+    return this.#rows(
+      (reader, after) => reader.planes(after, PAGE),
+      (plane) => plane.id,
+    );
   }
 
   zone(plane, id) {
@@ -235,7 +298,10 @@ export class Pack {
 
   zones(plane) {
     text(plane, "plane");
-    return this.#call((reader) => reader.zones(plane));
+    return this.#rows(
+      (reader, after) => reader.zones(plane, after, PAGE),
+      (zone) => zone.id,
+    );
   }
 
   anchor(plane, id) {
@@ -246,7 +312,10 @@ export class Pack {
 
   anchors(plane) {
     text(plane, "plane");
-    return this.#call((reader) => reader.anchors(plane));
+    return this.#rows(
+      (reader, after) => reader.anchors(plane, after, PAGE),
+      (anchor) => anchor.id,
+    );
   }
 
   stairwell(plane, id) {
@@ -257,7 +326,10 @@ export class Pack {
 
   stairwells(plane) {
     text(plane, "plane");
-    return this.#call((reader) => reader.stairwells(plane));
+    return this.#rows(
+      (reader, after) => reader.stairwells(plane, after, PAGE),
+      (stairwell) => stairwell.id,
+    );
   }
 
   stairwellStep(plane, layer, x, y) {
@@ -277,18 +349,27 @@ export class Pack {
     if (type !== undefined) {
       text(type, "type");
     }
-    return this.#call((reader) => reader.definitions(type));
+    return this.#rows(
+      (reader, after) => reader.definitions(type, after?.[0], after?.[1], PAGE),
+      (definition) => [definition.type, definition.id],
+    );
   }
 
   layers(plane) {
     text(plane, "plane");
-    return this.#call((reader) => reader.layers(plane));
+    return this.#rows(
+      (reader, after) => reader.layers(plane, after, PAGE),
+      (layer) => layer,
+    );
   }
 
   chunkKeys(plane, layer) {
     text(plane, "plane");
     int(layer, "layer", I32);
-    return this.#call((reader) => reader.chunkKeys(plane, layer));
+    return this.#rows(
+      (reader, after) => reader.chunkKeys(plane, layer, after?.[0], after?.[1], PAGE),
+      (key) => [BigInt(key.cx), BigInt(key.cy)],
+    );
   }
 
   chunk(plane, layer, cx, cy) {
@@ -308,9 +389,10 @@ export class Pack {
     return this.#call((reader) => reader.object(uid));
   }
 
-  verify(limits = {}) {
-    const maxPackBytes = limit(limits.maxPackBytes, "limits.maxPackBytes");
-    const maxDecodedBytes = limit(limits.maxDecodedBytes, "limits.maxDecodedBytes");
+  verify(limits) {
+    const { maxPackBytes: pack, maxDecodedBytes: decoded } = options(limits, "limits");
+    const maxPackBytes = limit(pack, "limits.maxPackBytes");
+    const maxDecodedBytes = limit(decoded, "limits.maxDecodedBytes");
     return this.#call((reader) => reader.verify(maxPackBytes, maxDecodedBytes));
   }
 

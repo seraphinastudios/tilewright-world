@@ -13,8 +13,8 @@
 
 use js_sys::{Array, Int32Array, Object, Reflect, Uint8Array, Uint16Array, Uint32Array};
 use tilewright_pack::{
-    Anchor, ChunkData, Definition, Error, FieldRecord, ObjectRecord, Pack, Plane, PortalRecord,
-    Summary, UidLocation, VerifyLimits, Zone,
+    Anchor, ChunkData, Definition, Error, FieldRecord, ObjectRecord, Pack, Page, Plane,
+    PortalRecord, Summary, UidLocation, VerifyLimits, Zone,
 };
 use tilewright_source::Stairwell;
 use wasm_bindgen::prelude::*;
@@ -308,7 +308,8 @@ fn optional<T>(found: Result<Option<T>, Error>, convert: impl Fn(&T) -> JsValue)
     }
 }
 
-/// The values `visit_rows` yields, as an array.
+/// The values `visit_rows` yields, as an array: one page of a listing, at
+/// most the limit the caller gave.
 fn listed<T>(
     visit_rows: impl FnOnce(&mut dyn FnMut(T) -> Result<(), Error>) -> Result<(), Error>,
     convert: impl Fn(&T) -> JsValue,
@@ -320,6 +321,14 @@ fn listed<T>(
     })
     .map_err(|error| rejected(&error))?;
     Ok(rows.into())
+}
+
+/// A page of a listing: at most `limit` rows after `after`.
+fn page<K>(after: Option<K>, limit: u32) -> Page<K> {
+    Page {
+        after,
+        limit: usize::try_from(limit).unwrap_or(usize::MAX),
+    }
 }
 
 #[wasm_bindgen]
@@ -388,24 +397,52 @@ impl Reader {
         optional(self.pack.plane(id), plane)
     }
 
-    pub fn planes(&self) -> Found {
-        listed(|visit| self.pack.visit_planes(visit), plane)
+    /// A page of planes: at most `limit`, after the plane `after`.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "wasm-bindgen passes optional strings by value"
+    )]
+    pub fn planes(&self, after: Option<String>, limit: u32) -> Found {
+        listed(
+            |visit| self.pack.visit_planes(page(after.as_deref(), limit), visit),
+            plane,
+        )
     }
 
     pub fn zone(&self, plane: &str, id: &str) -> Found {
         optional(self.pack.zone(plane, id), zone)
     }
 
-    pub fn zones(&self, plane: &str) -> Found {
-        listed(|visit| self.pack.visit_zones(plane, visit), zone)
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "wasm-bindgen passes optional strings by value"
+    )]
+    pub fn zones(&self, plane: &str, after: Option<String>, limit: u32) -> Found {
+        listed(
+            |visit| {
+                self.pack
+                    .visit_zones(plane, page(after.as_deref(), limit), visit)
+            },
+            zone,
+        )
     }
 
     pub fn anchor(&self, plane: &str, id: &str) -> Found {
         optional(self.pack.anchor(plane, id), anchor)
     }
 
-    pub fn anchors(&self, plane: &str) -> Found {
-        listed(|visit| self.pack.visit_anchors(plane, visit), anchor)
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "wasm-bindgen passes optional strings by value"
+    )]
+    pub fn anchors(&self, plane: &str, after: Option<String>, limit: u32) -> Found {
+        listed(
+            |visit| {
+                self.pack
+                    .visit_anchors(plane, page(after.as_deref(), limit), visit)
+            },
+            anchor,
+        )
     }
 
     pub fn stairwell(&self, plane: &str, id: &str) -> Found {
@@ -414,9 +451,16 @@ impl Reader {
         })
     }
 
-    pub fn stairwells(&self, plane: &str) -> Found {
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "wasm-bindgen passes optional strings by value"
+    )]
+    pub fn stairwells(&self, plane: &str, after: Option<String>, limit: u32) -> Found {
         listed(
-            |visit| self.pack.visit_stairwells(plane, visit),
+            |visit| {
+                self.pack
+                    .visit_stairwells(plane, page(after.as_deref(), limit), visit)
+            },
             |found| stairwell(plane, found),
         )
     }
@@ -436,30 +480,52 @@ impl Reader {
         optional(self.pack.definition(kind, id), definition)
     }
 
+    /// A page of definitions, of type `kind` or of every type, after the
+    /// definition `after_type`/`after_id` when both are given.
     #[expect(
         clippy::needless_pass_by_value,
         reason = "wasm-bindgen passes optional strings by value"
     )]
-    pub fn definitions(&self, kind: Option<String>) -> Found {
+    pub fn definitions(
+        &self,
+        kind: Option<String>,
+        after_type: Option<String>,
+        after_id: Option<String>,
+        limit: u32,
+    ) -> Found {
+        let after = after_type.as_deref().zip(after_id.as_deref());
         listed(
-            |visit| self.pack.visit_definitions(kind.as_deref(), visit),
+            |visit| {
+                self.pack
+                    .visit_definitions(kind.as_deref(), page(after, limit), visit)
+            },
             definition,
         )
     }
 
-    pub fn layers(&self, plane: &str) -> Found {
+    pub fn layers(&self, plane: &str, after: Option<i32>, limit: u32) -> Found {
         listed(
-            |visit| self.pack.visit_layers(plane, visit),
+            |visit| self.pack.visit_layers(plane, page(after, limit), visit),
             |layer: &i32| (*layer).into(),
         )
     }
 
     #[wasm_bindgen(js_name = chunkKeys)]
-    pub fn chunk_keys(&self, plane: &str, layer: i32) -> Found {
+    pub fn chunk_keys(
+        &self,
+        plane: &str,
+        layer: i32,
+        after_x: Option<i64>,
+        after_y: Option<i64>,
+        limit: u32,
+    ) -> Found {
+        let after = after_x.zip(after_y);
         listed(
             |visit| {
                 self.pack
-                    .visit_chunk_keys(plane, layer, &mut |cx, cy| visit((cx, cy)))
+                    .visit_chunk_keys(plane, layer, page(after, limit), &mut |cx, cy| {
+                        visit((cx, cy))
+                    })
             },
             |(cx, cy): &(i64, i64)| object(&[("cx", integer(*cx)), ("cy", integer(*cy))]),
         )

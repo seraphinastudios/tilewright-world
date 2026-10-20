@@ -56,7 +56,11 @@ export type ModuleSource =
  */
 export function initialize(source?: ModuleSource): Promise<void>;
 
-/** Loads the WebAssembly module from its bytes or a compiled module. */
+/**
+ * Loads the WebAssembly module from its bytes or a compiled module,
+ * synchronously. It does nothing once the module is loaded, and throws
+ * while `initialize()` is loading it.
+ */
 export function initializeSync(source: BufferSource | WebAssembly.Module): void;
 
 /**
@@ -236,13 +240,17 @@ export interface Chunk {
  * Opens a pack from its bytes, which are copied. Throws `PackError` if they
  * are not a pack of this format or are more than the pack size limit.
  */
-export function openPack(bytes: ArrayBufferView | ArrayBuffer, options?: OpenOptions): Pack;
+export function openPack(bytes: ArrayBufferView | ArrayBufferLike, options?: OpenOptions): Pack;
 
 /**
  * An open pack. Each read checks the shape and bounds of what it loads and
  * throws `PackError` with the code of the rule a stored value breaks; a
  * read of something the pack does not have returns `undefined`. `verify`
  * checks the whole pack, including that the targets reads name exist.
+ *
+ * Listings are iterators that read 64 rows at a time, in key order, so a
+ * walk over a large table holds one page. A page is read when the iterator
+ * reaches it, so closing the pack ends the walk with an error.
  */
 export class Pack {
   private constructor();
@@ -265,13 +273,16 @@ export class Pack {
 
   plane(id: string): Plane | undefined;
   /** Every plane, in ID order. */
-  planes(): Plane[];
+  planes(): IterableIterator<Plane>;
   zone(plane: string, id: string): Zone | undefined;
-  zones(plane: string): Zone[];
+  /** The zones of a plane, in ID order. */
+  zones(plane: string): IterableIterator<Zone>;
   anchor(plane: string, id: string): Anchor | undefined;
-  anchors(plane: string): Anchor[];
+  /** The anchors of a plane, in ID order. */
+  anchors(plane: string): IterableIterator<Anchor>;
   stairwell(plane: string, id: string): Stairwell | undefined;
-  stairwells(plane: string): Stairwell[];
+  /** The stairwells of a plane, in ID order. */
+  stairwells(plane: string): IterableIterator<Stairwell>;
   stairwellStep(
     plane: string,
     layer: number,
@@ -280,12 +291,12 @@ export class Pack {
   ): StairwellTile | undefined;
   definition(type: string, id: string): Definition | undefined;
   /** The definitions of one type in ID order, or all by type and ID. */
-  definitions(type?: string): Definition[];
+  definitions(type?: string): IterableIterator<Definition>;
 
   /** The layers of a plane that have chunks, in order. */
-  layers(plane: string): number[];
+  layers(plane: string): IterableIterator<number>;
   /** The positions of a layer's chunks, by cx and then cy. */
-  chunkKeys(plane: string, layer: number): ChunkKey[];
+  chunkKeys(plane: string, layer: number): IterableIterator<ChunkKey>;
   chunk(plane: string, layer: number, cx: IntegerArgument, cy: IntegerArgument): Chunk | undefined;
 
   objectLocation(uid: string): ObjectLocation | undefined;

@@ -205,7 +205,7 @@ test("the valid packs read back as the manifest lists", async () => {
     valid.strings.forEach((value, index) => assert.equal(pack.string(index + 1), value));
     assert.equal(pack.string(valid.strings.length + 1), undefined);
 
-    const planes = pack.planes();
+    const planes = [...pack.planes()];
     assert.deepEqual(
       planes,
       valid.planes.map(({ id, kind, chunk_size: chunkSize, document }) => ({ id, kind, chunkSize, document })),
@@ -215,7 +215,7 @@ test("the valid packs read back as the manifest lists", async () => {
     }
     assert.equal(pack.plane("missing"), undefined);
 
-    const zones = planes.flatMap((plane) => pack.zones(plane.id));
+    const zones = planes.flatMap((plane) => [...pack.zones(plane.id)]);
     assert.deepEqual(
       zones,
       valid.zones.map(({ plane, id, parent, document }) => ({ plane, id, parent: parent ?? null, document })),
@@ -224,13 +224,13 @@ test("the valid packs read back as the manifest lists", async () => {
       assert.deepEqual(pack.zone(zone.plane, zone.id), zone);
     }
 
-    const anchors = planes.flatMap((plane) => pack.anchors(plane.id));
+    const anchors = planes.flatMap((plane) => [...pack.anchors(plane.id)]);
     assert.deepEqual(anchors, valid.anchors);
     for (const anchor of anchors) {
       assert.deepEqual(pack.anchor(anchor.plane, anchor.id), anchor);
     }
 
-    const stairwells = planes.flatMap((plane) => pack.stairwells(plane.id));
+    const stairwells = planes.flatMap((plane) => [...pack.stairwells(plane.id)]);
     assert.deepEqual(
       stairwells.map(({ plane, id, document }) => ({ plane, id, document })),
       valid.stairwells,
@@ -249,13 +249,13 @@ test("the valid packs read back as the manifest lists", async () => {
       });
     }
 
-    const definitions = pack.definitions();
+    const definitions = [...pack.definitions()];
     assert.deepEqual(definitions, valid.definitions);
     for (const definition of definitions) {
       assert.deepEqual(pack.definition(definition.type, definition.id), definition);
-      assert.ok(pack.definitions(definition.type).some((listed) => listed.id === definition.id));
+      assert.ok([...pack.definitions(definition.type)].some((listed) => listed.id === definition.id));
     }
-    assert.deepEqual(pack.definitions("missing"), []);
+    assert.deepEqual([...pack.definitions("missing")], []);
 
     for (const row of valid.object_uids) {
       const location = { plane: row.plane, layer: row.layer, cx: row.cx, cy: row.cy, index: row.object };
@@ -267,8 +267,8 @@ test("the valid packs read back as the manifest lists", async () => {
     assert.equal(pack.object("missing"), undefined);
 
     const keys = planes.flatMap((plane) =>
-      pack.layers(plane.id).flatMap((layer) =>
-        pack.chunkKeys(plane.id, layer).map(({ cx, cy }) => ({ plane: plane.id, layer, cx, cy })),
+      [...pack.layers(plane.id)].flatMap((layer) =>
+        [...pack.chunkKeys(plane.id, layer)].map(({ cx, cy }) => ({ plane: plane.id, layer, cx, cy })),
       ),
     );
     assert.deepEqual(

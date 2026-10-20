@@ -83,7 +83,10 @@ released too.
 
 Reads are synchronous. Each checks the shape and bounds of what it loads and
 throws a `PackError` with the code of the rule a stored value breaks; a read
-of something the pack does not have returns `undefined`. Whether the
+of something the pack does not have returns `undefined`. Listings, the
+plural methods below, are iterators that read 64 rows at a time in key
+order, so walking a large table holds one page; use `Array.from` for an
+array. Whether the
 targets a row names exist (a chunk's strings, a zone's parent, the chunk a
 uid's row names) is what `verify()` checks.
 
@@ -133,9 +136,10 @@ cd packages/tilewright-pack && npm test
 ```
 
 `tools/build-wasm.sh` needs the pinned Rust toolchain, which includes the
-`wasm32-unknown-unknown` target. It downloads the pinned wasi-sdk (clang, for
-SQLite and zstd) and `wasm-bindgen` once, checks their SHA-256 digests, and
-writes `wasm/`. The tests run the shared conformance fixtures,
+`wasm32-unknown-unknown` target. It downloads the release archives of the
+pinned wasi-sdk (clang, for SQLite and zstd) and `wasm-bindgen` once, checks
+their SHA-256 digests on every run before unpacking them, and writes
+`wasm/`. The tests run the shared conformance fixtures,
 `fixtures/packs`, against the module, as the Rust and Go readers run them.
 `scripts/licenses.mjs` regenerates `THIRD_PARTY_LICENSES.md` when the
 crates compiled in change.

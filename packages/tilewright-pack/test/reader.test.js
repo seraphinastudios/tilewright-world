@@ -7,6 +7,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
+import vm from "node:vm";
 import { initialize, initializeSync, openPack, Pack, PackError } from "../index.js";
 import { Reader } from "../wasm/tilewright_pack.js";
 
@@ -31,12 +32,21 @@ function rejects(run, code) {
 
 // node:test runs each file in its own process, so this one starts with the
 // module not loaded.
-test("packs open only once the module is loaded", async () => {
+test("packs open only once the module is loaded, by one instance", async () => {
   assert.throws(() => openPack(valid), /initialize/);
-  const loading = initialize(module);
+  let release;
+  const source = new Promise((resolve) => {
+    release = resolve;
+  });
+  const loading = initialize(source);
   assert.equal(initialize(module), loading);
+  // A second instance would replace the exports the first one's packs use.
+  assert.throws(() => initializeSync(module), /loading/);
+  assert.throws(() => openPack(valid), /initialize/);
+  release(module);
   await loading;
   initializeSync(module);
+  await initialize(module);
   assert.ok(openPack(valid) instanceof Pack);
 });
 
@@ -61,9 +71,19 @@ test("bytes are accepted as any view of an array buffer, and copied", async () =
   const pack = openPack(copy, { digest: validName });
   copy.fill(0);
   assert.equal(pack.verify().chunks, 5);
-  for (const bytes of [undefined, null, "pack", [1, 2, 3], 7]) {
+  for (const bytes of [undefined, null, "pack", [1, 2, 3], 7, { byteLength: 4 }]) {
     assert.throws(() => openPack(bytes), TypeError);
   }
+  // Buffers and views from another realm, such as an iframe, are accepted.
+  const foreign = vm.runInNewContext("new ArrayBuffer(length)", { length: valid.length });
+  assert.equal(foreign instanceof ArrayBuffer, false);
+  new Uint8Array(foreign).set(valid);
+  assert.equal(openPack(foreign, { digest: validName }).verify().chunks, 5);
+  const foreignView = vm.runInNewContext("new Uint8Array(buffer)", { buffer: foreign });
+  assert.equal(openPack(foreignView).digest(), validName);
+  const shared = new SharedArrayBuffer(valid.length);
+  new Uint8Array(shared).set(valid);
+  assert.equal(openPack(shared).digest(), validName);
 });
 
 test("the expected digest is checked by verification", async () => {
@@ -90,6 +110,11 @@ test("limits are enforced and checked", async () => {
   const huge = new Uint8Array(2 ** 32 + 1);
   rejects(() => openPack(huge), "pack.sqlite");
   rejects(() => openPack(huge, { maxPackBytes: 2 ** 32 }), "pack.too_large");
+  // An option bag that is not an object is an error, not the defaults.
+  for (const bag of [1024, 1024n, "limits", true, null]) {
+    assert.throws(() => openPack(valid, bag), TypeError);
+    assert.throws(() => pack.verify(bag), TypeError);
+  }
   for (const limit of [-1, 1.5, 2 ** 53, -1n, 2n ** 64n, "1", null]) {
     assert.throws(() => openPack(valid, { maxPackBytes: limit }), TypeError);
     assert.throws(() => pack.verify({ maxDecodedBytes: limit }), TypeError);
@@ -160,6 +185,44 @@ test("integers past 2^53 are bigints, others numbers", async () => {
     assert.ok(grid instanceof Uint16Array);
     assert.equal(grid.length, chunk.chunkSize ** 2);
   }
+});
+
+test("listings read a page at a time from the last key", async () => {
+  await initialize(module);
+  const pack = openPack(valid);
+  const listings = [
+    ["planes", () => pack.planes()],
+    ["zones", () => pack.zones("overworld")],
+    ["anchors", () => pack.anchors("overworld")],
+    ["stairwells", () => pack.stairwells("overworld")],
+    ["definitions", () => pack.definitions()],
+    ["definitions", () => pack.definitions("proto")],
+    ["layers", () => pack.layers("overworld")],
+    ["chunkKeys", () => pack.chunkKeys("overworld", 0)],
+  ];
+  for (const [name, list] of listings) {
+    const all = [...list()];
+    assert.ok(all.length > 1, name);
+    // With pages of one row, the walk resumes after each row's key.
+    const read = Reader.prototype[name];
+    const calls = [];
+    Reader.prototype[name] = function (...args) {
+      calls.push(args);
+      args[args.length - 1] = 1;
+      return read.apply(this, args);
+    };
+    try {
+      assert.deepEqual([...list()], all, name);
+    } finally {
+      Reader.prototype[name] = read;
+    }
+    assert.equal(calls.length, all.length + 1, name);
+  }
+  // A listing is lazy: nothing is read until it is iterated, and a pack
+  // closed meanwhile ends it with an error.
+  const planes = pack.planes();
+  pack.close();
+  assert.throws(() => planes.next(), /closed/);
 });
 
 test("a closed pack refuses reads", async () => {

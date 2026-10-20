@@ -6,8 +6,9 @@
 #
 # It needs a C compiler for wasm32 (SQLite and zstd are C) and the
 # wasm-bindgen command whose version matches the crate in Cargo.lock. Both
-# are pinned below and downloaded once, checksum-verified, into
-# ${TILEWRIGHT_WASM_TOOLS:-${XDG_CACHE_HOME:-~/.cache}/tilewright-world/wasm-tools}.
+# are pinned below. Their release archives are downloaded once into
+# ${TILEWRIGHT_WASM_TOOLS:-${XDG_CACHE_HOME:-~/.cache}/tilewright-world/wasm-tools},
+# and checked by SHA-256 and unpacked into target/wasm-tools on every run.
 # Set CC_wasm32_unknown_unknown and AR_wasm32_unknown_unknown to use another
 # clang with the WebAssembly target instead of wasi-sdk.
 set -euo pipefail
@@ -70,31 +71,46 @@ sha256() {
   fi
 }
 
-# Downloads a release archive, checks its SHA-256, and unpacks it as
-# ${tools}/<name>. Nothing is installed unless the checksum matches.
+# This run's tools, unpacked afresh into the checkout's own target
+# directory. The path stays the same between runs, so Cargo does not
+# rebuild the C code for a new compiler path.
+unpacked=${repository}/target/wasm-tools
+rm -rf -- "${unpacked}"
+mkdir -p "${unpacked}"
+
+# Unpacks the release archive <name>.tar.gz as ${unpacked}/<name>. The
+# archive is downloaded once into ${tools}; on every run it is copied out,
+# and the copy is checked against its pinned SHA-256 before it is unpacked,
+# so a changed cache is never run.
 install() {
   local name=$1 url=$2 expected=$3
-  if [[ -d ${tools}/${name} ]]; then
-    return
+  local archive=${tools}/${name}.tar.gz copy=${unpacked}/${name}.tar.gz
+  if [[ -f ${archive} ]]; then
+    cp "${archive}" "${copy}"
+  else
+    echo "tools/build-wasm.sh: downloading ${url}" >&2
+    curl --fail --silent --show-error --location --retry 3 --proto '=https' --tlsv1.2 \
+      --output "${copy}" "${url}"
   fi
-  mkdir -p "${tools}"
-  local staging
-  staging=$(mktemp -d "${tools}/.${name}.XXXXXX")
-  echo "tools/build-wasm.sh: downloading ${url}" >&2
-  curl --fail --silent --show-error --location --retry 3 --proto '=https' --tlsv1.2 \
-    --output "${staging}/archive.tar.gz" "${url}"
   local found
-  found=$(sha256 "${staging}/archive.tar.gz")
+  found=$(sha256 "${copy}")
   if [[ ${found} != "${expected}" ]]; then
-    echo "tools/build-wasm.sh: ${url} has SHA-256 ${found}, not ${expected}" >&2
-    rm -rf -- "${staging}"
+    echo "tools/build-wasm.sh: ${name}.tar.gz has SHA-256 ${found}, not ${expected}" >&2
+    if [[ -f ${archive} ]]; then
+      echo "tools/build-wasm.sh: remove ${archive} to download it again" >&2
+    fi
     exit 1
   fi
-  mkdir "${staging}/unpacked"
-  tar -xzf "${staging}/archive.tar.gz" -C "${staging}/unpacked" --strip-components 1
-  # Another build may have installed it meanwhile.
-  mv "${staging}/unpacked" "${tools}/${name}" 2>/dev/null || [[ -d ${tools}/${name} ]]
-  rm -rf -- "${staging}"
+  if [[ ! -f ${archive} ]]; then
+    mkdir -p "${tools}"
+    local partial
+    partial=$(mktemp "${tools}/.${name}.XXXXXX")
+    cp "${copy}" "${partial}"
+    mv "${partial}" "${archive}"
+  fi
+  mkdir "${unpacked}/${name}"
+  tar -xzf "${copy}" -C "${unpacked}/${name}" --strip-components 1
+  rm -- "${copy}"
 }
 
 if [[ -z ${CC_wasm32_unknown_unknown-} || -z ${AR_wasm32_unknown_unknown-} ]]; then
@@ -102,8 +118,8 @@ if [[ -z ${CC_wasm32_unknown_unknown-} || -z ${AR_wasm32_unknown_unknown-} ]]; t
   install "${wasi_sdk}" \
     "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${wasi_sdk_release}/${wasi_sdk}.tar.gz" \
     "${wasi_sdk_sha256}"
-  export CC_wasm32_unknown_unknown=${tools}/${wasi_sdk}/bin/clang
-  export AR_wasm32_unknown_unknown=${tools}/${wasi_sdk}/bin/llvm-ar
+  export CC_wasm32_unknown_unknown=${unpacked}/${wasi_sdk}/bin/clang
+  export AR_wasm32_unknown_unknown=${unpacked}/${wasi_sdk}/bin/llvm-ar
 fi
 wasm_bindgen=wasm-bindgen-${wasm_bindgen_version}-${wasm_bindgen_platform}
 install "${wasm_bindgen}" \
@@ -126,7 +142,7 @@ fi
 cargo build --locked --target wasm32-unknown-unknown --profile wasm --package tilewright-pack-wasm
 
 rm -rf -- "${package}/wasm"
-"${tools}/${wasm_bindgen}/wasm-bindgen" \
+"${unpacked}/${wasm_bindgen}/wasm-bindgen" \
   --target web \
   --no-typescript \
   --remove-name-section \

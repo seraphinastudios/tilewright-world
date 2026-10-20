@@ -34,8 +34,9 @@ crate and C library compiled into the module. Its
 `scripts/licenses.mjs` writes it from the crates `Cargo.lock` resolves for
 the module, and `tools/validate.sh` checks that it is current.
 
-Building the module also uses these tools, which `tools/build-wasm.sh`
-downloads and checks by SHA-256. Nothing of them is compiled in, except the
+Building the module also uses these tools, whose release archives
+`tools/build-wasm.sh` downloads once and checks by SHA-256 every time it
+unpacks them. Nothing of them is compiled in, except the
 JavaScript glue `wasm-bindgen` generates, which the package ships:
 
 | Tool | Version | License |

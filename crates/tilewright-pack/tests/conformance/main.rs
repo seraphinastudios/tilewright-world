@@ -18,7 +18,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use tilewright_jsonc::{Document, Limits, Value};
-use tilewright_pack::{Error, ErrorCode, Pack, VerifyLimits};
+use tilewright_pack::{Error, ErrorCode, Pack, Page, VerifyLimits};
 
 const UPDATE: &str = "TILEWRIGHT_UPDATE_PACK_FIXTURES";
 
@@ -410,7 +410,28 @@ fn collect<T>(
 /// read back, one at a time and listed, as the manifest lists them.
 fn rows_read_back(pack: &Pack, valid: &Value) {
     let listed = |key: &str| valid.get(key).and_then(Value::as_array).unwrap();
-    let planes = collect(|visit| pack.visit_planes(visit));
+    let planes = collect(|visit| pack.visit_planes(Page::all(), visit));
+    // Walking a page of one row at a time visits the same rows.
+    let mut paged = Vec::new();
+    loop {
+        let after = paged
+            .last()
+            .map(|plane: &tilewright_pack::Plane| plane.id.clone());
+        let page = collect(|visit| {
+            pack.visit_planes(
+                Page {
+                    after: after.as_deref(),
+                    limit: 1,
+                },
+                visit,
+            )
+        });
+        if page.is_empty() {
+            break;
+        }
+        paged.extend(page);
+    }
+    assert_eq!(paged, planes);
     assert_eq!(planes.len(), listed("planes").len());
     for (plane, expected) in planes.iter().zip(listed("planes")) {
         assert_eq!(Some(plane.id.as_str()), text(expected, "id"));
@@ -423,11 +444,15 @@ fn rows_read_back(pack: &Pack, valid: &Value) {
     let mut anchors = Vec::new();
     let mut chunks = Vec::new();
     for plane in &planes {
-        zones.extend(collect(|visit| pack.visit_zones(&plane.id, visit)));
-        anchors.extend(collect(|visit| pack.visit_anchors(&plane.id, visit)));
-        for layer in collect(|visit| pack.visit_layers(&plane.id, visit)) {
+        zones.extend(collect(|visit| {
+            pack.visit_zones(&plane.id, Page::all(), visit)
+        }));
+        anchors.extend(collect(|visit| {
+            pack.visit_anchors(&plane.id, Page::all(), visit)
+        }));
+        for layer in collect(|visit| pack.visit_layers(&plane.id, Page::all(), visit)) {
             for (cx, cy) in collect(|visit| {
-                pack.visit_chunk_keys(&plane.id, layer, &mut |cx, cy| visit((cx, cy)))
+                pack.visit_chunk_keys(&plane.id, layer, Page::all(), &mut |cx, cy| visit((cx, cy)))
             }) {
                 chunks.push((plane.id.clone(), i64::from(layer), cx, cy));
             }
@@ -487,7 +512,7 @@ fn rows_read_back(pack: &Pack, valid: &Value) {
 /// lists them.
 fn definitions_read_back(pack: &Pack, valid: &Value) {
     let listed = valid.get("definitions").and_then(Value::as_array).unwrap();
-    let definitions = collect(|visit| pack.visit_definitions(None, visit));
+    let definitions = collect(|visit| pack.visit_definitions(None, Page::all(), visit));
     assert_eq!(definitions.len(), listed.len());
     for (definition, expected) in definitions.iter().zip(listed) {
         assert_eq!(Some(definition.kind.as_str()), text(expected, "type"));
@@ -502,7 +527,8 @@ fn definitions_read_back(pack: &Pack, valid: &Value) {
                 .as_ref(),
             Some(definition)
         );
-        let of_type = collect(|visit| pack.visit_definitions(Some(&definition.kind), visit));
+        let of_type =
+            collect(|visit| pack.visit_definitions(Some(&definition.kind), Page::all(), visit));
         assert!(of_type.iter().all(|listed| listed.kind == definition.kind));
         assert!(of_type.contains(definition));
     }
