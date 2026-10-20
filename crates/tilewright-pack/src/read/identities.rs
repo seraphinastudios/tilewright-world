@@ -222,7 +222,10 @@ impl Pack {
     /// have the source format's shape, layers and positions are integers
     /// within the format's range, chunk coordinates keep every tile of a
     /// format 1 chunk within it, and object indexes are at most
-    /// [`MAXIMUM_OBJECT_INDEX`].
+    /// [`MAXIMUM_OBJECT_INDEX`]. Relations between a row and other rows or
+    /// chunk records, such as an anchor's plane existing or a uid's row
+    /// naming an object with that uid, are what the verification before
+    /// the listing checks, and they are not checked again.
     fn visit_rows(
         &self,
         visit: &mut dyn FnMut(Identity<'_>) -> Result<(), Error>,
