@@ -1,0 +1,24 @@
+[package]
+name = "tilewright-edit"
+description = "Lossless, deterministic transactions over Tilewright world sources: structural edits, preview, staged apply with rollback and inverse plans"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+sha2.workspace = true
+tempfile.workspace = true
+tilewright-jsonc.workspace = true
+tilewright-source.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+rustix.workspace = true
+
+[lints]
+workspace = true

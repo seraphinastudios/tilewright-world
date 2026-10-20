@@ -25,6 +25,7 @@
 //! # Ok::<(), usize>(())
 //! ```
 
+mod access;
 mod chunk;
 mod defs;
 mod diagnostic;
@@ -39,8 +40,11 @@ mod uid;
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 use tilewright_jsonc::Limits;
 
+pub use access::{Access, AccessError, SourceDirectory, SourceLock, SourceRoot};
 use diagnostic::Diagnostics;
 pub use diagnostic::{Code, Diagnostic};
+pub use files::is_jsonc_path;
+pub use read::{is_identifier, is_namespace};
 pub use schema::{FieldSpec, FieldType, MAXIMUM_FIELD_DEPTH, MAXIMUM_LIST_ITEMS, Schema};
 
 /// Tiles along each side of a chunk in format 1.
@@ -67,8 +71,8 @@ pub struct LoadOptions {
     pub maximum_entries: usize,
     /// Most bytes read in one load.
     pub maximum_total_bytes: u64,
-    /// Most diagnostics kept; past this, one `source.budget` diagnostic
-    /// notes that the rest were dropped.
+    /// Most diagnostics kept, at least one; past this, one `source.budget`
+    /// diagnostic notes that the rest were dropped.
     pub maximum_diagnostics: usize,
 }
 
@@ -511,12 +515,78 @@ pub fn load(root: &Path) -> Result<World, Vec<Diagnostic>> {
 /// # Errors
 /// Returns every diagnostic found, sorted by path and position.
 pub fn load_with(root: &Path, options: &LoadOptions) -> Result<World, Vec<Diagnostic>> {
+    load_edited(root, options, &Overlay::new())
+}
+
+/// Edits applied over the files of a tree for [`load_edited`], keyed by
+/// root-relative `/`-separated path: `Some(text)` replaces or creates the
+/// file, and `None` removes it.
+pub type Overlay = BTreeMap<String, Option<String>>;
+
+/// Loads a source tree as it would be with `overlay` applied, without
+/// writing anything. Overlay files are read under the same limits and
+/// budget as files on disk, and a directory that holds one exists. An
+/// overlay of more entries than `maximum_entries` is refused before
+/// anything is read.
+///
+/// # Errors
+/// Returns every diagnostic found, sorted by path and position.
+pub fn load_edited(
+    root: &Path,
+    options: &LoadOptions,
+    overlay: &Overlay,
+) -> Result<World, Vec<Diagnostic>> {
+    load_edited_in(&SourceRoot::new(root), options, overlay)
+}
+
+/// Loads the tree of an opened root as [`load_edited`] does, through the
+/// handle rather than its path, so that what is validated is the directory
+/// the caller opened.
+///
+/// # Errors
+/// Returns every diagnostic found, sorted by path and position.
+pub fn load_edited_in(
+    root: &SourceRoot,
+    options: &LoadOptions,
+    overlay: &Overlay,
+) -> Result<World, Vec<Diagnostic>> {
+    // At least one diagnostic is kept, so a failed load always says why.
     let options = &LoadOptions {
         limits: within_format(options.limits),
+        maximum_diagnostics: options.maximum_diagnostics.max(1),
         ..*options
     };
-    let mut tree = files::Tree::new(root, options);
+    // Each entry adds, replaces or removes a directory entry; more than a
+    // load may list cannot load, and is not looked at.
+    if overlay.len() > options.maximum_entries {
+        return Err(vec![Diagnostic::file(
+            ".",
+            Code::Budget,
+            format!(
+                "the edits hold more than {} entries",
+                options.maximum_entries
+            ),
+        )]);
+    }
+    // Every key must be a path a file could have, so no entry costs more
+    // than a path does.
+    if let Some(key) = overlay
+        .keys()
+        .find(|key| key.is_empty() || access::checked(key).is_err())
+    {
+        let shown = if key.len() <= 128 {
+            format!("{key:?}")
+        } else {
+            format!("a path of {} bytes", key.len())
+        };
+        return Err(vec![Diagnostic::file(
+            ".",
+            Code::Path,
+            format!("the edits name {shown}, which is not a path a file of the tree can have"),
+        )]);
+    }
     let mut diagnostics = Diagnostics::new(options.maximum_diagnostics);
+    let mut tree = files::Tree::in_root(root.platform(), options, overlay, diagnostics.total());
     let world = load_tree(&mut tree, &mut diagnostics);
     diagnostics.append(tree.take_diagnostics());
     match world {

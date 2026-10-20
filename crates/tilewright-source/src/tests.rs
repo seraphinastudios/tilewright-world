@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 use super::{
-    FieldValue, LoadOptions, ObjectLocation, PlaneKind, Portal, Projection, StairwellDirection,
-    StairwellStep, load, load_with,
+    FieldValue, LoadOptions, ObjectLocation, Overlay, PlaneKind, Portal, Projection,
+    StairwellDirection, StairwellStep, load, load_edited, load_with,
 };
 use std::{
     fs,
@@ -1684,6 +1684,214 @@ fn every_key_of_a_spec_is_checked() {
             .collect();
         assert_eq!(found, expected, "{spec}");
     }
+}
+
+#[test]
+fn an_overlay_edits_the_tree_in_memory() {
+    let root = workspace();
+    let before = load(root.path()).unwrap();
+    let chunk = fs::read_to_string(root.path().join(CHUNK)).unwrap();
+    let new_chunk = "{\"format\": \"tilewright.chunk/1\", \"plane\": \"overworld\", \"layer\": 5, \"chunk\": [0, 0],\n \"objects\": [{\"at\": [1, 1], \"proto\": \"tree\"}]}\n";
+    let mut overlay = Overlay::new();
+    overlay.insert(
+        CHUNK.to_owned(),
+        Some(chunk.replacen("\"proto\": \"wall\"", "\"proto\": \"tree\"", 1)),
+    );
+    overlay.insert(
+        "planes/overworld/layers/5/0_0.jsonc".to_owned(),
+        Some(new_chunk.to_owned()),
+    );
+    overlay.insert("planes/overworld/layers/0/-1_0.jsonc".to_owned(), None);
+    // An entry that removes a file that is not there changes nothing.
+    overlay.insert("planes/overworld/layers/0/.x.tmp".to_owned(), None);
+    let world = load_edited(root.path(), &LoadOptions::default(), &overlay).unwrap();
+    let chunks = &world.planes()["overworld"].chunks;
+    assert!(chunks.contains_key(&(5, 0, 0)));
+    assert!(!chunks.contains_key(&(0, -1, 0)));
+    assert_eq!(chunks[&(0, 0, 0)].objects[1].proto, "tree");
+    assert_ne!(world.source_digest(), before.source_digest());
+    // Nothing was written.
+    assert_eq!(fs::read_to_string(root.path().join(CHUNK)).unwrap(), chunk);
+    assert!(!root.path().join("planes/overworld/layers/5").exists());
+    assert_eq!(load(root.path()).unwrap(), before);
+
+    // The digest is the digest of the tree as edited.
+    fs::create_dir_all(root.path().join("planes/overworld/layers/5")).unwrap();
+    fs::write(
+        root.path().join("planes/overworld/layers/5/0_0.jsonc"),
+        new_chunk,
+    )
+    .unwrap();
+    fs::write(
+        root.path().join(CHUNK),
+        chunk.replacen("\"proto\": \"wall\"", "\"proto\": \"tree\"", 1),
+    )
+    .unwrap();
+    fs::remove_file(root.path().join("planes/overworld/layers/0/-1_0.jsonc")).unwrap();
+    assert_eq!(load(root.path()).unwrap(), world);
+
+    // Overlay files are checked like files on disk, at their own positions.
+    let mut broken = Overlay::new();
+    broken.insert(CHUNK.to_owned(), Some("{\n  \"format\": 1,\n}".to_owned()));
+    broken.insert("world.jsonc".to_owned(), None);
+    let found = load_edited(root.path(), &LoadOptions::default(), &broken).unwrap_err();
+    assert!(
+        found
+            .iter()
+            .any(|problem| problem.code == "source.missing_file" && problem.path == "world.jsonc"),
+        "{found:#?}"
+    );
+    broken.remove("world.jsonc");
+    let found = load_edited(root.path(), &LoadOptions::default(), &broken).unwrap_err();
+    assert!(
+        found
+            .iter()
+            .any(|problem| problem.code == "jsonc.trailing_comma"
+                && problem.path == CHUNK
+                && problem.line == 2),
+        "{found:#?}"
+    );
+    let small = LoadOptions {
+        maximum_total_bytes: 10,
+        ..LoadOptions::default()
+    };
+    let found = load_edited(root.path(), &small, &Overlay::new()).unwrap_err();
+    assert!(found.iter().any(|problem| problem.code == "source.budget"));
+}
+
+#[cfg(unix)]
+#[test]
+fn an_overlay_file_replaces_whatever_has_its_name() {
+    let root = workspace();
+    let chunk = "planes/overworld/layers/0/5_5.jsonc";
+    std::os::unix::fs::symlink(root.path().join(CHUNK), root.path().join(chunk)).unwrap();
+    let mut overlay = Overlay::new();
+    overlay.insert(
+        chunk.to_owned(),
+        Some(
+            "{\"format\": \"tilewright.chunk/1\", \"plane\": \"overworld\", \"layer\": 0, \"chunk\": [5, 5]}\n"
+                .to_owned(),
+        ),
+    );
+    let world = load_edited(root.path(), &LoadOptions::default(), &overlay).unwrap();
+    assert!(world.planes()["overworld"].chunks.contains_key(&(0, 5, 5)));
+}
+
+#[test]
+fn diagnostics_of_many_files_share_one_cap() {
+    let copy = workspace();
+    for index in 0..30 {
+        fs::write(
+            copy.path().join(format!("defs/proto/bad{index}.jsonc")),
+            "{\"format\": \"tilewright.def/1\", \"type\": \"proto\"}\n",
+        )
+        .unwrap();
+    }
+    let options = LoadOptions {
+        maximum_diagnostics: 10,
+        ..LoadOptions::default()
+    };
+    let found = load_with(copy.path(), &options).expect_err("the definitions lack ids");
+    assert_eq!(found.len(), 11, "{found:?}");
+    assert_eq!(
+        found
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "source.budget")
+            .count(),
+        1,
+        "{found:?}"
+    );
+}
+
+#[test]
+fn overlay_files_count_against_the_entry_budget() {
+    let root = workspace();
+    let mut overlay = Overlay::new();
+    for index in 0..10_000 {
+        overlay.insert(format!("defs/proto/x{index}.jsonc"), Some("{}".to_owned()));
+    }
+    let small = LoadOptions {
+        maximum_entries: 100,
+        ..LoadOptions::default()
+    };
+    let found = load_edited(root.path(), &small, &overlay).unwrap_err();
+    assert!(
+        found
+            .iter()
+            .any(|diagnostic| diagnostic.code == "source.budget"),
+        "{found:?}"
+    );
+    // So do removals, before anything is read.
+    let removals: Overlay = (0..101)
+        .map(|index| (format!("defs/proto/x{index}.jsonc"), None))
+        .collect();
+    let found = load_edited(root.path(), &small, &removals).unwrap_err();
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].code, "source.budget");
+    // Within the budget, the same names are listed.
+    let mut few = Overlay::new();
+    few.insert("defs/proto/x0.jsonc".to_owned(), Some("{}".to_owned()));
+    let found = load_edited(root.path(), &small, &few).unwrap_err();
+    assert!(
+        !found
+            .iter()
+            .any(|diagnostic| diagnostic.code == "source.budget"),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn a_failed_load_says_why_even_with_no_room_for_diagnostics() {
+    let copy = workspace();
+    fs::write(copy.path().join("defs/proto/bad.jsonc"), "{}\n").unwrap();
+    let options = LoadOptions {
+        maximum_diagnostics: 0,
+        ..LoadOptions::default()
+    };
+    let found = load_with(copy.path(), &options).expect_err("the definition is invalid");
+    assert!(!found.is_empty());
+}
+
+#[test]
+fn overlay_keys_must_be_paths() {
+    let root = workspace();
+    for key in [
+        format!("defs/{}/x.jsonc", "a".repeat(300)),
+        "defs/../x.jsonc".to_owned(),
+        String::new(),
+    ] {
+        let mut overlay = Overlay::new();
+        overlay.insert(key.clone(), Some("{}".to_owned()));
+        let found = load_edited(root.path(), &LoadOptions::default(), &overlay).unwrap_err();
+        assert_eq!(found.len(), 1, "{key}: {found:?}");
+        assert_eq!(found[0].code, "source.path", "{found:?}");
+        assert!(found[0].message.len() < 200, "{found:?}");
+    }
+}
+
+#[test]
+fn reading_stopped_at_the_cap_is_reported() {
+    let copy = workspace();
+    // Each file has one syntax error, found as it is read.
+    for index in 0..30 {
+        fs::write(
+            copy.path().join(format!("defs/proto/bad{index}.jsonc")),
+            "{,}\n",
+        )
+        .unwrap();
+    }
+    let options = LoadOptions {
+        maximum_diagnostics: 10,
+        ..LoadOptions::default()
+    };
+    let found = load_with(copy.path(), &options).expect_err("the files do not parse");
+    assert_eq!(found.len(), 11, "{found:?}");
+    assert!(
+        found
+            .iter()
+            .any(|diagnostic| diagnostic.code == "source.budget"),
+        "{found:?}"
+    );
 }
 
 const VAULT_CHUNK: &str = "planes/vault/layers/0/0_0.jsonc";

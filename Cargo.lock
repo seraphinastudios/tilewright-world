@@ -243,6 +243,7 @@ version = "0.1.0"
 dependencies = [
  "tempfile",
  "tilewright-diff",
+ "tilewright-edit",
  "tilewright-jsonc",
  "tilewright-pack",
  "tilewright-source",
@@ -256,6 +257,17 @@ dependencies = [
  "tempfile",
  "tilewright-jsonc",
  "tilewright-pack",
+ "tilewright-source",
+]
+
+[[package]]
+name = "tilewright-edit"
+version = "0.1.0"
+dependencies = [
+ "rustix",
+ "sha2",
+ "tempfile",
+ "tilewright-jsonc",
  "tilewright-source",
 ]
 

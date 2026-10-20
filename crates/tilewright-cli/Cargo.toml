@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 tilewright-diff.workspace = true
+tilewright-edit.workspace = true
 tilewright-jsonc.workspace = true
 tilewright-pack.workspace = true
 tilewright-source.workspace = true

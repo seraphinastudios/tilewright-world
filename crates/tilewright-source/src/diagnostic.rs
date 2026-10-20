@@ -1,7 +1,7 @@
 // Copyright 2026 Seraphina Studios
 // SPDX-License-Identifier: MIT
 
-use std::fmt;
+use std::{cell::Cell, fmt, rc::Rc};
 use tilewright_jsonc::ErrorCode;
 
 /// Anything with a stable diagnostic code string.
@@ -227,34 +227,65 @@ pub(crate) struct Diagnostics {
     items: Vec<Diagnostic>,
     maximum: usize,
     dropped: bool,
+    /// Whether reading stopped at the maximum, so that problems there may
+    /// be were not looked for.
+    skipped: bool,
+    /// The diagnostics kept by every collection of one load, shared, so
+    /// that the load stops reading once their sum reaches the maximum:
+    /// nothing more could be reported.
+    total: Rc<Cell<usize>>,
 }
 
 impl Diagnostics {
-    pub(crate) const fn new(maximum: usize) -> Self {
+    pub(crate) fn new(maximum: usize) -> Self {
+        Self::sharing(maximum, Rc::new(Cell::new(0)))
+    }
+
+    /// A collection that shares its count with others of the same load.
+    pub(crate) const fn sharing(maximum: usize, total: Rc<Cell<usize>>) -> Self {
         Self {
             items: Vec::new(),
             maximum,
             dropped: false,
+            skipped: false,
+            total,
         }
     }
 
+    /// The count shared by the collections of this load.
+    pub(crate) fn total(&self) -> Rc<Cell<usize>> {
+        Rc::clone(&self.total)
+    }
+
+    /// Whether the collections of this load together hold the maximum.
+    pub(crate) fn is_full(&self) -> bool {
+        self.total.get() >= self.maximum
+    }
+
     pub(crate) fn push(&mut self, diagnostic: Diagnostic) {
-        if self.items.len() < self.maximum {
-            self.items.push(diagnostic);
-        } else {
+        if self.is_full() {
             self.dropped = true;
+        } else {
+            self.items.push(diagnostic);
+            self.total.set(self.total.get() + 1);
         }
     }
 
     pub(crate) const fn is_empty(&self) -> bool {
-        self.items.is_empty() && !self.dropped
+        self.items.is_empty() && !self.dropped && !self.skipped
     }
 
+    /// Notes that reading stopped because the collections are full.
+    pub(crate) const fn skip(&mut self) {
+        self.skipped = true;
+    }
+
+    /// Takes in another collection of the same load, whose diagnostics are
+    /// already counted.
     pub(crate) fn append(&mut self, other: Self) {
-        for diagnostic in other.items {
-            self.push(diagnostic);
-        }
+        self.items.extend(other.items);
         self.dropped |= other.dropped;
+        self.skipped |= other.skipped;
     }
 
     /// The diagnostics sorted by path and position, without duplicates.
@@ -266,6 +297,15 @@ impl Diagnostics {
                 Code::Budget,
                 format!(
                     "more than {} problems; the rest are not reported",
+                    self.maximum
+                ),
+            ));
+        } else if self.skipped {
+            items.push(Diagnostic::file(
+                ".",
+                Code::Budget,
+                format!(
+                    "{} problems, as many as are reported; reading stopped there, so there may be more",
                     self.maximum
                 ),
             ));

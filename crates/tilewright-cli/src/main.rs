@@ -1,10 +1,12 @@
 // Copyright 2026 Seraphina Studios
 // SPDX-License-Identifier: MIT
 
-//! `tilewright`: validate world sources, compile packs, inspect them and
-//! compare the IDs of two worlds.
+//! `tilewright`: validate world sources, compile packs, inspect them,
+//! compare the IDs of two worlds, and preview, rebase and apply
+//! transactions.
 
 mod diff;
+mod tx;
 
 use std::{
     ffi::{OsStr, OsString},
@@ -19,6 +21,9 @@ const USAGE: &str = "usage:
   tilewright compile ROOT OUTPUT_DIRECTORY
   tilewright inspect [--max-decoded-bytes BYTES] [--max-pack-bytes BYTES] PACK
   tilewright diff [--json] [--allow ALLOWLIST] [--max-ids COUNT] OLD NEW
+  tilewright tx preview [--json] TRANSACTION ROOT
+  tilewright tx rebase TRANSACTION ROOT OUTPUT
+  tilewright tx apply TRANSACTION ROOT INVERSE
   tilewright --version
 
 inspect verifies the pack. It stops once the chunks decode to more than
@@ -31,7 +36,11 @@ the first ID past the limit, while a source root is loaded and validated
 whole, as validate loads it, before its IDs are counted. It exits 0 when no
 ID was removed or renamed, or the allowlist accepts each one; 1 when one was
 not accepted; and 2 when a side, the allowlist or the arguments could not
-be read.";
+be read.
+
+tx preview validates a transaction's result without writing; tx rebase
+writes it replayed on ROOT as it is now; tx apply writes the inverse to
+INVERSE, then applies it. OUTPUT and INVERSE must not exist.";
 
 fn main() -> ExitCode {
     // Paths need not be UTF-8, so arguments are read as OS strings.
@@ -153,6 +162,7 @@ fn run_command(arguments: &[&OsStr]) -> Result<String, Failure> {
         [command, root, output] if *command == "compile" => {
             compile(Path::new(root), Path::new(output))
         }
+        [command, rest @ ..] if *command == "tx" => tx::run(rest),
         [command, options @ ..] if *command == "inspect" => {
             let (pack, limits) = inspect_options(options)?;
             inspect(Path::new(pack), limits)

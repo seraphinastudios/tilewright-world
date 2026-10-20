@@ -20,6 +20,22 @@ directory's handle. On other platforms components are
 checked by path first, which a local process changing the tree at the same
 time can race. Sources are local checkouts, so a race needs a local attacker.
 
+Applying a transaction writes, renames and removes files beneath the root
+through the same confinement, on Linux only: there every operation goes
+through the directory handles opened while the transaction was carried out,
+so changing the tree cannot redirect it. A transaction moves content
+between the files it changes, so a source tree is one unit of access:
+publishing requires the files it changes and every directory above them to
+be reachable by the same users (the classes that may read each file and
+search each directory, and the group where only it may) and to have no
+access control list or mandatory access control label (SELinux, Smack),
+refuses otherwise, and gives the files it writes that same access. Other platforms either cannot reach files through
+handles or cannot be checked for access control lists the same way, so
+applying is refused there; previewing and rebasing work everywhere. As
+with verifying packs, applying transactions in a tree that others can
+write to is not supported: such a writer could swap a file between a check
+and its use.
+
 A pack's file name digest is checked against the file at its path, so the
 check binds to the path. Packs are content-addressed files opened from
 directories the caller controls; verifying packs in a directory others can

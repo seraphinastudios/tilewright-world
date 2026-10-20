@@ -8,21 +8,28 @@
 //! before use (`portable`).
 
 #[cfg(unix)]
-mod beneath;
+pub(crate) mod beneath;
 #[cfg(any(not(unix), test))]
-mod portable;
+pub(crate) mod portable;
 
 #[cfg(unix)]
-use beneath as platform;
+pub(crate) use beneath as platform;
 #[cfg(not(unix))]
-use portable as platform;
+pub(crate) use portable as platform;
 
 use crate::{
-    Code, Diagnostic, LoadOptions,
+    Code, Diagnostic, LoadOptions, Overlay,
     diagnostic::{Diagnostics, Positions},
 };
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, io::Read as _, path::Path};
+#[cfg(all(test, target_os = "linux"))]
+use std::path::Path;
+use std::{
+    cell::Cell,
+    collections::{BTreeMap, BTreeSet},
+    io::Read as _,
+    rc::Rc,
+};
 use tilewright_jsonc::{Document, ErrorCode};
 
 /// Why a path beneath the root could not be used.
@@ -61,7 +68,7 @@ pub(crate) struct RawEntry {
 }
 
 /// The components of a relative path.
-fn components(path: &str) -> Vec<&str> {
+pub(crate) fn components(path: &str) -> Vec<&str> {
     path.split('/')
         .filter(|component| !component.is_empty())
         .collect()
@@ -89,6 +96,7 @@ pub(crate) struct Entry {
 pub(crate) struct Tree<'o> {
     root: platform::Root,
     options: &'o LoadOptions,
+    overlay: &'o Overlay,
     files: usize,
     entries: usize,
     bytes: u64,
@@ -97,8 +105,11 @@ pub(crate) struct Tree<'o> {
     exhausted: bool,
 }
 
-/// Whether `path` is a safe relative path ending in `.jsonc`.
-pub(crate) fn is_jsonc_path(path: &str) -> bool {
+/// Whether `path` is a safe relative path ending in `.jsonc`: at most 1,024
+/// bytes and 32 `/`-separated components of at most 128 ASCII letters,
+/// digits, `_`, `.` and `-`, none starting with `.` or `-`.
+#[must_use]
+pub fn is_jsonc_path(path: &str) -> bool {
     is_safe_relative(path) && path.as_bytes().ends_with(b".jsonc")
 }
 
@@ -119,16 +130,41 @@ pub(crate) fn is_safe_relative(path: &str) -> bool {
         })
 }
 
+/// The overlay of a load that edits nothing.
+#[cfg(all(test, target_os = "linux"))]
+static NO_OVERLAY: Overlay = BTreeMap::new();
+
 impl<'o> Tree<'o> {
+    #[cfg(all(test, target_os = "linux"))]
     pub fn new(root: &Path, options: &'o LoadOptions) -> Self {
-        Self {
-            root: platform::Root::new(root),
+        Self::in_root(
+            platform::Root::new(root),
             options,
+            &NO_OVERLAY,
+            Rc::new(Cell::new(0)),
+        )
+    }
+
+    /// A tree over an opened root whose files are those on disk with
+    /// `overlay` applied: an entry's text replaces or creates the file at
+    /// its path, and an entry of `None` removes it. Directories that hold
+    /// an overlay file exist. `total` is the load's shared diagnostic
+    /// count; once it reaches the maximum, nothing more is read.
+    pub fn in_root(
+        root: platform::Root,
+        options: &'o LoadOptions,
+        overlay: &'o Overlay,
+        total: Rc<Cell<usize>>,
+    ) -> Self {
+        Self {
+            root,
+            options,
+            overlay,
             files: 0,
             entries: 0,
             bytes: 0,
             digests: BTreeMap::new(),
-            diagnostics: Diagnostics::new(options.maximum_diagnostics),
+            diagnostics: Diagnostics::sharing(options.maximum_diagnostics, total),
             exhausted: false,
         }
     }
@@ -158,10 +194,16 @@ impl<'o> Tree<'o> {
     }
 
     pub fn take_diagnostics(&mut self) -> Diagnostics {
+        let total = self.diagnostics.total();
         std::mem::replace(
             &mut self.diagnostics,
-            Diagnostics::new(self.options.maximum_diagnostics),
+            Diagnostics::sharing(self.options.maximum_diagnostics, total),
         )
+    }
+
+    /// Whether the load's diagnostics are full, so reading on is useless.
+    fn stopped(&self) -> bool {
+        self.diagnostics.is_full()
     }
 
     /// Reports a symbolic link at `path`.
@@ -176,11 +218,18 @@ impl<'o> Tree<'o> {
     /// Whether a regular file or directory exists at `path`. A symbolic
     /// link anywhere in the path is reported and counts as neither.
     pub fn kind(&mut self, path: &str) -> Option<EntryKind> {
+        match self.overlay.get(path) {
+            Some(Some(_)) => return Some(EntryKind::File),
+            Some(None) => return None,
+            None => {}
+        }
         match self.root.kind(&components(path)) {
             Ok(Found::File) => Some(EntryKind::File),
             Ok(Found::Directory) => Some(EntryKind::Directory),
             Ok(Found::Other) => Some(EntryKind::Other),
-            Ok(Found::Missing) | Err(Refused::Missing | Refused::Unexpected) => None,
+            Ok(Found::Missing) | Err(Refused::Missing | Refused::Unexpected) => self
+                .holds_overlay_files(path)
+                .then_some(EntryKind::Directory),
             Err(Refused::Link(link)) => {
                 self.link(&link);
                 None
@@ -194,6 +243,11 @@ impl<'o> Tree<'o> {
                 None
             }
         }
+    }
+
+    /// Whether the overlay puts a file beneath the directory `path`.
+    fn holds_overlay_files(&self, path: &str) -> bool {
+        overlay_beneath(self.overlay, path).any(|(_, value)| value.is_some())
     }
 
     /// Whether the optional directory `path` is present. An entry of
@@ -216,12 +270,65 @@ impl<'o> Tree<'o> {
     /// Lists a directory, sorted by name. Symbolic links, special files and
     /// non-UTF-8 names are reported and skipped.
     pub fn list(&mut self, path: &str) -> Vec<Entry> {
+        if self.stopped() {
+            self.diagnostics.skip();
+            return Vec::new();
+        }
+        // Overlay files replace, add or remove entries; a directory that
+        // holds an overlay file is listed. Names are looked up in sets, so
+        // merging costs a logarithm per entry.
+        let mut added: BTreeMap<&str, EntryKind> = BTreeMap::new();
+        let remaining = self.options.maximum_entries.saturating_sub(self.entries);
+        for (rest, value) in overlay_beneath(self.overlay, path) {
+            match (rest.split_once('/'), value) {
+                (None, Some(_)) => {
+                    added.insert(rest, EntryKind::File);
+                }
+                (Some((directory, _)), Some(_)) => {
+                    added.entry(directory).or_insert(EntryKind::Directory);
+                }
+                (_, None) => {}
+            }
+            // Each name added is counted once, here or on disk, so more
+            // names than the budget has left exhaust it whatever is there.
+            if added.len() > remaining {
+                self.exhaust(path);
+                return Vec::new();
+            }
+        }
+        // An entry the overlay replaces or removes is not looked at at
+        // all, so what is there on disk, a link, a special file or a
+        // directory, is not reported.
+        let mut entries = self.list_disk(path);
+        let present: BTreeSet<String> = entries.iter().map(|entry| entry.name.clone()).collect();
+        for (name, kind) in added {
+            if !present.contains(name) {
+                self.entries += 1;
+                if self.entries > self.options.maximum_entries {
+                    self.exhaust(path);
+                    break;
+                }
+                entries.push(Entry {
+                    name: name.to_owned(),
+                    kind,
+                });
+            }
+        }
+        entries.sort_by(|left, right| left.name.cmp(&right.name));
+        entries
+    }
+
+    /// Lists a directory on disk. A directory that is missing on disk but
+    /// holds overlay files is empty there.
+    fn list_disk(&mut self, path: &str) -> Vec<Entry> {
+        let overlay = self.overlay;
         let directory = match self.root.list(&components(path)) {
             Ok(directory) => directory,
             Err(Refused::Link(link)) => {
                 self.link(&link);
                 return Vec::new();
             }
+            Err(Refused::Missing) if self.holds_overlay_files(path) => return Vec::new(),
             Err(refused) => {
                 let reason = match refused {
                     Refused::Io(error) => error.to_string(),
@@ -265,6 +372,11 @@ impl<'o> Tree<'o> {
                 ));
                 continue;
             };
+            if overlay.contains_key(&join(path, &name)) {
+                // The overlay's entry takes its place, and is counted then.
+                self.entries -= 1;
+                continue;
+            }
             let child = join(path, &name);
             match entry.kind {
                 RawKind::Link => self.link(&child),
@@ -283,13 +395,24 @@ impl<'o> Tree<'o> {
                 )),
             }
         }
-        entries.sort_by(|left, right| left.name.cmp(&right.name));
         entries
     }
 
     /// Reads and parses a JSONC document. Every problem is reported.
-    #[allow(clippy::too_many_lines)]
     pub fn document(&mut self, path: &str) -> Option<Source> {
+        if self.stopped() {
+            self.diagnostics.skip();
+            return None;
+        }
+        match self.overlay.get(path) {
+            Some(Some(text)) => return self.overlay_document(path, text),
+            Some(None) => {
+                self.diagnostics
+                    .push(Diagnostic::file(path, Code::MissingFile, "file is missing"));
+                return None;
+            }
+            None => {}
+        }
         // The file is opened first and its opened handle checked, so what is
         // checked is what is read.
         let (file, length) = match self.root.file(&components(path)) {
@@ -365,6 +488,32 @@ impl<'o> Tree<'o> {
             self.exhaust(path);
             return None;
         }
+        self.parse(path, bytes)
+    }
+
+    /// Reads an overlay file under the same limits and budget as a file on
+    /// disk.
+    fn overlay_document(&mut self, path: &str, text: &str) -> Option<Source> {
+        let limit = u64::try_from(self.options.limits.max_input_bytes).unwrap_or(u64::MAX);
+        let length = u64::try_from(text.len()).unwrap_or(u64::MAX);
+        if length > limit {
+            self.diagnostics.push(Diagnostic::file(
+                path,
+                ErrorCode::InputTooLarge,
+                format!("file is larger than {limit} bytes"),
+            ));
+            return None;
+        }
+        if !self.within_budget(length) {
+            self.exhaust(path);
+            return None;
+        }
+        self.parse(path, text.as_bytes().to_vec())
+    }
+
+    /// Counts, digests and parses the bytes of a file that fits the budget.
+    fn parse(&mut self, path: &str, bytes: Vec<u8>) -> Option<Source> {
+        let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         self.files += 1;
         self.bytes = self.bytes.saturating_add(length);
         self.digests
@@ -412,6 +561,22 @@ impl<'o> Tree<'o> {
         }
         hasher.finalize().into()
     }
+}
+
+/// The overlay entries beneath the directory `path`, with the rest of
+/// their paths.
+fn overlay_beneath<'a>(
+    overlay: &'a Overlay,
+    path: &str,
+) -> impl Iterator<Item = (&'a str, &'a Option<String>)> + 'a {
+    let prefix = if path.is_empty() {
+        String::new()
+    } else {
+        format!("{path}/")
+    };
+    overlay
+        .range(prefix.clone()..)
+        .map_while(move |(key, value)| key.strip_prefix(prefix.as_str()).map(|rest| (rest, value)))
 }
 
 pub(crate) fn join(directory: &str, name: &str) -> String {
@@ -494,4 +659,164 @@ mod tests {
 
     access_tests!(beneath_refuses_links, beneath);
     access_tests!(portable_refuses_links, portable);
+
+    macro_rules! write_tests {
+        ($name:ident, $module:ident) => {
+            #[test]
+            fn $name() {
+                let directory = tree();
+                let root = super::$module::Root::new(directory.path());
+                // Directories are created as asked, never through a link.
+                assert!(matches!(
+                    root.directory(&["new", "deeper"], false),
+                    Err(Refused::Missing)
+                ));
+                let made = root.directory(&["new", "deeper"], true).unwrap();
+                assert!(directory.path().join("new/deeper").is_dir());
+                assert_eq!(link(root.directory(&["link", "inside"], true)), "link");
+                assert!(!directory.path().join("dir/inside").exists());
+                assert!(matches!(
+                    root.directory(&["dir", "file.jsonc"], true),
+                    Err(Refused::Unexpected)
+                ));
+
+                // A write replaces a link or hard link instead of writing
+                // through it, and takes the access it is given.
+                let dir = root.directory(&["dir"], false).unwrap();
+                let outside = tempfile::tempdir().unwrap();
+                let target = outside.path().join("target");
+                fs::write(&target, "outside").unwrap();
+                symlink(&target, directory.path().join("dir/staged")).unwrap();
+                dir.write("staged", None, b"new").unwrap();
+                assert_eq!(fs::read_to_string(&target).unwrap(), "outside");
+                fs::hard_link(&target, directory.path().join("dir/hard")).unwrap();
+                dir.write("hard", None, b"new").unwrap();
+                assert_eq!(fs::read_to_string(&target).unwrap(), "outside");
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    let file = directory.path().join("dir/file.jsonc");
+                    fs::set_permissions(&file, fs::Permissions::from_mode(0o640)).unwrap();
+                    let like = dir.access("file.jsonc").unwrap();
+                    assert!(dir.access("nope").unwrap().is_none());
+                    dir.write("moded", like.as_ref(), b"x").unwrap();
+                    let mode = fs::metadata(directory.path().join("dir/moded"))
+                        .unwrap()
+                        .permissions()
+                        .mode();
+                    assert_eq!(mode & 0o777, 0o640);
+                    // A directory's own access can be read and set.
+                    let mut own = dir.own_access().unwrap();
+                    own.mode = 0o750;
+                    dir.set_own_access(&own).unwrap();
+                    assert_eq!(dir.own_access().unwrap(), own);
+                }
+
+                dir.rename("staged", "file.jsonc").unwrap();
+                assert_eq!(
+                    fs::read_to_string(directory.path().join("dir/file.jsonc")).unwrap(),
+                    "new"
+                );
+                assert!(dir.remove_file("hard").unwrap());
+                assert!(!dir.remove_file("hard").unwrap());
+                assert!(dir.remove_file("file-link.jsonc").unwrap());
+                assert!(target.exists());
+                dir.sync().unwrap();
+                made.sync().unwrap();
+
+                let top = root.directory(&["new"], false).unwrap();
+                fs::write(directory.path().join("new/deeper/x"), "").unwrap();
+                assert!(!top.remove_directory("deeper").unwrap());
+                fs::remove_file(directory.path().join("new/deeper/x")).unwrap();
+                assert!(top.remove_directory("deeper").unwrap());
+                assert!(!top.remove_directory("deeper").unwrap());
+
+                assert!(root.lock().unwrap().is_some());
+                // Making a directory says whether this call made it.
+                assert!(root.make_directory(&["made"]).unwrap());
+                assert!(!root.make_directory(&["made"]).unwrap());
+                assert!(!root.make_directory(&["dir", "file.jsonc"]).unwrap());
+                assert!(matches!(
+                    root.make_directory(&["nope", "deeper"]),
+                    Err(Refused::Missing)
+                ));
+                // A clone is a handle on the same directory.
+                let clone = root.try_clone();
+                assert_eq!(clone.kind(&["dir"]).unwrap(), Found::Directory);
+            }
+        };
+    }
+
+    write_tests!(beneath_writes_beneath_the_root, beneath);
+    write_tests!(portable_writes_beneath_the_root, portable);
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_written_file_with_access_has_no_inherited_access_control_list() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tree();
+        // A default list for new files: user::rwx, user:nobody:r--,
+        // group::r-x, mask::r-x, other::---.
+        let mut acl = 2_u32.to_le_bytes().to_vec();
+        for (tag, permissions, id) in [
+            (0x01_u16, 7_u16, u32::MAX),
+            (0x02, 4, 65534),
+            (0x04, 5, u32::MAX),
+            (0x10, 5, u32::MAX),
+            (0x20, 0, u32::MAX),
+        ] {
+            acl.extend(tag.to_le_bytes());
+            acl.extend(permissions.to_le_bytes());
+            acl.extend(id.to_le_bytes());
+        }
+        let dir_path = directory.path().join("dir");
+        if rustix::fs::setxattr(
+            &dir_path,
+            "system.posix_acl_default",
+            &acl,
+            rustix::fs::XattrFlags::empty(),
+        )
+        .is_err()
+        {
+            // No ACL support here.
+            return;
+        }
+        let root = super::beneath::Root::new(directory.path());
+        let dir = root.directory(&["dir"], false).unwrap();
+        // The directory's own list is refused.
+        assert!(dir.own_access().is_err());
+        let mut access = dir.access("file.jsonc").unwrap().unwrap();
+        access.mode = 0o640;
+        dir.write("new", Some(&access), b"x").unwrap();
+        let written = dir_path.join("new");
+        assert_eq!(
+            rustix::fs::getxattr(&written, "system.posix_acl_access", &mut [0_u8; 0][..]),
+            Err(rustix::io::Errno::NODATA)
+        );
+        assert_eq!(
+            fs::metadata(&written).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        // Without access, the file has what the directory gives it.
+        dir.write("default", None, b"x").unwrap();
+        assert!(
+            rustix::fs::getxattr(
+                dir_path.join("default"),
+                "system.posix_acl_access",
+                &mut [0_u8; 0][..]
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn the_lock_excludes_a_second_holder() {
+        let directory = tree();
+        let root = super::beneath::Root::new(directory.path());
+        let other = super::beneath::Root::new(directory.path());
+        let held = root.lock().unwrap();
+        assert!(held.is_some());
+        assert!(other.lock().unwrap().is_none());
+        drop(held);
+        assert!(other.lock().unwrap().is_some());
+    }
 }
