@@ -271,7 +271,8 @@ impl<'r> Workspace<'r> {
         match self.entries.entry(path.to_owned()) {
             std::collections::btree_map::Entry::Occupied(entry) => Ok(entry.into_mut()),
             std::collections::btree_map::Entry::Vacant(vacant) => {
-                if count >= limits::FILES {
+                // Files that could not be read count too.
+                if count + self.unreadable.len() >= limits::FILES {
                     // The transaction is rejected; carrying on is useless.
                     self.spent = true;
                     return Err(Failure::limit(format!(
@@ -333,6 +334,13 @@ impl<'r> Workspace<'r> {
         self.spent
     }
 
+    /// Whether `path` has a file now, or had one before the transaction,
+    /// which publishing finds on disk until it removes it.
+    pub fn has_or_had(&mut self, path: &str) -> Outcome<bool> {
+        let entry = self.entry(path)?;
+        Ok(entry.current.text().is_some() || entry.base.is_some())
+    }
+
     pub fn exists(&mut self, path: &str) -> Outcome<bool> {
         Ok(self.entry(path)?.current.text().is_some())
     }
@@ -390,22 +398,41 @@ impl<'r> Workspace<'r> {
         if self.charged.insert(path.to_owned()) {
             self.charge(length)?;
         }
-        let entry = self.entry(path)?;
-        if let Current::Text(text) = &entry.current {
-            let document = Document::parse(text.as_str(), &limits()).map_err(|error| {
-                Failure::unparsed(
-                    &error,
-                    format!("{path} is not valid JSONC ({error}); it cannot be edited"),
-                )
-            })?;
-            entry.current = Current::Parsed(document);
+        let parsed = {
+            let entry = self.entry(path)?;
+            match &entry.current {
+                Current::Text(text) => match Document::parse(text.as_str(), &limits()) {
+                    Ok(document) => {
+                        entry.current = Current::Parsed(document);
+                        Ok(())
+                    }
+                    Err(error) => Err(Failure::unparsed(
+                        &error,
+                        format!("{path} is not valid JSONC ({error}); it cannot be edited"),
+                    )),
+                },
+                Current::Absent | Current::Parsed(_) => Ok(()),
+            }
+        };
+        if let Err(failure) = parsed {
+            return Err(self.failed(failure));
         }
+        let entry = self.entry(path)?;
         match &entry.current {
             Current::Parsed(document) => Ok(document),
             Current::Absent | Current::Text(_) => {
                 Err(Failure::conflict(format!("{path} cannot be edited")))
             }
         }
+    }
+
+    /// A failure, after which nothing more is carried out if it is past a
+    /// limit: the transaction is rejected whatever follows.
+    fn failed(&mut self, failure: Failure) -> Failure {
+        if failure.code == Code::Limit {
+            self.spent = true;
+        }
+        failure
     }
 
     /// Replaces the text of `path`, which must parse, and records the
@@ -418,9 +445,14 @@ impl<'r> Workspace<'r> {
         if !created {
             self.record(&inverse)?;
         }
-        let document = Document::parse(text, &limits()).map_err(|error| {
-            Failure::unparsed(&error, format!("the edit leaves {path} invalid ({error})"))
-        })?;
+        let document = match Document::parse(text, &limits()) {
+            Ok(document) => document,
+            Err(error) => {
+                let failure =
+                    Failure::unparsed(&error, format!("the edit leaves {path} invalid ({error})"));
+                return Err(self.failed(failure));
+            }
+        };
         let entry = self.entry(path)?;
         let before = std::mem::replace(&mut entry.current, Current::Parsed(document));
         let length = entry.inverse.len();

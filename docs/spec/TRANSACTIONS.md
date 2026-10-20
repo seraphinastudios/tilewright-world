@@ -103,7 +103,7 @@ an error.
 | `object.remove` | tile, `index`, `expect` | Removes an object. |
 | `object.move` | tile, `index`, `expect`, `to` | Moves an object to `to`: `{"plane"?, "layer"?, "at"?, "index"?}`, each defaulting to the object's own (and `index` to after the destination's objects). `to.index` counts the destination's objects without the moved one, so a move on one tile reorders it, and a move to where the object already is changes nothing. |
 | `terrain.set` | `plane`, `layer`, `grid`, `cells` | Sets terrain cells of one grid (section 5). |
-| `document.create` | `path`, `document` or `text`, `like`? | Creates a document: `document` is written in canonical layout (section 10), `text` exactly; `text` is a string or an array of strings joined, for a file longer than a string or a line may be. Either must be valid JSONC. The new file takes the permissions of the file at `like`, if it is there when publishing (section 9). |
+| `document.create` | `path`, `document` or `text`, `like`? | Creates a document: `document` is written in canonical layout (section 10), `text` exactly; `text` is a string or an array of strings joined, for a file longer than a string or a line may be. Either must be valid JSONC. `like` names a file that is there at that point of the transaction, or was before it, and the new file takes its permissions (section 9). |
 | `document.delete` | `path` | Deletes a document. |
 | `document.rename` | `path`, `to` | Moves a document to a path that is free, unchanged, with its permissions (section 9). A rename that changes identity also sets it, such as a definition's `id` or a chunk's `chunk`, in the same transaction; references to it are updated by operations of their own. |
 
@@ -251,15 +251,18 @@ files before. Every operation of an inverse names one file by path, so its
 files are independent: when a transaction of that kind has a `result`, a
 file that already has its result digest is left alone instead of being a
 conflict. Applying an inverse therefore undoes an interrupted apply, and
-applying it twice does nothing the second time.
+applying it twice does nothing the second time. An inverse is applied like
+any transaction, so its result must validate: the inverse of a transaction
+that made an invalid tree valid recreates the invalid tree, is refused, and
+such a tree is restored from version control instead.
 
 ## 9. Applying
 
-Publishing is supported on Unix only. Other platforms cannot reach files
-through directory handles, so a process changing the tree could redirect a
-write outside it, and a file replaced there would not keep its own access
-control list; publishing is refused there, with `tx.io`, and nothing is
-written. Previewing and rebasing work everywhere.
+Publishing is supported on Linux only. Elsewhere it is refused, with
+`tx.io`, and nothing is written: some platforms cannot reach files through
+directory handles, so a process changing the tree could redirect a write
+outside it, and the others cannot be checked for access control lists in
+the same way. Previewing and rebasing work everywhere.
 
 Publishing a carried-out transaction works on the root it was carried out
 on: the directory opened then, whatever its path names later. It:
@@ -301,9 +304,12 @@ allows: to the mode bits all of them have. So no file allows more than the
 files it came from did. Any other new file has the platform's default. A
 file whose bytes end as they began is not written, and keeps its
 permissions. Restoring after a failure gives every file back the
-permissions it had. Permissions here are the mode bits: a file's access
-control list, other extended attributes and owner are not carried to the
-file that replaces it, which has the directory's defaults for them.
+permissions it had. Permissions here are the mode bits. Since a file's
+access control list could not be kept, publishing refuses to replace,
+remove or take permissions from a file that has one (POSIX, NFS version 4
+or rich), with `tx.io`; other extended attributes and the owner are not
+carried to the file that replaces a file, which has the directory's
+defaults for them.
 
 Each rename and removal is atomic, but there is no atomic publication of
 several files. If a step of 4 fails, the files already published are

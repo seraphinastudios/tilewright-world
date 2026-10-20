@@ -21,14 +21,16 @@ checked by path first, which a local process changing the tree at the same
 time can race. Sources are local checkouts, so a race needs a local attacker.
 
 Applying a transaction writes, renames and removes files beneath the root
-through the same confinement, on Unix only: there every operation goes
+through the same confinement, on Linux only: there every operation goes
 through the directory handles opened while the transaction was carried out,
-so changing the tree cannot redirect it. Other platforms cannot do this, and
-a file replaced there would not keep its own access control list, so
-applying is refused there; previewing and rebasing work everywhere. A
-replaced file keeps the mode bits of the file it replaces, or narrower ones;
-an access control list, other extended attributes and the owner are not
-carried over.
+so changing the tree cannot redirect it, and a file with an access control
+list (POSIX, NFS version 4 or rich), whose mode bits do not say who may
+read it, is refused rather than replaced, removed or copied from. A
+replaced file keeps the mode bits of the file it replaces, or narrower
+ones; other extended attributes and the owner are not carried over. Other
+platforms either cannot reach files through handles or cannot be checked
+for access control lists the same way, so applying is refused there;
+previewing and rebasing work everywhere.
 
 A pack's file name digest is checked against the file at its path, so the
 check binds to the path. Packs are content-addressed files opened from

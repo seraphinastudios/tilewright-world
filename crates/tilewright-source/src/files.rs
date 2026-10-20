@@ -22,7 +22,7 @@ use crate::{
     diagnostic::{Diagnostics, Positions},
 };
 use sha2::{Digest, Sha256};
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 use std::path::Path;
 use std::{
     cell::Cell,
@@ -131,11 +131,11 @@ pub(crate) fn is_safe_relative(path: &str) -> bool {
 }
 
 /// The overlay of a load that edits nothing.
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 static NO_OVERLAY: Overlay = BTreeMap::new();
 
 impl<'o> Tree<'o> {
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub fn new(root: &Path, options: &'o LoadOptions) -> Self {
         Self::in_root(
             platform::Root::new(root),

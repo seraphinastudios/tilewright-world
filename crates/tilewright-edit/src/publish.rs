@@ -114,12 +114,13 @@ fn not_applied(problems: Vec<Diagnostic>) -> PublishError {
     }
 }
 
-/// Whether publishing is supported here: only on Unix are files reached
-/// through directory handles and replaced with their permissions kept.
-pub const PUBLISH_SUPPORTED: bool = cfg!(unix);
+/// Whether publishing is supported here: only on Linux are files reached
+/// through directory handles and checked for access control lists, which a
+/// replacement could not keep.
+pub const PUBLISH_SUPPORTED: bool = cfg!(target_os = "linux");
 
 /// Why publishing is refused where it is not supported.
-const UNSUPPORTED: &str = "applying a transaction is supported only on Unix, where files are reached through directory handles and keep their permissions; preview and rebase work everywhere";
+const UNSUPPORTED: &str = "applying a transaction is supported only on Linux, where files are reached through directory handles and checked for access control lists; preview and rebase work everywhere";
 
 /// How many directory handles a publish keeps open at once; past it, one
 /// is closed and opened again when needed, so that a transaction across
@@ -641,7 +642,11 @@ impl Plan {
         // interrupted apply go too, and the directories deleting files
         // emptied.
         for file in &self.files {
-            directories.clean(&staging_path(&file.path), false);
+            // Beside a file that is not there, such a staging file may have
+            // been all its directories held.
+            if directories.clean(&staging_path(&file.path), false) && file.after.is_none() {
+                directories.prune(&file.path);
+            }
         }
         for file in &changed {
             if file.after.is_none() {

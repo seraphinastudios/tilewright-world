@@ -274,6 +274,13 @@ impl Directory {
         use std::os::unix::fs::PermissionsExt as _;
         match statat(&self.0, name, AtFlags::SYMLINK_NOFOLLOW) {
             Ok(stat) if kind_of(FileType::from_raw_mode(stat.st_mode)) == RawKind::File => {
+                #[cfg(target_os = "linux")]
+                if self.has_access_control_list(name)? {
+                    return Err(Refused::Io(std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        "it has an access control list, which a file replacing it could not keep",
+                    )));
+                }
                 Ok(Some(std::fs::Permissions::from_mode(
                     Mode::from_raw_mode(stat.st_mode).as_raw_mode(),
                 )))
@@ -281,6 +288,30 @@ impl Directory {
             Ok(_) | Err(Errno::NOENT) => Ok(None),
             Err(errno) => Err(Refused::Io(errno.into())),
         }
+    }
+
+    /// Whether the file `name` has an access control list beyond its mode
+    /// bits: a POSIX, NFS version 4 or rich one.
+    #[cfg(target_os = "linux")]
+    fn has_access_control_list(&self, name: &str) -> Result<bool, Refused> {
+        let flags =
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC | OFlags::NOCTTY;
+        let fd = openat(&self.0, name, flags, Mode::empty())
+            .map_err(|errno| classify(self.0.as_fd(), name, errno, &[name]))?;
+        for attribute in [
+            "system.posix_acl_access",
+            "system.nfs4_acl",
+            "system.richacl",
+        ] {
+            // Asked with no room, the call gives the size of a value that is
+            // there, or says there is none.
+            match rustix::fs::fgetxattr(&fd, attribute, &mut [0_u8; 0][..]) {
+                Ok(_) | Err(Errno::RANGE) => return Ok(true),
+                Err(Errno::NODATA | Errno::NOTSUP) => {}
+                Err(errno) => return Err(Refused::Io(errno.into())),
+            }
+        }
+        Ok(false)
     }
 
     pub(crate) fn write(

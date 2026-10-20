@@ -1197,7 +1197,8 @@ fn reading_stops_at_the_read_budget() {
     let layer = root.join("planes/overworld/layers/4");
     fs::create_dir_all(&layer).unwrap();
     let large = tree.path().join("large");
-    fs::write(&large, " ".repeat(40 << 20)).unwrap();
+    // Within the parser's bounds, but not a document.
+    fs::write(&large, format!("{}\n", " ".repeat(1023)).repeat(40 << 10)).unwrap();
     let mut cells = String::new();
     for cx in 0..100 {
         fs::hard_link(&large, layer.join(format!("{cx}_0.jsonc"))).unwrap();
@@ -2398,5 +2399,124 @@ fn a_publish_across_more_directories_than_it_keeps_open() {
             .filter(|path| path.ends_with("/0_0.jsonc"))
             .count(),
         2 * publish::OPEN_DIRECTORIES + 5
+    );
+}
+
+#[test]
+fn an_edit_past_a_parser_bound_stops_carrying_out() {
+    let tree = copy();
+    let members: Vec<String> = (0..256).map(|index| format!("\"k{index}\": 0")).collect();
+    fs::write(
+        tree.path().join("defs/proto/wide.jsonc"),
+        format!("{{\n{}\n}}\n", members.join(",\n")),
+    )
+    .unwrap();
+    let found = problems(
+        tree.path(),
+        &transaction(
+            r#"{"op": "set", "path": "defs/proto/wide.jsonc", "pointer": ["one_more"], "value": 0},
+    {"op": "test", "path": "defs/proto/coin.jsonc", "pointer": ["id"], "value": "x"}"#,
+        ),
+    );
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(found[0].code, "tx.limit", "{found:#?}");
+}
+
+#[test]
+fn unreadable_files_count_toward_the_file_limit() {
+    let tree = copy();
+    fs::write(
+        tree.path().join("defs/proto/latin1.jsonc"),
+        b"{\"id\": \"\xe9\"}",
+    )
+    .unwrap();
+    let mut operations = vec![
+        r#"{"op": "test", "path": "defs/proto/latin1.jsonc", "pointer": [], "absent": true}"#
+            .to_owned(),
+    ];
+    operations.extend((0..limits::FILES).map(|index| {
+        format!(
+            "{{\"op\": \"test\", \"path\": \"defs/proto/n{index}.jsonc\", \"pointer\": [], \"absent\": true}}"
+        )
+    }));
+    let found = problems(tree.path(), &transaction(&operations.join(",\n    ")));
+    assert!(has(&found, "tx.limit", "more than"), "{found:#?}");
+}
+
+#[test]
+fn a_file_is_like_one_that_is_there() {
+    let tree = copy();
+    let found = problems(
+        tree.path(),
+        &transaction(
+            r#"{"op": "document.create", "path": "defs/recipe/a.jsonc", "text": "{}", "like": "defs/recipe/b.jsonc"},
+    {"op": "document.create", "path": "defs/recipe/b.jsonc", "text": "{}", "like": "defs/recipe/chest.jsonc"}"#,
+        ),
+    );
+    assert!(
+        has(
+            &found,
+            "tx.conflict",
+            "has no file for defs/recipe/a.jsonc to be like"
+        ),
+        "{found:#?}"
+    );
+}
+
+#[test]
+fn recovery_removes_directories_an_interrupted_stage_made() {
+    let tree = copy();
+    let root = tree.path();
+    let plan = planned(
+        root,
+        &transaction(
+            r#"{"op": "object.insert", "plane": "overworld", "layer": 9, "at": [1, 1], "object": {"proto": "tree"}}"#,
+        ),
+    );
+    // The apply stopped after staging the new chunk in a new directory.
+    let layer = root.join("planes/overworld/layers/9");
+    fs::create_dir(&layer).unwrap();
+    fs::write(
+        layer.join(".0_0.jsonc.tilewright-tmp"),
+        plan.files()[0].after.as_deref().unwrap_or_default(),
+    )
+    .unwrap();
+    apply(
+        root,
+        &Transaction::parse("inverse.jsonc", plan.inverse()).unwrap(),
+    );
+    assert!(!layer.exists());
+    assert_eq!(snapshot(root), snapshot(&fixture()));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_file_with_an_access_control_list_is_not_replaced() {
+    let tree = copy();
+    let root = tree.path();
+    let target = root.join("planes/overworld/plane.jsonc");
+    let set = std::process::Command::new("setfacl")
+        .args(["-m", "u:nobody:---"])
+        .arg(&target)
+        .status();
+    if !set.is_ok_and(|status| status.success()) {
+        // No ACL support here.
+        return;
+    }
+    let plan = planned(
+        root,
+        &transaction(
+            r#"{"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["title"], "value": "Changed"}"#,
+        ),
+    );
+    let failure = plan.publish().unwrap_err();
+    assert!(
+        has(&failure.problems, "tx.io", "access control list"),
+        "{failure:#?}"
+    );
+    assert!(!failure.applied);
+    assert_eq!(
+        read(root, "planes/overworld/plane.jsonc"),
+        read(&fixture(), "planes/overworld/plane.jsonc")
     );
 }

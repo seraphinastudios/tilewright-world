@@ -219,7 +219,9 @@ impl SourceDirectory {
     }
 
     /// The permissions of the regular file `name`; `None` when there is no
-    /// regular file there.
+    /// regular file there. On Linux, a file with an access control list is
+    /// refused, since its mode bits do not say who may read it and a file
+    /// replacing it could not keep the list.
     pub fn permissions(&self, name: &str) -> Result<Option<std::fs::Permissions>, AccessError> {
         self.directory
             .permissions(checked_name(name)?)

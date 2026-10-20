@@ -187,7 +187,7 @@ fn rebase(transaction: &Path, root: &Path, output: &Path) -> Result<String, Fail
 fn apply(transaction: &Path, root: &Path, inverse: &Path) -> Result<String, Failure> {
     if !tilewright_edit::PUBLISH_SUPPORTED {
         return Err(Failure::message(
-            "tx apply is supported only on Unix, where files are reached through directory handles and keep their permissions; tx preview and tx rebase work here",
+            "tx apply is supported only on Linux, where files are reached through directory handles and checked for access control lists; tx preview and tx rebase work here",
         ));
     }
     outside(root, inverse)?;
@@ -341,6 +341,8 @@ mod tests {
         }
     }
 
+    // Publishing is supported on Linux only.
+    #[cfg(target_os = "linux")]
     #[test]
     fn apply_writes_the_inverse_and_the_inverse_undoes_it() {
         let (directory, root) = setup();

@@ -940,5 +940,6 @@ fn inverse(workspace: &Workspace<'_>) -> Result<String, TooLarge> {
     Ok(output.text)
 }
 
-#[cfg(test)]
+// Most tests publish, which is supported on Linux only.
+#[cfg(all(test, target_os = "linux"))]
 mod tests;

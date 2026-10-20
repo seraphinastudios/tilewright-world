@@ -625,6 +625,15 @@ fn document_operation(
             content,
             like,
         } => {
+            // The file it is like must be there, now or before the
+            // transaction, so its permissions are known when publishing.
+            if let Some(like) = like
+                && !workspace.has_or_had(like)?
+            {
+                return Err(Failure::conflict(format!(
+                    "{like} has no file for {path} to be like"
+                )));
+            }
             let text = match content {
                 Content::Document(span) => {
                     Node::from_value(&transaction.document, transaction.value(*span)).file()
