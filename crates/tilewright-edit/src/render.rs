@@ -148,6 +148,21 @@ impl Node {
         }
     }
 
+    /// Whether this is a string too long to share its line.
+    fn is_long(&self) -> bool {
+        matches!(self, Self::String(_)) && !self.fits(&mut SCALAR_LINE_WIDTH.clone())
+    }
+
+    /// Writes a long string on a line of its own, from its first column,
+    /// and starts the next line at `indent`, so that nothing else shares
+    /// the string's line.
+    fn write_alone(&self, indent: &str, output: &mut String) {
+        output.push('\n');
+        self.inline(output);
+        output.push('\n');
+        output.push_str(indent);
+    }
+
     fn write(&self, indent: &str, expand: bool, output: &mut String) {
         // An array of numbers, booleans and nulls stays on one line while
         // that line is not long; any other container while it is short.
@@ -171,8 +186,12 @@ impl Node {
                     if index > 0 {
                         output.push_str(",\n");
                     }
-                    output.push_str(&inner);
-                    item.write(&inner, false, output);
+                    if item.is_long() {
+                        item.write_alone(&inner, output);
+                    } else {
+                        output.push_str(&inner);
+                        item.write(&inner, false, output);
+                    }
                 }
                 output.push('\n');
                 output.push_str(indent);
@@ -186,17 +205,13 @@ impl Node {
                     }
                     output.push_str(&inner);
                     write_json_string(key, output);
-                    // A long string goes on a line of its own.
-                    if matches!(value, Self::String(_))
-                        && !value.fits(&mut SCALAR_LINE_WIDTH.clone())
-                    {
-                        output.push_str(":\n");
-                        output.push_str(&inner);
-                        output.push_str("  ");
+                    if value.is_long() {
+                        output.push(':');
+                        value.write_alone(&inner, output);
                     } else {
                         output.push_str(": ");
+                        value.write(&inner, false, output);
                     }
-                    value.write(&inner, false, output);
                 }
                 output.push('\n');
                 output.push_str(indent);

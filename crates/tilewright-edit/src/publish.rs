@@ -386,6 +386,7 @@ impl Plan {
                 .terrain
                 .iter()
                 .filter_map(|(plane, grid)| crate::terrain_problem(&world, plane, grid))
+                .take(crate::limits::DIAGNOSTICS)
                 .map(|message| diagnostic::file(&self.name, Code::Conflict.as_str(), message))
                 .collect();
             if problems.is_empty() {
@@ -470,7 +471,14 @@ fn publish_one<'f>(
         // failing to remove it leaves the target untouched; its removal is
         // recorded to sync whatever happens next. The target's permissions
         // are kept to restore it with.
-        directories.remove(&staging_path(&file.path), false)?;
+        if let Err(error) = directories.remove(&staging_path(&file.path), false) {
+            directories.leftovers.push(diagnostic::file(
+                &staging_path(&file.path),
+                Code::Io.as_str(),
+                format!("could not be removed ({error}); remove it by hand"),
+            ));
+            return Err(error);
+        }
         let Some(directory) = directories.get(parent, false)? else {
             return Err(AccessError::Unexpected(parent.to_owned()));
         };

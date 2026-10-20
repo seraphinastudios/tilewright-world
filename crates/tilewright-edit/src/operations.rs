@@ -461,7 +461,9 @@ fn test_value(
         let document = workspace.document(&path)?;
         let matching = splice::find(document.root(), &steps)
             .and_then(Value::as_array)
-            .unwrap_or_default()
+            .ok_or_else(|| {
+                Failure::conflict(format!("{path} has no array at {}", describe(&steps)))
+            })?
             .iter()
             .filter(|item| item.get("id").and_then(Value::as_str) == Some(id.as_str()))
             .count();
@@ -624,7 +626,13 @@ fn document_operation(
             }
             let text = workspace.delete(path)?;
             workspace.create(to, text)?;
-            workspace.renames.insert(to.clone(), path.clone());
+            // A chain of renames leads back to the file on disk.
+            let origin = workspace
+                .renames
+                .get(path)
+                .cloned()
+                .unwrap_or_else(|| path.clone());
+            workspace.renames.insert(to.clone(), origin);
             Ok(())
         }
         Action::ObjectInsert { .. } | Action::ObjectRemove { .. } | Action::ObjectMove { .. } => {

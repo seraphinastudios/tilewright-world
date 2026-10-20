@@ -305,8 +305,8 @@ indentation and `"key": value` members with minimal string escaping. A
 container is written on one line when it is empty, when it is an array of
 numbers, booleans and nulls only whose one-line form is at most 4,096
 bytes, or when its one-line form is at most 80 bytes; otherwise each item
-is on its own line one level deeper; a member whose string value is longer
-than 4,096 bytes has the value on a line of its own. A file's root is
+is on its own line one level deeper; a string value or item longer than
+4,096 bytes is on a line of its own, from the line's first column. A file's root is
 always on several lines and the file ends with a newline.
 
 ## 11. Limits
@@ -329,8 +329,8 @@ FORMAT.md section 3 and these, while they are read and carried out:
 Whatever an operation does within a document, finding values, scanning
 members or objects and comparing values, is bounded by a constant times
 the work it is charged, so no lookup is metered on its own. A file is read
-only as far as the read allowance left; the inverse's text is counted as
-operations run and must fit a transaction; one terrain operation names at
+only as far as the read allowance left; the inverse's text and operations
+are counted as operations run and must fit a transaction; one terrain operation names at
 most 10,000 chunks; and carrying out stops as soon as a budget is spent or
 the diagnostic limit is reached. Messages describe a value over 4 KiB by its kind and size
 rather than render it.

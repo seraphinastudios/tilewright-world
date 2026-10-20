@@ -164,16 +164,18 @@ pub(crate) struct Workspace<'r> {
     work: u64,
     /// The documents the current operation has been charged for.
     charged: BTreeSet<String>,
-    /// Bytes of inverse text recorded so far.
+    /// Bytes of inverse text, and inverse operations, recorded so far.
     inverse_bytes: u64,
+    inverse_operations: usize,
     /// A budget was exceeded, and the failure reported; nothing more is
     /// carried out.
     spent: bool,
     /// The state of each file before the current operation first changed
     /// it, and its inverse's length then, to undo a failed operation.
     journal: BTreeMap<String, (Current, usize)>,
-    /// The inverse's size before the current operation.
+    /// The inverse's size and operations before the current operation.
     journal_inverse_bytes: u64,
+    journal_inverse_operations: usize,
     /// Files that were read but cannot be edited, with why.
     unreadable: BTreeMap<String, String>,
     /// Files created by renaming another, with the file each came from.
@@ -193,9 +195,11 @@ impl<'r> Workspace<'r> {
             work: 0,
             charged: BTreeSet::new(),
             inverse_bytes: 0,
+            inverse_operations: 0,
             spent: false,
             journal: BTreeMap::new(),
             journal_inverse_bytes: 0,
+            journal_inverse_operations: 0,
             unreadable: BTreeMap::new(),
             renames: BTreeMap::new(),
         }
@@ -208,6 +212,7 @@ impl<'r> Workspace<'r> {
         self.charged.clear();
         self.journal.clear();
         self.journal_inverse_bytes = self.inverse_bytes;
+        self.journal_inverse_operations = self.inverse_operations;
         self.charge(size)
     }
 
@@ -221,6 +226,7 @@ impl<'r> Workspace<'r> {
             }
         }
         self.inverse_bytes = self.journal_inverse_bytes;
+        self.inverse_operations = self.journal_inverse_operations;
     }
 
     /// Keeps a file's state from before the current operation's first
@@ -324,6 +330,14 @@ impl<'r> Workspace<'r> {
         self.inverse_bytes = self
             .inverse_bytes
             .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
+        self.inverse_operations = self.inverse_operations.saturating_add(inverse.len());
+        if self.inverse_operations > limits::OPERATIONS {
+            self.spent = true;
+            return Err(Failure::limit(format!(
+                "the inverse would hold more than {} operations; split the transaction",
+                limits::OPERATIONS
+            )));
+        }
         let limit = u64::try_from(limits().max_input_bytes).unwrap_or(u64::MAX);
         if self.inverse_bytes > limit {
             self.spent = true;

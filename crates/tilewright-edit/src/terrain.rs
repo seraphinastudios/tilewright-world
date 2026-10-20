@@ -569,30 +569,35 @@ fn edit_heights(
         .and_then(|grid| grid.get("rows"))
         .and_then(Value::as_array)
         .ok_or_else(|| Failure::conflict(format!("{path}: the height grid has no rows")))?;
+    // Each changed height is replaced; the inverse restores each changed
+    // row whole, one operation a row.
     let mut edits = Vec::new();
     let mut inverse = Vec::new();
-    for (index, (old, new)) in before.cells.iter().zip(&after.cells).enumerate() {
-        if old != new {
-            let (row, column) = (index / SIDE, index % SIDE);
-            let cell = rows
-                .get(row)
-                .and_then(Value::as_array)
-                .and_then(|cells| cells.get(column))
-                .ok_or_else(|| {
-                    Failure::conflict(format!("{path}: the height grid is malformed"))
-                })?;
-            edits.push((cell.span(), new.to_string()));
-            inverse.push(Primitive::Set {
-                pointer: vec![
-                    key_step("terrain"),
-                    key_step("height"),
-                    key_step("rows"),
-                    Step::Index(row),
-                    Step::Index(column),
-                ],
-                value: document.text(cell.span()).to_owned(),
-            });
+    for row in 0..SIDE {
+        let range = row * SIDE..(row + 1) * SIDE;
+        if before.cells[range.clone()] == after.cells[range.clone()] {
+            continue;
         }
+        let cells = rows
+            .get(row)
+            .and_then(Value::as_array)
+            .filter(|cells| cells.len() == SIDE)
+            .ok_or_else(|| Failure::conflict(format!("{path}: the height grid is malformed")))?;
+        for (column, cell) in cells.iter().enumerate() {
+            let new = after.cells[row * SIDE + column];
+            if before.cells[row * SIDE + column] != new {
+                edits.push((cell.span(), new.to_string()));
+            }
+        }
+        inverse.push(Primitive::Set {
+            pointer: vec![
+                key_step("terrain"),
+                key_step("height"),
+                key_step("rows"),
+                Step::Index(row),
+            ],
+            value: document.text(rows[row].span()).to_owned(),
+        });
     }
     workspace.replace_spans(path, edits, inverse)
 }

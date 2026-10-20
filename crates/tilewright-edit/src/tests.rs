@@ -1110,7 +1110,14 @@ fn a_blocked_deletion_keeps_its_file() {
     fs::create_dir(root.join("defs/recipe/.chest.jsonc.tilewright-tmp")).unwrap();
     let before = snapshot(root);
     let failure = plan.publish().unwrap_err();
-    assert!(!failure.applied);
+    assert!(!failure.applied && !failure.cleaned, "{failure:#?}");
+    assert!(
+        failure
+            .problems
+            .iter()
+            .any(|problem| problem.path == "defs/recipe/.chest.jsonc.tilewright-tmp"),
+        "{failure:#?}"
+    );
     assert!(
         failure.problems[0].message.contains("restored"),
         "{failure:#?}"
@@ -1641,7 +1648,10 @@ fn a_long_string_gets_a_line_of_its_own() {
     let plan = planned(root, &tx);
     let created = plan.files()[0].after.clone().unwrap();
     assert!(created.lines().all(|line| line.len() < 1 << 20));
-    assert!(created.contains("\"example.org/s\":\n"));
+    assert!(
+        created.contains("\"example.org/s\":\n\"sss"),
+        "the string starts its line"
+    );
 }
 
 #[cfg(unix)]
@@ -1696,4 +1706,42 @@ fn terrain_addresses_are_checked_again_when_publishing() {
         has(&failure.problems, "tx.conflict", "\"effect\" is not a grid"),
         "{failure:#?}"
     );
+}
+
+#[test]
+fn an_absent_id_test_needs_its_array() {
+    let tree = copy();
+    let found = problems(
+        tree.path(),
+        &transaction(
+            r#"{"op": "test", "path": "planes/overworld/zones.jsonc", "pointer": ["missing", {"id": "x"}], "absent": true}"#,
+        ),
+    );
+    assert!(has(&found, "tx.conflict", "has no array at"), "{found:#?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_chain_of_renames_keeps_the_first_file_permissions() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let tree = copy();
+    let root = tree.path();
+    fs::set_permissions(
+        root.join("defs/recipe/chest.jsonc"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    apply(
+        root,
+        &transaction(
+            r#"{"op": "document.rename", "path": "defs/recipe/chest.jsonc", "to": "defs/recipe/box.jsonc"},
+    {"op": "document.rename", "path": "defs/recipe/box.jsonc", "to": "defs/recipe/crate.jsonc"},
+    {"op": "set", "path": "defs/recipe/crate.jsonc", "pointer": ["id"], "value": "crate"}"#,
+        ),
+    );
+    let mode = fs::metadata(root.join("defs/recipe/crate.jsonc"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
 }
