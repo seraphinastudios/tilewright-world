@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "crates/tilewright-cli",
+  "crates/tilewright-diff",
   "crates/tilewright-edit",
   "crates/tilewright-jsonc",
   "crates/tilewright-pack",
@@ -17,6 +18,7 @@ repository = "https://github.com/seraphinastudios/tilewright-world"
 authors = ["Seraphina Studios"]
 
 [workspace.dependencies]
+tilewright-diff = { path = "crates/tilewright-diff", version = "=0.1.0" }
 tilewright-edit = { path = "crates/tilewright-edit", version = "=0.1.0" }
 tilewright-jsonc = { path = "crates/tilewright-jsonc", version = "=0.1.0" }
 tilewright-pack = { path = "crates/tilewright-pack", version = "=0.1.0" }

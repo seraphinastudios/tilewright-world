@@ -242,7 +242,19 @@ name = "tilewright-cli"
 version = "0.1.0"
 dependencies = [
  "tempfile",
+ "tilewright-diff",
  "tilewright-edit",
+ "tilewright-jsonc",
+ "tilewright-pack",
+ "tilewright-source",
+]
+
+[[package]]
+name = "tilewright-diff"
+version = "0.1.0"
+dependencies = [
+ "sha2",
+ "tempfile",
  "tilewright-jsonc",
  "tilewright-pack",
  "tilewright-source",

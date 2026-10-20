@@ -1,9 +1,11 @@
 // Copyright 2026 Seraphina Studios
 // SPDX-License-Identifier: MIT
 
-//! `tilewright`: validate world sources, compile packs and inspect them,
-//! and preview, rebase and apply transactions.
+//! `tilewright`: validate world sources, compile packs, inspect them,
+//! compare the IDs of two worlds, and preview, rebase and apply
+//! transactions.
 
+mod diff;
 mod tx;
 
 use std::{
@@ -18,6 +20,7 @@ const USAGE: &str = "usage:
   tilewright validate [--json] ROOT
   tilewright compile ROOT OUTPUT_DIRECTORY
   tilewright inspect [--max-decoded-bytes BYTES] [--max-pack-bytes BYTES] PACK
+  tilewright diff [--json] [--allow ALLOWLIST] [--max-ids COUNT] OLD NEW
   tilewright tx preview [--json] TRANSACTION ROOT
   tilewright tx rebase TRANSACTION ROOT OUTPUT
   tilewright tx apply TRANSACTION ROOT INVERSE
@@ -27,6 +30,14 @@ inspect verifies the pack. It stops once the chunks decode to more than
 --max-decoded-bytes, and rejects a pack file longer than --max-pack-bytes
 before opening or hashing it. Both default to 8589934592 (8 GiB).
 
+diff compares the IDs of two worlds, each a source root or a pack. It keeps
+at most --max-ids IDs (default 1000000) of each side: reading a pack stops at
+the first ID past the limit, while a source root is loaded and validated
+whole, as validate loads it, before its IDs are counted. It exits 0 when no
+ID was removed or renamed, or the allowlist accepts each one; 1 when one was
+not accepted; and 2 when a side, the allowlist or the arguments could not
+be read.
+
 tx preview validates a transaction's result without writing; tx rebase
 writes it replayed on ROOT as it is now; tx apply writes the inverse to
 INVERSE, then applies it. OUTPUT and INVERSE must not exist.";
@@ -35,6 +46,12 @@ fn main() -> ExitCode {
     // Paths need not be UTF-8, so arguments are read as OS strings.
     let arguments: Vec<OsString> = std::env::args_os().skip(1).collect();
     let arguments: Vec<&OsStr> = arguments.iter().map(OsString::as_os_str).collect();
+    // `diff` has exit codes of its own.
+    if let [command, options @ ..] = arguments.as_slice()
+        && *command == "diff"
+    {
+        return diff::main(options);
+    }
     match run(&arguments) {
         Ok(output) => {
             print!("{output}");

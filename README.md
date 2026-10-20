@@ -20,11 +20,13 @@ game-specific code.
   dialect.
 - [Content pack](docs/spec/PACK.md): the SQLite pack and the binary chunk
   encoding.
+- [ID diff](docs/spec/DIFF.md): the ID kinds, rename and allowlist rules,
+  and the JSON report of `tilewright diff`.
 - [Transactions](docs/spec/TRANSACTIONS.md): reviewable edits addressed by
   identity, with structural operations, preconditions, rebasing, a staged
   apply that rolls back on failure, and exact inverses.
 
-All three are drafts until format 1.0 is frozen.
+All are drafts until format 1.0 is frozen.
 
 ## Crates
 
@@ -33,6 +35,7 @@ All three are drafts until format 1.0 is frozen.
 | `tilewright-jsonc` | Strict, lossless, bounded JSONC parser with byte spans, span edits and canonical JSON output |
 | `tilewright-source` | Loads and validates a source tree into a typed world model, reporting every problem with file, span and a stable code |
 | `tilewright-pack` | Deterministic pack compiler, the `twc1+zstd` chunk codec, and a verifying pack reader |
+| `tilewright-diff` | Compares the IDs of two worlds, source trees or packs, and reports removals, additions and renames |
 | `tilewright-edit` | Transactions: lossless structural edits, preview, rebase, staged apply with rollback, and inverses |
 | `tilewright-cli` | The `tilewright` command |
 
@@ -43,6 +46,7 @@ cargo run --locked --package tilewright-cli -- validate fixtures/basic
 cargo run --locked --package tilewright-cli -- validate --json fixtures/basic
 cargo run --locked --package tilewright-cli -- compile fixtures/basic dist
 cargo run --locked --package tilewright-cli -- inspect dist/<sha256>.twpack
+cargo run --locked --package tilewright-cli -- diff --allow allow.jsonc baseline.twpack fixtures/basic
 cargo run --locked --package tilewright-cli -- tx preview edit.jsonc fixtures/basic
 cargo run --locked --package tilewright-cli -- tx apply edit.jsonc fixtures/basic undo.jsonc
 ```
@@ -51,11 +55,13 @@ cargo run --locked --package tilewright-cli -- tx apply edit.jsonc fixtures/basi
 a JSON array with `--json`, and a summary of planes, chunks, stairwells and
 definitions when the tree is valid. `compile` writes `<sha256>.twpack` atomically and
 never replaces a different file. `inspect` verifies a pack and prints its
-metadata and counts. `tx preview` carries out a transaction in memory and
-lists the files it would change; `tx rebase` replays it on the tree as it is
-and records the new base; `tx apply` writes its inverse, then applies it.
-`fixtures/basic` is a small synthetic world that uses every feature of the
-format.
+metadata and counts. `diff` reports the IDs removed, added and renamed
+between two worlds, each a source root or a pack, and exits 1 when one was
+removed or renamed without the allowlist accepting it. `tx preview` carries
+out a transaction in memory and lists the files it would change; `tx
+rebase` replays it on the tree as it is and records the new base; `tx
+apply` writes its inverse, then applies it. `fixtures/basic` is a small
+synthetic world that uses every feature of the format.
 
 ## Development
 

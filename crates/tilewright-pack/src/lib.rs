@@ -25,8 +25,8 @@ pub use chunk::{
 };
 pub use compile::{COMPILER, Written, compile, write_pack};
 pub use read::{
-    DEFAULT_MAXIMUM_DECODED_BYTES, DEFAULT_MAXIMUM_PACK_BYTES, Pack, StairwellTile, Summary,
-    VerifyLimits,
+    DEFAULT_MAXIMUM_DECODED_BYTES, DEFAULT_MAXIMUM_PACK_BYTES, Identity, Pack, StairwellTile,
+    Summary, VerifyLimits,
 };
 
 use std::fmt;

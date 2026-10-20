@@ -1,0 +1,21 @@
+[package]
+name = "tilewright-diff"
+description = "Compares the IDs of two Tilewright worlds, source trees or content packs, to catch removals and renames"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+sha2.workspace = true
+tilewright-jsonc.workspace = true
+tilewright-pack.workspace = true
+tilewright-source.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
