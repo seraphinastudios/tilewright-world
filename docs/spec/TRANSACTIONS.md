@@ -374,8 +374,9 @@ object's, a deleted file's that its inverse creates again. So the files it
 changes and every directory above them, up to the root, must be reachable
 by the same users, which publishing checks before it writes anything and
 again just before it renames: the classes that may read each file, and
-search each directory, must be the same, and where the group may and
-others may not, the group must be the same. Otherwise publishing is
+search each directory, must be the same, where the group may and others
+may not, the group must be the same, and where not everyone may, the
+owner must be the same. Otherwise publishing is
 refused with `tx.io`, naming two that differ, and nothing is written. So
 is a mode whose classes do not nest, one that lets others read, or
 search, what it denies the group, or the group what it denies the owner

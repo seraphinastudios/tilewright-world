@@ -874,7 +874,8 @@ impl Plan {
 }
 
 /// Publishes one file: renames its staged text into place, or removes it.
-/// The file is recorded as published as soon as its target changed.
+/// The file is recorded as published as soon as its target changed, and a
+/// deleted one just before it is removed.
 fn publish_one<'f>(
     directories: &mut Directories<'_>,
     parent: &str,
@@ -911,10 +912,16 @@ fn publish_one<'f>(
             ));
             return Err(error);
         }
+        // Recorded first: a removal that fails part way, as one Windows
+        // leaves pending while another program has the file open, is
+        // rolled back with the rest.
+        published.push(file);
+        directories.changed.insert(parent.to_owned());
         let Some(directory) = directories.get(parent, None)? else {
             return Err(AccessError::Unexpected(parent.to_owned()));
         };
         directory.remove_file(name)?;
+        return Ok(());
     }
     published.push(file);
     directories.changed.insert(parent.to_owned());

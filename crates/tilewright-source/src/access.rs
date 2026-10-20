@@ -120,6 +120,8 @@ pub struct Access {
 pub struct Audience {
     /// The classes that may reach, as read bits.
     reach: u32,
+    /// The owner, where not everyone may reach.
+    user: Option<u32>,
     /// The group, where only it may reach.
     group: Option<u32>,
     /// The labels.
@@ -162,6 +164,7 @@ impl Access {
         };
         Audience {
             reach,
+            user: (reach != 0o444).then_some(self.user),
             group: (reach & 0o040 != 0 && reach & 0o004 == 0).then_some(self.group),
             control: self.control,
         }
