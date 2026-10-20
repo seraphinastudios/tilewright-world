@@ -12,29 +12,53 @@ escapes control characters, newlines included, in every untrusted value it
 prints, so content from a source or pack cannot send escape sequences to the
 terminal or add lines to the output.
 
-Loading a source tree never follows a symbolic link beneath its root. The
-root path itself is resolved as the caller gives it, so it may be, or pass
-through, a link. On Unix this holds even if the tree changes during the load,
+Loading a source tree never follows a symbolic link beneath its root (on
+Windows, any reparse point, junctions included). The root path itself is
+resolved as the caller gives it, so it may be, or pass through, a link. On
+Unix and Windows this holds even if the tree changes during the load,
 because every component beneath the root is opened through its parent
-directory's handle. On other platforms components are
-checked by path first, which a local process changing the tree at the same
-time can race. Sources are local checkouts, so a race needs a local attacker.
+directory's handle. On other platforms components are checked by path
+first, which a local process changing the tree at the same time can race.
+Sources are local checkouts, so a race needs a local attacker.
 
 Applying a transaction writes, renames and removes files beneath the root
-through the same confinement, on Linux only: there every operation goes
-through the directory handles opened while the transaction was carried out,
-so changing the tree cannot redirect it. A transaction moves content
-between the files it changes, so a source tree is one unit of access:
-publishing requires the files it changes and every directory above them to
-be reachable by the same users (the classes that may read each file and
-search each directory, and the group where only it may) and to have no
-access control list or mandatory access control label (SELinux, Smack),
-refuses otherwise, and gives the files it writes that same access. Other platforms either cannot reach files through
-handles or cannot be checked for access control lists the same way, so
-applying is refused there; previewing and rebasing work everywhere. As
+through the same confinement, on Linux, macOS and Windows: there every
+operation goes through the directory handles opened while the transaction
+was carried out, so changing the tree cannot redirect it. A transaction
+moves content between the files it changes, so a source tree is one unit
+of access: publishing requires the files it changes and every directory
+above them to be reachable by the same users, refuses access control it
+could not keep, and never gives a file it writes access the files it
+replaces did not have.
+
+- On Unix, the classes that may read each file and search each directory,
+  and the group where only it may, must be the same, and no file or
+  directory may have an access control list. Written files are given that
+  mode and group.
+- On Linux, their mandatory access control labels (SELinux, Smack) must be
+  the same too. Publishing never sets a label: the system's policy must
+  give every file it writes, and directory it creates, that label, which is
+  checked before a byte is written. A type transition the policy keys on a
+  new file's final name is not applied, since the file is staged under
+  another name; relabelling the tree applies it.
+- On Windows, access control must be wholly inherited: an access control
+  entry of an entry's own, a list protected from inheritance, a mandatory
+  integrity label, a central access policy, encryption or a read-only file
+  is refused. The changed files must share one access control list, and the
+  directories above them one, and every file publishing writes, and
+  directory it creates, must inherit that list, which is checked before a
+  byte is written. Publishing never changes a list. The lock is a handle on
+  the root directory that shares write access with no one.
+
+Other platforms, the BSDs other than macOS among them, are not checked for
+access control lists and labels the same way, so applying is refused
+there; previewing and rebasing work everywhere. The access checks are made
+before anything is written and again just before the first rename, but as
 with verifying packs, applying transactions in a tree that others can
 write to is not supported: such a writer could swap a file between a check
-and its use.
+and its use. The low-level calls Rust's standard library lacks for this, on
+Windows and macOS, are in `tilewright-platform`, the only crate that may
+use `unsafe`.
 
 A pack's file name digest is checked against the file at its path, so the
 check binds to the path. Packs are content-addressed files opened from

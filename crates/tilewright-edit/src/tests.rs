@@ -640,15 +640,41 @@ fn another_holder_of_the_lock_stops_a_publish() {
     let plan = planned(root, &tx);
     let source = SourceRoot::new(root);
     let lock = source.lock().unwrap();
-    if cfg!(unix) {
-        let found = plan.publish().unwrap_err().problems;
-        assert!(has(&found, "tx.conflict", "lock"), "{found:#?}");
-    }
+    let found = plan.publish().unwrap_err().problems;
+    assert!(has(&found, "tx.conflict", "lock"), "{found:#?}");
     drop(lock);
     plan.publish().unwrap();
 }
 
-#[cfg(unix)]
+/// Makes `link` a link to the directory `target`: a symbolic link on Unix,
+/// a junction on Windows, which any user may make.
+fn link_directory(link: &Path, target: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
+    #[cfg(windows)]
+    run(
+        "cmd",
+        &[
+            "/C".as_ref(),
+            "mklink".as_ref(),
+            "/J".as_ref(),
+            link.as_os_str(),
+            target.as_os_str(),
+        ],
+    );
+}
+
+/// Runs a program, which must succeed.
+#[cfg(any(target_os = "macos", windows))]
+fn run(program: &str, arguments: &[&std::ffi::OsStr]) {
+    let status = std::process::Command::new(program)
+        .args(arguments)
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "{program} {arguments:?}");
+}
+
 #[test]
 fn links_are_never_followed() {
     let tree = copy();
@@ -656,7 +682,7 @@ fn links_are_never_followed() {
     let outside = tempfile::tempdir().unwrap();
     let layer = root.join("planes/overworld/layers/1");
     fs::rename(&layer, outside.path().join("1")).unwrap();
-    std::os::unix::fs::symlink(outside.path().join("1"), &layer).unwrap();
+    link_directory(&layer, &outside.path().join("1"));
     let before = snapshot(outside.path());
     for operations in [
         r#"{"op": "terrain.set", "plane": "overworld", "layer": 1, "grid": "height", "cells": [{"at": [0, 0], "value": 7}]}"#,
@@ -666,6 +692,59 @@ fn links_are_never_followed() {
         assert!(has(&found, "tx.path", "symbolic links"), "{found:#?}");
     }
     assert_eq!(snapshot(outside.path()), before);
+}
+
+#[test]
+fn a_link_swapped_in_after_planning_is_never_followed() {
+    let tree = copy();
+    let root = tree.path();
+    let outside = tempfile::tempdir().unwrap();
+    for operations in [
+        // An existing chunk, and a new one.
+        r#"{"op": "terrain.set", "plane": "overworld", "layer": 0, "grid": "height", "cells": [{"at": [0, 0], "value": 7}]}"#,
+        r#"{"op": "terrain.set", "plane": "overworld", "layer": 0, "grid": "height", "cells": [{"at": [100, 100], "value": 7}]}"#,
+    ] {
+        let plan = planned(root, &transaction(operations));
+        // The layer's directory moves out of the tree, and a link to it
+        // takes its place.
+        let layer = root.join("planes/overworld/layers/0");
+        let moved = outside.path().join("0");
+        fs::rename(&layer, &moved).unwrap();
+        link_directory(&layer, &moved);
+        let before = snapshot(&moved);
+        let failure = plan.publish().unwrap_err();
+        assert!(!failure.applied, "{failure:#?}");
+        assert!(
+            has(&failure.problems, "tx.path", "symbolic links"),
+            "{failure:#?}"
+        );
+        assert_eq!(snapshot(&moved), before);
+        #[cfg(unix)]
+        fs::remove_file(&layer).unwrap();
+        #[cfg(windows)]
+        fs::remove_dir(&layer).unwrap();
+        fs::rename(&moved, &layer).unwrap();
+        assert_eq!(snapshot(root), snapshot(&fixture()));
+    }
+}
+
+#[test]
+fn files_whose_paths_differ_only_in_case_are_not_published() {
+    let tree = copy();
+    let root = tree.path();
+    let plan = planned(
+        root,
+        &transaction(
+            r#"{"op": "test", "path": "defs/recipe/new.jsonc", "pointer": [], "absent": true},
+    {"op": "test", "path": "defs/recipe/NEW.jsonc", "pointer": [], "absent": true}"#,
+        ),
+    );
+    let failure = plan.publish().unwrap_err();
+    assert!(!failure.applied);
+    assert!(
+        has(&failure.problems, "tx.path", "differ only in case"),
+        "{failure:#?}"
+    );
 }
 
 #[test]
@@ -1487,23 +1566,19 @@ fn a_plan_publishes_into_the_root_it_was_made_on() {
         fs::write(target, bytes).unwrap();
     }
     plan.publish().unwrap();
-    if cfg!(unix) {
-        assert!(read(&moved, "planes/overworld/plane.jsonc").contains("\"Changed\""));
-        assert_eq!(snapshot(&planned_root), snapshot(&fixture()));
-    }
+    assert!(read(&moved, "planes/overworld/plane.jsonc").contains("\"Changed\""));
+    assert_eq!(snapshot(&planned_root), snapshot(&fixture()));
 }
 
-#[cfg(unix)]
 #[test]
 fn a_link_at_a_staging_name_does_not_stop_its_file_being_edited() {
     let tree = copy();
     let root = tree.path();
     let outside = tempfile::tempdir().unwrap();
-    std::os::unix::fs::symlink(
+    link_directory(
+        &root.join("planes/overworld/.plane.jsonc.tilewright-tmp"),
         outside.path(),
-        root.join("planes/overworld/.plane.jsonc.tilewright-tmp"),
-    )
-    .unwrap();
+    );
     let tx = transaction(
         r#"{"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["title"], "value": "Changed"}"#,
     );
@@ -2767,4 +2842,127 @@ fn a_file_that_cannot_be_read_stops_carrying_out() {
     );
     assert_eq!(found.len(), 1, "{found:#?}");
     assert_eq!(found[0].code, "tx.io", "{found:#?}");
+}
+
+/// Applies an access control list entry with `chmod +a`.
+#[cfg(target_os = "macos")]
+fn add_access_control_entry(path: &Path, entry: &str) {
+    run("chmod", &["+a".as_ref(), entry.as_ref(), path.as_os_str()]);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_access_control_list_is_refused_on_macos() {
+    let edit = r#"{"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["title"], "value": "Changed"}"#;
+    for (entry, at) in [
+        ("everyone allow read", "planes/overworld/plane.jsonc"),
+        (
+            "everyone allow list,search,file_inherit,directory_inherit",
+            "planes/overworld",
+        ),
+    ] {
+        let tree = copy();
+        let root = tree.path();
+        add_access_control_entry(&root.join(at), entry);
+        let plan = planned(root, &transaction(edit));
+        let failure = plan.publish().unwrap_err();
+        assert!(!failure.applied);
+        assert!(
+            has(&failure.problems, "tx.io", "access control list"),
+            "{failure:#?}"
+        );
+        assert_eq!(snapshot(root), snapshot(&fixture()));
+    }
+}
+
+/// Runs `icacls` on `path` with `arguments`.
+#[cfg(windows)]
+fn icacls(path: &Path, arguments: &[&str]) {
+    let mut all = vec![path.as_os_str()];
+    all.extend(arguments.iter().map(std::ffi::OsStr::new));
+    run("icacls", &all);
+}
+
+#[cfg(windows)]
+#[test]
+fn access_control_of_an_entry_own_is_refused_on_windows() {
+    let edit = r#"{"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["title"], "value": "Changed"}"#;
+    for (at, arguments, refusal) in [
+        // An entry granted to the file itself.
+        (
+            "planes/overworld/plane.jsonc",
+            &["/grant", "*S-1-1-0:(R)"][..],
+            "access control entry of its own",
+        ),
+        // A list no longer inherited.
+        (
+            "planes/overworld/plane.jsonc",
+            &["/inheritance:d"],
+            "protected from inheritance",
+        ),
+        // An entry a directory above it has of its own.
+        (
+            "planes",
+            &["/grant", "*S-1-1-0:(OI)(CI)(R)"],
+            "access control entry of its own",
+        ),
+    ] {
+        let tree = copy();
+        let root = tree.path();
+        icacls(&root.join(at), arguments);
+        let plan = planned(root, &transaction(edit));
+        let failure = plan.publish().unwrap_err();
+        assert!(!failure.applied);
+        assert!(has(&failure.problems, "tx.io", refusal), "{failure:#?}");
+        assert_eq!(snapshot(root), snapshot(&fixture()));
+    }
+    // A read-only file.
+    let tree = copy();
+    let root = tree.path();
+    let target = root.join("planes/overworld/plane.jsonc");
+    let mut permissions = fs::metadata(&target).unwrap().permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(&target, permissions).unwrap();
+    let failure = planned(root, &transaction(edit)).publish().unwrap_err();
+    assert!(has(&failure.problems, "tx.io", "read-only"), "{failure:#?}");
+}
+
+#[cfg(windows)]
+#[test]
+fn entries_a_transaction_changes_must_have_one_inherited_list_on_windows() {
+    // The directory above the tree gives the root, and only the root, an
+    // entry no directory below it has.
+    let outer = tempfile::tempdir().unwrap();
+    icacls(outer.path(), &["/grant", "*S-1-1-0:(OI)(CI)(NP)(R)"]);
+    let root = outer.path().join("source");
+    for (path, bytes) in snapshot(&fixture()) {
+        let target = root.join(&path);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(target, bytes).unwrap();
+    }
+    let plan = planned(
+        &root,
+        &transaction(
+            r#"{"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["title"], "value": "Changed"}"#,
+        ),
+    );
+    let failure = plan.publish().unwrap_err();
+    assert!(!failure.applied);
+    assert!(
+        has(
+            &failure.problems,
+            "tx.io",
+            "can be reached by different users"
+        ),
+        "{failure:#?}"
+    );
+    assert_eq!(snapshot(&root), snapshot(&fixture()));
+    // A file only in the root, the one directory compared, is published.
+    apply(
+        &root,
+        &transaction(
+            r#"{"op": "set", "path": "world.jsonc", "pointer": ["planes"], "value": ["vault", "overworld"]}"#,
+        ),
+    );
+    assert!(read(&root, "world.jsonc").contains(r#"["vault", "overworld"]"#));
 }

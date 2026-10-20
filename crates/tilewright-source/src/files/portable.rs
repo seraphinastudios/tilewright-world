@@ -294,6 +294,7 @@ fn access_of(metadata: &fs::Metadata) -> Access {
             mode: metadata.mode() & 0o7777,
             user: metadata.uid(),
             group: metadata.gid(),
+            control: [0; 32],
         }
     }
     #[cfg(not(unix))]
@@ -307,6 +308,7 @@ fn access_of(metadata: &fs::Metadata) -> Access {
             },
             user: 0,
             group: 0,
+            control: [0; 32],
         }
     }
 }

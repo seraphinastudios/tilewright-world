@@ -14,6 +14,16 @@ contribute.
 Rust crate dependencies keep their own licenses as recorded in `Cargo.lock`
 and their crate metadata. No outside source is copied into this repository.
 
+Confined file access, which applying transactions relies on, calls the
+operating system through these crates. `tilewright-platform` declares two
+functions of macOS's own system library, `acl_get_fd_np` and `acl_free`,
+which every macOS program links; nothing of it is compiled in.
+
+| Crate | Used for | License |
+| --- | --- | --- |
+| [rustix](https://github.com/bytecodealliance/rustix) | Directory handles, locks and extended attributes on Unix (`tilewright-source`) | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
+| [windows-sys](https://github.com/microsoft/windows-rs) and its `windows-link` | Handle-relative opens, renames and deletions, security descriptors and directory listings on Windows (`tilewright-platform`, `tilewright-source`) | MIT OR Apache-2.0 |
+
 ## Go module (`go/`)
 
 The Go pack reader depends on these modules, pinned in `go/go.mod` and

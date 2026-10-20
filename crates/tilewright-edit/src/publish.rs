@@ -11,7 +11,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
 };
-use tilewright_source::{Access, AccessError, Diagnostic, SourceDirectory, SourceRoot};
+use tilewright_source::{Access, AccessError, Audience, Diagnostic, SourceDirectory, SourceRoot};
 
 #[cfg(test)]
 thread_local! {
@@ -112,13 +112,15 @@ fn not_applied(problems: Vec<Diagnostic>) -> PublishError {
     }
 }
 
-/// Whether publishing is supported here: only on Linux are files reached
-/// through directory handles and checked for access control lists, which a
-/// replacement could not keep.
-pub const PUBLISH_SUPPORTED: bool = cfg!(target_os = "linux");
+/// Whether publishing is supported here: on Linux, macOS and Windows,
+/// where files are reached through directory handles and access control a
+/// replacement could not keep can be told apart and refused. Other systems
+/// have other access control lists and labels to check, so publishing is
+/// refused there.
+pub const PUBLISH_SUPPORTED: bool = cfg!(any(target_os = "linux", target_os = "macos", windows));
 
 /// Why publishing is refused where it is not supported.
-const UNSUPPORTED: &str = "applying a transaction is supported only on Linux, where files are reached through directory handles and checked for access control lists; preview and rebase work everywhere";
+const UNSUPPORTED: &str = "applying a transaction is supported only on Linux, macOS and Windows, where files are reached through directory handles and checked for access control a replacement could not keep; preview and rebase work everywhere";
 
 /// How many directory handles a publish keeps open at once; past it, one
 /// is closed and opened again when needed, so that a transaction across
@@ -347,22 +349,23 @@ struct Known {
     /// written there keeps this access, and a failed publish restores it.
     files: BTreeMap<String, Option<Access>>,
     /// Every directory there was above each changed file, up to the root.
-    /// A new file takes the mode of the nearest, without the execute bits,
-    /// and its group, and a new directory its mode and group.
+    /// A new file gets the access the nearest gives new files, and a new
+    /// directory its access.
     directories: BTreeMap<String, Access>,
 }
 
 impl Known {
-    /// The access a new file at `path` gets, from the nearest directory
-    /// above it that was there.
+    /// The access a new file at `path` gets: on Unix from the nearest
+    /// directory above it that was there; on Windows, where a new file
+    /// takes the access its directory gives it, that of the changed files,
+    /// which is one access, when there are any.
     fn new_file(&self, path: &str) -> Option<Access> {
         let mut directory = split(path).0;
         loop {
             if let Some(access) = self.directories.get(directory) {
-                return Some(Access {
-                    mode: access.mode & 0o666,
-                    ..*access
-                });
+                return access
+                    .new_file()
+                    .or_else(|| self.files.values().flatten().next().copied());
             }
             if directory.is_empty() {
                 return None;
@@ -386,20 +389,13 @@ impl Known {
     }
 }
 
-/// Who may reach content, by an access: for a file the classes that may
-/// read it, for a directory those that may search it, as read bits, and the
-/// group where it says who may.
-fn readers(access: &Access, directory: bool) -> (u32, Option<u32>) {
-    let reach = if directory {
-        (access.mode & 0o111) << 2
-    } else {
-        access.mode & 0o444
-    };
-    (
-        reach,
-        (reach & 0o040 != 0 && reach & 0o004 == 0).then_some(access.group),
-    )
-}
+/// What the files a transaction changes, and the directories above them,
+/// must share to be one unit of access.
+const ONE_AUDIENCE: &str = if cfg!(windows) {
+    "the files a transaction changes must have one access control list, and the directories above them one, each inherited from the directory above"
+} else {
+    "the files a transaction changes must be readable, and the directories above them searchable, by the same classes, by the same group where only the group may, and under the same labels"
+};
 
 fn shown(path: &str) -> &str {
     if path.is_empty() { "." } else { path }
@@ -407,10 +403,11 @@ fn shown(path: &str) -> &str {
 
 /// Reads the access of every file the plan changes and of every directory
 /// above each, up to the root, and checks that they all have the same
-/// readers. A transaction moves content between the files it changes, a
-/// renamed file's or a moved object's, and its inverse recreates deleted
-/// files, and directories pruned since, with the access of the directory
-/// above them; so no file may be readable by anyone another is not.
+/// audience, where the platform compares them. A transaction moves content
+/// between the files it changes, a renamed file's or a moved object's, and
+/// its inverse recreates deleted files, and directories pruned since, with
+/// the access the directory above them gives; so no file may be readable
+/// by anyone another is not.
 fn survey(
     directories: &mut Directories<'_>,
     changed: &[&FileChange],
@@ -443,26 +440,30 @@ fn survey(
             directory = split(directory).0;
         }
     }
-    let mut audiences = known
+    let audiences = known
         .files
         .iter()
-        .filter_map(|(path, access)| Some((path.as_str(), readers(access.as_ref()?, false))))
+        .filter_map(|(path, access)| Some((path.as_str(), access.as_ref()?.audience(false))))
         .chain(
             known
                 .directories
                 .iter()
-                .map(|(path, access)| (shown(path), readers(access, true))),
+                .map(|(path, access)| (shown(path), access.audience(true))),
         );
-    if let Some((first, expected)) = audiences.next()
-        && let Some((other, _)) = audiences.find(|(_, found)| *found != expected)
-    {
-        return Err(problem(
-            other,
-            Code::Io,
-            format!(
-                "{other} and {first} can be reached by different users; the files a transaction changes must be readable, and the directories above them searchable, by the same classes and, where the group alone may, the same group"
-            ),
-        ));
+    // Each audience is compared with the first one it can be compared with.
+    let mut firsts: Vec<(&str, Audience)> = Vec::new();
+    for (path, audience) in audiences {
+        match firsts.iter().find(|(_, first)| first.comparable(&audience)) {
+            Some((first, expected)) if *expected != audience => {
+                return Err(problem(
+                    path,
+                    Code::Io,
+                    format!("{path} and {first} can be reached by different users; {ONE_AUDIENCE}"),
+                ));
+            }
+            Some(_) => {}
+            None => firsts.push((path, audience)),
+        }
     }
     Ok(known)
 }
@@ -581,6 +582,26 @@ fn check_again(root: &SourceRoot, files: &[FileChange]) -> Result<(), Vec<Diagno
 }
 
 impl Plan {
+    /// Two files of the plan whose paths differ only in the case of their
+    /// letters, which a file system that ignores case, as macOS and Windows
+    /// do by default, would take for one file.
+    fn case_aliases(&self) -> Option<Vec<Diagnostic>> {
+        let mut seen: BTreeMap<String, &str> = BTreeMap::new();
+        for file in &self.files {
+            if let Some(other) = seen.insert(file.path.to_ascii_lowercase(), &file.path) {
+                return Some(problem(
+                    &file.path,
+                    Code::Path,
+                    format!(
+                        "{} and {other} differ only in case, which some file systems do not tell apart; nothing was written",
+                        file.path
+                    ),
+                ));
+            }
+        }
+        None
+    }
+
     /// Validates the tree with the plan's files again, and its terrain
     /// addresses against it, since files the plan did not read may have
     /// changed since it was made.
@@ -632,11 +653,15 @@ impl Plan {
     /// Cleanup that could not be done and directories that could not be
     /// synced are reported too, with `cleaned` or `durable` unset, whether
     /// or not every file was published. Where [`PUBLISH_SUPPORTED`] is
-    /// false, publishing is refused with a `tx.io` diagnostic and nothing is
-    /// written.
+    /// false, publishing is refused with a `tx.io` diagnostic, and a plan
+    /// with two files whose paths differ only in case with a `tx.path` one;
+    /// either way nothing is written.
     pub fn publish(&self) -> Result<Published, PublishError> {
         if !PUBLISH_SUPPORTED {
             return Err(not_applied(problem(".", Code::Io, UNSUPPORTED)));
+        }
+        if let Some(problems) = self.case_aliases() {
+            return Err(not_applied(problems));
         }
         let root = &self.source;
         let _lock = root.lock().map_err(|error| {

@@ -288,6 +288,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tilewright-platform"
+version = "0.1.0"
+dependencies = [
+ "windows-sys",
+]
+
+[[package]]
 name = "tilewright-source"
 version = "0.1.0"
 dependencies = [
@@ -295,6 +302,8 @@ dependencies = [
  "sha2",
  "tempfile",
  "tilewright-jsonc",
+ "tilewright-platform",
+ "windows-sys",
 ]
 
 [[package]]

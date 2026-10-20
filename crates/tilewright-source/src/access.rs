@@ -6,12 +6,13 @@
 //! This is the loader's own path confinement: paths are root-relative and
 //! `/`-separated, with no empty, `.` or `..` component and no `\`, `:` or
 //! NUL in any component, and nothing beneath the root is followed if it is
-//! a symbolic link. On Unix every
-//! component is opened through its parent's directory handle without
-//! following links, and writes, renames and removals act on names inside a
-//! directory opened that way, so a link swapped in at any moment is never
-//! followed. Elsewhere components are checked by path before use, a best
-//! effort that a local process changing the tree at the same time can race.
+//! a symbolic link. On Unix and Windows every component is opened through
+//! its parent's directory handle without following links (on Windows, any
+//! reparse point: symbolic links, junctions and mount points among them),
+//! and writes, renames and removals act on names inside a directory opened
+//! that way, so a link swapped in at any moment is never followed.
+//! Elsewhere components are checked by path before use, a best effort that
+//! a local process changing the tree at the same time can race.
 
 use crate::files::{Refused, components, platform};
 use std::{fmt, io::Read as _, path::Path};
@@ -86,24 +87,92 @@ fn checked_name(name: &str) -> Result<&str, AccessError> {
     }
 }
 
-/// Who may use a file or directory, as publishing keeps it: where there are
-/// no modes, a read-only file has none of the write bits.
+/// Who may use a file or directory, as publishing keeps it.
+///
+/// On Unix: the permission bits, the owner and the group. Beside them on
+/// Linux, the mandatory access control labels (`SELinux`, Smack), which
+/// publishing requires to be the same on every entry it compares. On
+/// Windows, where entries take the access their directory gives them: the
+/// inherited discretionary access control list. Where the mode bits do not
+/// say who may read, as with an access control list on Unix, or access
+/// control of an entry's own on Windows, reading the access is refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Access {
-    /// The permission bits, with the set-user, set-group and sticky bits.
-    pub mode: u32,
-    /// The owning user.
-    pub user: u32,
-    /// The owning group.
-    pub group: u32,
+    /// The permission bits, with the set-user, set-group and sticky bits;
+    /// 0 on Windows.
+    pub(crate) mode: u32,
+    /// The owning user; 0 on Windows.
+    pub(crate) user: u32,
+    /// The owning group; 0 on Windows.
+    pub(crate) group: u32,
+    /// A digest of the access control beside the mode bits that publishing
+    /// requires to be the same throughout: on Linux the labels, on Windows
+    /// the access control list. All zero where there is none.
+    pub(crate) control: [u8; 32],
+}
+
+/// Who may reach content through a file or directory: for a file who may
+/// read it, for a directory who may search it. Publishing requires the
+/// entries it compares to have one audience each where they are
+/// [`comparable`](Audience::comparable).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Audience {
+    /// Which audiences are compared: on Unix every entry's with every
+    /// other's, since a new file takes its directory's mode; on Windows a
+    /// file's with a file's and a directory's with a directory's, since
+    /// their lists differ in kind.
+    kind: u8,
+    /// The classes that may reach, as read bits.
+    reach: u32,
+    /// The group, where only it may reach.
+    group: Option<u32>,
+    control: [u8; 32],
+}
+
+impl Audience {
+    /// Whether the two can be compared.
+    #[must_use]
+    pub const fn comparable(&self, other: &Self) -> bool {
+        self.kind == other.kind
+    }
 }
 
 impl Access {
-    /// Whether the group may read and others may not, so that the group
-    /// says who may.
+    /// Who may reach content through an entry with this access, a
+    /// directory if `directory`.
     #[must_use]
-    pub const fn group_reads_alone(&self) -> bool {
-        self.mode & 0o040 != 0 && self.mode & 0o004 == 0
+    pub fn audience(&self, directory: bool) -> Audience {
+        if cfg!(windows) {
+            return Audience {
+                kind: 1 + u8::from(directory),
+                reach: 0,
+                group: None,
+                control: self.control,
+            };
+        }
+        let reach = if directory {
+            (self.mode & 0o111) << 2
+        } else {
+            self.mode & 0o444
+        };
+        Audience {
+            kind: 0,
+            reach,
+            group: (reach & 0o040 != 0 && reach & 0o004 == 0).then_some(self.group),
+            control: self.control,
+        }
+    }
+
+    /// The access a new file in a directory with this access is given: on
+    /// Unix the directory's mode without the execute bits, its group and
+    /// its labels. `None` on Windows, where a new file takes the access
+    /// control list its directory gives it.
+    #[must_use]
+    pub fn new_file(&self) -> Option<Self> {
+        (!cfg!(windows)).then_some(Self {
+            mode: self.mode & 0o666,
+            ..*self
+        })
     }
 }
 
@@ -114,10 +183,10 @@ pub struct SourceRoot {
 }
 
 impl SourceRoot {
-    /// Opens the root. On Unix the directory is opened here, and every
-    /// later access goes through that handle, so moving or replacing what
-    /// the path names afterwards does not move the root; elsewhere the path
-    /// is resolved to an absolute one here.
+    /// Opens the root. On Unix and Windows the directory is opened here,
+    /// and every later access goes through that handle, so moving or
+    /// replacing what the path names afterwards does not move the root;
+    /// elsewhere the path is resolved to an absolute one here.
     #[must_use]
     pub fn new(root: &Path) -> Self {
         Self {
@@ -190,10 +259,14 @@ impl SourceRoot {
             .map_err(|error| refused(path, error))
     }
 
-    /// Takes the root's exclusive advisory lock, held until the returned
-    /// value is dropped. It fails at once with [`AccessError::Locked`] if
-    /// another holder, in this process or another, has it. Only Unix has
-    /// the lock; elsewhere this always succeeds.
+    /// Takes the root's exclusive lock, held until the returned value is
+    /// dropped. It fails at once with [`AccessError::Locked`] if another
+    /// holder, in this process or another, has it. On Unix it is an
+    /// advisory `flock` of the root directory; on Windows a handle on the
+    /// root directory that asks for write access and shares it with no
+    /// one, so it also fails while another program has the root directory
+    /// open for writing. Elsewhere there is no lock and this always
+    /// succeeds.
     pub fn lock(&self) -> Result<SourceLock, AccessError> {
         match self.root.lock() {
             Ok(Some(lock)) => Ok(SourceLock(lock)),
@@ -219,10 +292,15 @@ impl SourceDirectory {
 
     /// Writes a new file `name` with `bytes` and syncs it. Whatever was at
     /// `name` is removed first, so a link or hard link there is never
-    /// written through. With `access`, the file is its owner's alone until
-    /// written, then takes that mode and group, and on Linux no access
-    /// control list it would get from the directory; without, it has the
-    /// platform's default.
+    /// written through. With `access`, the new file must have the access
+    /// control beside the mode bits that `access` has, its labels on Linux
+    /// or its access control list on Windows, which is checked before
+    /// anything is written; on Unix it is its owner's alone until written,
+    /// then takes that mode and group, without an access control list its
+    /// directory would give it on Linux. Without `access`, it has the
+    /// platform's default. A new file with access control that reading its
+    /// access would refuse is refused before anything is written, except
+    /// without `access` on Unix.
     pub fn write(
         &self,
         name: &str,
@@ -235,26 +313,31 @@ impl SourceDirectory {
     }
 
     /// Who may use the regular file `name`; `None` when there is no regular
-    /// file there. On Linux, a file with an access control list or a
-    /// mandatory access control label (`SELinux`, Smack) is refused, since its
-    /// mode bits do not say who may read it and a file replacing it could
-    /// not keep them.
+    /// file there. A file whose access publishing could not keep is
+    /// refused: on Linux and macOS one with an access control list; on
+    /// Windows one with access control of its own (an access control entry
+    /// that is not inherited, or a list protected from inheritance), a
+    /// mandatory integrity label or central access policy, encryption, or
+    /// the read-only attribute.
     pub fn access(&self, name: &str) -> Result<Option<Access>, AccessError> {
         self.directory
             .access(checked_name(name)?)
             .map_err(|error| refused(&self.entry(name), error))
     }
 
-    /// Who may use this directory. On Linux, a directory with an access
-    /// control list, its own or one it gives new files, or a mandatory
-    /// access control label is refused.
+    /// Who may use this directory. A directory is refused as a file is by
+    /// [`access`](Self::access), except that it may be read-only; on Linux a
+    /// default access control list it gives new files is refused too.
     pub fn own_access(&self) -> Result<Access, AccessError> {
         self.directory
             .own_access()
             .map_err(|error| refused(&self.path, error))
     }
 
-    /// Gives this directory the mode and group of `access`.
+    /// Gives this directory the mode and group of `access`, and checks that
+    /// it has the labels of `access`. On Windows, where a directory has the
+    /// access control list it inherits, checks that the list is that of
+    /// `access`.
     pub fn set_own_access(&self, access: &Access) -> Result<(), AccessError> {
         self.directory
             .set_own_access(access)

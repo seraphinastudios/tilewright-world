@@ -266,53 +266,72 @@ pub(crate) struct Lock(#[allow(dead_code)] OwnedFd);
 pub(crate) struct Directory(OwnedFd);
 
 impl Directory {
-    /// Who may use the regular file `name`, if there is one. On Linux, a
-    /// file with an access control list is refused, since its mode bits do
-    /// not say who may read it and a file replacing it could not keep it.
+    /// Who may use the regular file `name`, if there is one. A file whose
+    /// access publishing could not keep is refused: on Linux and macOS one
+    /// with an access control list, since its mode bits do not say who may
+    /// read it and a file replacing it could not keep the list.
     pub(crate) fn access(&self, name: &str) -> Result<Option<Access>, Refused> {
         match statat(&self.0, name, AtFlags::SYMLINK_NOFOLLOW) {
             Ok(stat) if kind_of(FileType::from_raw_mode(stat.st_mode)) == RawKind::File => {
-                #[cfg(target_os = "linux")]
-                {
-                    let flags = OFlags::RDONLY
-                        | OFlags::NOFOLLOW
-                        | OFlags::NONBLOCK
-                        | OFlags::CLOEXEC
-                        | OFlags::NOCTTY;
-                    let fd = openat(&self.0, name, flags, Mode::empty())
-                        .map_err(|errno| classify(self.0.as_fd(), name, errno, &[name]))?;
-                    refuse_access_control_lists(&fd, &ACCESS_CONTROL_LISTS)?;
-                    refuse_labels(&fd)?;
-                }
-                Ok(Some(access_of(&stat)))
+                self.file_access(name, &stat)
             }
             Ok(_) | Err(Errno::NOENT) => Ok(None),
             Err(errno) => Err(Refused::Io(errno.into())),
         }
     }
 
-    /// Who may use this directory. On Linux, a directory with an access
-    /// control list, its own or one it gives new files, is refused.
-    pub(crate) fn own_access(&self) -> Result<Access, Refused> {
-        let stat = fstat(&self.0).map_err(|errno| Refused::Io(errno.into()))?;
-        #[cfg(target_os = "linux")]
-        {
-            refuse_access_control_lists(&self.0, &ACCESS_CONTROL_LISTS)?;
-            refuse_access_control_lists(&self.0, &["system.posix_acl_default"])?;
-            refuse_labels(&self.0)?;
+    /// The access of the regular file `name`, opened to check what its
+    /// status does not show.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn file_access(&self, name: &str, _: &Stat) -> Result<Option<Access>, Refused> {
+        let flags =
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC | OFlags::NOCTTY;
+        let fd = openat(&self.0, name, flags, Mode::empty())
+            .map_err(|errno| classify(self.0.as_fd(), name, errno, &[name]))?;
+        // What is read is what was opened.
+        let stat = fstat(&fd).map_err(|errno| Refused::Io(errno.into()))?;
+        if kind_of(FileType::from_raw_mode(stat.st_mode)) != RawKind::File {
+            return Ok(None);
         }
-        Ok(access_of(&stat))
+        refuse_access_control_lists(&fd, false)?;
+        Ok(Some(Access {
+            control: labels(&fd)?,
+            ..access_of(&stat)
+        }))
     }
 
-    /// Gives this directory the mode and group of `access`.
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[allow(clippy::unnecessary_wraps, clippy::unused_self)]
+    fn file_access(&self, _: &str, stat: &Stat) -> Result<Option<Access>, Refused> {
+        Ok(Some(access_of(stat)))
+    }
+
+    /// Who may use this directory. On Linux and macOS, a directory with an
+    /// access control list, its own or, on Linux, one it gives new files,
+    /// is refused.
+    pub(crate) fn own_access(&self) -> Result<Access, Refused> {
+        let stat = fstat(&self.0).map_err(|errno| Refused::Io(errno.into()))?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        refuse_access_control_lists(&self.0, true)?;
+        Ok(Access {
+            control: labels(&self.0)?,
+            ..access_of(&stat)
+        })
+    }
+
+    /// Gives this directory the mode and group of `access`, and checks
+    /// that the system gave it the labels of `access`.
     pub(crate) fn set_own_access(&self, access: &Access) -> Result<(), Refused> {
+        check_labels(&self.0, access)?;
         set_access(&self.0, access)
     }
 
     /// Writes a new file `name` holding `bytes` and syncs it. Whatever was
     /// at `name` is removed first, so a link or a second hard link there is
-    /// never written through. With `access`, the file is its owner's alone
-    /// until written, then gets that mode and group; without, the
+    /// never written through. With `access`, the file must have the labels
+    /// of `access`, and on Linux loses an access control list its directory
+    /// gives it, both before anything is written; it is its owner's alone
+    /// until written, then gets that mode and group. Without, the
     /// platform's default.
     pub(crate) fn write(
         &self,
@@ -335,12 +354,19 @@ impl Directory {
             .map_err(|errno| classify(self.0.as_fd(), name, errno, &[name]))?;
         let written = (|| {
             let mut file = std::fs::File::from(fd);
-            file.write_all(bytes).map_err(Refused::Io)?;
             if let Some(access) = access {
                 // An access control list the directory gives new files
-                // would let others read what the mode bits do not.
+                // would let others read what the mode bits do not, and a
+                // label other than the one asked for would be another
+                // audience; both are dealt with before a byte is written.
                 #[cfg(target_os = "linux")]
                 strip_access_control_list(&file)?;
+                #[cfg(target_os = "macos")]
+                refuse_access_control_lists(&file, false)?;
+                check_labels(&file, access)?;
+            }
+            file.write_all(bytes).map_err(Refused::Io)?;
+            if let Some(access) = access {
                 set_access(&file, access)?;
             }
             file.sync_all().map_err(Refused::Io)
@@ -384,13 +410,20 @@ impl Directory {
     }
 }
 
-/// Who may use a file or directory, from its status.
+/// Who may use a file or directory, from its status, without labels.
 fn access_of(stat: &Stat) -> Access {
     Access {
-        mode: stat.st_mode & 0o7777,
+        mode: mode_bits(stat.st_mode),
         user: stat.st_uid,
         group: stat.st_gid,
+        control: [0; 32],
     }
+}
+
+/// The permission bits of a mode, which is a `u16` on Apple platforms.
+#[allow(clippy::useless_conversion)]
+fn mode_bits(mode: rustix::fs::RawMode) -> u32 {
+    u32::from(mode) & 0o7777
 }
 
 /// Gives an open file or directory the mode and group of `access`: the
@@ -403,18 +436,20 @@ fn set_access(fd: impl AsFd, access: &Access) -> Result<(), Refused> {
         fchown(&fd, None, Some(Gid::from_raw(access.group)))
             .map_err(|errno| Refused::Io(errno.into()))?;
     }
-    fchmod(&fd, Mode::from_raw_mode(access.mode)).map_err(|errno| Refused::Io(errno.into()))?;
+    let mode = rustix::fs::RawMode::try_from(access.mode & 0o7777)
+        .map_err(|_| Refused::Io(std::io::ErrorKind::InvalidInput.into()))?;
+    fchmod(&fd, Mode::from_raw_mode(mode)).map_err(|errno| Refused::Io(errno.into()))?;
     // The system may drop a bit without failing, such as the set-group bit
     // for a user outside the group, so the result is checked.
     let stat = fstat(&fd).map_err(|errno| Refused::Io(errno.into()))?;
-    if stat.st_mode & 0o7777 != access.mode || stat.st_gid != access.group {
+    if mode_bits(stat.st_mode) != access.mode || stat.st_gid != access.group {
         return Err(Refused::Io(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             format!(
                 "could not be given mode {:o} and group {}: it has mode {:o} and group {}",
                 access.mode,
                 access.group,
-                stat.st_mode & 0o7777,
+                mode_bits(stat.st_mode),
                 stat.st_gid
             ),
         )));
@@ -430,29 +465,34 @@ const ACCESS_CONTROL_LISTS: [&str; 3] = [
     "system.richacl",
 ];
 
-/// Refuses an open file or directory that has any of the access control
-/// lists `names`.
+/// The mandatory access control labels Linux security modules keep, which
+/// say who may read a file beside its mode bits.
 #[cfg(target_os = "linux")]
-fn refuse_access_control_lists(fd: impl AsFd, names: &[&str]) -> Result<(), Refused> {
-    if has_any(&fd, names)? {
-        return Err(Refused::Io(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "it has an access control list, which publishing could not keep",
-        )));
-    }
-    Ok(())
+const LABELS: [&str; 2] = ["security.selinux", "security.SMACK64"];
+
+/// An error for access control that publishing could not keep.
+fn unkept(what: &str) -> Refused {
+    Refused::Io(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        format!("{what}, which publishing could not keep"),
+    ))
 }
 
-/// Refuses an open file or directory with a mandatory access control
-/// label, `SELinux` or Smack: who may read under one is up to a policy that
-/// can label a file it replaces, or one created again, otherwise.
-#[cfg(target_os = "linux")]
-fn refuse_labels(fd: impl AsFd) -> Result<(), Refused> {
-    if has_any(&fd, &["security.selinux", "security.SMACK64"])? {
-        return Err(Refused::Io(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "it has a mandatory access control label (SELinux or Smack), which publishing could not keep",
-        )));
+/// Refuses an open file or directory that has an access control list: on
+/// Linux a POSIX, NFS version 4 or rich one, and for a `directory` also a
+/// default list it gives new files; on macOS any.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn refuse_access_control_lists(fd: impl AsFd, directory: bool) -> Result<(), Refused> {
+    #[cfg(target_os = "linux")]
+    let found = has_any(&fd, &ACCESS_CONTROL_LISTS)?
+        || (directory && has_any(&fd, &["system.posix_acl_default"])?);
+    #[cfg(target_os = "macos")]
+    let found = {
+        let _ = directory;
+        tilewright_platform::macos::has_access_control_list(fd.as_fd()).map_err(Refused::Io)?
+    };
+    if found {
+        return Err(unkept("it has an access control list"));
     }
     Ok(())
 }
@@ -470,6 +510,94 @@ fn has_any(fd: impl AsFd, names: &[&str]) -> Result<bool, Refused> {
         }
     }
     Ok(false)
+}
+
+/// The largest label read; real ones are far shorter.
+#[cfg(target_os = "linux")]
+const LABEL_LIMIT: usize = 4096;
+
+/// A digest of the open file's or directory's mandatory access control
+/// labels, all zero when it has none. Elsewhere than on Linux there are
+/// none.
+#[cfg(target_os = "linux")]
+fn labels(fd: impl AsFd) -> Result<[u8; 32], Refused> {
+    use sha2::{Digest as _, Sha256};
+    let mut values = Vec::with_capacity(LABELS.len());
+    for name in LABELS {
+        values.push((name, label(&fd, name)?));
+    }
+    #[cfg(test)]
+    if let Some(given) = given_label(&fd)? {
+        values[0].1 = Some(given);
+    }
+    if values.iter().all(|(_, value)| value.is_none()) {
+        return Ok([0; 32]);
+    }
+    let mut hasher = Sha256::new();
+    for (name, value) in values {
+        hasher.update(name.as_bytes());
+        match value {
+            None => hasher.update([0]),
+            Some(value) => {
+                hasher.update([1]);
+                hasher.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_le_bytes());
+                hasher.update(&value);
+            }
+        }
+    }
+    Ok(hasher.finalize().into())
+}
+
+/// The label `name` of an open file or directory, if it has one.
+#[cfg(target_os = "linux")]
+fn label(fd: impl AsFd, name: &str) -> Result<Option<Vec<u8>>, Refused> {
+    let size = match rustix::fs::fgetxattr(&fd, name, &mut [0_u8; 0][..]) {
+        Ok(size) => size,
+        Err(Errno::NODATA | Errno::NOTSUP) => return Ok(None),
+        Err(errno) => return Err(Refused::Io(errno.into())),
+    };
+    if size > LABEL_LIMIT {
+        return Err(unkept("it has a label longer than publishing reads"));
+    }
+    let mut value = vec![0_u8; size];
+    // A label that grew since its size was read is an error too.
+    let read = rustix::fs::fgetxattr(&fd, name, &mut value[..])
+        .map_err(|errno| Refused::Io(errno.into()))?;
+    value.truncate(read);
+    Ok(Some(value))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+thread_local! {
+    /// `SELinux` labels by device and inode, for tests: setting a
+    /// `security.*` attribute takes privileges a test does not have.
+    pub(crate) static GIVEN_LABELS: std::cell::RefCell<std::collections::BTreeMap<(u64, u64), Vec<u8>>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
+#[cfg(all(test, target_os = "linux"))]
+fn given_label(fd: impl AsFd) -> Result<Option<Vec<u8>>, Refused> {
+    let stat = fstat(&fd).map_err(|errno| Refused::Io(errno.into()))?;
+    Ok(GIVEN_LABELS.with(|labels| labels.borrow().get(&(stat.st_dev, stat.st_ino)).cloned()))
+}
+
+#[cfg(not(target_os = "linux"))]
+#[allow(clippy::unnecessary_wraps)]
+fn labels(_fd: impl AsFd) -> Result<[u8; 32], Refused> {
+    Ok([0; 32])
+}
+
+/// Checks that the open file or directory has the labels of `access`:
+/// publishing never relabels, so an entry its directory, or the system's
+/// policy, labels otherwise is refused.
+fn check_labels(fd: impl AsFd, access: &Access) -> Result<(), Refused> {
+    if labels(fd)? == access.control {
+        Ok(())
+    } else {
+        Err(unkept(
+            "the system gave it other mandatory access control labels (SELinux, Smack) than the entries publishing compared it with",
+        ))
+    }
 }
 
 /// Removes the POSIX access control list a new file got from its

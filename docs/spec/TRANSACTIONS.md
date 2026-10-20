@@ -189,8 +189,8 @@ so.
 
 Carrying out a transaction is pure and deterministic. It reads each file it
 needs once, through the loader's path confinement: no symbolic link beneath
-the root is followed, and on Unix every component is opened through its
-parent's handle. Every edit is a span edit of the file's JSONC, which is
+the root is followed, and on Unix and Windows every component is opened
+through its parent's handle. Every edit is a span edit of the file's JSONC, which is
 parsed again after each edit, so untouched bytes, comments and ordering stay.
 The edited tree is then validated by the normal loader, with the edited files
 in memory over the files on disk. Previewing stops there and writes nothing;
@@ -244,8 +244,8 @@ the transaction changed, in path order:
   line of the file.
 
 An inverse holds text, not permissions: a file it creates again takes the
-permissions of the directory it is in, which were the file's own as far
-as reading goes (section 9).
+access the directory it is in gives a new file, which was the file's own as
+far as reading goes (section 9).
 
 Its `base` is the changed files after the transaction, and its `result` the
 files before. Every operation of an inverse names one file by path and
@@ -259,25 +259,31 @@ such a tree is restored from version control instead.
 
 ## 9. Applying
 
-Publishing is supported on Linux only. Elsewhere it is refused, with
-`tx.io`, and nothing is written: some platforms cannot reach files through
-directory handles, so a process changing the tree could redirect a write
-outside it, and the others cannot be checked for access control lists in
-the same way. Previewing and rebasing work everywhere.
+Publishing is supported on Linux, macOS and Windows, which reach files
+through directory handles and can tell the access control apart that
+publishing could not keep. Elsewhere, the other BSDs included, it is
+refused, with `tx.io`, and nothing is written: their access control lists
+and labels are not checked, so a replacement could drop them. Previewing
+and rebasing work everywhere.
 
 Publishing a carried-out transaction works on the root it was carried out
 on: the directory opened then, whatever its path names later. It:
 
 1. takes the source root's exclusive lock (an advisory `flock` of the root
-   directory), so two applies cannot interleave, and reads the permissions
-   of the files it changes and of the directories above them (below);
+   directory; on Windows a handle on it that asks for write access and
+   shares it with no other), so two applies cannot interleave, and reads
+   the permissions of the files it changes and of the directories above
+   them (below);
 2. writes each new file beside its target as `.<name>.tilewright-tmp`,
    created fresh (whatever was at that name is removed first, so a link or
-   hard link there is never written through), only its owner's until it is
-   written, then with the mode and group given below and without an access
-   control list its directory would give it, and synced; a failure removes
-   every staging file it wrote and the directories it created, and reports
-   one it created that is no longer empty;
+   hard link there is never written through); checks, before a byte is
+   written, the access control the system gave it beside the mode bits (its
+   labels on Linux, its access control list on Windows, below); writes it,
+   only its owner's on Unix until then; gives it the mode and group given
+   below, without an access control list its directory would give it; and
+   syncs it. A failure removes every staging file it wrote and the
+   directories it created, and reports one it created that is no longer
+   empty;
 3. reads every file the transaction touched or consulted again and compares
    it with the files it was carried out on, then validates the tree with
    the transaction's files again, and its terrain addresses against that
@@ -302,26 +308,59 @@ A transaction moves content between files: a renamed file's, a moved
 object's, a deleted file's that its inverse creates again. So the files it
 changes and every directory above them, up to the root, must be reachable
 by the same users, which publishing checks before it writes anything and
-again just before it renames: the classes that may read each file, and
-search each directory, must be the same, and where the group may and
-others may not, the group must be the same; and none may have an access
-control list (POSIX, NFS version 4
-or rich, or a default one a directory gives new files), whose entries the
-mode bits do not show. Otherwise publishing is refused with `tx.io`, naming
-two that differ, and nothing is written. A file written where a file is
-keeps that file's mode and group. A new file takes the mode of the
-directory above it without the execute bits, and its group, and a new
-directory the mode and group of the directory above it. A group the user
-may not give is an error, since the group bits would otherwise apply to
-another group. A mandatory access control label (SELinux or Smack) on a
-changed file, a directory above it, a staged file or a restored one is
-refused like an access control list: who may read under one is up to a
-policy that may label a replacement, or a file created again, otherwise.
-So publishing is refused on systems that label every file. The owner of
-every file written is the user applying, who could read them all. A file
-whose bytes end as they began is not written. Restoring after a failure
-gives every file back the mode and group it had. Other extended
-attributes are not kept.
+again just before it renames. Otherwise publishing is refused with
+`tx.io`, naming two that differ, and nothing is written. Access control
+that publishing could not keep is refused the same way, on any of them, on
+a staged file and on a restored one. What that means depends on the
+platform.
+
+On Unix, the classes that may read each file, and search each directory,
+must be the same, and where the group may and others may not, the group
+must be the same; and none may have an access control list, whose entries
+the mode bits do not show (on Linux a POSIX, NFS version 4 or rich one, or
+a default one a directory gives new files; on macOS any). A file written
+where a file is keeps that file's mode and group. A new file takes the
+mode of the directory above it without the execute bits, and its group,
+and a new directory the mode and group of the directory above it. A group
+the user may not give is an error, since the group bits would otherwise
+apply to another group. The owner of every file written is the user
+applying, who could read them all.
+
+On Linux, the mandatory access control labels (SELinux and Smack) of the
+files and directories compared must be the same too, or all absent:
+who may read under a label is up to the system's policy. Publishing never
+sets a label. Every file it stages or restores, and every directory it
+creates, must be given that same label by the policy, which is checked
+before a byte is written or the directory used; otherwise publishing fails
+and nothing is published. A tree whose files and directories carry one
+label, as a user's files commonly do under SELinux, can be published. A
+new file is staged under another name, so it gets the label the policy
+gives that name, which must be the tree's; a type transition the policy
+keys on the final file name is not applied, and relabelling the tree
+afterwards (`restorecon -R`) applies it.
+
+On Windows an entry has the access control list its directory gives it,
+by inheritance. Every changed file and every directory above it, the root
+included, may have only inherited access control: no access control entry
+of its own, no list protected from inheritance, no mandatory integrity
+label or central access policy, no encryption, and no read-only attribute
+on a file. The changed files must have one access control list, and the
+directories one; a file's is not compared with a directory's, since their
+entries differ in kind. Publishing never changes a list: a new or restored
+file must be given by inheritance the list the changed files have, if
+there are any, and a new directory the list of the directory above it,
+which is checked before a byte is written or the directory used. The owner
+of every file written is the user applying.
+
+A file whose bytes end as they began is not written. Restoring after a
+failure gives every file back the access it had. Other extended
+attributes are not kept, nor on Windows other streams and attributes.
+Nothing beneath the root that is a reparse point on Windows is followed or
+used: a symbolic link, junction or mount point, and also a cloud
+placeholder or a deduplicated or compressed file, is refused as a link. A
+transaction that touches or consults two paths that differ only in case
+is refused with `tx.path`, since macOS and Windows, and some other file
+systems, take them for one file.
 
 Each rename and removal is atomic, but there is no atomic publication of
 several files. If a step of 4 fails, the files already published are
@@ -350,9 +389,10 @@ transaction touches or consults, a link or special file included.
 
 Staging names, `.<name>.tilewright-tmp`, are reserved beside source files.
 A program other than the toolkit changing the tree at the same moment can
-race a publish: the lock only orders applies. Where a directory cannot be
-synced, the command line's writes of its outputs say that their names may
-not be durable yet.
+race a publish: the lock only orders applies. Windows cannot sync a
+directory, so a publish there reports that it was not made durable, and
+the command line's writes of its outputs say that their names may not be
+durable yet.
 
 ## 10. Canonical layout
 
