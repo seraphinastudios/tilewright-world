@@ -407,7 +407,8 @@ impl Directory {
     /// keys a new file's label on its name applies when a file is made, not
     /// when it is renamed, so a file staged under another name and renamed
     /// to `name` would keep a label the policy does not give `name`. Where
-    /// `SELinux` labels nothing here, there is nothing to check.
+    /// `SELinux` labels nothing here, there is nothing to check; where it
+    /// labels the directory but cannot be asked, the check fails.
     #[cfg(target_os = "linux")]
     pub(crate) fn check_final_name(&self, staged: &str, name: &str) -> Result<(), Refused> {
         let Some(directory) = label(&self.0, "security.selinux")? else {
@@ -418,9 +419,9 @@ impl Directory {
         let fd = openat(&self.0, staged, flags, Mode::empty())
             .map_err(|errno| classify(self.0.as_fd(), staged, errno, &[staged]))?;
         let given = label(&fd, "security.selinux")?;
-        let Some(expected) = selinux::compute_create(&directory, name).map_err(Refused::Io)? else {
-            return Ok(());
-        };
+        // A labelled tree whose policy cannot be asked, as in a container
+        // that hides the SELinux file system, is refused, not guessed at.
+        let expected = selinux::compute_create(&directory, name).map_err(Refused::Io)?;
         if given.as_deref().map(selinux::trimmed) == Some(selinux::trimmed(&expected)) {
             Ok(())
         } else {
@@ -692,17 +693,20 @@ pub(crate) mod selinux {
     }
 
     /// The label the policy gives a regular file this thread makes as
-    /// `name` in a directory labelled `directory`; `None` when `SELinux` is
-    /// not enabled.
-    pub(super) fn compute_create(directory: &[u8], name: &str) -> io::Result<Option<Vec<u8>>> {
-        let class = match fs::read_to_string(format!("{FILE_SYSTEM}/class/file/index")) {
-            Ok(index) => index
-                .trim()
-                .parse::<u16>()
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error),
-        };
+    /// `name` in a directory labelled `directory`. An error where the
+    /// policy cannot be asked, such as where the `SELinux` file system is
+    /// not mounted.
+    pub(super) fn compute_create(directory: &[u8], name: &str) -> io::Result<Vec<u8>> {
+        let class = fs::read_to_string(format!("{FILE_SYSTEM}/class/file/index"))
+            .map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("the tree has SELinux labels, but {FILE_SYSTEM} cannot be asked which label a new file gets ({error})"),
+                )
+            })?
+            .trim()
+            .parse::<u16>()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         let thread = fs::read("/proc/thread-self/attr/current")?;
         let query = request(&thread, directory, class, name)?;
         let mut answer = fs::OpenOptions::new()
@@ -718,7 +722,7 @@ pub(crate) mod selinux {
         }
         let mut label = Vec::new();
         answer.take(LIMIT).read_to_end(&mut label)?;
-        Ok(Some(trimmed(&label).to_vec()))
+        Ok(trimmed(&label).to_vec())
     }
 
     /// The question `SELinux`'s `create` file answers: the labels of who

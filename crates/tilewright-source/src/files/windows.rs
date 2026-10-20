@@ -765,6 +765,11 @@ fn control(descriptor: &[u8]) -> Result<[u8; 32], Refused> {
                     .to_le_bytes(),
             );
             for entry in entries {
+                if trustee(entry)? == OWNER_RIGHTS {
+                    return Err(unkept(
+                        "its access control list has an entry for its owner (OWNER RIGHTS), and publishing makes the user applying the owner",
+                    ));
+                }
                 hasher.update(&entry[..1]);
                 hasher.update([entry[1] & !inherited]);
                 hasher.update(&entry[2..]);
@@ -772,6 +777,36 @@ fn control(descriptor: &[u8]) -> Result<[u8; 32], Refused> {
         }
     }
     Ok(hasher.finalize().into())
+}
+
+/// The security identifier `S-1-3-4`, OWNER RIGHTS, which stands for an
+/// entry's owner, whoever that is.
+const OWNER_RIGHTS: &[u8] = &[1, 1, 0, 0, 0, 0, 0, 3, 4, 0, 0, 0];
+
+/// The security identifier an entry of an access control list is for, its
+/// revision, count and authority and as many sub-authorities as it says.
+/// Kinds of entry an access control list does not hold are refused.
+fn trustee(entry: &[u8]) -> Result<&[u8], Refused> {
+    // After the header (type, flags, size) and the access mask; an object
+    // entry then has flags and up to two identifiers of 16 bytes.
+    let start = match entry[0] {
+        // Allowed, denied, and their callback forms.
+        0x00 | 0x01 | 0x09 | 0x0A => 8,
+        // Their object forms.
+        0x05 | 0x06 | 0x0B | 0x0C => {
+            let flags = u32_at(entry, 8)?;
+            12 + 16 * (flags & 1) + 16 * ((flags >> 1) & 1)
+        }
+        _ => {
+            return Err(unkept(
+                "its access control list has an entry of a kind publishing does not read",
+            ));
+        }
+    };
+    let count = usize::from(*entry.get(start + 1).ok_or_else(malformed)?);
+    entry
+        .get(start..start + 8 + 4 * count)
+        .ok_or_else(malformed)
 }
 
 #[cfg(test)]
@@ -787,13 +822,15 @@ mod tests {
         bytes.extend([0_u8; 8]); // owner, group
         bytes.extend(0_u32.to_le_bytes()); // no system list
         bytes.extend(20_u32.to_le_bytes()); // the list follows
-        let size = 8 + entries.len() * 8 + slack;
+        let size = 8 + entries.len() * 20 + slack;
         bytes.extend([2, 0]);
         bytes.extend(u16::try_from(size).unwrap().to_le_bytes());
         bytes.extend(u16::try_from(entries.len()).unwrap().to_le_bytes());
         bytes.extend([0, 0]);
         for flags in entries {
-            bytes.extend([0, *flags, 8, 0, 0, 0, 0, 0]);
+            // Allowed, the flags, 20 bytes, a mask, and Everyone (S-1-1-0).
+            bytes.extend([0, *flags, 20, 0, 0, 0, 0, 0]);
+            bytes.extend([1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0]);
         }
         bytes.extend(vec![0; slack]);
         bytes
@@ -827,5 +864,29 @@ mod tests {
         assert!(control(&descriptor(present & !0x8000, &[0x10], 0)).is_err());
         // No list at all.
         assert!(control(&descriptor(0x8000, &[], 0)).is_ok());
+        // An entry for OWNER RIGHTS, or of a kind a list does not hold, is
+        // refused.
+        let mut owner = descriptor(present, &[0x10], 0);
+        let at = owner.len() - 12;
+        owner[at..].copy_from_slice(&[1, 1, 0, 0, 0, 0, 0, 3, 4, 0, 0, 0]);
+        assert!(control(&owner).is_err());
+        let mut audit = descriptor(present, &[0x10], 0);
+        audit[28] = 0x02;
+        assert!(control(&audit).is_err());
+        // An object entry with one identifier is read past it.
+        let mut object = vec![1, 0];
+        object.extend(present.to_le_bytes());
+        object.extend([0_u8; 8]);
+        object.extend(0_u32.to_le_bytes());
+        object.extend(20_u32.to_le_bytes());
+        object.extend([2, 0, 48, 0, 1, 0, 0, 0]);
+        object.extend([5, 0x10, 40, 0, 0, 0, 0, 0, 1, 0, 0, 0]);
+        object.extend([0; 16]);
+        object.extend([1, 1, 0, 0, 0, 0, 0, 3, 4, 0, 0, 0]);
+        assert!(control(&object).is_err());
+        // CREATOR OWNER (S-1-3-0) instead.
+        let rid = object.len() - 4;
+        object[rid] = 0;
+        assert!(control(&object).is_ok());
     }
 }

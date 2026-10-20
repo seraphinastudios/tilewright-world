@@ -379,13 +379,6 @@ impl Known {
             .or_else(|| self.files.values().flatten().next().copied())
     }
 
-    /// Whether a new file at `path` takes the access its directory gives
-    /// it, which the directory's own access does not tell (Windows).
-    fn inherits(&self, path: &str) -> bool {
-        self.nearest(path)
-            .is_some_and(|access| access.new_file().is_none())
-    }
-
     /// The access the directories made for a file at `path` get.
     fn new_directory(&self, path: &str) -> Option<&Access> {
         self.nearest(path)
@@ -508,12 +501,12 @@ fn check_access(directories: &mut Directories<'_>, known: &Known) -> Result<(), 
 }
 
 /// Stages every new file: one written where a file is with that file's
-/// access, a new one with its directory's. Where a new file takes the
-/// access its directory gives it (Windows), an empty file is staged beside
-/// each deleted file too, and must get the access the deleted file has:
-/// its inverse creates it again with what its directory gives. That file
-/// goes with the deleted one. On failure removes every staging file it
-/// wrote, the failed one included, and the directories it created.
+/// access, a new one with what a new file there gets. Beside each deleted
+/// file an empty file is staged too, as its inverse would make it: a
+/// deleted file must be one its inverse can make again, with the access,
+/// labels and list it had. That file goes with the deleted one. On failure
+/// removes every staging file it wrote, the failed one included, and the
+/// directories it created.
 fn stage_all<'f>(
     directories: &mut Directories<'_>,
     known: &Known,
@@ -524,12 +517,13 @@ fn stage_all<'f>(
         let (access, text) = match (&file.after, known.files.get(&file.path)) {
             (Some(text), Some(Some(access))) => (Some(*access), text.as_bytes()),
             (Some(text), _) => (known.new_file(&file.path), text.as_bytes()),
-            (None, Some(Some(access))) if known.inherits(&file.path) => (Some(*access), &b""[..]),
+            (None, Some(Some(_))) => (known.new_file(&file.path), &b""[..]),
             (None, _) => continue,
         };
-        // A file where there was none gets the label the system's policy
-        // gives its name, which renaming would not give it.
-        let new = file.after.is_some() && !matches!(known.files.get(&file.path), Some(Some(_)));
+        // A file made where there was none, or made again by an inverse,
+        // gets the label the system's policy gives its name, which renaming
+        // would not give it.
+        let new = file.after.is_none() || !matches!(known.files.get(&file.path), Some(Some(_)));
         staged.push(file.path.as_str());
         // Writing removes whatever was at the staging name first, so the
         // directory may change even if the write fails.

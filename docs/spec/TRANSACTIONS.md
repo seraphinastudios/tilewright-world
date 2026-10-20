@@ -282,9 +282,12 @@ on: the directory opened then, whatever its path names later. It:
    labels on Linux, its access control list on Windows, below); writes it,
    only its owner's on Unix until then; gives it the mode and group given
    below, without an access control list its directory would give it; and
-   syncs it. A failure removes every staging file it wrote and the
-   directories it created, and reports one it created that is no longer
-   empty;
+   syncs it. Beside each file it deletes it stages an empty file the same
+   way, with the access a file made there again gets, as the inverse would
+   make it, so that a file is deleted only if its inverse can make it again
+   (below); that file goes with the deleted one. A failure removes every
+   staging file it wrote and the directories it created, and reports one it
+   created that is no longer empty;
 3. reads every file the transaction touched or consulted again and compares
    it with the files it was carried out on, then validates the tree with
    the transaction's files again, and its terrain addresses against that
@@ -336,10 +339,11 @@ before a byte is written or the directory used; otherwise publishing fails
 and nothing is published. A tree whose files and directories carry one
 label, as a user's files commonly do under SELinux, can be published. A
 new file is staged under another name, and renaming does not relabel it,
-so where SELinux is enabled publishing also asks it (through
-`/sys/fs/selinux/create`) which label the policy gives a new file of the
-final name, which may differ by a rule keyed on the name, and refuses
-unless it is the label the staged file got. Smack's execution, mapping and
+so for a new file, and for the empty file staged beside a deleted one,
+publishing also asks SELinux (through `/sys/fs/selinux/create`) which
+label the policy gives a new file of the final name, which may differ by a
+rule keyed on the name, and refuses unless it is the label the staged file
+got, or if the policy cannot be asked. Smack's execution, mapping and
 transmuting labels (`SMACK64EXEC`, `SMACK64MMAP`, `SMACK64TRANSMUTE`) are
 refused, since a replacement, or a directory made again, would not get
 them.
@@ -348,12 +352,13 @@ On Windows a new entry gets the access control list its directory gives
 it, by inheritance, and publishing never changes a list. So the changed
 files must have one access control list, and the directories above them,
 the root included, one; a file's is not compared with a directory's, since
-their entries differ in kind. Every file publishing stages must be given
-by its directory the list the file it replaces has, or the changed files
-have; beside a deleted file, which its inverse creates again, an empty
-file is staged to check the same, and removed with the deleted file. Both
-are checked before a byte is written, and a directory publishing makes
-must be given the list of the directory above it. Whether an entry of a
+their entries differ in kind. Every file publishing stages, the empty one
+beside a deleted file included, must be given by its directory the list
+the file it replaces has, or the changed files have, which is checked
+before a byte is written, and a directory publishing makes must be given
+the list of the directory above it. A list with an entry for OWNER RIGHTS,
+which stands for whoever owns the entry, is refused, since a file written
+is owned by the user applying. Whether an entry of a
 list is marked inherited is not compared: a system marks the entries it
 copies from a directory's list only where that list is marked so. A list
 protected from inheritance, a mandatory integrity label, a central access
@@ -366,7 +371,9 @@ failure gives every file back the access it had. Other extended
 attributes are not kept, nor on Windows other streams and attributes.
 Nothing beneath the root that is a reparse point on Windows is followed or
 used: a symbolic link, junction or mount point, and also a cloud
-placeholder or a deduplicated or compressed file, is refused as a link. A
+placeholder, a deduplicated file or one compressed by the Windows overlay
+filter, is refused as a link. (A file NTFS compresses is not a reparse
+point; its compression, an attribute, is not kept.) A
 transaction that touches or consults two paths that differ only in case
 is refused with `tx.path`, since macOS and Windows, and some other file
 systems, take them for one file.

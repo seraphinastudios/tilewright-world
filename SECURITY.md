@@ -36,22 +36,26 @@ replaces did not have.
   directory may have an access control list. Written files are given that
   mode and group.
 - On Linux, their mandatory access control labels (SELinux, Smack) must be
-  the same too. Publishing never sets a label: the system's policy must
-  give every file it writes, and directory it creates, that label, which is
+  the same too. Publishing never sets a label: the system's policy must give
+  every file it writes, and directory it creates, that label, which is
   checked before a byte is written. For a new file, which is staged under
-  another name, SELinux is also asked which label the policy gives its
-  final name, and publishing refuses if that differs. Smack's execution,
-  mapping and transmuting labels are refused.
-- On Windows, the changed files must share one access control list, and
-  the directories above them one, and every file publishing writes, every
-  deleted file (through an empty file staged beside it) and every directory
-  it creates must be given that list by its directory, which is checked
-  before a byte is written; so a file with entries of its own, which a
-  replacement or an inverse would not get, is refused. Publishing never
-  changes a list. A list protected from inheritance, a mandatory integrity
-  label, a central access policy, a resource attribute, a trust label,
-  encryption or a read-only file is refused. The lock is a file in the root, `.tilewright.lock`, that is
-  shared with no one and deleted when released.
+  another name, SELinux is also asked which label the policy gives its final
+  name, and publishing refuses if that differs or SELinux cannot be asked.
+  Smack's execution, mapping and transmuting labels are refused.
+- On Windows, the changed files must share one access control list, and the
+  directories above them one, and every file publishing writes and every
+  directory it creates must be given that list by its directory, which is
+  checked before a byte is written; so a file with entries of its own, which
+  a replacement would not get, is refused, and so is a list with an entry
+  for OWNER RIGHTS, since the owner changes. Publishing never changes a
+  list. A list protected from inheritance, a mandatory integrity label, a
+  central access policy, a resource attribute, a trust label, encryption or
+  a read-only file is refused. The lock is a file in the root,
+  `.tilewright.lock`, that is shared with no one and deleted when released.
+
+Every file a transaction deletes must be one its inverse can make again:
+an empty file is staged beside it, as the inverse would make it, and must
+get the access it had.
 
 Other platforms, the BSDs other than macOS among them, are not checked for
 access control lists and labels the same way, so applying is refused

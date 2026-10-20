@@ -1208,11 +1208,10 @@ fn a_blocked_deletion_keeps_its_file() {
             .any(|problem| problem.path == "defs/recipe/.chest.jsonc.tilewright-tmp"),
         "{failure:#?}"
     );
-    // Where a file is staged beside a deleted one (Windows), staging fails
-    // and nothing is published; elsewhere the deletion fails and what was
-    // published is restored.
+    // The file staged beside the deleted one cannot be, so nothing is
+    // published.
     assert!(
-        cfg!(windows) || failure.problems[0].message.contains("restored"),
+        !failure.problems[0].message.contains("restored"),
         "{failure:#?}"
     );
     assert_eq!(snapshot(root), before);
