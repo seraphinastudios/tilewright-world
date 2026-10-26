@@ -97,6 +97,13 @@ the Actions tab or with:
 gh workflow run release.yml --ref main -R seraphinastudios/tilewright-world
 ```
 
+If a merge lands while that run is still waiting for an earlier Release run
+on `main`, GitHub cancels the waiting run in favour of the merge's run,
+which does not cut a first release. The cancelled run says so in the
+Actions tab. Start the workflow again once no Release run is queued on
+`main`. Before the first release, those runs only plan, so they take a
+minute or two.
+
 Releases of a branch run one at a time. If several merges land while a
 release runs, the next run releases them together. Each branch queues on
 its own, so a maintenance release never displaces a release of `main`.
