@@ -4,10 +4,12 @@
 package twpack
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -162,6 +164,13 @@ func Open(ctx context.Context, path string, limits Limits) (*Pack, error) {
 	if uint64(info.Size()) > limits.MaxPackBytes {
 		return nil, tooLarge(limits.MaxPackBytes)
 	}
+	head, err := readHead(absolute)
+	if err != nil {
+		return nil, ioError(err)
+	}
+	if err := checkHeader(head); err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("sqlite", uri(absolute))
 	if err != nil {
 		return nil, sqliteError(ctx, err)
@@ -182,6 +191,39 @@ func Open(ctx context.Context, path string, limits Limits) (*Pack, error) {
 		return nil, err
 	}
 	return pack, nil
+}
+
+// headerBytes is how much of a pack's start checkHeader reads.
+const headerBytes = 20
+
+// readHead reads the first headerBytes of a file, or all of a shorter one.
+func readHead(path string) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	head := make([]byte, headerBytes)
+	n, err := io.ReadFull(file, head)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return nil, err
+	}
+	return head[:n], nil
+}
+
+// checkHeader checks the start of a pack, head, before SQLite reads it. A
+// database file begins with SQLite's header string, and its header bytes 18
+// and 19, the file format write and read versions, are 1 for a rollback
+// journal, as in every pack, or 2 for WAL. SQLite opens a WAL database from
+// an immutable file but not from an in-memory copy, so every reader refuses
+// one, as from any other version, before SQLite reads it. Bytes that are
+// not a database are left for SQLite to refuse.
+func checkHeader(head []byte) error {
+	if len(head) == headerBytes && bytes.HasPrefix(head, []byte("SQLite format 3\x00")) &&
+		(head[18] != 1 || head[19] != 1) {
+		return reject(CodeIdentity, "the SQLite header's file format versions are not 1, a rollback journal's")
+	}
+	return nil
 }
 
 func (p *Pack) checkOpen(ctx context.Context, absolute string, maximum uint64) error {

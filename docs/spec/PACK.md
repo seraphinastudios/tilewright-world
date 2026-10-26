@@ -135,6 +135,10 @@ loading it, and never load a whole table into memory. Readers:
   untrusted schemas disabled. A reader may instead open a pack from its
   bytes, as the browser does: it copies them into a read-only database in
   memory and checks them as it checks a file;
+- before SQLite reads the file, reject it if it begins with SQLite's header
+  string and its header bytes 18 and 19, the file format write and read
+  versions, are not both 1, a rollback journal's. SQLite opens a WAL
+  database (2) from an immutable file but not from a copy in memory;
 - reject the file unless its schema is exactly section 1, its
   `application_id` is `"TWP1"`, its `user_version` is 2, and `meta` holds
   exactly the keys of section 1, as text of at most 64 MiB for `profile` and
@@ -278,7 +282,7 @@ fails with, and every reader in this repository runs them.
 | `pack.too_large` | The file is longer than the pack-size limit. |
 | `pack.file_length` | The file is not exactly its pages. |
 | `pack.schema` | The schema is not exactly section 1. |
-| `pack.identity` | The `application_id`, `user_version` or page size is not the format's. |
+| `pack.identity` | The `application_id`, `user_version` or page size is not the format's, or the SQLite header's file format versions are not 1. |
 | `pack.free_pages` | The pack has free pages. |
 | `pack.meta` | `meta` does not hold exactly the keys and values of section 1. |
 | `pack.profile` | The stored profile is invalid or disagrees with `meta`. |

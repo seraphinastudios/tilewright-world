@@ -579,6 +579,11 @@ impl Pack {
         if metadata.len() > limits.maximum_pack_bytes {
             return Err(too_long(limits.maximum_pack_bytes));
         }
+        let mut head = Vec::with_capacity(HEADER_BYTES);
+        std::fs::File::open(&path)?
+            .take(HEADER_BYTES as u64)
+            .read_to_end(&mut head)?;
+        check_header(&head)?;
         let connection = Connection::open_with_flags(
             uri(&path)?,
             OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -647,6 +652,7 @@ impl Pack {
             inner: read,
             missing: false,
             failure: None,
+            head: Vec::with_capacity(HEADER_BYTES),
         };
         // An empty image is an empty database, as an empty file is; SQLite
         // cannot allocate a copy of no bytes.
@@ -673,6 +679,9 @@ impl Pack {
                 format!("the pack image is longer than {length} bytes"),
             ));
         }
+        // SQLite has not read the copy yet: it first does so in
+        // `check_identity`.
+        check_header(&image.head)?;
         harden(&connection)?;
         check_identity(&connection)?;
         check_pages(&connection, length, limits)?;
@@ -1693,6 +1702,8 @@ struct Filled<R> {
     inner: R,
     missing: bool,
     failure: Option<std::io::Error>,
+    /// The first [`HEADER_BYTES`] bytes `inner` yielded.
+    head: Vec<u8>,
 }
 
 impl<R: std::io::Read> std::io::Read for Filled<R> {
@@ -1703,7 +1714,11 @@ impl<R: std::io::Read> std::io::Read for Filled<R> {
         while !self.missing && self.failure.is_none() {
             match self.inner.read(buffer) {
                 Ok(0) => self.missing = true,
-                Ok(read) => return Ok(read),
+                Ok(read) => {
+                    let wanted = HEADER_BYTES.saturating_sub(self.head.len()).min(read);
+                    self.head.extend_from_slice(&buffer[..wanted]);
+                    return Ok(read);
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(error) => self.failure = Some(error),
             }
@@ -1711,6 +1726,29 @@ impl<R: std::io::Read> std::io::Read for Filled<R> {
         buffer.fill(0);
         Ok(buffer.len())
     }
+}
+
+/// How much of a pack's start [`check_header`] reads.
+const HEADER_BYTES: usize = 20;
+
+/// Checks the start of a pack, `head`, before SQLite reads it. A database
+/// file begins with SQLite's header string, and its header bytes 18 and 19,
+/// the file format write and read versions, are 1 for a rollback journal,
+/// as in every pack, or 2 for WAL. SQLite opens a WAL database from an
+/// immutable file but not from an in-memory copy, so every reader refuses
+/// one, as from any other version, before SQLite reads it. Bytes that are
+/// not a database are left for SQLite to refuse.
+fn check_header(head: &[u8]) -> Result<(), Error> {
+    if head.len() == HEADER_BYTES
+        && head.starts_with(b"SQLite format 3\0")
+        && (head[18] != 1 || head[19] != 1)
+    {
+        return Err(Error::Rejected(
+            ErrorCode::Identity,
+            "the SQLite header's file format versions are not 1, a rollback journal's".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Whether `read` yields at least one more byte.

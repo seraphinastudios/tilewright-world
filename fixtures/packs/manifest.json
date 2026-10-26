@@ -379,6 +379,21 @@
     },
     {"file": "open-page-size.twpack", "rule": "the pages are 8192 bytes", "open": "pack.identity"},
     {
+      "file": "open-header-wal.twpack",
+      "rule": "the SQLite header declares WAL: file format versions 2 and 2",
+      "open": "pack.identity"
+    },
+    {
+      "file": "open-header-write-version.twpack",
+      "rule": "the SQLite header's file format write version is 2",
+      "open": "pack.identity"
+    },
+    {
+      "file": "open-header-read-version.twpack",
+      "rule": "the SQLite header's file format read version is 2",
+      "open": "pack.identity"
+    },
+    {
       "file": "open-free-pages.twpack",
       "rule": "pages freed by a dropped table are kept as free pages",
       "open": "pack.free_pages"

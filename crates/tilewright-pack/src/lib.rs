@@ -166,7 +166,8 @@ pub enum ErrorCode {
     FileLength,
     /// The schema is not exactly the format's.
     Schema,
-    /// The application ID, user version or page size is not the format's.
+    /// The application ID, user version or page size is not the format's,
+    /// or the SQLite header's file format versions are not 1.
     Identity,
     /// The pack has free pages.
     FreePages,

@@ -353,6 +353,38 @@ fn open_cases(base: &mut Base<'_>, length: u64) {
             |path| sql(path, &change),
         );
     }
+    // SQLite's header bytes 18 and 19: the file format write and read
+    // versions, 1 in every pack.
+    for (name, rule, write, read) in [
+        (
+            "open-header-wal",
+            "the SQLite header declares WAL: file format versions 2 and 2",
+            2,
+            2,
+        ),
+        (
+            "open-header-write-version",
+            "the SQLite header's file format write version is 2",
+            2,
+            1,
+        ),
+        (
+            "open-header-read-version",
+            "the SQLite header's file format read version is 2",
+            1,
+            2,
+        ),
+    ] {
+        base.add(
+            Case::new(format!("{name}.twpack"), rule).open(ErrorCode::Identity),
+            |path| {
+                bytes(path, |data| {
+                    data[18] = write;
+                    data[19] = read;
+                });
+            },
+        );
+    }
     base.add(
         Case::new(
             "open-free-pages.twpack",
