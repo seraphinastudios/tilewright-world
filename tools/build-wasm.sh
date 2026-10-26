@@ -151,6 +151,10 @@ quoted() {
   local escaped=${1//\'/\'\\\'\'}
   printf "'%s'" "${escaped}"
 }
+# Cargo builds into this checkout's target directory, whatever
+# CARGO_TARGET_DIR or a Cargo config names: the module is taken from there,
+# and its build paths stay under the remapped repository.
+export CARGO_TARGET_DIR=${repository}/target
 export CARGO_ENCODED_RUSTFLAGS="--remap-path-prefix=${repository}=/tilewright-world"$'\x1f'"--remap-path-prefix=${cargo_home}=/cargo"
 export CC_SHELL_ESCAPED_FLAGS=1
 CFLAGS_wasm32_unknown_unknown="-ffile-prefix-map=$(quoted "${repository}")=/tilewright-world -ffile-prefix-map=$(quoted "${cargo_home}")=/cargo"

@@ -21,6 +21,11 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repository = join(here, "../../..");
 const output = join(here, "../THIRD_PARTY_LICENSES.md");
 
+// Orders strings by UTF-16 code unit, which no locale changes.
+function byCodeUnit(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 function cargo(...args) {
   return execFileSync("cargo", args, { cwd: repository, encoding: "utf8", maxBuffer: 256 << 20 });
 }
@@ -53,7 +58,7 @@ const metadata = JSON.parse(
 );
 const crates = metadata.packages
   .filter((crate) => compiled.has(`${crate.name} ${crate.version}`))
-  .sort((left, right) => left.name.localeCompare(right.name) || left.version.localeCompare(right.version));
+  .sort((left, right) => byCodeUnit(left.name, right.name) || byCodeUnit(left.version, right.version));
 if (crates.length !== compiled.size) {
   throw new Error("cargo metadata does not list every crate cargo tree does");
 }
