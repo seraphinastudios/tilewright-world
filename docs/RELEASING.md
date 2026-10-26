@@ -302,5 +302,10 @@ source releases (its `docs/CRATE-RELEASE.md`):
   re-run the failed jobs within 30 days. The re-run creates both tags and
   the release again from the same attested assets.
 - **"Publish to npm" failed**: re-run it. It checks the release again and
-  publishes from the release's commit. If npm already has that version, the
-  publication succeeded earlier.
+  publishes from the release's commit. If npm already has that version,
+  the job compares npm's copy with the release's tarball and succeeds if
+  they are the same. It cannot set a dist-tag, so if an earlier attempt
+  published the version without one, it prints the `npm dist-tag add`
+  command to run. npm's registry can take a few minutes to list a new
+  version: if the re-run fails because the version already exists, re-run
+  it again later.

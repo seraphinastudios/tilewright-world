@@ -607,4 +607,32 @@ jobs:
               console.error("npm " + process.argv[1] + " is too old for trusted publishing");
               process.exit(1);
             }' "$(npm --version)"
-          npm publish "${TARBALL}" --access public --tag "${DIST_TAG}"
+          # A version npm already has cannot be published again. If an
+          # earlier attempt published this tarball and then failed, the
+          # re-run checks the registry's copy and stops there.
+          metadata="${RUNNER_TEMP}/registry.json"
+          status=$(curl -sS --retry 3 -o "${metadata}" -w '%{http_code}' \
+            -H 'Accept: application/vnd.npm.install-v1+json' \
+            "https://registry.npmjs.org/${PACKAGE/\//%2f}")
+          case ${status} in
+            200) published=$(jq -r --arg version "${VERSION}" '.versions[$version].dist.integrity // empty' "${metadata}") ;;
+            404) published= ;;
+            *)
+              echo "::error::the npm registry answered ${status} for ${PACKAGE}"
+              exit 1
+              ;;
+          esac
+          if [[ -z ${published} ]]; then
+            npm publish "${TARBALL}" --access public --tag "${DIST_TAG}"
+            exit 0
+          fi
+          if [[ ${published} != "sha512-$(openssl dgst -sha512 -binary "${TARBALL}" | base64 -w0)" ]]; then
+            echo "::error::npm has a different tarball for ${PACKAGE}@${VERSION}"
+            exit 1
+          fi
+          echo "::notice::npm already has this tarball as ${PACKAGE}@${VERSION}"
+          # Trusted publishing can only publish, so a dist-tag that an
+          # earlier attempt did not set is left to the owner.
+          if [[ $(jq -r --arg tag "${DIST_TAG}" '."dist-tags"[$tag] // empty' "${metadata}") != "${VERSION}" ]]; then
+            echo "::warning::the npm dist-tag ${DIST_TAG} does not point at ${VERSION}; to set it, run: npm dist-tag add ${PACKAGE}@${VERSION} ${DIST_TAG}"
+          fi
