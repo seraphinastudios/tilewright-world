@@ -37,10 +37,13 @@ on:
 
 permissions: {}
 
-# Releases of one branch run one at a time. GitHub keeps one pending run per
-# group and drops an older pending run for a newer one, which is safe within
-# a branch: the newer run's commit contains the older one's. Each branch has
-# its own group, so a maintenance release never displaces a release of main.
+# Releases of one branch run one at a time, so their release jobs never
+# overlap. GitHub keeps one pending run per group and cancels an older
+# pending run for a newer one. For merges that is safe: the newer run's
+# commit contains the older one's. A merge's run can neither cut the first
+# release nor finish an unpublished one, so a waiting dispatch or re-run
+# that it displaces has to be started again (docs/RELEASING.md). Each branch
+# has its own group, so a maintenance release never displaces one of main.
 concurrency:
   group: ${{ github.event_name == 'pull_request' && format('world-release-check-{0}', github.event.pull_request.number) || format('world-release-{0}', github.ref) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -96,9 +99,14 @@ jobs:
         run: |
           set -euo pipefail
           # The branch from the full ref: a dispatch may name a tag, and a
-          # tag called "main" must not pass for the branch.
+          # tag called "main" must not pass for the branch. A pull request
+          # into another pull request's branch is checked as one into main.
           if [[ ${EVENT} == pull_request ]]; then
-            BRANCH=${BASE_REF}
+            if [[ ${BASE_REF} == main || ${BASE_REF} =~ ^[0-9]+\.[0-9]+\.x$ ]]; then
+              BRANCH=${BASE_REF}
+            else
+              BRANCH=main
+            fi
           elif [[ ${GITHUB_REF} == refs/heads/* ]]; then
             BRANCH=${GITHUB_REF#refs/heads/}
           else
@@ -161,8 +169,9 @@ jobs:
           if [[ -z ${PREVIOUS_TAG} ]]; then
             exit 0
           fi
-          # A failed request prints its error body, which is not "true".
-          finished=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${PREVIOUS_TAG}" --jq '.draft == false and .immutable == true' 2>/dev/null || true)
+          # A failed request prints its error body, which is not "true", and
+          # its status on stderr, which stays in the log.
+          finished=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${PREVIOUS_TAG}" --jq '.draft == false and .immutable == true' || true)
           if [[ ${finished} != true ]]; then
             echo "::error::${PREVIOUS_TAG}, the latest release tag on ${BRANCH}, has no published immutable release. Finish or repair that release first; see \"When a release fails\" in docs/RELEASING.md."
             exit 1

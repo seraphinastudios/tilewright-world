@@ -88,7 +88,7 @@ configures the commit analyzer with it, as in the other two repositories:
 | Push before any `vX.Y.Z` tag exists | The plan job only, which says the first release has to be started by hand. Merging never cuts the first release. |
 | Run workflow (`workflow_dispatch`) on `main` | The same as a push, except that it can also cut the first release |
 | Run workflow on a maintenance branch `MAJOR.MINOR.x` | The plan job only, which says what it would release; publishing from maintenance branches is off |
-| Pull request that changes the release workflows, `scripts/release/`, `tools/release/`, `tools/build-wasm.sh`, `packages/tilewright-pack/`, `rust-toolchain.toml`, `Cargo.lock` or a `Cargo.toml` | The tests, plan, five builds, npm build and packaging under the version `0.0.0-check.N` (N is the pull request number), as a check. Nothing is attested or published. |
+| Pull request that changes the release workflows, `scripts/release/`, `tools/release/`, `tools/build-wasm.sh`, `packages/tilewright-pack/`, `rust-toolchain.toml`, `Cargo.lock` or a `Cargo.toml` | The tests, plan, five builds, npm build and packaging under the version `0.0.0-check.N` (N is the pull request number), as a check. A pull request into another pull request's branch is planned as one into `main`. Nothing is attested or published. |
 
 To cut the first release, run the Release workflow on `main`, either from
 the Actions tab or with:
@@ -97,12 +97,15 @@ the Actions tab or with:
 gh workflow run release.yml --ref main -R seraphinastudios/tilewright-world
 ```
 
-If a merge lands while that run is still waiting for an earlier Release run
-on `main`, GitHub cancels the waiting run in favour of the merge's run,
-which does not cut a first release. The cancelled run says so in the
-Actions tab. Start the workflow again once no Release run is queued on
-`main`. Before the first release, those runs only plan, so they take a
-minute or two.
+GitHub keeps one waiting run per branch. If a merge lands while a run you
+started is still waiting for an earlier Release run on `main`, GitHub
+cancels the waiting run in favour of the merge's run, and the cancelled run
+says so in the Actions tab. A merge's run cannot stand in for two kinds of
+run: the first-release dispatch, because a merge never cuts the first
+release, and a re-run of failed jobs that would finish an unpublished
+release, because a merge's run stops at that release. Start such a run
+again once no Release run is queued on `main`. Before the first release,
+runs only plan, so they take a minute or two.
 
 Releases of a branch run one at a time. If several merges land while a
 release runs, the next run releases them together. Each branch queues on
@@ -302,14 +305,18 @@ source releases (its `docs/CRATE-RELEASE.md`):
   A re-run runs the workflow of the run's own commit, so it cannot pick
   up a fix to the workflow, and it fails once the artifacts have expired.
   If a re-run cannot succeed, nothing has been published, and the owner
-  can start over. Turn off enforcement of the tag ruleset, which has no
-  bypass list. Delete both tags, turn enforcement back on, and run the
-  workflow again. First check that
-  `https://proxy.golang.org/github.com/seraphinastudios/tilewright-world/go/@v/list`
-  does not list the version. If it does, the Go checksum database has
-  recorded the module's content at that tag. The new run's commit must
-  then have the same `go/` directory and root `LICENSE`, which the module
-  zip includes because `go/` has no license file of its own.
+  can start over:
+  1. Check whether
+     `https://proxy.golang.org/github.com/seraphinastudios/tilewright-world/go/@v/list`
+     lists the version. If it does, the Go proxy holds the module's
+     content at that tag. The commit the new run releases must then have
+     the same `go/` directory and root `LICENSE`. The module zip includes
+     that `LICENSE` because `go/` has no license file of its own.
+  2. The tag ruleset has no bypass list, and it also covers
+     tilewright-editor and tilewright-renderer. Add `tilewright-world` to
+     its excluded repositories, delete both tags, then remove the
+     exclusion.
+  3. Run the workflow again.
 - **"Publish the GitHub release" failed its checks after publishing**: the
   release exists. Do not delete an immutable release. Read the error, fix
   the cause, then re-run the failed jobs: the re-run skips publishing,
@@ -317,11 +324,13 @@ source releases (its `docs/CRATE-RELEASE.md`):
 - **The release came out mutable** (immutable releases were off when it was
   published): GitHub cannot make it immutable afterwards, so its checks
   keep failing, and the plan job of every later run on the branch stops at
-  it. To repair it, turn immutable releases back on, delete the release
-  and its two tags (the tag ruleset has no bypass list, so turn off its
-  enforcement while deleting them), and re-run the failed jobs within 30
-  days. The re-run creates both tags and
-  the release again from the same attested assets.
+  it. To repair it, turn immutable releases back on, and turn the release
+  back into a draft, which a mutable release allows:
+  `gh api --method PATCH repos/seraphinastudios/tilewright-world/releases/RELEASE_ID -F draft=true`.
+  Then re-run the failed jobs within 30 days. The re-run accepts the tags,
+  deletes the draft and publishes the release afresh, now immutable, from
+  the same attested assets. After 30 days, delete the release instead and
+  start over as described above.
 - **"Publish to npm" failed**: re-run it. It checks the release again and
   publishes from the release's commit. If npm already has that version,
   the job compares npm's copy with the release's tarball and succeeds if
