@@ -670,11 +670,27 @@ fn row_cases(base: &mut Base<'_>) {
             ErrorCode::Zone,
         ),
         (
+            "zone-plane-id",
+            "a zone's plane is not an identifier",
+            "UPDATE zones SET plane = 'Attic' WHERE id = 'village'",
+            keyed_op("zone", ("plane", "Attic"), Some(("id", "village"))),
+            Some(ErrorCode::Zone),
+            ErrorCode::Zone,
+        ),
+        (
             "anchor-plane",
             "an anchor names a plane the pack does not have",
             "UPDATE anchors SET plane = 'attic' WHERE id = 'village.well'",
             keyed_op("anchor", ("plane", "attic"), Some(("id", "village.well"))),
             None,
+            ErrorCode::Anchor,
+        ),
+        (
+            "anchor-plane-id",
+            "an anchor's plane is not an identifier",
+            "UPDATE anchors SET plane = 'Attic' WHERE id = 'village.well'",
+            keyed_op("anchor", ("plane", "Attic"), Some(("id", "village.well"))),
+            Some(ErrorCode::Anchor),
             ErrorCode::Anchor,
         ),
         (

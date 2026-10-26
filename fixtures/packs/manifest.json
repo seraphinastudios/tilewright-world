@@ -572,10 +572,26 @@
       "verify": "pack.zone"
     },
     {
+      "file": "zone-plane-id.twpack",
+      "rule": "a zone's plane is not an identifier",
+      "reads": [
+        {"op": "zone", "plane": "Attic", "id": "village", "error": "pack.zone"}
+      ],
+      "verify": "pack.zone"
+    },
+    {
       "file": "anchor-plane.twpack",
       "rule": "an anchor names a plane the pack does not have",
       "reads": [
         {"op": "anchor", "plane": "attic", "id": "village.well", "error": null}
+      ],
+      "verify": "pack.anchor"
+    },
+    {
+      "file": "anchor-plane-id.twpack",
+      "rule": "an anchor's plane is not an identifier",
+      "reads": [
+        {"op": "anchor", "plane": "Attic", "id": "village.well", "error": "pack.anchor"}
       ],
       "verify": "pack.anchor"
     },
