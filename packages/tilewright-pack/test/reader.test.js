@@ -220,25 +220,28 @@ test("integers past 2^53 are bigints, others numbers", async () => {
 test("listings read a page at a time from the last key", async () => {
   await initialize(module);
   const pack = openPack(valid);
+  // Each listing, and the index of its row limit, which the byte budget
+  // follows.
   const listings = [
-    ["planes", () => pack.planes()],
-    ["zones", () => pack.zones("overworld")],
-    ["anchors", () => pack.anchors("overworld")],
-    ["stairwells", () => pack.stairwells("overworld")],
-    ["definitions", () => pack.definitions()],
-    ["definitions", () => pack.definitions("proto")],
-    ["layers", () => pack.layers("overworld")],
-    ["chunkKeys", () => pack.chunkKeys("overworld", 0)],
+    ["planes", () => pack.planes(), 1],
+    ["zones", () => pack.zones("overworld"), 2],
+    ["anchors", () => pack.anchors("overworld"), 2],
+    ["stairwells", () => pack.stairwells("overworld"), 2],
+    ["definitions", () => pack.definitions(), 3],
+    ["definitions", () => pack.definitions("proto"), 3],
+    ["layers", () => pack.layers("overworld"), 2],
+    ["chunkKeys", () => pack.chunkKeys("overworld", 0), 4],
   ];
-  for (const [name, list] of listings) {
+  for (const [name, list, rows] of listings) {
     const all = [...list()];
     assert.ok(all.length > 1, name);
-    // With pages of one row, the walk resumes after each row's key.
+    // A page is at most 64 rows and 1 MiB. With pages of one row, the walk
+    // resumes after each row's key.
     const read = Reader.prototype[name];
     const calls = [];
     Reader.prototype[name] = function (...args) {
-      calls.push(args);
-      args[args.length - 2] = 1;
+      calls.push([args[rows], args[rows + 1]]);
+      args[rows] = 1;
       return read.apply(this, args);
     };
     try {
@@ -247,6 +250,9 @@ test("listings read a page at a time from the last key", async () => {
       Reader.prototype[name] = read;
     }
     assert.equal(calls.length, all.length + 1, name);
+    for (const bounds of calls) {
+      assert.deepEqual(bounds, [64, 2 ** 20], name);
+    }
   }
   // So does a byte budget the first row reaches.
   const definitions = Reader.prototype.definitions;
@@ -298,6 +304,36 @@ test("chunk reads keep to their budget of objects and fields", async () => {
   for (const limits of [1, null, { maxEntries: -1 }, { maxEntries: 1.5 }, { maxEntries: "1" }]) {
     assert.throws(() => pack.chunk("overworld", 0, 0, 0, limits), TypeError);
     assert.throws(() => pack.object(uid, limits), TypeError);
+  }
+});
+
+test("entry budgets are 65,536 unless the caller sets one", async () => {
+  await initialize(module);
+  const pack = openPack(valid);
+  const uid = "o.k3vq7zr2mxa5d6wfh4pnyt2cgu";
+  const stairwell = [...pack.stairwells("overworld")][0].id;
+  for (const [name, read] of [
+    ["chunk", () => pack.chunk("overworld", 0, 0, 0)],
+    ["object", () => pack.object(uid)],
+    ["stairwell", () => pack.stairwell("overworld", stairwell)],
+    ["stairwells", () => [...pack.stairwells("overworld")]],
+    ["stairwells", () => [...pack.stairwells("overworld", {})]],
+  ]) {
+    const original = Reader.prototype[name];
+    const budgets = [];
+    Reader.prototype[name] = function (...args) {
+      budgets.push(args[args.length - 1]);
+      return original.apply(this, args);
+    };
+    try {
+      read();
+    } finally {
+      Reader.prototype[name] = original;
+    }
+    assert.ok(budgets.length > 0, name);
+    for (const budget of budgets) {
+      assert.equal(budget, 65536n, name);
+    }
   }
 });
 
@@ -364,14 +400,16 @@ test("options are read from the bag's own properties only", async () => {
   }
 });
 
-test("keys longer than any row's are not looked up", async () => {
+test("keys of any length are looked up, as the other readers look them up", async () => {
   await initialize(module);
   const pack = openPack(valid);
+  // A damaged pack can hold a row whose key is longer than an identifier
+  // can be, which a lookup finds and refuses (the plane-id-long fixture).
   const long = "a".repeat(129);
   const calls = await counting("plane", async () => {
     assert.equal(pack.plane(long), undefined);
   });
-  assert.equal(calls, 0);
+  assert.equal(calls, 1);
   assert.equal(pack.meta(long), undefined);
   assert.equal(pack.zone("overworld", long), undefined);
   assert.equal(pack.anchor(long, "x"), undefined);
@@ -391,8 +429,6 @@ test("keys longer than any row's are not looked up", async () => {
   ]) {
     assert.deepEqual([...listing], []);
   }
-  // A key of the longest length is still looked up.
-  assert.equal(pack.plane("a".repeat(128)), undefined);
   pack.close();
   assert.throws(() => pack.plane(long), /closed/);
 });
@@ -471,10 +507,26 @@ test("a trap stops the module for good", async () => {
     detached += 1;
     return detach.call(this);
   };
+  const { open } = Reader;
+  let opened = 0;
+  Reader.open = (...args) => {
+    opened += 1;
+    return open.apply(Reader, args);
+  };
   try {
     // A pack still open when the module stops, then dropped.
     let dropped = openPack(valid);
-    assert.throws(() => pack.summary(), WebAssembly.RuntimeError);
+    opened = 0;
+    // The module stops while openPack() reads its options, which then
+    // does not call into it.
+    const settings = {
+      get digest() {
+        assert.throws(() => pack.summary(), WebAssembly.RuntimeError);
+        return undefined;
+      },
+    };
+    assert.throws(() => openPack(valid, settings), /stopped/);
+    assert.equal(opened, 0);
     assert.throws(() => pack.meta("format"), /stopped/);
     assert.throws(() => dropped.meta("format"), /stopped/);
     assert.throws(() => openPack(valid), /stopped/);
@@ -488,5 +540,6 @@ test("a trap stops the module for good", async () => {
     assert.equal(freed, 0);
   } finally {
     Object.assign(Reader.prototype, { summary, free, __destroy_into_raw: detach });
+    Reader.open = open;
   }
 });

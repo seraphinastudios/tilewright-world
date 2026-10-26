@@ -22,9 +22,12 @@ function own(target, key, value, enumerable) {
   Object.defineProperty(target, key, { __proto__: null, value, writable: true, enumerable, configurable: true });
 }
 
-// The module is "unloaded", "loading" while initialize() waits for it, or
-// "ready". One instance is ever installed: a second would replace the
-// exports that open packs still call.
+// The module is "unloaded", "loading" while initialize() waits for it,
+// "loading-sync" while initializeSync() loads it, or "ready". One instance
+// is ever installed: a second would replace the exports that open packs
+// still call. The state changes before any code of the caller's, such as a
+// getter of the source, can run, so a call it makes cannot start a second
+// load.
 let state = "unloaded";
 let loading;
 
@@ -42,25 +45,25 @@ export function initialize(source) {
   if (state === "ready") {
     return Promise.resolve();
   }
+  if (state === "loading-sync") {
+    return Promise.reject(new Error("initializeSync() is loading the module"));
+  }
   if (state === "unloaded") {
-    // Normalizing can throw, as a `then` getter can; the module is then
-    // still unloaded.
-    let module_or_path;
-    try {
-      module_or_path = source === undefined ? undefined : fetchable(source);
-    } catch (error) {
-      return Promise.reject(error);
-    }
     state = "loading";
-    loading = initialize_(module_or_path === undefined ? undefined : { module_or_path }).then(
-      () => {
-        state = "ready";
-      },
-      (error) => {
-        failed(error);
-        throw error;
-      },
-    );
+    // The source is normalized once `loading` is set: a call to
+    // initialize() from its getters, such as `then`, joins this load, and
+    // a getter that throws fails it, leaving the module unloaded.
+    loading = Promise.resolve()
+      .then(() => initialize_(source === undefined ? undefined : { module_or_path: fetchable(source) }))
+      .then(
+        () => {
+          state = "ready";
+        },
+        (error) => {
+          failed(error);
+          throw error;
+        },
+      );
   }
   return loading;
 }
@@ -70,21 +73,35 @@ export function initialize(source) {
 // Those are recognized by brand, as each getter below throws for anything
 // else, and handed over as this realm's: a Response's body, and the
 // Response of fetching a URL or Request.
+// A type whose prototype has no such getter, as a polyfill's may not, is
+// only recognized by wasm-bindgen's instanceof.
 const brands = [
   ["Response", "status"],
   ["Request", "url"],
   ["URL", "href"],
 ]
-  .filter(([type]) => typeof globalThis[type] === "function")
-  .map(([type, getter]) => [globalThis[type], Object.getOwnPropertyDescriptor(globalThis[type].prototype, getter).get]);
+  .map(([type, getter]) => {
+    const constructor = globalThis[type];
+    const prototype = typeof constructor === "function" ? constructor.prototype : undefined;
+    const descriptor =
+      typeof prototype === "object" && prototype !== null
+        ? Object.getOwnPropertyDescriptor(prototype, getter)
+        : undefined;
+    return [constructor, descriptor?.get];
+  })
+  .filter(([, brand]) => typeof brand === "function");
+
+function brandOf(type) {
+  return brands.find(([candidate]) => candidate === type)?.[1];
+}
 
 function branded(value, type) {
-  const brand = brands.find(([candidate]) => candidate === type);
+  const brand = brandOf(type);
   if (brand === undefined || typeof value !== "object" || value === null || value instanceof type) {
     return false;
   }
   try {
-    brand[1].call(value);
+    brand.call(value);
     return true;
   } catch {
     return false;
@@ -99,7 +116,12 @@ function fetchable(source) {
   if (typeof source === "object" && source !== null && typeof source.then === "function") {
     return Promise.resolve(source).then(body);
   }
-  if (branded(source, globalThis.Request) || branded(source, globalThis.URL)) {
+  // A URL is fetched by its href, which its brand getter gives, rather than
+  // by what its own toString gives.
+  if (branded(source, globalThis.URL)) {
+    return fetch(brandOf(globalThis.URL).call(source));
+  }
+  if (branded(source, globalThis.Request)) {
     return fetch(source);
   }
   return body(source);
@@ -110,23 +132,47 @@ function body(source) {
 }
 
 /**
- * Loads the WebAssembly module from its bytes or a compiled module,
- * synchronously; it does nothing once the module is loaded, and throws
- * while `initialize()` is loading it.
+ * Loads the WebAssembly module from its bytes, of any realm, or a module
+ * this realm compiled, synchronously; it does nothing once the module is
+ * loaded, and throws while `initialize()` is loading it. wasm-bindgen's
+ * synchronous loader recognizes a compiled module with `instanceof`, so one
+ * from another realm, which `initialize()` takes, is refused here.
  */
 export function initializeSync(source) {
   usable();
   if (state === "loading") {
     throw new Error("initialize() is loading the module; await it instead");
   }
+  if (state === "loading-sync") {
+    throw new Error("initializeSync() is loading the module");
+  }
   if (state === "unloaded") {
+    state = "loading-sync";
     try {
+      argument(
+        !foreignModule(source),
+        "initializeSync() takes a WebAssembly.Module of this realm; pass one from another realm to initialize()",
+      );
       initSync({ module: source });
     } catch (error) {
       failed(error);
       throw error;
     }
     state = "ready";
+  }
+}
+
+// Whether `value` is a compiled module of another realm: Module.exports
+// throws for anything that is not a module.
+function foreignModule(value) {
+  if (typeof value !== "object" || value === null || value instanceof WebAssembly.Module) {
+    return false;
+  }
+  try {
+    WebAssembly.Module.exports(value);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -163,15 +209,6 @@ function argument(condition, message) {
   if (!condition) {
     throw new TypeError(message);
   }
-}
-
-// The longest key a pack row can have: an identifier, ASCII of at most 128
-// bytes. A longer string finds nothing, so it is not copied into the
-// module's memory to look for.
-const MAX_KEY = 128;
-
-function fits(...keys) {
-  return keys.every((key) => key === undefined || key.length <= MAX_KEY);
 }
 
 function text(value, name) {
@@ -393,6 +430,9 @@ export function openPack(bytes, settings) {
     }
     throw new PackError("pack.sqlite", "the pack is larger than WebAssembly memory can hold");
   }
+  // Reading the options ran the caller's getters, which may have stopped
+  // the module.
+  usable();
   let reader;
   try {
     reader = Reader.open(image, digest, maximum);
@@ -441,12 +481,6 @@ export class Pack {
     usable();
   }
 
-  /** What a read of a key no row can have finds, once the pack is open. */
-  #missing() {
-    this.#open();
-    return undefined;
-  }
-
   #call(read) {
     this.#open();
     try {
@@ -480,7 +514,7 @@ export class Pack {
 
   meta(key) {
     text(key, "key");
-    return fits(key) ? this.#call((reader) => reader.meta(key)) : this.#missing();
+    return this.#call((reader) => reader.meta(key));
   }
 
   profile() {
@@ -498,7 +532,7 @@ export class Pack {
 
   plane(id) {
     text(id, "id");
-    return fits(id) ? this.#call((reader) => reader.plane(id)) : this.#missing();
+    return this.#call((reader) => reader.plane(id));
   }
 
   planes() {
@@ -511,13 +545,13 @@ export class Pack {
   zone(plane, id) {
     text(plane, "plane");
     text(id, "id");
-    return fits(plane, id) ? this.#call((reader) => reader.zone(plane, id)) : this.#missing();
+    return this.#call((reader) => reader.zone(plane, id));
   }
 
   zones(plane) {
     text(plane, "plane");
     return this.#rows(
-      (reader, after) => (fits(plane) ? reader.zones(plane, after, PAGE, PAGE_BYTES) : []),
+      (reader, after) => reader.zones(plane, after, PAGE, PAGE_BYTES),
       (zone) => zone.id,
     );
   }
@@ -525,13 +559,13 @@ export class Pack {
   anchor(plane, id) {
     text(plane, "plane");
     text(id, "id");
-    return fits(plane, id) ? this.#call((reader) => reader.anchor(plane, id)) : this.#missing();
+    return this.#call((reader) => reader.anchor(plane, id));
   }
 
   anchors(plane) {
     text(plane, "plane");
     return this.#rows(
-      (reader, after) => (fits(plane) ? reader.anchors(plane, after, PAGE, PAGE_BYTES) : []),
+      (reader, after) => reader.anchors(plane, after, PAGE, PAGE_BYTES),
       (anchor) => anchor.id,
     );
   }
@@ -540,16 +574,14 @@ export class Pack {
     text(plane, "plane");
     text(id, "id");
     const maxEntries = entryBudget(limits);
-    return fits(plane, id)
-      ? this.#call((reader) => reader.stairwell(plane, id, maxEntries))
-      : this.#missing();
+    return this.#call((reader) => reader.stairwell(plane, id, maxEntries));
   }
 
   stairwells(plane, limits) {
     text(plane, "plane");
     const maxEntries = entryBudget(limits);
     return this.#rows(
-      (reader, after) => (fits(plane) ? reader.stairwells(plane, after, PAGE, PAGE_BYTES, maxEntries) : []),
+      (reader, after) => reader.stairwells(plane, after, PAGE, PAGE_BYTES, maxEntries),
       (stairwell) => stairwell.id,
     );
   }
@@ -558,15 +590,13 @@ export class Pack {
     text(plane, "plane");
     int(layer, "layer", I32);
     const [bigX, bigY] = [big(x, "x", I64), big(y, "y", I64)];
-    return fits(plane)
-      ? this.#call((reader) => reader.stairwellStep(plane, layer, bigX, bigY))
-      : this.#missing();
+    return this.#call((reader) => reader.stairwellStep(plane, layer, bigX, bigY));
   }
 
   definition(type, id) {
     text(type, "type");
     text(id, "id");
-    return fits(type, id) ? this.#call((reader) => reader.definition(type, id)) : this.#missing();
+    return this.#call((reader) => reader.definition(type, id));
   }
 
   definitions(type) {
@@ -574,8 +604,7 @@ export class Pack {
       text(type, "type");
     }
     return this.#rows(
-      (reader, after) =>
-        fits(type) ? reader.definitions(type, after?.[0], after?.[1], PAGE, PAGE_BYTES) : [],
+      (reader, after) => reader.definitions(type, after?.[0], after?.[1], PAGE, PAGE_BYTES),
       (definition) => [definition.type, definition.id],
     );
   }
@@ -583,7 +612,7 @@ export class Pack {
   layers(plane) {
     text(plane, "plane");
     return this.#rows(
-      (reader, after) => (fits(plane) ? reader.layers(plane, after, PAGE, PAGE_BYTES) : []),
+      (reader, after) => reader.layers(plane, after, PAGE, PAGE_BYTES),
       (layer) => layer,
     );
   }
@@ -592,8 +621,7 @@ export class Pack {
     text(plane, "plane");
     int(layer, "layer", I32);
     return this.#rows(
-      (reader, after) =>
-        fits(plane) ? reader.chunkKeys(plane, layer, after?.[0], after?.[1], PAGE, PAGE_BYTES) : [],
+      (reader, after) => reader.chunkKeys(plane, layer, after?.[0], after?.[1], PAGE, PAGE_BYTES),
       (key) => [BigInt(key.cx), BigInt(key.cy)],
     );
   }
@@ -603,20 +631,18 @@ export class Pack {
     int(layer, "layer", I32);
     const [bigX, bigY] = [big(cx, "cx", I64), big(cy, "cy", I64)];
     const maxEntries = entryBudget(limits);
-    return fits(plane)
-      ? this.#call((reader) => reader.chunk(plane, layer, bigX, bigY, maxEntries))
-      : this.#missing();
+    return this.#call((reader) => reader.chunk(plane, layer, bigX, bigY, maxEntries));
   }
 
   objectLocation(uid) {
     text(uid, "uid");
-    return fits(uid) ? this.#call((reader) => reader.objectLocation(uid)) : this.#missing();
+    return this.#call((reader) => reader.objectLocation(uid));
   }
 
   object(uid, limits) {
     text(uid, "uid");
     const maxEntries = entryBudget(limits);
-    return fits(uid) ? this.#call((reader) => reader.object(uid, maxEntries)) : this.#missing();
+    return this.#call((reader) => reader.object(uid, maxEntries));
   }
 
   verify(limits) {

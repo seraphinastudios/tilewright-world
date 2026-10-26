@@ -63,9 +63,11 @@ export type ModuleSource =
 export function initialize(source?: ModuleSource): Promise<void>;
 
 /**
- * Loads the WebAssembly module from its bytes or a compiled module,
- * synchronously. It does nothing once the module is loaded, and throws
- * while `initialize()` is loading it.
+ * Loads the WebAssembly module from its bytes, of any realm, or a module
+ * compiled in this realm, synchronously. It does nothing once the module is
+ * loaded, and throws while `initialize()` is loading it. It throws a
+ * `TypeError` for a compiled module of another realm, such as an iframe's,
+ * which `initialize()` takes.
  */
 export function initializeSync(source: BufferSource | WebAssembly.Module): void;
 

@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: MIT
 
 // Loading the module from a promise that is not this realm's Promise, as a
-// thenable is, settling to a Response. Node's Response cannot be made to
-// look like another realm's, so a browser covers that case.
+// thenable is, settling to a Response. Node's Response brand check is
+// instanceof, so a Response of another realm cannot be made here; that case
+// was checked by hand in Chrome.
 // node:test runs each file in its own process, so this one starts with the
 // module not loaded.
 
