@@ -532,6 +532,18 @@
       "verify": "pack.plane"
     },
     {
+      "file": "plane-id-long.twpack",
+      "rule": "a plane's ID is longer than an identifier can be",
+      "reads": [
+        {
+          "op": "plane",
+          "id": "vaultaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "error": "pack.plane"
+        }
+      ],
+      "verify": "pack.plane"
+    },
+    {
       "file": "plane-chunk-size.twpack",
       "rule": "a plane's chunks are not 32 tiles square",
       "reads": [

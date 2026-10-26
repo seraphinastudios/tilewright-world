@@ -612,6 +612,9 @@ fn row_cases(base: &mut Base<'_>) {
             |path| sql(path, change),
         );
     }
+    // An ID longer than an identifier can be, which a lookup by that ID
+    // still finds and refuses.
+    let long_plane = format!("vault{}", "a".repeat(195));
     for (name, rule, change, op, read, code) in [
         (
             "plane-kind",
@@ -626,6 +629,16 @@ fn row_cases(base: &mut Base<'_>) {
             "a plane's ID is not an identifier",
             "UPDATE planes SET id = 'Vault', document = replace(document, '\"id\":\"vault\"', '\"id\":\"Vault\"') WHERE id = 'vault'",
             keyed_op("plane", ("id", "Vault"), None),
+            Some(ErrorCode::Plane),
+            ErrorCode::Plane,
+        ),
+        (
+            "plane-id-long",
+            "a plane's ID is longer than an identifier can be",
+            &format!(
+                "UPDATE planes SET id = '{long_plane}', document = replace(document, '\"id\":\"vault\"', '\"id\":\"{long_plane}\"') WHERE id = 'vault'"
+            ),
+            keyed_op("plane", ("id", &long_plane), None),
             Some(ErrorCode::Plane),
             ErrorCode::Plane,
         ),
