@@ -167,6 +167,13 @@ class AssembleTest(unittest.TestCase):
             self.assertEqual(
                 (first / "assets" / name).read_bytes(), (second / "assets" / name).read_bytes(), name
             )
+            # Two runs within one second would not catch a clock time in a
+            # gzip header, so check the headers: no file name, no time.
+            if name.endswith(".tar.gz"):
+                header = (first / "assets" / name).read_bytes()[:10]
+                self.assertEqual(header[:3], b"\x1f\x8b\x08", name)
+                self.assertEqual(header[3] & 0x08, 0, f"{name} records a file name")
+                self.assertEqual(header[4:8], b"\0\0\0\0", f"{name} records a time")
         self.assertEqual(
             sorted(path.name for path in (first / "binaries").iterdir()),
             [
