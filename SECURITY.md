@@ -36,7 +36,11 @@ platform:
 - **Linux** keeps every guarantee. Every operation goes through the
   directory handles opened while the transaction was carried out, so
   changing the tree cannot redirect it. A file or directory with an access
-  control list is refused, since a replacement could not keep it. The
+  control list (POSIX, NFS version 4 or rich) is refused, since a
+  replacement could not keep it. On SMB, 9p (such as WSL's mounts of
+  Windows drives), FUSE and NTFS file systems, Linux does not show the
+  access control lists at all, so there, told by the file system's type,
+  applying needs the same explicit consent as on macOS and Windows. The
   mandatory access control labels (SELinux, Smack) of the entries compared
   must be the same, and the system's policy must give every file publishing
   writes, and directory it creates, that label, which is checked before a
@@ -53,21 +57,25 @@ platform:
 - **Windows** reaches files by path, after checking each component for a
   reparse point (a symbolic link, junction or mount point, or any other), so
   a local process that swaps a link in between the check and the use can
-  redirect a write, rename or removal outside the tree. Access control lists
+  redirect a write, rename or removal outside the tree. Loading refuses
+  reparse points too, so a tree in a OneDrive folder, whose files are
+  cloud placeholders even when kept on the device, cannot be loaded or
+  applied there. Access control lists
   are neither checked nor kept: a replaced file, or one an inverse makes
   again, takes the list its directory gives a new file. A read-only file,
   and an encrypted (EFS) file or directory, is refused. The lock is a file
   in the root, `.tilewright.lock`, shared with no one and deleted when
   released.
 
-So on macOS and Windows applying transactions is supported only in a tree
-that no one else can change and in which no file or directory has an
-access control list of its own. Nothing there checks that, so applying is
-refused by default and goes ahead only when the caller accepts it
-explicitly: `PublishOptions::unchecked_access` in the library,
-`tilewright tx apply --unchecked-access` on the command line, which then
-warns, naming what is not checked. Linux checks everything and needs no
-such consent. On other platforms, the BSDs among them, applying is
+So on macOS and Windows, and on Linux on those file systems, applying
+transactions is supported only in a tree that no one else can change and
+in which no file or directory has an access control list of its own.
+Nothing there checks that, so applying is refused by default and goes
+ahead only when the caller accepts it explicitly:
+`PublishOptions::unchecked_access` in the library, `tilewright tx apply
+--unchecked-access` on the command line, which then warns, naming what is
+not checked. Elsewhere on Linux, which checks everything, no such consent
+is needed. On other platforms, the BSDs among them, applying is
 refused; previewing and rebasing work everywhere. On every
 platform the access checks are made before anything is written and again
 just before the first rename, but as with verifying packs, applying
