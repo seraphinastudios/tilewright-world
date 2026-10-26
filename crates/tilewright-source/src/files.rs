@@ -854,6 +854,30 @@ mod tests {
         made.set_own_access(&made.own_access().unwrap()).unwrap();
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn file_systems_whose_access_control_lists_linux_does_not_show_are_named() {
+        let directory = tree();
+        let root = super::beneath::Root::new(directory.path());
+        let dir = root.directory(&["dir"], false).unwrap();
+        // A test's own directory is on a local file system.
+        assert_eq!(dir.unchecked_file_system().unwrap(), None);
+        for (magic, name) in [
+            (0xFF53_4D42, Some("SMB")),
+            (0xFE53_4D42, Some("SMB")),
+            (0x0102_1997, Some("9p")),
+            (0x6573_5546, Some("FUSE")),
+            (0x7366_746E, Some("NTFS")),
+            (0xEF53, None),
+            (0x5846_5342, None),
+        ] {
+            super::beneath::GIVEN_FILE_SYSTEM.with(|given| given.set(Some(magic)));
+            let found = dir.unchecked_file_system().unwrap();
+            super::beneath::GIVEN_FILE_SYSTEM.with(|given| given.set(None));
+            assert_eq!(found, name, "{magic:x}");
+        }
+    }
+
     #[test]
     fn the_lock_excludes_a_second_holder() {
         let directory = tree();
@@ -988,6 +1012,12 @@ mod windows_tests {
             .is_ok_and(|status| status.success());
         let root = Root::new(directory.path());
         let dir = root.directory(&["inside"], false).unwrap();
+        // The hosted runners have it, so there the test must not pass
+        // without it.
+        assert!(
+            encrypted || std::env::var_os("CI").is_none(),
+            "cipher /e failed on CI"
+        );
         if encrypted {
             assert!(matches!(dir.access("file.jsonc"), Err(Refused::Io(_))));
             assert!(matches!(dir.own_access(), Err(Refused::Io(_))));

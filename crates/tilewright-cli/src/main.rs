@@ -41,8 +41,9 @@ be read.
 tx preview validates a transaction's result without writing; tx rebase
 writes it replayed on ROOT as it is now; tx apply writes the inverse to
 INVERSE, then applies it. OUTPUT and INVERSE must not exist. On macOS and
-Windows tx apply does not check everything (SECURITY.md), so it refuses
-unless --unchecked-access accepts that; Linux checks everything.";
+Windows, and on Linux on SMB, 9p, FUSE and NTFS file systems, tx apply does
+not check everything (SECURITY.md), so it refuses unless --unchecked-access
+accepts that.";
 
 fn main() -> ExitCode {
     // Paths need not be UTF-8, so arguments are read as OS strings.

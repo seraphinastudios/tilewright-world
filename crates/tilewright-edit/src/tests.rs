@@ -1571,7 +1571,7 @@ fn a_rolled_back_deletion_keeps_its_permissions() {
 
 #[cfg(unix)]
 #[test]
-fn a_directory_that_cannot_be_pruned_is_reported() {
+fn a_directory_whose_parent_has_other_access_is_not_pruned() {
     use std::os::unix::fs::PermissionsExt as _;
     let tree = copy();
     let root = tree.path();
@@ -1583,10 +1583,6 @@ fn a_directory_that_cannot_be_pruned_is_reported() {
     );
     let layers = root.join("planes/overworld/layers");
     fs::set_permissions(&layers, fs::Permissions::from_mode(0o555)).unwrap();
-    // A user that can still write there (such as root) cannot see the
-    // failure.
-    let writable = fs::write(layers.join("probe"), "").is_ok();
-    let _ = fs::remove_file(layers.join("probe"));
     let plan = planned(
         root,
         &transaction(
@@ -1595,15 +1591,11 @@ fn a_directory_that_cannot_be_pruned_is_reported() {
     );
     let outcome = publish(&plan);
     fs::set_permissions(&layers, fs::Permissions::from_mode(0o755)).unwrap();
-    if !writable {
-        let failure = outcome.unwrap_err();
-        assert!(failure.applied, "{failure:#?}");
-        assert!(
-            failure.problems[0].path.ends_with("layers/7"),
-            "{failure:#?}"
-        );
-    }
+    // The inverse would make layers/7 again as 0555, so the emptied
+    // directory is left, and that is no failure.
+    outcome.unwrap();
     assert!(!root.join("planes/overworld/layers/7/0_0.jsonc").exists());
+    assert!(root.join("planes/overworld/layers/7").is_dir());
 }
 
 #[test]
@@ -2714,6 +2706,170 @@ fn a_file_its_inverse_could_not_make_again_is_not_deleted() {
             .join("defs/recipe/.chest.jsonc.tilewright-tmp")
             .exists()
     );
+}
+
+/// Gives every directory of the tree `directories` and every file `files`.
+#[cfg(unix)]
+fn set_modes(root: &Path, directories: u32, files: u32) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let directory = fs::symlink_metadata(root).unwrap().is_dir();
+    let mode = if directory { directories } else { files };
+    fs::set_permissions(root, fs::Permissions::from_mode(mode)).unwrap();
+    if directory {
+        for entry in fs::read_dir(root).unwrap() {
+            set_modes(&entry.unwrap().path(), directories, files);
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_directory_its_inverse_would_make_otherwise_is_not_pruned() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let tree = copy();
+    let root = tree.path();
+    let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+    // Everyone may search every directory and read every file, but a file
+    // made in defs itself would be its owner's alone.
+    set_modes(root, 0o755, 0o644);
+    fs::set_permissions(root.join("defs"), fs::Permissions::from_mode(0o711)).unwrap();
+    let recipe = root.join("defs/recipe/chest.jsonc");
+    let plan = apply(
+        root,
+        &transaction(r#"{"op": "document.delete", "path": "defs/recipe/chest.jsonc"}"#),
+    );
+    // Its only file deleted, defs/recipe is left: made again from defs, it
+    // would be 0711, and the file in it 0600.
+    assert!(!recipe.exists());
+    assert_eq!(mode(&root.join("defs/recipe")), 0o755);
+    apply(
+        root,
+        &Transaction::parse("inverse.jsonc", plan.inverse()).unwrap(),
+    );
+    assert_eq!(mode(&recipe), 0o644);
+
+    // Where it has the access of the directory above, it goes.
+    fs::set_permissions(root.join("defs"), fs::Permissions::from_mode(0o755)).unwrap();
+    apply(
+        root,
+        &transaction(r#"{"op": "document.delete", "path": "defs/recipe/chest.jsonc"}"#),
+    );
+    assert!(!root.join("defs/recipe").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_file_no_transaction_could_change_again_is_not_made() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let tree = copy();
+    let root = tree.path();
+    // Everyone may search defs/proto, but a file made in it would be its
+    // owner's alone, unlike every other file and directory.
+    set_modes(root, 0o755, 0o644);
+    fs::set_permissions(root.join("defs/proto"), fs::Permissions::from_mode(0o711)).unwrap();
+    let before = snapshot(root);
+    let plan = planned(
+        root,
+        &transaction(
+            r#"{"op": "document.create", "path": "defs/proto/rock.jsonc", "document": {"format": "tilewright.def/1", "type": "proto", "id": "rock", "fields": {"face": "rock.png", "layer": "item", "blocks_view": true}}}"#,
+        ),
+    );
+    let failure = publish(&plan).unwrap_err();
+    assert!(!failure.applied && failure.cleaned, "{failure:#?}");
+    assert!(
+        has(
+            &failure.problems,
+            "tx.io",
+            "so no transaction could change it again"
+        ),
+        "{failure:#?}"
+    );
+    assert_eq!(snapshot(root), before);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_tree_whose_access_control_lists_linux_cannot_read_needs_consent() {
+    let tree = copy();
+    let root = tree.path();
+    let before = snapshot(root);
+    let plan = planned(
+        root,
+        &transaction(
+            r#"{"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["title"], "value": "Changed"}"#,
+        ),
+    );
+    assert_eq!(plan.unchecked_access().unwrap(), None);
+    publish::FOREIGN.with(|foreign| foreign.set(Some("SMB")));
+    let unchecked = plan.unchecked_access().unwrap().unwrap();
+    let refused = plan.publish().unwrap_err();
+    let accepted = publish(&plan);
+    publish::FOREIGN.with(|foreign| foreign.set(None));
+    assert!(unchecked.contains("(SMB)"), "{unchecked}");
+    assert!(!refused.applied && refused.cleaned, "{refused:#?}");
+    assert!(
+        has(&refused.problems, "tx.io", &unchecked)
+            && has(&refused.problems, "tx.io", "unless the caller accepts"),
+        "{refused:#?}"
+    );
+    accepted.unwrap();
+    assert_ne!(snapshot(root), before);
+}
+
+#[test]
+fn device_names_are_known_whatever_their_case_and_extension() {
+    for name in [
+        "con",
+        "CON.jsonc",
+        "nul .jsonc",
+        "Aux",
+        "prn.x.y",
+        "com1.jsonc",
+        "LPT9",
+        "com0",
+    ] {
+        assert!(crate::publish::device_name(name), "{name}");
+    }
+    for name in [
+        "console",
+        "com",
+        "com10",
+        "nul_x.jsonc",
+        ".con",
+        "lpt",
+        "comx",
+        "con-1",
+    ] {
+        assert!(!crate::publish::device_name(name), "{name}");
+    }
+}
+
+#[test]
+fn the_root_listing_is_not_charged_to_the_load_budget() {
+    let tree = copy();
+    let root = tree.path();
+    let tx = transaction(
+        r#"{"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["title"], "value": "Changed"}"#,
+    );
+    // The smallest budget a load of the tree fits in.
+    let options = |maximum_entries| Options {
+        load: tilewright_source::LoadOptions {
+            maximum_entries,
+            ..tilewright_source::LoadOptions::default()
+        },
+        ..Options::default()
+    };
+    let smallest = (1..1_000)
+        .find(|entries| plan(root, &tx, &options(*entries)).is_ok())
+        .unwrap();
+    // Files at the root, which a load does not list, do not count: fill
+    // the root to the budget it has of its own.
+    let there = fs::read_dir(root).unwrap().count();
+    for index in 0..(smallest + 1).saturating_sub(there) {
+        fs::write(root.join(format!("note{index}.txt")), "").unwrap();
+    }
+    let plan = plan(root, &tx, &options(smallest)).unwrap();
+    publish(&plan).unwrap();
 }
 
 /// Makes every directory of the tree 0750 and every file 0640: readable by

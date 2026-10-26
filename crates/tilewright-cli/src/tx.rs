@@ -142,8 +142,11 @@ fn preview(transaction: &Path, root: &Path, json: bool) -> Result<String, Failur
 }
 
 /// Refuses an output inside the source tree's documents, where it would
-/// itself become a stray source file, or at the name `world.jsonc` is
-/// staged in, which publishing replaces.
+/// itself become a stray source file; at `world.jsonc`, the name it is
+/// staged in, which publishing replaces, or the lock file; at a name that
+/// a file system could take for one of those, without case or trailing
+/// dots and spaces; and anywhere in the tree at a path with a component
+/// that is not ASCII or holds a colon.
 fn outside(root: &Path, path: &Path) -> Result<(), Failure> {
     let parent = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
@@ -225,11 +228,16 @@ fn rebase(transaction: &Path, root: &Path, output: &Path) -> Result<String, Fail
     ))
 }
 
-/// Whether `tx apply` may publish here: where the platform does not check
-/// everything, only with `--unchecked-access`. Returns the warning to give
-/// when it was accepted.
-fn consent(unchecked_access: bool) -> Result<Option<String>, Failure> {
-    match tilewright_edit::UNCHECKED_ACCESS {
+/// Whether `tx apply` may publish `plan`: where publishing does not check
+/// everything (on macOS and Windows, and on Linux on some file systems),
+/// only with `--unchecked-access`. Returns the warning to give when it was
+/// accepted.
+fn consent(plan: &Plan, unchecked_access: bool) -> Result<Option<String>, Failure> {
+    let unchecked = plan.unchecked_access().map_err(|problems| Failure {
+        output: diagnostics_text(&problems, false),
+        message: format!("{} problem(s); nothing was written", problems.len()),
+    })?;
+    match unchecked {
         Some(unchecked) if !unchecked_access => Err(Failure::message(format!(
             "tx apply here does not check everything: {unchecked}; pass --unchecked-access to accept that (SECURITY.md says what it guarantees on each platform); nothing was written"
         ))),
@@ -251,10 +259,10 @@ fn apply(
             "tx apply is supported only on Linux, macOS and Windows (SECURITY.md says what it guarantees on each); tx preview and tx rebase work here",
         ));
     }
-    // Refused before anything is written, the inverse included.
-    let warning = consent(unchecked_access)?;
     outside(root, inverse)?;
     let plan = plan(&read(transaction, false)?, root, false, false)?;
+    // Refused before anything is written, the inverse included.
+    let warning = consent(&plan, unchecked_access)?;
     // The inverse is durable before any file changes, so an interrupted
     // apply can be undone with it, where the platform can make it so.
     let inverse_durable = write(inverse, plan.inverse())?;
@@ -264,7 +272,7 @@ fn apply(
         "; the inverse's name could not be synced, so it may not be durable yet"
     };
     if let Some(warning) = warning {
-        eprintln!("tilewright: {warning}");
+        eprintln!("tilewright: {}", super::terminal_safe(&warning));
     }
     let options = tilewright_edit::PublishOptions { unchecked_access };
     let published = plan.publish_with(&options).map_err(|error| Failure {
@@ -417,11 +425,18 @@ mod tests {
         let (directory, root) = setup();
         let path = |name: &str| directory.path().join(name).display().to_string();
         let chunk = Path::new(&root).join("planes/overworld/layers/0/1_0.jsonc");
+        let planned = super::plan(
+            &super::read(Path::new(&path("tx.jsonc")), false).unwrap(),
+            Path::new(&root),
+            false,
+            false,
+        )
+        .unwrap();
         let applied = run(&["tx", "apply", &path("tx.jsonc"), &root, &path("undo.jsonc")]);
-        // Only Linux checks everything, and needs no consent.
+        // Only Linux checks everything, here, and needs no consent.
         let Some(unchecked) = tilewright_edit::UNCHECKED_ACCESS else {
-            assert!(super::consent(false).unwrap().is_none());
-            assert!(super::consent(true).unwrap().is_none());
+            assert!(super::consent(&planned, false).unwrap().is_none());
+            assert!(super::consent(&planned, true).unwrap().is_none());
             assert!(applied.unwrap().contains("applied; the inverse is in"));
             assert!(chunk.exists());
             return;
@@ -435,7 +450,7 @@ mod tests {
         // Neither the inverse nor the tree was written.
         assert!(!Path::new(&path("undo.jsonc")).exists());
         assert!(!chunk.exists());
-        let warning = super::consent(true).unwrap().unwrap();
+        let warning = super::consent(&planned, true).unwrap().unwrap();
         assert!(warning.starts_with("warning: ") && warning.contains(unchecked));
         run(&[
             "tx",

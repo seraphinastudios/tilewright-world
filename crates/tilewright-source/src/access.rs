@@ -51,6 +51,30 @@ impl fmt::Display for AccessError {
 
 impl std::error::Error for AccessError {}
 
+impl AccessError {
+    /// Whether this is a removal that took effect but is not finished: on
+    /// Windows a removed entry stays, on some file systems, until another
+    /// program closes it, and goes then.
+    #[must_use]
+    pub fn removal_pending(&self) -> bool {
+        type Inner = dyn std::error::Error + Send + Sync;
+        matches!(self, Self::Io(_, error) if error.get_ref().is_some_and(Inner::is::<RemovalPending>))
+    }
+}
+
+/// A removal that took effect but stays until another program closes the
+/// entry; see [`AccessError::removal_pending`].
+#[derive(Debug)]
+pub(crate) struct RemovalPending;
+
+impl fmt::Display for RemovalPending {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("it is removed, but stays until another program closes it")
+    }
+}
+
+impl std::error::Error for RemovalPending {}
+
 fn refused(path: &str, refused: Refused) -> AccessError {
     match refused {
         Refused::Link(prefix) => AccessError::Link(prefix),
@@ -59,8 +83,8 @@ fn refused(path: &str, refused: Refused) -> AccessError {
     }
 }
 
-/// The name of the file in the root that is its lock on Windows; reserved
-/// on every platform.
+/// The name of the file in the root that is its lock on Windows. The
+/// command line writes no output there on any platform.
 pub const LOCK_NAME: &str = ".tilewright.lock";
 
 /// The checked components of a root-relative path; the empty path is the
@@ -426,6 +450,18 @@ impl SourceDirectory {
         self.directory
             .remove_directory(checked_name(name)?)
             .map_err(|error| refused(&self.entry(name), error))
+    }
+
+    /// The file system this directory is on, by name, where publishing
+    /// cannot read the access control lists of what is in it: on Linux an
+    /// SMB, 9p (such as WSL's Windows drives), FUSE or NTFS one, whose
+    /// lists Linux does not show as the attributes publishing reads.
+    /// `None` where it can, and on other platforms, which do not read
+    /// access control lists at all.
+    pub fn unchecked_file_system(&self) -> Result<Option<&'static str>, AccessError> {
+        self.directory
+            .unchecked_file_system()
+            .map_err(|error| refused(&self.path, error))
     }
 
     /// Syncs the directory, making renames and removals in it durable.

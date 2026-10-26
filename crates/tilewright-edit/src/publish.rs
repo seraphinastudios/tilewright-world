@@ -11,7 +11,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
 };
-use tilewright_source::{Access, AccessError, Diagnostic, SourceDirectory, SourceRoot};
+use tilewright_source::{Access, AccessError, Audience, Diagnostic, SourceDirectory, SourceRoot};
 
 #[cfg(test)]
 thread_local! {
@@ -22,6 +22,9 @@ thread_local! {
         std::cell::RefCell::new(None);
     /// Fails every directory sync, for tests.
     pub(crate) static FAIL_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Takes every directory to be on this file system, whose access
+    /// control publishing cannot check, for tests.
+    pub(crate) static FOREIGN: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
 }
 
 /// Why publishing did not finish.
@@ -127,32 +130,39 @@ fn not_applied(problems: Vec<Diagnostic>) -> PublishError {
 pub const PUBLISH_SUPPORTED: bool = cfg!(any(target_os = "linux", target_os = "macos", windows));
 
 /// Whether publishing here keeps every guarantee of the specification:
-/// only on Linux (see [`PUBLISH_SUPPORTED`]).
+/// only on Linux (see [`PUBLISH_SUPPORTED`]), and there only on file
+/// systems that show their access control lists (see
+/// [`Plan::unchecked_access`]).
 pub const PUBLISH_CONFINED: bool = cfg!(target_os = "linux");
 
 /// What publishing here does not check, where it is supported but does not
 /// keep every guarantee (on macOS and Windows), for a caller to show its
 /// user; `None` elsewhere. Publishing there is refused unless the caller
-/// accepts it with [`PublishOptions::unchecked_access`].
+/// accepts it with [`PublishOptions::unchecked_access`]. On Linux it can
+/// still be refused for a tree on a file system whose access control lists
+/// Linux does not show; [`Plan::unchecked_access`] says, for a plan.
 pub const UNCHECKED_ACCESS: Option<&str> = if cfg!(target_os = "macos") {
-    Some(
-        "access control lists are neither checked nor kept: a file replaced, or made again by an inverse or a rollback, gets only the access its directory gives a new file, so a file whose own list keeps users out that its mode lets in can become readable by them",
-    )
+    Some(UNKEPT_LISTS)
 } else if cfg!(windows) {
     Some(
-        "access control lists are neither checked nor kept: a file replaced, or made again by an inverse or a rollback, gets only the list its directory gives a new file, so a file whose own list keeps users out can become readable by them; and files are reached by path, so a process changing the tree during the apply can redirect a write, rename or removal by swapping a link in",
+        "access control lists are neither checked nor kept: a file replaced, or made again by an inverse or a rollback, gets the list its directory gives new files instead of its own, so it can become readable by users its own list kept out; and files are reached by path, so a process changing the tree during the apply can redirect a write, rename or removal by swapping a link in",
     )
 } else {
     None
 };
 
+/// What is not checked where access control lists cannot be read.
+const UNKEPT_LISTS: &str = "access control lists are neither checked nor kept: a file replaced, or made again by an inverse or a rollback, gets the list its directory gives new files instead of its own, so it can become readable by users its own list kept out";
+
 /// How to publish a plan.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PublishOptions {
-    /// Publish even though the platform does not check everything that
-    /// [`UNCHECKED_ACCESS`] names: on macOS and Windows. Without it,
-    /// publishing there is refused, with a `tx.io` diagnostic, and nothing
-    /// is written. Linux checks everything, so there it changes nothing.
+    /// Publish even though publishing does not check everything, as
+    /// [`Plan::unchecked_access`] says: on macOS and Windows, and on Linux
+    /// in a tree on a file system whose access control lists Linux does
+    /// not show (SMB, 9p, FUSE or NTFS). Without it, publishing there is
+    /// refused, with a `tx.io` diagnostic, and nothing is written.
+    /// Elsewhere it changes nothing.
     pub unchecked_access: bool,
 }
 
@@ -177,7 +187,18 @@ struct Directories<'r> {
     dropped: usize,
 }
 
-impl Directories<'_> {
+impl<'r> Directories<'r> {
+    fn new(root: &'r SourceRoot) -> Self {
+        Self {
+            root,
+            open: BTreeMap::new(),
+            created: Vec::new(),
+            changed: BTreeSet::new(),
+            leftovers: Vec::new(),
+            dropped: 0,
+        }
+    }
+
     /// The directory `path`. With `create`, its missing parents and itself
     /// are made, each with that access.
     fn get(
@@ -309,12 +330,27 @@ impl Directories<'_> {
 
     /// Removes the directories above a deleted file that are now empty, up
     /// to the top-level directories. A directory that is not empty is left,
-    /// as it should be.
+    /// as it should be, and so is one whose mode or group is not the one
+    /// above it's: an inverse makes a directory again with the access of
+    /// the nearest one still there, so it would make that one, and the file
+    /// in it, with other access than they had.
     fn prune(&mut self, path: &str) {
         let mut current = split(path).0.to_owned();
-        while current.contains('/') && self.clean(&current, true) {
+        while current.contains('/') && self.like_parent(&current) && self.clean(&current, true) {
             current = split(&current).0.to_owned();
         }
+    }
+
+    /// Whether the directory `path` has the mode and group of the one above
+    /// it; `false` when either cannot be read.
+    fn like_parent(&mut self, path: &str) -> bool {
+        let mut read = |path: &str| match self.get(path, None) {
+            Ok(Some(directory)) => directory.own_access().ok(),
+            _ => None,
+        };
+        let own = read(path);
+        let parent = read(split(path).0);
+        matches!((own, parent), (Some(own), Some(parent)) if own.mode == parent.mode && own.group == parent.group)
     }
 
     /// The outcome: success when every file was published and nothing went
@@ -405,6 +441,9 @@ struct Known {
     /// A new file gets the access the nearest gives new files, and a new
     /// directory its access.
     directories: BTreeMap<String, Access>,
+    /// Who may reach the files and directories read: one audience, which
+    /// every file staged must have too.
+    audience: Option<Audience>,
 }
 
 impl Known {
@@ -520,18 +559,84 @@ fn survey(
             ),
         ));
     }
-    if let Some((first, expected)) = audiences.next()
-        && let Some((other, _)) = audiences.find(|(_, found)| *found != expected)
-    {
-        return Err(problem(
-            other,
-            Code::Io,
-            format!(
-                "{other} and {first} can be reached by different users; the files a transaction changes must be readable, and the directories above them searchable, by the same classes, by the same group where only the group may, and under the same labels"
-            ),
-        ));
+    if let Some((first, expected)) = audiences.next() {
+        if let Some((other, _)) = audiences.find(|(_, found)| *found != expected) {
+            return Err(problem(
+                other,
+                Code::Io,
+                format!(
+                    "{other} and {first} can be reached by different users; the files a transaction changes must be readable, and the directories above them searchable, by the same classes, by the same group where only the group may, by the same owner where not everyone may, and under the same labels"
+                ),
+            ));
+        }
+        known.audience = Some(expected);
     }
     Ok(known)
+}
+
+/// The first directory, among the root and those there are above each
+/// changed file, that is on a file system whose access control lists
+/// publishing cannot read, and that file system's name.
+fn foreign(
+    directories: &mut Directories<'_>,
+    changed: &[&FileChange],
+) -> Result<Option<(String, &'static str)>, Vec<Diagnostic>> {
+    let mut seen = BTreeSet::new();
+    for file in changed {
+        let mut directory = split(&file.path).0;
+        while seen.insert(directory.to_owned()) {
+            #[cfg(test)]
+            if let Some(name) = FOREIGN.with(std::cell::Cell::get) {
+                return Ok(Some((directory.to_owned(), name)));
+            }
+            let found = match directories.get(directory, None) {
+                Ok(Some(handle)) => handle.unchecked_file_system(),
+                Ok(None) => Ok(None),
+                Err(error) => Err(error),
+            }
+            .map_err(|error| io(shown(directory), &error))?;
+            if let Some(name) = found {
+                return Ok(Some((directory.to_owned(), name)));
+            }
+            if directory.is_empty() {
+                break;
+            }
+            directory = split(directory).0;
+        }
+    }
+    Ok(None)
+}
+
+/// On Linux, refuses a tree on a file system whose access control lists it
+/// does not show, unless the caller accepts that with `unchecked_access`.
+fn refuse_foreign(
+    directories: &mut Directories<'_>,
+    changed: &[&FileChange],
+    unchecked_access: bool,
+) -> Result<(), Vec<Diagnostic>> {
+    if unchecked_access {
+        return Ok(());
+    }
+    match foreign(directories, changed)? {
+        None => Ok(()),
+        Some((directory, name)) => Err(problem(
+            shown(&directory),
+            Code::Io,
+            format!(
+                "{}; it is refused unless the caller accepts that with unchecked access, so nothing was written",
+                foreign_message(&directory, name)
+            ),
+        )),
+    }
+}
+
+/// What is not checked in a directory on a file system whose access
+/// control lists publishing cannot read.
+fn foreign_message(directory: &str, name: &str) -> String {
+    format!(
+        "{} is on a file system ({name}) whose access control lists Linux does not show, so {UNKEPT_LISTS}",
+        shown(directory)
+    )
 }
 
 /// Checks that the access publishing read is still what is on disk, so
@@ -611,26 +716,29 @@ fn stage_all<'f>(
                 // The new inode must have no access publishing could not
                 // keep, such as a list or label the system gave it.
                 let given = directory.access(&staging_name(name))?;
-                // Each staged file must be readable by the users who could
-                // read the file it replaces, or, beside a deleted file, the
-                // one its inverse would make again; a new one by those a
-                // new file there has. The owner it gets, the user applying,
-                // counts where not everyone may read.
-                let expected = match known.files.get(&file.path) {
-                    Some(Some(before)) => Some(*before),
-                    _ => access,
-                };
+                // Each staged file must be readable by the users who may
+                // read the files and search the directories the transaction
+                // changes: one replacing a file, by those who could read
+                // it; beside a deleted file, the one its inverse would make
+                // again, too; and a new file as well, so that a later
+                // transaction, its inverse among them, can change it. The
+                // owner it gets, the user applying, counts where not
+                // everyone may read.
+                let expected = known.audience.or_else(|| match known.files.get(&file.path) {
+                    Some(Some(before)) => Some(before.audience(false)),
+                    _ => access.map(|access| access.audience(false)),
+                });
                 if let (Some(given), Some(expected)) = (given, expected)
-                    && given.audience(false) != expected.audience(false)
+                    && given.audience(false) != expected
                 {
                     return Err(AccessError::Io(
                         file.path.clone(),
                         std::io::Error::new(
                             std::io::ErrorKind::Unsupported,
-                            if file.after.is_none() {
-                                "a file made here again, as its inverse would make it, could be read by other users than this one"
-                            } else {
-                                "the file written here could be read by other users than the one it replaces, such as by being another user's"
+                            match (&file.before, &file.after) {
+                                (_, None) => "a file made here again, as its inverse would make it, could be read by other users than this one",
+                                (None, Some(_)) => "a file made here could be read by other users than the files and directories the transaction changes, such as by being this user's, or by the read bits its directory gives new files, so no transaction could change it again",
+                                (Some(_), Some(_)) => "the file written here could be read by other users than the one it replaces, such as by being another user's",
                             },
                         ),
                     ));
@@ -681,11 +789,54 @@ fn check_again(root: &SourceRoot, files: &[FileChange]) -> Result<(), Vec<Diagno
     Ok(())
 }
 
+/// Whether Windows takes a path component for a device: `CON`, `PRN`,
+/// `AUX`, `NUL`, `COM0` to `COM9` or `LPT0` to `LPT9`, in any case and with
+/// any extension, and with spaces before it.
+pub(crate) fn device_name(component: &str) -> bool {
+    let stem = component
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches(' ')
+        .to_ascii_lowercase();
+    match stem.as_bytes() {
+        [b'c', b'o', b'n'] | [b'p', b'r', b'n'] | [b'a', b'u', b'x'] | [b'n', b'u', b'l'] => true,
+        [b'c', b'o', b'm', digit] | [b'l', b'p', b't', digit] => digit.is_ascii_digit(),
+        _ => false,
+    }
+}
+
 impl Plan {
+    /// What publishing this plan would not check, which it refuses unless
+    /// the caller accepts it with [`PublishOptions::unchecked_access`], in
+    /// words for the caller to show its user: [`UNCHECKED_ACCESS`] on macOS
+    /// and Windows, and on Linux, where the tree, or a directory above a
+    /// file the plan changes, is on a file system whose access control
+    /// lists Linux does not show (SMB, 9p, FUSE or NTFS), that. `None` when
+    /// publishing checks everything, or is not supported here.
+    ///
+    /// # Errors
+    /// The `tx.io` or `tx.path` diagnostics of a directory that could not
+    /// be read.
+    pub fn unchecked_access(&self) -> Result<Option<String>, Vec<Diagnostic>> {
+        if !PUBLISH_SUPPORTED {
+            return Ok(None);
+        }
+        if let Some(unchecked) = UNCHECKED_ACCESS {
+            return Ok(Some(unchecked.to_owned()));
+        }
+        let mut directories = Directories::new(&self.source);
+        let changed: Vec<&FileChange> =
+            self.files.iter().filter(|file| file.is_changed()).collect();
+        Ok(foreign(&mut directories, &changed)?
+            .map(|(directory, name)| foreign_message(&directory, name)))
+    }
+
     /// A file of the plan whose path another file system could take for
     /// another's: two that differ only in the case of their letters, which
     /// macOS and Windows by default take for one file, or one with a
-    /// component that ends in a dot or a space, which Windows drops.
+    /// component that ends in a dot or a space, which Windows drops; and on
+    /// Windows one with a component that names a device.
     fn path_aliases(&self) -> Option<Vec<Diagnostic>> {
         let mut seen: BTreeMap<String, &str> = BTreeMap::new();
         for file in &self.files {
@@ -698,6 +849,13 @@ impl Plan {
                     &file.path,
                     Code::Path,
                     "a component of the path ends in a dot or a space, which Windows drops from a name; nothing was written",
+                ));
+            }
+            if cfg!(windows) && file.path.split('/').any(device_name) {
+                return Some(problem(
+                    &file.path,
+                    Code::Path,
+                    "a component of the path names a device on Windows, such as CON or NUL, whatever its extension; nothing was written",
                 ));
             }
             // Every prefix, so that two directories made for different files
@@ -734,23 +892,35 @@ impl Plan {
     /// the load's entry budget.
     fn named_exactly(&self, root: &SourceRoot) -> Result<(), Vec<Diagnostic>> {
         let mut listed: BTreeMap<String, Option<BTreeSet<String>>> = BTreeMap::new();
-        // One more than a load reads: the lock file publishing made in the
-        // root, on Windows.
-        let mut remaining = self.load.maximum_entries.saturating_add(1);
+        let mut remaining = self.load.maximum_entries;
         for file in &self.files {
             let mut directory = String::new();
             for component in file.path.split('/') {
                 if !listed.contains_key(&directory) {
-                    let names = root.names(&directory, remaining).map_err(|error| match error {
+                    // A load does not list the root, so it has a budget of
+                    // its own, one more than a load's for the lock file
+                    // publishing made there on Windows.
+                    let limit = if directory.is_empty() {
+                        self.load.maximum_entries.saturating_add(1)
+                    } else {
+                        remaining
+                    };
+                    let names = root.names(&directory, limit).map_err(|error| match error {
                         AccessError::TooLarge(_) => problem(
                             shown(&directory),
                             Code::Limit,
-                            "the directories on the way to the files have more entries than a load reads",
+                            if directory.is_empty() {
+                                "the root has more entries than a load may read"
+                            } else {
+                                "the directories on the way to the files have more entries than a load reads"
+                            },
                         ),
                         other => io(shown(&directory), &other),
                     })?;
                     let names = names.map(|(names, count)| {
-                        remaining -= count;
+                        if !directory.is_empty() {
+                            remaining -= count;
+                        }
                         names
                     });
                     listed.insert(directory.clone(), names);
@@ -846,9 +1016,12 @@ impl Plan {
     /// synced are reported too, with `cleaned` or `durable` unset, whether
     /// or not every file was published. Where [`PUBLISH_SUPPORTED`] is
     /// false, publishing is refused with a `tx.io` diagnostic; so it is
-    /// where [`UNCHECKED_ACCESS`] names what is not checked and `options`
-    /// do not accept it; and a plan with two files whose paths differ only
-    /// in case with a `tx.path` one. Each time nothing is written.
+    /// where [`Plan::unchecked_access`] names what is not checked and
+    /// `options` do not accept it; and a plan with a path that another
+    /// file system could take for another's (two that differ only in case,
+    /// a component ending in a dot or a space, on Windows a device name, or
+    /// a name the file system finds otherwise named on disk) with a
+    /// `tx.path` one. Each time nothing is written.
     pub fn publish_with(&self, options: &PublishOptions) -> Result<Published, PublishError> {
         if !PUBLISH_SUPPORTED {
             return Err(not_applied(problem(".", Code::Io, UNSUPPORTED)));
@@ -877,20 +1050,15 @@ impl Plan {
         if let Err(problems) = self.named_exactly(root) {
             return Err(not_applied(problems));
         }
-        let mut directories = Directories {
-            root,
-            open: BTreeMap::new(),
-            created: Vec::new(),
-            changed: BTreeSet::new(),
-            leftovers: Vec::new(),
-            dropped: 0,
-        };
+        let mut directories = Directories::new(root);
         // Files are written first and removed last, so that whatever stops
         // a publish halfway, a renamed file is never only removed.
         let mut changed: Vec<&FileChange> =
             self.files.iter().filter(|file| file.is_changed()).collect();
         changed.sort_by_key(|file| file.after.is_none());
-        let known = match survey(&mut directories, &changed) {
+        let surveyed = refuse_foreign(&mut directories, &changed, options.unchecked_access)
+            .and_then(|()| survey(&mut directories, &changed));
+        let known = match surveyed {
             Ok(known) => known,
             Err(problems) => return directories.outcome(false, problems),
         };
@@ -987,14 +1155,8 @@ fn publish_one<'f>(
         // failing to remove it leaves the target untouched; its removal is
         // recorded to sync whatever happens next. The target's access was
         // noted, and checked, before publishing began.
-        if let Err(error) = directories.remove(&staging_path(&file.path), false) {
-            directories.leftover(diagnostic::file(
-                &staging_path(&file.path),
-                Code::Io.as_str(),
-                format!("could not be removed ({error}); remove it by hand"),
-            ));
-            return Err(error);
-        }
+        // A failure here is reported once, by the cleanup that follows.
+        directories.remove(&staging_path(&file.path), false)?;
         let Some(directory) = directories.get(parent, None)? else {
             return Err(AccessError::Unexpected(parent.to_owned()));
         };
@@ -1002,7 +1164,10 @@ fn publish_one<'f>(
         // A removal that failed and left the file as it was is not rolled
         // back; one that took effect, or that Windows left pending while
         // another program has the file open, is.
-        let untouched = removed.is_err() && matches!(directory.access(name), Ok(Some(_)));
+        let untouched = match &removed {
+            Ok(_) => false,
+            Err(error) => !error.removal_pending() && matches!(directory.access(name), Ok(Some(_))),
+        };
         if !untouched {
             published.push(file);
             directories.changed.insert(parent.to_owned());

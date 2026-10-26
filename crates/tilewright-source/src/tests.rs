@@ -2114,3 +2114,26 @@ fn a_root_and_what_is_in_it_exist() {
     let missing = crate::SourceRoot::new(&directory.path().join("missing"));
     assert!(!missing.exists("").unwrap());
 }
+
+#[test]
+fn only_a_removal_left_pending_says_so() {
+    let pending = crate::AccessError::Io(
+        "file".to_owned(),
+        std::io::Error::new(
+            std::io::ErrorKind::ResourceBusy,
+            crate::access::RemovalPending,
+        ),
+    );
+    assert!(pending.removal_pending());
+    assert!(
+        pending
+            .to_string()
+            .contains("stays until another program closes it")
+    );
+    let busy = crate::AccessError::Io(
+        "file".to_owned(),
+        std::io::Error::new(std::io::ErrorKind::ResourceBusy, "busy"),
+    );
+    assert!(!busy.removal_pending());
+    assert!(!crate::AccessError::Locked.removal_pending());
+}

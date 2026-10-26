@@ -439,8 +439,40 @@ impl Directory {
         Ok(())
     }
 
-    /// Syncs the directory, so renames and removals in it are durable.
+    /// The file system this directory is on, where Linux does not show its
+    /// access control lists; see [`unchecked_file_system`].
+    #[cfg(target_os = "linux")]
+    pub(crate) fn unchecked_file_system(&self) -> Result<Option<&'static str>, Refused> {
+        #[cfg(test)]
+        if let Some(magic) = GIVEN_FILE_SYSTEM.with(std::cell::Cell::get) {
+            return Ok(unchecked_file_system(magic));
+        }
+        let found = rustix::fs::fstatfs(&self.0).map_err(|errno| Refused::Io(errno.into()))?;
+        // The magic numbers are 32 bits wide, whatever the width of the
+        // field.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let magic = found.f_type as u32;
+        Ok(unchecked_file_system(magic))
+    }
+
+    /// Elsewhere access control lists are not read at all.
+    #[cfg(not(target_os = "linux"))]
+    #[allow(clippy::unnecessary_wraps, clippy::unused_self)]
+    pub(crate) fn unchecked_file_system(&self) -> Result<Option<&'static str>, Refused> {
+        Ok(None)
+    }
+
+    /// Syncs the directory, so renames and removals in it are durable. On
+    /// macOS `fsync` does not flush the drive's cache, so the directory is
+    /// synced with `F_FULLFSYNC`, as std syncs files, or with `fsync` where
+    /// the file system has no such sync.
     pub(crate) fn sync(&self) -> Result<bool, Refused> {
+        #[cfg(target_os = "macos")]
+        match rustix::fs::fcntl_fullfsync(&self.0) {
+            Ok(()) => return Ok(true),
+            Err(Errno::NOTSUP | Errno::OPNOTSUPP | Errno::INVAL | Errno::NOTTY) => {}
+            Err(errno) => return Err(Refused::Io(errno.into())),
+        }
         fsync(&self.0)
             .map(|()| true)
             .map_err(|errno| Refused::Io(errno.into()))
@@ -494,13 +526,39 @@ fn set_access(fd: impl AsFd, access: &Access) -> Result<(), Refused> {
     Ok(())
 }
 
-/// The access control lists Linux file systems keep beside the mode bits.
+/// The access control lists Linux file systems keep beside the mode bits:
+/// POSIX, NFS version 4 (also as ZFS shows them) and rich ones.
 #[cfg(target_os = "linux")]
-const ACCESS_CONTROL_LISTS: [&str; 3] = [
+const ACCESS_CONTROL_LISTS: [&str; 4] = [
     "system.posix_acl_access",
     "system.nfs4_acl",
+    "system.nfs4_acl_xdr",
     "system.richacl",
 ];
+
+/// File systems whose access control lists Linux does not show as the
+/// attributes above, by the magic number `statfs` gives: who may read a
+/// file there is not what its mode bits and those attributes say.
+#[cfg(target_os = "linux")]
+const UNCHECKED_FILE_SYSTEMS: [(u32, &str); 7] = [
+    (0xFF53_4D42, "SMB"),
+    (0xFE53_4D42, "SMB"),
+    (0x0000_517B, "SMB"),
+    (0x0102_1997, "9p"),
+    (0x6573_5546, "FUSE"),
+    (0x5346_544E, "NTFS"),
+    (0x7366_746E, "NTFS"),
+];
+
+/// The name of a file system whose access control lists Linux does not
+/// show, by its `statfs` magic number; `None` for any other.
+#[cfg(target_os = "linux")]
+pub(crate) fn unchecked_file_system(magic: u32) -> Option<&'static str> {
+    UNCHECKED_FILE_SYSTEMS
+        .iter()
+        .find(|(known, _)| *known == magic)
+        .map(|(_, name)| *name)
+}
 
 /// The mandatory access control labels Linux security modules keep, which
 /// say who may read a file beside its mode bits.
@@ -620,6 +678,14 @@ thread_local! {
     /// `security.*` attribute takes privileges a test does not have.
     pub(crate) static GIVEN_LABELS: std::cell::RefCell<std::collections::BTreeMap<(u64, u64), Vec<u8>>> =
         const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
+#[cfg(all(test, target_os = "linux"))]
+thread_local! {
+    /// The `statfs` magic number every directory reports, for tests: the
+    /// file systems it matters for cannot be mounted in one.
+    pub(crate) static GIVEN_FILE_SYSTEM: std::cell::Cell<Option<u32>> =
+        const { std::cell::Cell::new(None) };
 }
 
 #[cfg(all(test, target_os = "linux"))]

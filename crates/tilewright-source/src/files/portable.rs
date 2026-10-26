@@ -199,12 +199,14 @@ impl Root {
         const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
         const ERROR_SHARING_VIOLATION: i32 = 32;
         let path = self.base()?.join(crate::access::LOCK_NAME);
+        // A link at the name is not followed, so it is a lock file no edit
+        // holds, not one made where it points.
         match fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .access_mode(GENERIC_WRITE | DELETE)
             .share_mode(0)
-            .custom_flags(FILE_FLAG_DELETE_ON_CLOSE)
+            .custom_flags(FILE_FLAG_DELETE_ON_CLOSE | FILE_FLAG_OPEN_REPARSE_POINT)
             .open(&path)
         {
             Ok(file) => return Ok(Some(Lock(Some(file)))),
@@ -346,6 +348,14 @@ impl Directory {
             use std::os::unix::fs::OpenOptionsExt as _;
             options.mode(0o600);
         }
+        // A link swapped in at the name since it was removed is not
+        // followed: the file is not made where it points.
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+            options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        }
         let mut file = options.open(&path).map_err(Refused::Io)?;
         let written = (|| {
             file.write_all(bytes).map_err(Refused::Io)?;
@@ -420,15 +430,23 @@ impl Directory {
     }
 
     /// Checks that `name`, just removed, is gone: on Windows a removed
-    /// entry may stay while another program has it open.
+    /// entry may stay while another program has it open, on file systems
+    /// without POSIX removal semantics; then the removal took effect, but
+    /// is pending.
     fn gone(&self, name: &str) -> Result<(), Refused> {
         match self.entry(name) {
             Ok(None) => Ok(()),
             Ok(Some(_)) | Err(_) => Err(Refused::Io(std::io::Error::new(
                 ErrorKind::ResourceBusy,
-                "it is not removed until another program closes it",
+                crate::access::RemovalPending,
             ))),
         }
+    }
+
+    /// Access control lists are not read here at all.
+    #[allow(clippy::unnecessary_wraps, clippy::unused_self, dead_code)]
+    pub(crate) fn unchecked_file_system(&self) -> Result<Option<&'static str>, Refused> {
+        Ok(None)
     }
 
     /// Syncs the directory where the platform can; `false` where it
