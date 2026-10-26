@@ -90,7 +90,6 @@ jobs:
       - name: Plan
         id: plan
         env:
-          GH_TOKEN: ${{ github.token }}
           EVENT: ${{ github.event_name }}
           BASE_REF: ${{ github.base_ref }}
           PULL_REQUEST: ${{ github.event.pull_request.number }}
@@ -117,16 +116,6 @@ jobs:
             echo '```'
           } >>"${GITHUB_STEP_SUMMARY}"
           echo "::notice title=Release plan::$(jq -r .reason "${plan}")"
-          # A release tag is created before its release is published. If a
-          # run failed in between, finish that release before any newer one,
-          # which would otherwise count from a tag that has no release. A
-          # release that came out mutable stops newer ones too, until the
-          # owner has dealt with it.
-          previous=$(jq -r '.previous_tag // empty' "${plan}")
-          if [[ -n ${previous} ]] && [[ $(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${previous}" --jq '.draft == false and .immutable == true' || true) != true ]]; then
-            echo "::error::${previous}, the latest release tag on ${BRANCH}, has no published immutable release. Finish or repair that release first; see \"When a release fails\" in docs/RELEASING.md."
-            exit 1
-          fi
           publish=$(jq -r .publish "${plan}")
           if [[ ${EVENT} == pull_request ]]; then
             # A check build under a version that can never be released.
@@ -156,6 +145,28 @@ jobs:
             echo "publish=${publish}"
             echo "npm=${npm}"
           } >>"${GITHUB_OUTPUT}"
+
+      # A release tag is created before its release is published. If a run
+      # failed in between, finish that release before any newer one, which
+      # would otherwise count from a tag that has no release. A release that
+      # came out mutable stops newer ones too, until the owner has repaired
+      # it. Every later job needs this job to succeed.
+      - name: Stop at an unfinished release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREVIOUS_TAG: ${{ steps.plan.outputs.previous_tag }}
+          BRANCH: ${{ steps.plan.outputs.branch }}
+        run: |
+          set -euo pipefail
+          if [[ -z ${PREVIOUS_TAG} ]]; then
+            exit 0
+          fi
+          # A failed request prints its error body, which is not "true".
+          finished=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${PREVIOUS_TAG}" --jq '.draft == false and .immutable == true' 2>/dev/null || true)
+          if [[ ${finished} != true ]]; then
+            echo "::error::${PREVIOUS_TAG}, the latest release tag on ${BRANCH}, has no published immutable release. Finish or repair that release first; see \"When a release fails\" in docs/RELEASING.md."
+            exit 1
+          fi
 
   validate:
     name: Revalidate
@@ -387,7 +398,6 @@ jobs:
     permissions:
       contents: write
     env:
-      GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       VERSION: ${{ needs.plan.outputs.version }}
       TAG: ${{ needs.plan.outputs.tag }}
@@ -432,6 +442,8 @@ jobs:
       # immutable releases on, publishing locks the tag and the assets.
       - name: Publish
         if: steps.tag.outputs.published != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           options=(--verify-tag --title "${TAG}" --notes-file "${RUNNER_TEMP}/notes.md"
@@ -442,6 +454,8 @@ jobs:
           gh release create "${TAG}" dist/release/assets/* "${options[@]}"
 
       - name: Check the published release
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           gh api "repos/${GH_REPO}/releases/tags/${TAG}" >"${RUNNER_TEMP}/release.json"
@@ -482,7 +496,6 @@ jobs:
       attestations: read
       id-token: write
     env:
-      GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       TAG: ${{ needs.plan.outputs.tag }}
       VERSION: ${{ needs.plan.outputs.version }}
@@ -494,6 +507,8 @@ jobs:
       # asset digest and the provenance this run attested.
       - name: Download and check the release's npm tarball
         id: tarball
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if [[ ${GITHUB_SHA} != "${REVISION}" ]]; then
@@ -539,7 +554,8 @@ jobs:
           # The newest release is npm's latest. A re-run after a newer
           # release gives this one a dist-tag for its line instead (a
           # dist-tag must not parse as a semver range, so "0.4" would not do).
-          if [[ $(gh api "repos/${GH_REPO}/releases/latest" --jq .tag_name) == "${TAG}" ]]; then
+          latest_tag=$(gh api "repos/${GH_REPO}/releases/latest" --jq .tag_name)
+          if [[ ${latest_tag} == "${TAG}" ]]; then
             dist_tag=latest
           else
             dist_tag="release-$(cut -d. -f1-2 <<<"${VERSION}")"

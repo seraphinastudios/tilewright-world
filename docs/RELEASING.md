@@ -112,7 +112,7 @@ its own, so a maintenance release never displaces a release of `main`.
 
 | Job | Runner | Permissions | Does |
 | --- | --- | --- | --- |
-| Plan release | ubuntu-24.04 | `contents: read` | Runs the policy, planner and packaging tests, then `scripts/release/plan.mjs`, which finds the last release tag the branch contains, analyzes the commits since it, and decides the version and whether to publish. Stops if that last tag has no published release. |
+| Plan release | ubuntu-24.04 | `contents: read` | Runs the policy, planner and packaging tests, then `scripts/release/plan.mjs`, which finds the last release tag the branch contains, analyzes the commits since it, and decides the version and whether to publish. Stops if that last tag has no published, immutable release. |
 | Revalidate | ubuntu-24.04 | `contents: read` | Runs `validate.yml`, so `tools/validate.sh`, on the released commit |
 | Build TARGET | one per platform | `contents: read` | `tools/release/build.sh`: builds with the pinned toolchain and `--locked`, then runs the binary to validate, compile and verify `fixtures/basic` |
 | Build the npm package | ubuntu-24.04 | `contents: read` | `tools/build-wasm.sh`, then `npm pack` at the release version (only when `packages/tilewright-pack/package.json` exists) |
@@ -193,10 +193,15 @@ The pipeline changes no settings. It relies on:
   assets cannot change. The release job checks `immutable: true` after
   publishing and fails loudly if it is not.
 - **The organization ruleset "Tilewright 04 - Immutable release tags"**. It
-  forbids deleting or moving `refs/tags/v[0-9]*` and `refs/tags/go/v[0-9]*`,
-  so it also protects the Go tags, which have no GitHub release of their
-  own. The Go checksum database also rejects changed content for any
-  version that was fetched once.
+  covers `refs/tags/v[0-9]*` and `refs/tags/go/v[0-9]*`, has no bypass
+  list, and has two rules: tags cannot be deleted, and cannot be moved to a
+  commit that does not contain their current one. It does not stop a tag
+  from being moved forward, to a later commit. Once a release is published,
+  immutable releases also lock its `vX.Y.Z` tag. A `go/vX.Y.Z` tag has no
+  release, so only the ruleset protects it. The ruleset's "Restrict updates"
+  rule would stop it from moving forward too. Until it has that rule, the
+  Go checksum database is what pins a Go version: it rejects changed
+  content for any version that someone has fetched once.
 - **The Actions allowlist**, for checkout, setup-node, upload-artifact,
   download-artifact and attest-build-provenance.
 
@@ -243,8 +248,12 @@ To turn it on:
 3. Create the repository environment `npm`, and under "Deployment branches
    and tags" allow only `main`. This is required. Anyone who can push a
    branch can run a modified `release.yml` on it, and the environment's
-   branch rule is what keeps such a run from publishing. Add required
-   reviewers as well if each publication should wait for approval.
+   branch rule is what keeps such a run from publishing. Create the
+   environment before step 5: a job that names an environment that does
+   not exist creates it, with no branch rule. Required reviewers are
+   possible too, but a release run that waits for approval holds the
+   release queue of `main`, so later releases wait until it is approved
+   or rejected.
 4. In the package's settings on npmjs.com, add a trusted publisher:
    GitHub Actions, organization `seraphinastudios`, repository
    `tilewright-world`, workflow `release.yml`, environment `npm`. Under
@@ -290,6 +299,17 @@ source releases (its `docs/CRATE-RELEASE.md`):
   The re-run accepts tags the failed attempt created at the same commit.
   The ruleset keeps such tags from being deleted, so the plan job of every
   later run on that branch stops until that release is published.
+  A re-run runs the workflow of the run's own commit, so it cannot pick
+  up a fix to the workflow, and it fails once the artifacts have expired.
+  If a re-run cannot succeed, nothing has been published, and the owner
+  can start over. Turn off enforcement of the tag ruleset, which has no
+  bypass list. Delete both tags, turn enforcement back on, and run the
+  workflow again. First check that
+  `https://proxy.golang.org/github.com/seraphinastudios/tilewright-world/go/@v/list`
+  does not list the version. If it does, the Go checksum database has
+  recorded the module's content at that tag. The new run's commit must
+  then have the same `go/` directory and root `LICENSE`, which the module
+  zip includes because `go/` has no license file of its own.
 - **"Publish the GitHub release" failed its checks after publishing**: the
   release exists. Do not delete an immutable release. Read the error, fix
   the cause, then re-run the failed jobs: the re-run skips publishing,
@@ -298,8 +318,9 @@ source releases (its `docs/CRATE-RELEASE.md`):
   published): GitHub cannot make it immutable afterwards, so its checks
   keep failing, and the plan job of every later run on the branch stops at
   it. To repair it, turn immutable releases back on, delete the release
-  and its two tags (which takes the owner's bypass of the tag ruleset), and
-  re-run the failed jobs within 30 days. The re-run creates both tags and
+  and its two tags (the tag ruleset has no bypass list, so turn off its
+  enforcement while deleting them), and re-run the failed jobs within 30
+  days. The re-run creates both tags and
   the release again from the same attested assets.
 - **"Publish to npm" failed**: re-run it. It checks the release again and
   publishes from the release's commit. If npm already has that version,
