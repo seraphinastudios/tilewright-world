@@ -191,3 +191,48 @@ fn an_empty_image_is_an_empty_database() {
         ErrorCode::Schema
     );
 }
+
+/// Yields `bytes` at most `chunk` bytes a read.
+struct Trickle<'b> {
+    bytes: &'b [u8],
+    chunk: usize,
+}
+
+impl Read for Trickle<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let count = buffer.len().min(self.chunk).min(self.bytes.len());
+        buffer[..count].copy_from_slice(&self.bytes[..count]);
+        self.bytes = &self.bytes[count..];
+        Ok(count)
+    }
+}
+
+#[test]
+fn the_header_is_checked_however_few_bytes_each_read_yields() {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/packs");
+    let (_, valid) = valid();
+    let open = |bytes: &[u8], chunk| {
+        let length = u64::try_from(bytes.len()).unwrap();
+        Pack::open_from(
+            Trickle { bytes, chunk },
+            length,
+            None,
+            &VerifyLimits::default(),
+        )
+    };
+    for chunk in [1, 7, 19, 20, 21] {
+        open(&valid, chunk).unwrap();
+        for name in [
+            "open-header-wal",
+            "open-header-write-version",
+            "open-header-read-version",
+        ] {
+            let bytes = std::fs::read(directory.join(format!("{name}.twpack"))).unwrap();
+            assert_eq!(
+                code(open(&bytes, chunk)),
+                ErrorCode::Identity,
+                "{name} in reads of {chunk} bytes"
+            );
+        }
+    }
+}
