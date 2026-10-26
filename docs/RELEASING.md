@@ -20,10 +20,20 @@ build provenance attestation. `.github/workflows/release.yml` does the work.
 
 Each CLI archive holds one directory, `tilewright-X.Y.Z-PLATFORM/`, with
 `tilewright` (`tilewright.exe` on Windows), `LICENSE`, `PROVENANCE.md`,
-`THIRD_PARTY_NOTICES.md` and `THIRD_PARTY_LICENSES.txt`. The last file holds
-the license files of every crate the binary compiles in for that platform.
-`tools/release/package.py` generates it from `cargo metadata`, and a release
-stops if such a crate ships no license file.
+`THIRD_PARTY_NOTICES.md`, `THIRD_PARTY_LICENSES.txt` and
+`RUST_LIBRARY_COPYRIGHT.html`:
+
+- `THIRD_PARTY_LICENSES.txt` holds the license files of every crate the
+  binary compiles in for that platform. `tools/release/package.py`
+  generates it from `cargo metadata`, and a release stops if such a crate
+  ships no license file. In the Linux archives it also holds musl's
+  copyright notice (`tools/release/licenses/musl-COPYRIGHT`), because those
+  binaries link musl statically.
+- `RUST_LIBRARY_COPYRIGHT.html` holds the copyright notices of the Rust
+  standard library, which every binary links in. It is the
+  `share/doc/rust/COPYRIGHT-library.html` that the pinned Rust toolchain
+  ships, unchanged, and a release stops if that toolchain is not the one
+  `rust-toolchain.toml` names.
 
 The same release also tags the Go module
 `github.com/seraphinastudios/tilewright-world/go` as `go/vX.Y.Z` at the

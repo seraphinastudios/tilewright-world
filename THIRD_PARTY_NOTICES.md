@@ -12,10 +12,25 @@ contribute.
 | [Zstandard](https://github.com/facebook/zstd) | `zstd` (`zstd-sys`) | BSD-3-Clause (upstream offers BSD-3-Clause or GPL-2.0; used under BSD-3-Clause) |
 
 Rust crate dependencies keep their own licenses as recorded in `Cargo.lock`
-and their crate metadata. No outside source is copied into this repository.
+and their crate metadata. No outside source code is copied into this
+repository; `PROVENANCE.md` records the one outside license notice it keeps.
 Each release archive of the CLI carries `THIRD_PARTY_LICENSES.txt`, which
 `tools/release/package.py` assembles from the license files of every crate
 that binary compiles in.
+
+## Linked into the CLI binaries
+
+The toolchain links these into the released `tilewright` binaries besides
+the crates. Each release archive carries their notices.
+
+| Component | Platforms | License | Notice in the archive |
+| --- | --- | --- | --- |
+| The Rust standard library | All | Apache-2.0 OR MIT, with some parts under other permissive licenses | `RUST_LIBRARY_COPYRIGHT.html`, the pinned toolchain's `COPYRIGHT-library.html` |
+| [musl](https://musl.libc.org/), the C library | Linux (static) | MIT | In `THIRD_PARTY_LICENSES.txt`, from `tools/release/licenses/musl-COPYRIGHT` (see `PROVENANCE.md`) |
+
+The Windows binaries link Microsoft's C runtime statically, under the
+license terms of Microsoft's build tools. The macOS binaries link the
+system libraries dynamically.
 
 ## Go module (`go/`)
 

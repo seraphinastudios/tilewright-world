@@ -18,3 +18,10 @@ never copied, adapted or used as a dependency.
   David Stafford's "Mix13". Only these five constants are used; the function
   is written here from them, and no code is copied. Notice: the author
   dedicated `splitmix64.c` to the public domain under CC0 1.0.
+- **musl's copyright notice.** `tools/release/licenses/musl-COPYRIGHT` is
+  musl's `COPYRIGHT` file at tag `v1.2.5`
+  (<https://git.musl-libc.org/cgit/musl/plain/COPYRIGHT?h=v1.2.5>, SHA-256
+  `f9bc4423732350eb0b3f7ed7e91d530298476f8fec0c6c427a1c04ade22655af`),
+  copied unchanged. `tools/release/package.py` reproduces it in the Linux
+  release archives, whose binaries link musl statically. Notice: musl is
+  MIT licensed, as the file states.

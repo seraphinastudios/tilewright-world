@@ -3,7 +3,8 @@
 
 assemble: from the binaries tools/release/build.sh staged for every target,
 write deterministic archives with the license files, a source archive, the
-npm tarball when there is one, and SHA256SUMS:
+npm tarball when there is one, and SHA256SUMS. It runs rustc to find the
+pinned toolchain's notices for the Rust standard library:
 
     OUTPUT/assets/     the release assets, SHA256SUMS included
     OUTPUT/binaries/   tilewright-PLATFORM[.exe], the binaries the archives
@@ -26,6 +27,7 @@ import sys
 import tarfile
 import time
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -41,6 +43,12 @@ NPM_PACKAGE = "@seraphinastudios/tilewright-pack"
 # Files every archive carries next to the binary.
 DOCUMENTS = ("LICENSE", "PROVENANCE.md", "THIRD_PARTY_NOTICES.md")
 LICENSES = "THIRD_PARTY_LICENSES.txt"
+# Besides the crates, every binary links in the Rust standard library, whose
+# notices the pinned toolchain ships as this file, and the Linux binaries
+# link musl statically, whose notice this repository keeps.
+RUST_LIBRARY_NOTICES = "RUST_LIBRARY_COPYRIGHT.html"
+TOOLCHAIN_NOTICES = Path("share", "doc", "rust", "COPYRIGHT-library.html")
+MUSL_COPYRIGHT = "tools/release/licenses/musl-COPYRIGHT"
 CHECKSUMS = "SHA256SUMS"
 MAXIMUM_LICENSE_BYTES = 1 << 20
 
@@ -51,6 +59,10 @@ class Platform:
     target: str
     executable: str
     archive: str
+
+    @property
+    def musl(self) -> bool:
+        return self.target.endswith("-linux-musl")
 
 
 # Keep in step with the build matrix in .github/workflows/release.yml.
@@ -199,7 +211,39 @@ def license_texts(metadata: dict, root_package: str = "tilewright-cli") -> list[
     return [(f"{name} {version}", license, texts) for name, version, license, texts in crates]
 
 
-def render_licenses(version: str, platform: Platform, crates: list[tuple[str, str, dict[str, str]]]) -> bytes:
+def rust_library_notices(repository: Path, revision: str) -> tuple[str, bytes]:
+    """The pinned Rust version and the notices its toolchain ships for the
+    Rust standard library. The build jobs use the same pinned toolchain, and
+    rustc here must be it too."""
+    toolchain = git(repository, "show", f"{revision}:rust-toolchain.toml").decode("utf-8")
+    pinned = re.search(r'^channel = "([^"]+)"$', toolchain, re.MULTILINE)
+    if not pinned:
+        raise ReleaseError("rust-toolchain.toml names no channel")
+
+    def rustc(*arguments: str) -> str:
+        return subprocess.run(
+            ["rustc", *arguments], cwd=repository, check=True, stdout=subprocess.PIPE, text=True
+        ).stdout.strip()
+
+    reported = rustc("--version").split()
+    if len(reported) < 2 or reported[1] != pinned.group(1):
+        raise ReleaseError(f"rustc is not the pinned {pinned.group(1)}: {' '.join(reported)}")
+    notices = Path(rustc("--print", "sysroot")) / TOOLCHAIN_NOTICES
+    if not notices.is_file():
+        raise ReleaseError(f"the Rust toolchain ships no {TOOLCHAIN_NOTICES.as_posix()}")
+    return pinned.group(1), notices.read_bytes()
+
+
+def render_licenses(
+    version: str,
+    platform: Platform,
+    crates: list[tuple[str, str, dict[str, str]]],
+    rust: str,
+    musl: str | None,
+) -> bytes:
+    """THIRD_PARTY_LICENSES.txt for one platform: the crates, the Rust
+    standard library of Rust `rust`, and musl's notice `musl` if the
+    platform links it."""
     rule = "=" * 78
     lines = [
         f"Third-party licenses for tilewright {version} ({platform.name}, {platform.target})",
@@ -209,14 +253,28 @@ def render_licenses(version: str, platform: Platform, crates: list[tuple[str, st
         "that several crates ship is printed once. THIRD_PARTY_NOTICES.md describes",
         "the C libraries some of them build in.",
         "",
+        f"The binary also links in the standard library of Rust {rust}, which is",
+        "licensed under Apache-2.0 OR MIT, with some parts under other permissive",
+        f"licenses. Its copyright notices are in {RUST_LIBRARY_NOTICES}.",
     ]
+    if musl is not None:
+        lines.extend(
+            [
+                "It is statically linked with musl, the C library, which is licensed under",
+                "MIT. musl's copyright notice follows the crates' license files.",
+            ]
+        )
+    lines.append("")
     for crate, license, _ in crates:
         lines.append(f"  {crate}: {license or 'see its license files'}")
     groups: dict[str, list[str]] = {}
     for crate, _, texts in crates:
         for name, text in texts.items():
             groups.setdefault(text, []).append(f"{crate}: {name}")
-    for text, users in groups.items():
+    sections = list(groups.items())
+    if musl is not None:
+        sections.append((musl, ["musl: COPYRIGHT"]))
+    for text, users in sections:
         lines.extend(["", rule])
         lines.extend(users)
         lines.append("-" * 78)
@@ -272,7 +330,8 @@ def assemble(
     binaries: Path,
     output: Path,
     npm_tarball: Path | None,
-    metadata=cargo_metadata,
+    metadata: Callable[[Path, str], dict] = cargo_metadata,
+    toolchain: Callable[[Path, str], tuple[str, bytes]] = rust_library_notices,
 ) -> None:
     if not VERSION.fullmatch(version):
         raise ReleaseError(f"invalid release version: {version}")
@@ -288,6 +347,9 @@ def assemble(
 
     mtime = int(git(repository, "show", "--no-patch", "--format=%ct", revision).decode().strip())
     documents = [(name, git(repository, "show", f"{revision}:{name}"), 0o644) for name in DOCUMENTS]
+    rust, rust_notices = toolchain(repository, revision)
+    documents.append((RUST_LIBRARY_NOTICES, rust_notices, 0o644))
+    musl = git(repository, "show", f"{revision}:{MUSL_COPYRIGHT}").decode("utf-8")
     assets = output / "assets"
     staged = output / "binaries"
     assets.mkdir(parents=True)
@@ -297,7 +359,8 @@ def assemble(
         if not binary.is_file():
             raise ReleaseError(f"{binary} is missing")
         data = binary.read_bytes()
-        licenses = render_licenses(version, platform, license_texts(metadata(repository, platform.target)))
+        crates = license_texts(metadata(repository, platform.target))
+        licenses = render_licenses(version, platform, crates, rust, musl if platform.musl else None)
         members = [(platform.executable, data, 0o755), *documents, (LICENSES, licenses, 0o644)]
         members.sort(key=lambda member: member[0])
         root = archive_root(version, platform)
@@ -372,7 +435,7 @@ def verify(directory: Path, version: str, npm: bool) -> list[str]:
     for platform in PLATFORMS:
         root = archive_root(version, platform)
         members = archive_members(assets / archive_name(version, platform))
-        wanted = {f"{root}/{name}" for name in (platform.executable, *DOCUMENTS, LICENSES)}
+        wanted = {f"{root}/{name}" for name in (platform.executable, *DOCUMENTS, RUST_LIBRARY_NOTICES, LICENSES)}
         if set(members) != wanted:
             raise ReleaseError(f"{archive_name(version, platform)} holds {sorted(members)}, not {sorted(wanted)}")
         if members[f"{root}/{platform.executable}"] != (staged / binary_name(platform)).read_bytes():

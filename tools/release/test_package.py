@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -15,11 +16,14 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 import package
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 PACK = "5830e26e449a1f0d0c786b32801b7ed68e351777db5f586532478cb4384844b2.twpack"
+RUST_NOTICES = b"<html>notices of the Rust standard library</html>\n"
+MUSL_NOTICE = "musl as a whole is licensed under the following standard MIT license:\n"
 
 
 def git(root: Path, *arguments: str) -> str:
@@ -87,6 +91,10 @@ class Fixture:
         self.repository.mkdir()
         for name in package.DOCUMENTS:
             (self.repository / name).write_text(f"{name} text\n", encoding="utf-8")
+        (self.repository / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.97.1"\n', encoding="utf-8")
+        musl = self.repository / package.MUSL_COPYRIGHT
+        musl.parent.mkdir(parents=True)
+        musl.write_text(MUSL_NOTICE, encoding="utf-8")
         git(self.repository, "init", "--quiet")
         git(self.repository, "config", "user.name", "Release fixture")
         git(self.repository, "config", "user.email", "release-fixture@example.invalid")
@@ -105,7 +113,14 @@ class Fixture:
     def assemble(self, output: str = "out", version: str = "0.2.0", npm: Path | None = None) -> Path:
         destination = self.root / output
         package.assemble(
-            self.repository, version, self.revision, self.binaries, destination, npm, metadata=self.metadata
+            self.repository,
+            version,
+            self.revision,
+            self.binaries,
+            destination,
+            npm,
+            metadata=self.metadata,
+            toolchain=lambda _repository, _revision: ("1.97.1", RUST_NOTICES),
         )
         return destination
 
@@ -175,6 +190,7 @@ class AssembleTest(unittest.TestCase):
                     "tilewright-0.2.0-linux-arm64",
                     "tilewright-0.2.0-linux-arm64/LICENSE",
                     "tilewright-0.2.0-linux-arm64/PROVENANCE.md",
+                    "tilewright-0.2.0-linux-arm64/RUST_LIBRARY_COPYRIGHT.html",
                     "tilewright-0.2.0-linux-arm64/THIRD_PARTY_LICENSES.txt",
                     "tilewright-0.2.0-linux-arm64/THIRD_PARTY_NOTICES.md",
                     "tilewright-0.2.0-linux-arm64/tilewright",
@@ -186,7 +202,13 @@ class AssembleTest(unittest.TestCase):
             self.assertEqual(archive.extractfile(binary).read(), b"binary for aarch64-unknown-linux-musl")
             licenses = archive.extractfile(members["tilewright-0.2.0-linux-arm64/THIRD_PARTY_LICENSES.txt"])
             text = licenses.read().decode()
+            notices = archive.extractfile(members["tilewright-0.2.0-linux-arm64/RUST_LIBRARY_COPYRIGHT.html"])
+            self.assertEqual(notices.read(), RUST_NOTICES)
         self.assertIn("tilewright 0.2.0 (linux-arm64, aarch64-unknown-linux-musl)", text)
+        self.assertIn("standard library of Rust 1.97.1", text)
+        # The static Linux binaries carry musl's notice, after the crates'.
+        self.assertIn("musl: COPYRIGHT\n" + "-" * 78 + "\n" + MUSL_NOTICE, text)
+        self.assertGreater(text.index("musl: COPYRIGHT"), text.index("beta authors"))
         self.assertIn("  alpha 1.0.0: MIT OR Apache-2.0\n  beta 1.0.0: MIT OR Apache-2.0\n", text)
         self.assertNotIn("gamma", text)
         self.assertNotIn("delta", text)
@@ -200,6 +222,13 @@ class AssembleTest(unittest.TestCase):
             entry = archive.getinfo("tilewright-0.2.0-windows-amd64/tilewright.exe")
             self.assertEqual(entry.external_attr >> 16, 0o100755)
             self.assertEqual(archive.read(entry), b"binary for x86_64-pc-windows-msvc")
+            self.assertEqual(archive.read("tilewright-0.2.0-windows-amd64/RUST_LIBRARY_COPYRIGHT.html"), RUST_NOTICES)
+            text = archive.read("tilewright-0.2.0-windows-amd64/THIRD_PARTY_LICENSES.txt").decode()
+        self.assertIn("standard library of Rust 1.97.1", text)
+        self.assertNotIn("musl", text)
+        with tarfile.open(output / "assets" / "tilewright-0.2.0-macos-arm64.tar.gz") as archive:
+            text = archive.extractfile("tilewright-0.2.0-macos-arm64/THIRD_PARTY_LICENSES.txt").read().decode()
+        self.assertNotIn("musl", text)
         with tarfile.open(output / "assets" / "tilewright-world-0.2.0-source.tar.gz") as archive:
             self.assertIn("tilewright-world-0.2.0/LICENSE", archive.getnames())
 
@@ -242,6 +271,52 @@ class AssembleTest(unittest.TestCase):
             self.fixture.assemble("old", npm=self.fixture.npm_tarball(version="0.1.0"))
         with self.assertRaisesRegex(package.ReleaseError, "no wasm"):
             self.fixture.assemble("bare", npm=self.fixture.npm_tarball(wasm=False))
+
+
+class ToolchainTest(unittest.TestCase):
+    """rust_library_notices with a stand-in rustc on PATH."""
+
+    def setUp(self) -> None:
+        self.fixture = Fixture()
+        self.addCleanup(self.fixture.close)
+        self.sysroot = self.fixture.root / "sysroot"
+        notices = self.sysroot / package.TOOLCHAIN_NOTICES
+        notices.parent.mkdir(parents=True)
+        notices.write_bytes(RUST_NOTICES)
+        self.bin = self.fixture.root / "bin"
+        self.bin.mkdir()
+
+    def rustc(self, version: str) -> None:
+        script = self.bin / "rustc"
+        script.write_text(
+            "#!/bin/sh\n"
+            f'if [ "$1" = --version ]; then echo "rustc {version} (0123456789 2026-10-01)"; '
+            f"else echo '{self.sysroot}'; fi\n",
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+
+    def notices(self) -> tuple[str, bytes]:
+        with mock.patch.dict(os.environ, {"PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}"}):
+            return package.rust_library_notices(self.fixture.repository, self.fixture.revision)
+
+    @unittest.skipIf(os.name == "nt", "the stand-in rustc is a shell script")
+    def test_the_pinned_toolchain_supplies_the_notices(self) -> None:
+        self.rustc("1.97.1")
+        self.assertEqual(self.notices(), ("1.97.1", RUST_NOTICES))
+
+    @unittest.skipIf(os.name == "nt", "the stand-in rustc is a shell script")
+    def test_another_rustc_stops_the_release(self) -> None:
+        self.rustc("1.98.0")
+        with self.assertRaisesRegex(package.ReleaseError, "not the pinned 1.97.1"):
+            self.notices()
+
+    @unittest.skipIf(os.name == "nt", "the stand-in rustc is a shell script")
+    def test_a_toolchain_without_the_notices_stops_the_release(self) -> None:
+        self.rustc("1.97.1")
+        (self.sysroot / package.TOOLCHAIN_NOTICES).unlink()
+        with self.assertRaisesRegex(package.ReleaseError, "ships no share/doc/rust/COPYRIGHT-library.html"):
+            self.notices()
 
 
 class VerifyTest(unittest.TestCase):
