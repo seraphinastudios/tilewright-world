@@ -190,6 +190,9 @@ jobs:
       # came out mutable stops newer ones too, until the owner has repaired
       # it. Every later job needs this job to succeed.
       - name: Stop at an unfinished release
+        # Pull requests never tag or publish, and one may be the fix that
+        # an unfinished release needs.
+        if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
           PREVIOUS_TAG: ${{ steps.plan.outputs.previous_tag }}
