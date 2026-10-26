@@ -22,6 +22,11 @@ if [[ $# -ne 0 ]]; then
   exit 2
 fi
 : "${TAG:?}" "${GO_TAG:?}" "${REVISION:?}" "${GH_REPO:?}" "${GH_TOKEN:?}" "${GITHUB_OUTPUT:?}"
+# The tags come from the plan job, which runs third-party npm code.
+if [[ ! ${TAG} =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ || ${GO_TAG} != "go/${TAG}" || ! ${REVISION} =~ ^[0-9a-f]{40}$ ]]; then
+  echo "::error::invalid release tags or revision: ${TAG} ${GO_TAG} ${REVISION}"
+  exit 1
+fi
 
 missing=()
 for tag in "${TAG}" "${GO_TAG}"; do

@@ -141,12 +141,12 @@ class TagsTest(unittest.TestCase):
         )
         return found.stdout.strip() if found.returncode == 0 else None
 
-    def run_script(self) -> subprocess.CompletedProcess:
+    def run_script(self, tag: str = "v0.2.0", go_tag: str = "go/v0.2.0") -> subprocess.CompletedProcess:
         environment = {
             **os.environ,
             "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
-            "TAG": "v0.2.0",
-            "GO_TAG": "go/v0.2.0",
+            "TAG": tag,
+            "GO_TAG": go_tag,
             "REVISION": self.revision,
             "GH_REPO": "example/world",
             "GH_TOKEN": "not-a-token",
@@ -191,6 +191,21 @@ class TagsTest(unittest.TestCase):
         result = self.run_script()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("::error::v0.2.0 exists and does not point at", result.stdout)
+
+    def test_invalid_tags_stop_before_any_request(self) -> None:
+        for tag, go_tag in (
+            ("v0.2.0-rc.1", "go/v0.2.0-rc.1"),
+            ("v0.2", "go/v0.2"),
+            ("0.2.0", "go/0.2.0"),
+            ("v0.2.0", "go/v0.3.0"),
+            ("v0.2.0", "v0.2.0"),
+            ("v0.2.0\nv0.3.0", "go/v0.2.0\nv0.3.0"),
+        ):
+            result = self.run_script(tag, go_tag)
+            self.assertNotEqual(result.returncode, 0, (tag, go_tag))
+            self.assertIn("::error::invalid release tags or revision", result.stdout)
+        self.assertEqual(git(self.bare, "tag", "--list"), "")
+        self.assertEqual(self.output.read_text(encoding="utf-8"), "")
 
     def test_only_the_exact_tag_counts(self) -> None:
         # matching-refs also lists tags that merely start with the name.

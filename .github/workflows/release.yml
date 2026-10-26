@@ -59,7 +59,6 @@ jobs:
     permissions:
       contents: read
     outputs:
-      revision: ${{ steps.plan.outputs.revision }}
       branch: ${{ steps.plan.outputs.branch }}
       version: ${{ steps.plan.outputs.version }}
       tag: ${{ steps.plan.outputs.tag }}
@@ -124,17 +123,49 @@ jobs:
             echo '```'
           } >>"${GITHUB_STEP_SUMMARY}"
           echo "::notice title=Release plan::$(jq -r .reason "${plan}")"
-          publish=$(jq -r .publish "${plan}")
+          # The planner runs third-party npm code, so its answer is checked:
+          # it plans this run's commit and branch, and a release's tags
+          # follow from its version. Every later job builds github.sha.
+          revision=$(jq -r .revision "${plan}")
+          planned_branch=$(jq -r .branch "${plan}")
+          if [[ ${revision} != "${GITHUB_SHA}" || ${planned_branch} != "${BRANCH}" ]]; then
+            echo "::error::the planner planned ${revision} on ${planned_branch}, not ${GITHUB_SHA} on ${BRANCH}"
+            exit 1
+          fi
+          previous_tag=$(jq -r '.previous_tag // empty' "${plan}")
+          release_version='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
+          if [[ -n ${previous_tag} && ! ${previous_tag} =~ ^v${release_version}$ ]]; then
+            echo "::error::the planner named an invalid previous tag: ${previous_tag}"
+            exit 1
+          fi
+          tag=
+          go_tag=
           if [[ ${EVENT} == pull_request ]]; then
             # A check build under a version that can never be released.
+            # Pull requests never publish, whatever the planner says; the
+            # publishing jobs also check the event themselves.
+            publish=false
             build=true
             version="0.0.0-check.${PULL_REQUEST}"
-          elif [[ ${publish} == true ]]; then
+          elif [[ $(jq -r .publish "${plan}") == true ]]; then
+            publish=true
             build=true
             version=$(jq -r .version "${plan}")
+            tag="v${version}"
+            go_tag="go/${tag}"
+            if [[ ! ${version} =~ ^${release_version}$ || $(jq -r .tag "${plan}") != "${tag}" || $(jq -r .go_tag "${plan}") != "${go_tag}" ]]; then
+              echo "::error::the planner's version and tags do not agree: $(jq -c '[.version, .tag, .go_tag]' "${plan}")"
+              exit 1
+            fi
           else
+            publish=false
             build=false
             version=
+          fi
+          if [[ ${BRANCH} == main ]]; then
+            latest=true
+          else
+            latest=false
           fi
           if [[ -f ${NPM_PACKAGE_DIRECTORY}/package.json ]]; then
             npm=true
@@ -142,13 +173,12 @@ jobs:
             npm=false
           fi
           {
-            echo "revision=$(jq -r .revision "${plan}")"
-            echo "branch=$(jq -r .branch "${plan}")"
+            echo "branch=${BRANCH}"
             echo "version=${version}"
-            echo "tag=$(jq -r '.tag // empty' "${plan}")"
-            echo "go_tag=$(jq -r '.go_tag // empty' "${plan}")"
-            echo "previous_tag=$(jq -r '.previous_tag // empty' "${plan}")"
-            echo "latest=$(jq -r .latest "${plan}")"
+            echo "tag=${tag}"
+            echo "go_tag=${go_tag}"
+            echo "previous_tag=${previous_tag}"
+            echo "latest=${latest}"
             echo "build=${build}"
             echo "publish=${publish}"
             echo "npm=${npm}"
@@ -180,7 +210,7 @@ jobs:
   validate:
     name: Revalidate
     needs: plan
-    if: needs.plan.outputs.publish == 'true'
+    if: github.event_name != 'pull_request' && needs.plan.outputs.publish == 'true'
     permissions:
       contents: read
     uses: ./.github/workflows/validate.yml
@@ -221,7 +251,6 @@ jobs:
       - name: Check out the release revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.plan.outputs.revision }}
           persist-credentials: false
 
       - name: Install musl-gcc
@@ -258,7 +287,6 @@ jobs:
       - name: Check out the release revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.plan.outputs.revision }}
           persist-credentials: false
 
       - name: Set up Node
@@ -303,7 +331,6 @@ jobs:
       - name: Check out the release revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.plan.outputs.revision }}
           persist-credentials: false
 
       - name: Collect the binaries
@@ -323,7 +350,7 @@ jobs:
       - name: Assemble the assets and SHA256SUMS
         env:
           VERSION: ${{ needs.plan.outputs.version }}
-          REVISION: ${{ needs.plan.outputs.revision }}
+          REVISION: ${{ github.sha }}
           NPM: ${{ needs.plan.outputs.npm }}
         run: |
           set -euo pipefail
@@ -360,7 +387,7 @@ jobs:
   attest:
     name: Attest build provenance
     needs: [plan, validate, package]
-    if: ${{ !cancelled() && needs.plan.outputs.publish == 'true' && github.ref_type == 'branch' && needs.validate.result == 'success' && needs.package.result == 'success' }}
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.plan.outputs.publish == 'true' && github.ref_type == 'branch' && needs.validate.result == 'success' && needs.package.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -371,7 +398,6 @@ jobs:
       - name: Check out the release revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.plan.outputs.revision }}
           persist-credentials: false
 
       - name: Collect the assets
@@ -401,7 +427,7 @@ jobs:
   release:
     name: Publish the GitHub release
     needs: [plan, attest]
-    if: ${{ !cancelled() && needs.plan.outputs.publish == 'true' && github.ref_type == 'branch' && needs.attest.result == 'success' }}
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.plan.outputs.publish == 'true' && github.ref_type == 'branch' && needs.attest.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -411,7 +437,7 @@ jobs:
       VERSION: ${{ needs.plan.outputs.version }}
       TAG: ${{ needs.plan.outputs.tag }}
       GO_TAG: ${{ needs.plan.outputs.go_tag }}
-      REVISION: ${{ needs.plan.outputs.revision }}
+      REVISION: ${{ github.sha }}
       BRANCH: ${{ needs.plan.outputs.branch }}
       PREVIOUS_TAG: ${{ needs.plan.outputs.previous_tag }}
       LATEST: ${{ needs.plan.outputs.latest }}
@@ -420,7 +446,6 @@ jobs:
       - name: Check out the release revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.plan.outputs.revision }}
           persist-credentials: false
 
       - name: Collect the assets
@@ -496,7 +521,7 @@ jobs:
     # to true; see docs/RELEASING.md. Only releases from main are published,
     # and the npm environment admits only main. Publishing in the release's
     # own run gives npm's provenance the release's commit.
-    if: ${{ !cancelled() && needs.plan.outputs.publish == 'true' && needs.plan.outputs.npm == 'true' && needs.plan.outputs.branch == 'main' && github.ref == 'refs/heads/main' && needs.release.result == 'success' && vars.TILEWRIGHT_NPM_PUBLISH == 'true' }}
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.plan.outputs.publish == 'true' && needs.plan.outputs.npm == 'true' && needs.plan.outputs.branch == 'main' && github.ref == 'refs/heads/main' && needs.release.result == 'success' && vars.TILEWRIGHT_NPM_PUBLISH == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: npm
@@ -508,7 +533,7 @@ jobs:
       GH_REPO: ${{ github.repository }}
       TAG: ${{ needs.plan.outputs.tag }}
       VERSION: ${{ needs.plan.outputs.version }}
-      REVISION: ${{ needs.plan.outputs.revision }}
+      REVISION: ${{ github.sha }}
       PACKAGE: '@seraphinastudios/tilewright-pack'
     steps:
       # The job checks out nothing: it publishes the tarball the immutable
@@ -520,10 +545,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if [[ ${GITHUB_SHA} != "${REVISION}" ]]; then
-            echo "::error::this run is at ${GITHUB_SHA}, not the release revision ${REVISION}"
-            exit 1
-          fi
           gh api "repos/${GH_REPO}/releases/tags/${TAG}" >"${RUNNER_TEMP}/release.json"
           if ! jq -e '.draft == false and .prerelease == false and .immutable == true' "${RUNNER_TEMP}/release.json" >/dev/null; then
             echo "::error::${TAG} is not a published, immutable release"
