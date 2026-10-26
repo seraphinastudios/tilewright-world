@@ -209,7 +209,29 @@ check("an existing tag elsewhere stops the plan", {
     git("tag", "-d", "v0.2.0");
     git("tag", "go/v0.2.0", "elsewhere");
     assert.match(plan("main", "push").error, /tag go\/v0\.2\.0 already exists/);
+    assert.match(plan("main", "workflow_dispatch").error, /tag go\/v0\.2\.0 already exists/);
   },
 });
 
-console.log("release planner: first release, main, maintenance, 1.0, revert and tag-conflict fixtures passed");
+check("a pull request behind main's newest release still plans", {
+  run({git, commit, plan}) {
+    // A stacked pull request: its base branched off v0.1.0, and main has
+    // released v0.2.0 since.
+    git("tag", "v0.1.0");
+    git("checkout", "--quiet", "-b", "parent");
+    commit("feat: parent");
+    git("checkout", "--quiet", "main");
+    commit("feat: on main");
+    git("tag", "v0.2.0");
+    git("tag", "go/v0.2.0");
+    git("checkout", "--quiet", "parent");
+    commit("feat: stacked");
+    const checked = plan("main", "pull_request");
+    assert.equal(checked.error, undefined, checked.error);
+    assert.equal(checked.version, "0.2.0");
+    assert.equal(checked.publish, false);
+    assert.match(plan("main", "push").error, /tag v0\.2\.0 already exists/);
+  },
+});
+
+console.log("release planner: first release, main, maintenance, 1.0, revert, tag-conflict and stacked pull request fixtures passed");

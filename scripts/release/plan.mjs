@@ -70,10 +70,15 @@ let goTag = null;
 if (version !== null) {
   tag = "v" + version;
   goTag = "go/" + tag;
-  // A tag the branch does not contain may still exist elsewhere.
-  for (const existing of [tag, goTag]) {
-    if (lines(git("tag", "--list", existing)).length > 0) {
-      throw new Error("tag " + existing + " already exists");
+  // A tag the branch does not contain may still exist elsewhere. A pull
+  // request never publishes, and its base may be behind main's newest
+  // release (a pull request into another pull request's branch, or a
+  // re-run of an old check), so only releases stop at such a tag.
+  if (trigger !== "pull_request") {
+    for (const existing of [tag, goTag]) {
+      if (lines(git("tag", "--list", existing)).length > 0) {
+        throw new Error("tag " + existing + " already exists");
+      }
     }
   }
 }
