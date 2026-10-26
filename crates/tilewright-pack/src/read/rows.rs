@@ -483,12 +483,8 @@ impl Pack {
         page: Page<&str>,
         visit: &mut dyn FnMut(Plane) -> Result<(), Error>,
     ) -> Result<(), Error> {
-        let mut listing = Listing::new(&plane_columns(), "planes", true);
-        if let Some(after) = page.after {
-            listing.condition(|listing| format!("id > {}", listing.bind(after.to_owned())));
-        }
         self.walk(
-            listing.finish("ORDER BY id", page.limit),
+            planes_listing(page),
             page.after.map(str::to_owned),
             page.bytes,
             plane,
@@ -529,7 +525,7 @@ impl Pack {
         visit: &mut dyn FnMut(Zone) -> Result<(), Error>,
     ) -> Result<(), Error> {
         self.walk(
-            Self::in_plane(&zone_columns(), "zones", true, plane, page),
+            in_plane(&zone_columns(), "zones", true, plane, page),
             page.after.map(str::to_owned),
             page.bytes,
             zone,
@@ -541,22 +537,6 @@ impl Pack {
             ErrorCode::Zone,
             visit,
         )
-    }
-
-    /// The listing of a plane's rows of `table`, keyed by `id`, in `page`.
-    fn in_plane(
-        columns: &str,
-        table: &str,
-        documents: bool,
-        plane: &str,
-        page: Page<&str>,
-    ) -> (String, Vec<types::Value>) {
-        let mut listing = Listing::new(columns, table, documents);
-        listing.condition(|listing| format!("plane = {}", listing.bind(plane.to_owned())));
-        if let Some(after) = page.after {
-            listing.condition(|listing| format!("id > {}", listing.bind(after.to_owned())));
-        }
-        listing.finish("ORDER BY id", page.limit)
     }
 
     /// An anchor of a plane. Whether the plane exists is checked by
@@ -587,7 +567,7 @@ impl Pack {
         visit: &mut dyn FnMut(Anchor) -> Result<(), Error>,
     ) -> Result<(), Error> {
         self.walk(
-            Self::in_plane(&anchor_columns(), "anchors", false, plane, page),
+            in_plane(&anchor_columns(), "anchors", false, plane, page),
             page.after.map(str::to_owned),
             page.bytes,
             anchor_row,
@@ -628,7 +608,7 @@ impl Pack {
     ) -> Result<(), Error> {
         let columns = format!("{}, {}", bounded_identifier("id"), bounded_text("document"));
         self.walk(
-            Self::in_plane(&columns, "stairwells", true, plane, page),
+            in_plane(&columns, "stairwells", true, plane, page),
             page.after.map(str::to_owned),
             page.bytes,
             |row| stairwell_row_within(row, maximum_steps),
@@ -672,21 +652,11 @@ impl Pack {
         page: Page<(&str, &str)>,
         visit: &mut dyn FnMut(Definition) -> Result<(), Error>,
     ) -> Result<(), Error> {
-        let mut listing = Listing::new(&definition_columns(), "definitions", true);
-        if let Some(kind) = kind {
-            listing.condition(|listing| format!("type = {}", listing.bind(kind.to_owned())));
-        }
-        if let Some((after_kind, after_id)) = page.after {
-            listing.condition(|listing| {
-                format!(
-                    "(type, id) > ({}, {})",
-                    listing.bind(after_kind.to_owned()),
-                    listing.bind(after_id.to_owned())
-                )
-            });
-        }
+        let Some(query) = definitions_listing(kind, page) else {
+            return Ok(());
+        };
         self.walk(
-            listing.finish("ORDER BY type, id", page.limit),
+            query,
             page.after
                 .map(|(kind, id)| (kind.to_owned(), id.to_owned())),
             page.bytes,
@@ -712,15 +682,8 @@ impl Pack {
         page: Page<i32>,
         visit: &mut dyn FnMut(i32) -> Result<(), Error>,
     ) -> Result<(), Error> {
-        let mut listing = Listing::new(&integer("layer"), "chunks", false);
-        listing.condition(|listing| format!("plane = {}", listing.bind(plane.to_owned())));
-        if let Some(after) = page.after {
-            listing.condition(|listing| format!("layer > {}", listing.bind(after)));
-        }
         self.walk(
-            // Grouping by the stored layer lets SQLite read the primary key
-            // in order instead of collecting the layers first.
-            listing.finish("GROUP BY layer ORDER BY layer", page.limit),
+            layers_listing(plane, page),
             page.after,
             page.bytes,
             |row| layer(row, 0, "chunk", ErrorCode::Chunk),
@@ -744,20 +707,8 @@ impl Pack {
         page: Page<(i64, i64)>,
         visit: &mut dyn FnMut(i64, i64) -> Result<(), Error>,
     ) -> Result<(), Error> {
-        let mut listing = Listing::new(
-            &format!("{}, {}", integer("cx"), integer("cy")),
-            "chunks",
-            false,
-        );
-        listing.condition(|listing| format!("plane = {}", listing.bind(plane.to_owned())));
-        listing.condition(|listing| format!("layer = {}", listing.bind(layer)));
-        if let Some((cx, cy)) = page.after {
-            listing.condition(|listing| {
-                format!("(cx, cy) > ({}, {})", listing.bind(cx), listing.bind(cy))
-            });
-        }
         self.walk(
-            listing.finish("ORDER BY cx, cy", page.limit),
+            chunk_keys_listing(plane, layer, page),
             page.after,
             page.bytes,
             |row| {
@@ -773,9 +724,113 @@ impl Pack {
     }
 }
 
+// Each listing's query seeks its table's primary key to the row after the
+// page's key, so a walk of a table page by page reads each row once.
+
+/// The listing of planes in `page`.
+fn planes_listing(page: Page<&str>) -> (String, Vec<types::Value>) {
+    let mut listing = Listing::new(&plane_columns(), "planes", true);
+    if let Some(after) = page.after {
+        listing.condition(|listing| format!("id > {}", listing.bind(after.to_owned())));
+    }
+    listing.finish("ORDER BY id", page.limit)
+}
+
+/// The listing of a plane's rows of `table`, keyed by `id`, in `page`.
+fn in_plane(
+    columns: &str,
+    table: &str,
+    documents: bool,
+    plane: &str,
+    page: Page<&str>,
+) -> (String, Vec<types::Value>) {
+    let mut listing = Listing::new(columns, table, documents);
+    listing.condition(|listing| format!("plane = {}", listing.bind(plane.to_owned())));
+    if let Some(after) = page.after {
+        listing.condition(|listing| format!("id > {}", listing.bind(after.to_owned())));
+    }
+    listing.finish("ORDER BY id", page.limit)
+}
+
+/// The listing of the definitions of `page`, of type `kind` or of every
+/// type, or `None` when no row can follow the page's key. With a type, the
+/// key's type decides which IDs follow, so the query bounds only the ID: a
+/// bound on `(type, id)` as well as `type = ?` would make SQLite seek the
+/// type and filter its rows from the first, for every page.
+fn definitions_listing(
+    kind: Option<&str>,
+    page: Page<(&str, &str)>,
+) -> Option<(String, Vec<types::Value>)> {
+    let mut listing = Listing::new(&definition_columns(), "definitions", true);
+    match (kind, page.after) {
+        (Some(kind), after) => {
+            listing.condition(|listing| format!("type = {}", listing.bind(kind.to_owned())));
+            if let Some((after_kind, after_id)) = after {
+                match after_kind.cmp(kind) {
+                    // Every definition of the type follows the key.
+                    std::cmp::Ordering::Less => {}
+                    std::cmp::Ordering::Equal => {
+                        listing.condition(|listing| {
+                            format!("id > {}", listing.bind(after_id.to_owned()))
+                        });
+                    }
+                    std::cmp::Ordering::Greater => return None,
+                }
+            }
+        }
+        (None, Some((after_kind, after_id))) => {
+            listing.condition(|listing| {
+                format!(
+                    "(type, id) > ({}, {})",
+                    listing.bind(after_kind.to_owned()),
+                    listing.bind(after_id.to_owned())
+                )
+            });
+        }
+        (None, None) => {}
+    }
+    Some(listing.finish("ORDER BY type, id", page.limit))
+}
+
+/// The listing of the layers of a plane that have chunks, in `page`.
+fn layers_listing(plane: &str, page: Page<i32>) -> (String, Vec<types::Value>) {
+    let mut listing = Listing::new(&integer("layer"), "chunks", false);
+    listing.condition(|listing| format!("plane = {}", listing.bind(plane.to_owned())));
+    if let Some(after) = page.after {
+        listing.condition(|listing| format!("layer > {}", listing.bind(after)));
+    }
+    // Grouping by the stored layer lets SQLite read the primary key in
+    // order instead of collecting the layers first.
+    listing.finish("GROUP BY layer ORDER BY layer", page.limit)
+}
+
+/// The listing of the chunk keys of a plane's layer, in `page`.
+fn chunk_keys_listing(
+    plane: &str,
+    layer: i32,
+    page: Page<(i64, i64)>,
+) -> (String, Vec<types::Value>) {
+    let mut listing = Listing::new(
+        &format!("{}, {}", integer("cx"), integer("cy")),
+        "chunks",
+        false,
+    );
+    listing.condition(|listing| format!("plane = {}", listing.bind(plane.to_owned())));
+    listing.condition(|listing| format!("layer = {}", listing.bind(layer)));
+    if let Some((cx, cy)) = page.after {
+        listing.condition(|listing| {
+            format!("(cx, cy) > ({}, {})", listing.bind(cx), listing.bind(cy))
+        });
+    }
+    listing.finish("ORDER BY cx, cy", page.limit)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Listing, Page, plane, plane_columns};
+    use super::{
+        Listing, Page, chunk_keys_listing, definitions_listing, in_plane, layers_listing, plane,
+        plane_columns, planes_listing, types,
+    };
     use crate::{Error, ErrorCode, Pack, VerifyLimits};
     use std::path::Path;
 
@@ -967,6 +1022,118 @@ mod tests {
             pack.visit_planes(page, &mut |_| panic!("{page:?} is empty"))
                 .unwrap();
         }
+    }
+
+    /// A page of up to 64 rows after `key`.
+    fn after<K>(key: K) -> Page<K> {
+        Page {
+            after: Some(key),
+            limit: 64,
+            bytes: usize::MAX,
+        }
+    }
+
+    /// The steps of the query plan of `query`.
+    fn plan(pack: &Pack, (sql, values): (String, Vec<types::Value>)) -> Vec<String> {
+        let mut statement = pack
+            .connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap();
+        statement
+            .query_map(rusqlite::params_from_iter(values), |row| row.get(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn every_listing_seeks_past_its_page_key() {
+        let pack = pack();
+        let stairwell_columns = format!(
+            "{}, {}",
+            super::bounded_identifier("id"),
+            super::bounded_text("document")
+        );
+        for (query, seek) in [
+            (
+                planes_listing(after("a")),
+                "SEARCH planes USING PRIMARY KEY (id>?)",
+            ),
+            (
+                in_plane(
+                    &super::zone_columns(),
+                    "zones",
+                    true,
+                    "overworld",
+                    after("a"),
+                ),
+                "SEARCH zones USING PRIMARY KEY (plane=? AND id>?)",
+            ),
+            (
+                in_plane(
+                    &super::anchor_columns(),
+                    "anchors",
+                    false,
+                    "overworld",
+                    after("a"),
+                ),
+                "SEARCH anchors USING PRIMARY KEY (plane=? AND id>?)",
+            ),
+            (
+                in_plane(
+                    &stairwell_columns,
+                    "stairwells",
+                    true,
+                    "overworld",
+                    after("a"),
+                ),
+                "SEARCH stairwells USING PRIMARY KEY (plane=? AND id>?)",
+            ),
+            (
+                definitions_listing(None, after(("proto", "a"))).unwrap(),
+                "SEARCH definitions USING PRIMARY KEY ((type,id)>(?,?))",
+            ),
+            (
+                definitions_listing(Some("proto"), after(("proto", "a"))).unwrap(),
+                "SEARCH definitions USING PRIMARY KEY (type=? AND id>?)",
+            ),
+            (
+                layers_listing("overworld", after(0)),
+                "SEARCH chunks USING PRIMARY KEY (plane=? AND layer>?)",
+            ),
+            (
+                chunk_keys_listing("overworld", 0, after((0, 0))),
+                "SEARCH chunks USING PRIMARY KEY (plane=? AND layer=? AND (cx,cy)>(?,?))",
+            ),
+        ] {
+            assert_eq!(plan(&pack, query), [seek]);
+        }
+    }
+
+    #[test]
+    fn typed_definition_pages_follow_a_key_of_any_type() {
+        let pack = pack();
+        let read = |after: Option<(&str, &str)>| {
+            let mut ids = Vec::new();
+            let page = Page {
+                after,
+                limit: usize::MAX,
+                bytes: usize::MAX,
+            };
+            pack.visit_definitions(Some("proto"), page, &mut |definition| {
+                ids.push(definition.id);
+                Ok(())
+            })
+            .unwrap();
+            ids
+        };
+        let all = read(None);
+        assert!(all.len() > 1);
+        // A key of a type before the listing's is followed by all of its
+        // rows; a key of a type after it, by none.
+        assert_eq!(read(Some(("a", "zzz"))), all);
+        assert!(read(Some(("zzz", "a"))).is_empty());
+        assert_eq!(read(Some(("proto", all[0].as_str()))), all[1..]);
     }
 
     #[test]
