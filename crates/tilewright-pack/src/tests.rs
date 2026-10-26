@@ -1506,6 +1506,24 @@ fn stairwell_rows_steps_and_documents_are_verified() {
 }
 
 #[test]
+fn a_stairwell_document_with_an_escaped_key_is_refused_unbudgeted() {
+    // A document that spells `steps` with an escape is not canonical: it is
+    // refused as such under any step budget, before its steps are counted.
+    let (_directory, copy) = tampered(
+        "read-escaped-key.twpack",
+        r#"UPDATE stairwells SET document = replace(document, '"steps":', '"st\u0065ps":') WHERE id = 'cave.chute'"#,
+    );
+    let pack = Pack::open(&copy).unwrap();
+    for budget in [0, u64::MAX] {
+        let error = pack
+            .stairwell_within("overworld", "cave.chute", budget)
+            .unwrap_err();
+        assert_eq!(error.code(), super::ErrorCode::Stairwell, "{error}");
+        assert!(error.to_string().contains("canonical JSON"), "{error}");
+    }
+}
+
+#[test]
 fn stored_stairwell_documents_have_the_source_shape_and_agree_with_their_rows() {
     let disagrees = "disagrees with its rows";
     for (name, sql, problem) in [

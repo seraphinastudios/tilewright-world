@@ -6,28 +6,58 @@
 //! holds. They run before a document is parsed, so a document a read would
 //! refuse costs no parse.
 
-/// Whether `text` has none of the bytes canonical JSON never has outside
-/// its strings: whitespace, and the `/` that starts a comment. A stored
-/// document must be canonical, so one with them is refused unparsed.
+/// Whether `text` has none of what canonical JSON never has: whitespace, or
+/// the `/` that starts a comment, outside its strings; a raw control
+/// character inside them; or an escape other than the ones canonical output
+/// writes, `\"`, `\\`, `\b`, `\f`, `\n`, `\r`, `\t` and a lowercase
+/// `\u00xx` for another control character. A stored document must be
+/// canonical, so one with any is refused unparsed, and in one without, a
+/// member name is spelled as canonical output spells it.
 pub(super) fn compact(text: &str) -> bool {
+    let bytes = text.as_bytes();
     let mut in_string = false;
-    let mut escaped = false;
-    for &byte in text.as_bytes() {
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
         if in_string {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'"' {
-                in_string = false;
+            match byte {
+                b'"' => in_string = false,
+                b'\\' => {
+                    let Some(escape) = canonical_escape(&bytes[index + 1..]) else {
+                        return false;
+                    };
+                    index += escape;
+                }
+                0x00..=0x1f => return false,
+                _ => {}
             }
         } else if byte == b'"' {
             in_string = true;
         } else if matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | b'/') {
             return false;
         }
+        index += 1;
     }
     true
+}
+
+/// The length of the escape after a backslash, `rest`, when it is one
+/// canonical output writes.
+fn canonical_escape(rest: &[u8]) -> Option<usize> {
+    match rest.first()? {
+        b'"' | b'\\' | b'b' | b'f' | b'n' | b'r' | b't' => Some(1),
+        b'u' => {
+            let digits = rest.get(1..5)?;
+            let lower_hex = |byte: &u8| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte);
+            if digits[..2] != *b"00" || !digits.iter().all(lower_hex) {
+                return None;
+            }
+            let value = u8::from_str_radix(std::str::from_utf8(&digits[2..]).ok()?, 16).ok()?;
+            // A control character that has a short escape uses it.
+            (value < 0x20 && ![0x08, 0x09, 0x0a, 0x0c, 0x0d].contains(&value)).then_some(5)
+        }
+        _ => None,
+    }
 }
 
 /// The index of the quote that closes the string opening at `open`.
@@ -120,13 +150,26 @@ mod tests {
 
     #[test]
     fn canonical_text_is_compact_and_other_text_is_not() {
-        assert!(compact(r#"{"a":"x y/z","b":[1,{"c":"\" /"}]}"#));
+        assert!(compact(
+            r#"{"a":"x y/z","b":[1,{"c":"\" /\\\n\r\t\b\f\u0001\u001f"}]}"#
+        ));
         for text in [
             r#"{"a": 1}"#,
             "{\"a\":1}\n",
             r#"{"a":1}//"#,
             r#"{"a":/*x*/1}"#,
             "\t{}",
+            // Escapes canonical output never writes.
+            r#"{"st\u0065ps":[]}"#,
+            r#"{"a":"\/"}"#,
+            r#"{"a":"\u000a"}"#,
+            r#"{"a":"\u001F"}"#,
+            r#"{"a":"\u00e9"}"#,
+            r#"{"a":"\x"}"#,
+            r#"{"a":"\u00"}"#,
+            "{\"a\":\"\\",
+            // A raw control character inside a string.
+            "{\"a\":\"\u{1}\"}",
         ] {
             assert!(!compact(text), "{text}");
         }
