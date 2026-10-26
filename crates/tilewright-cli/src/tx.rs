@@ -19,8 +19,26 @@ pub(super) fn run(arguments: &[&OsStr]) -> Result<String, Failure> {
         [command, transaction, root, output] if *command == "rebase" => {
             rebase(Path::new(transaction), Path::new(root), Path::new(output))
         }
-        [command, transaction, root, inverse] if *command == "apply" => {
-            apply(Path::new(transaction), Path::new(root), Path::new(inverse))
+        // The flag with an argument missing is a usage error, not a path.
+        [command, transaction, root, inverse]
+            if *command == "apply" && *transaction != "--unchecked-access" =>
+        {
+            apply(
+                Path::new(transaction),
+                Path::new(root),
+                Path::new(inverse),
+                false,
+            )
+        }
+        [command, flag, transaction, root, inverse]
+            if *command == "apply" && *flag == "--unchecked-access" =>
+        {
+            apply(
+                Path::new(transaction),
+                Path::new(root),
+                Path::new(inverse),
+                true,
+            )
         }
         _ => Err(Failure::message(USAGE)),
     }
@@ -207,12 +225,34 @@ fn rebase(transaction: &Path, root: &Path, output: &Path) -> Result<String, Fail
     ))
 }
 
-fn apply(transaction: &Path, root: &Path, inverse: &Path) -> Result<String, Failure> {
+/// Whether `tx apply` may publish here: where the platform does not check
+/// everything, only with `--unchecked-access`. Returns the warning to give
+/// when it was accepted.
+fn consent(unchecked_access: bool) -> Result<Option<String>, Failure> {
+    match tilewright_edit::UNCHECKED_ACCESS {
+        Some(unchecked) if !unchecked_access => Err(Failure::message(format!(
+            "tx apply here does not check everything: {unchecked}; pass --unchecked-access to accept that (SECURITY.md says what it guarantees on each platform); nothing was written"
+        ))),
+        Some(unchecked) => Ok(Some(format!(
+            "warning: with --unchecked-access, tx apply does not check everything here: {unchecked}"
+        ))),
+        None => Ok(None),
+    }
+}
+
+fn apply(
+    transaction: &Path,
+    root: &Path,
+    inverse: &Path,
+    unchecked_access: bool,
+) -> Result<String, Failure> {
     if !tilewright_edit::PUBLISH_SUPPORTED {
         return Err(Failure::message(
             "tx apply is supported only on Linux, macOS and Windows (SECURITY.md says what it guarantees on each); tx preview and tx rebase work here",
         ));
     }
+    // Refused before anything is written, the inverse included.
+    let warning = consent(unchecked_access)?;
     outside(root, inverse)?;
     let plan = plan(&read(transaction, false)?, root, false, false)?;
     // The inverse is durable before any file changes, so an interrupted
@@ -223,7 +263,11 @@ fn apply(transaction: &Path, root: &Path, inverse: &Path) -> Result<String, Fail
     } else {
         "; the inverse's name could not be synced, so it may not be durable yet"
     };
-    let published = plan.publish().map_err(|error| Failure {
+    if let Some(warning) = warning {
+        eprintln!("tilewright: {warning}");
+    }
+    let options = tilewright_edit::PublishOptions { unchecked_access };
+    let published = plan.publish_with(&options).map_err(|error| Failure {
         output: diagnostics_text(&error.problems, false),
         message: format!(
             "{}; {} problem(s){unsynced_inverse}",
@@ -358,10 +402,51 @@ mod tests {
             &["tx"][..],
             &["tx", "preview"],
             &["tx", "apply", "a", "b"],
+            &["tx", "apply", "--unchecked-access", "a", "b"],
+            &["tx", "apply", "--unchecked", "a", "b", "c"],
             &["tx", "frob", "a", "b"],
         ] {
             assert!(run(arguments).unwrap_err().message.starts_with("usage:"));
         }
+    }
+
+    // Publishing is supported on Linux, macOS and Windows.
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn apply_needs_consent_where_access_is_unchecked() {
+        let (directory, root) = setup();
+        let path = |name: &str| directory.path().join(name).display().to_string();
+        let chunk = Path::new(&root).join("planes/overworld/layers/0/1_0.jsonc");
+        let applied = run(&["tx", "apply", &path("tx.jsonc"), &root, &path("undo.jsonc")]);
+        // Only Linux checks everything, and needs no consent.
+        let Some(unchecked) = tilewright_edit::UNCHECKED_ACCESS else {
+            assert!(super::consent(false).unwrap().is_none());
+            assert!(super::consent(true).unwrap().is_none());
+            assert!(applied.unwrap().contains("applied; the inverse is in"));
+            assert!(chunk.exists());
+            return;
+        };
+        let refused = applied.unwrap_err();
+        assert!(
+            refused.message.contains(unchecked) && refused.message.contains("--unchecked-access"),
+            "{}",
+            refused.message
+        );
+        // Neither the inverse nor the tree was written.
+        assert!(!Path::new(&path("undo.jsonc")).exists());
+        assert!(!chunk.exists());
+        let warning = super::consent(true).unwrap().unwrap();
+        assert!(warning.starts_with("warning: ") && warning.contains(unchecked));
+        run(&[
+            "tx",
+            "apply",
+            "--unchecked-access",
+            &path("tx.jsonc"),
+            &root,
+            &path("undo.jsonc"),
+        ])
+        .unwrap();
+        assert!(chunk.exists());
     }
 
     // Publishing is supported on Linux, macOS and Windows.
@@ -382,6 +467,7 @@ mod tests {
         let applied = run(&[
             "tx",
             "apply",
+            "--unchecked-access",
             &path("sealed.jsonc"),
             &root,
             &path("undo.jsonc"),
@@ -395,6 +481,7 @@ mod tests {
         let conflict = run(&[
             "tx",
             "apply",
+            "--unchecked-access",
             &path("sealed.jsonc"),
             &root,
             &path("undo2.jsonc"),
@@ -419,8 +506,15 @@ mod tests {
         ] {
             let inside = Path::new(&root).join(inside);
             let inside_text = inside.display().to_string();
-            let refused =
-                run(&["tx", "apply", &path("undo.jsonc"), &root, &inside_text]).unwrap_err();
+            let refused = run(&[
+                "tx",
+                "apply",
+                "--unchecked-access",
+                &path("undo.jsonc"),
+                &root,
+                &inside_text,
+            ])
+            .unwrap_err();
             assert!(
                 refused.message.contains("inside the source tree"),
                 "{}",
@@ -432,6 +526,7 @@ mod tests {
         run(&[
             "tx",
             "apply",
+            "--unchecked-access",
             &path("undo.jsonc"),
             &root,
             &path("redo.jsonc"),

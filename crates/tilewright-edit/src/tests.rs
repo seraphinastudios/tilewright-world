@@ -83,10 +83,17 @@ fn planned(root: &Path, transaction: &Transaction) -> Plan {
     }
 }
 
+/// Publishes `plan`, accepting what the platform does not check.
+fn publish(plan: &Plan) -> Result<Published, PublishError> {
+    plan.publish_with(&PublishOptions {
+        unchecked_access: true,
+    })
+}
+
 /// Plans and publishes, returning the plan.
 fn apply(root: &Path, transaction: &Transaction) -> Plan {
     let plan = planned(root, transaction);
-    if let Err(problems) = plan.publish() {
+    if let Err(problems) = publish(&plan) {
         panic!("{problems:#?}");
     }
     plan
@@ -558,8 +565,8 @@ fn plans_are_deterministic() {
     assert_eq!(one.sealed(), two.sealed());
     assert_eq!(one.inverse(), two.inverse());
     assert_eq!(one.world().source_digest(), two.world().source_digest());
-    one.publish().unwrap();
-    two.publish().unwrap();
+    publish(&one).unwrap();
+    publish(&two).unwrap();
     assert_eq!(snapshot(first.path()), snapshot(second.path()));
 }
 
@@ -577,7 +584,7 @@ fn a_failed_publish_restores_what_it_published() {
     let plan = planned(root, &tx);
     for step in 0..3 {
         publish::FAIL_STEP.with(|fail| fail.set(Some(step)));
-        let found = plan.publish().unwrap_err().problems;
+        let found = publish(&plan).unwrap_err().problems;
         publish::FAIL_STEP.with(|fail| fail.set(None));
         assert!(
             found[0]
@@ -588,7 +595,7 @@ fn a_failed_publish_restores_what_it_published() {
         assert_eq!(snapshot(root), before, "step {step}");
         assert_eq!(directories(root), folders, "step {step}");
     }
-    plan.publish().unwrap();
+    publish(&plan).unwrap();
     assert_ne!(snapshot(root), before);
 }
 
@@ -613,7 +620,7 @@ fn a_file_changed_during_publish_stops_it() {
     publish::BEFORE_CHECK.with(|hook| {
         *hook.borrow_mut() = Some(Box::new(move || fs::write(&hook_path, &hook_text).unwrap()));
     });
-    let found = plan.publish().unwrap_err().problems;
+    let found = publish(&plan).unwrap_err().problems;
     assert!(
         has(&found, "tx.conflict", "nothing was written"),
         "{found:#?}"
@@ -640,10 +647,41 @@ fn another_holder_of_the_lock_stops_a_publish() {
     let plan = planned(root, &tx);
     let source = SourceRoot::new(root);
     let lock = source.lock().unwrap();
-    let found = plan.publish().unwrap_err().problems;
+    let found = publish(&plan).unwrap_err().problems;
     assert!(has(&found, "tx.conflict", "lock"), "{found:#?}");
     drop(lock);
-    plan.publish().unwrap();
+    publish(&plan).unwrap();
+}
+
+#[test]
+fn publishing_where_access_is_unchecked_needs_the_callers_consent() {
+    let tree = copy();
+    let root = tree.path();
+    let before = snapshot(root);
+    let plan = planned(
+        root,
+        &transaction(
+            r#"{"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["title"], "value": "Changed"}"#,
+        ),
+    );
+    // Only Linux checks everything, and needs no consent.
+    assert_eq!(UNCHECKED_ACCESS.is_none(), PUBLISH_CONFINED);
+    if let Some(unchecked) = UNCHECKED_ACCESS {
+        let failure = plan.publish().unwrap_err();
+        assert!(!failure.applied && failure.durable && failure.cleaned);
+        assert!(
+            has(&failure.problems, "tx.io", unchecked)
+                && has(&failure.problems, "tx.io", "unless the caller accepts"),
+            "{:#?}",
+            failure.problems
+        );
+        // Nothing was written, not even a lock file.
+        assert_eq!(snapshot(root), before);
+        publish(&plan).unwrap();
+    } else {
+        plan.publish().unwrap();
+    }
+    assert_ne!(snapshot(root), before);
 }
 
 /// Makes `link` a link to the directory `target`: a symbolic link on Unix,
@@ -719,7 +757,7 @@ fn a_link_swapped_in_after_planning_is_never_followed() {
         fs::rename(&layer, &moved).unwrap();
         link_directory(&layer, &moved);
         let before = snapshot(&moved);
-        let failure = plan.publish().unwrap_err();
+        let failure = publish(&plan).unwrap_err();
         assert!(!failure.applied, "{failure:#?}");
         assert!(
             has(&failure.problems, "tx.path", "symbolic links"),
@@ -746,7 +784,7 @@ fn a_path_windows_would_read_otherwise_is_not_published() {
         // Windows drops the dot and finds defs/proto/tree.jsonc there.
         Err(problems) => assert!(!problems.is_empty()),
         Ok(plan) => {
-            let failure = plan.publish().unwrap_err();
+            let failure = publish(&plan).unwrap_err();
             assert!(!failure.applied);
             assert!(
                 has(&failure.problems, "tx.path", "ends in a dot or a space"),
@@ -770,7 +808,7 @@ fn a_path_named_otherwise_on_disk_is_not_published() {
         ),
     );
     let aliased = root.join("defs/PROTO").exists();
-    match plan.publish() {
+    match publish(&plan) {
         Ok(_) => assert!(!aliased),
         Err(failure) => {
             assert!(aliased, "{failure:#?}");
@@ -799,7 +837,7 @@ fn files_whose_paths_differ_only_in_case_are_not_published() {
     {"op": "test", "path": "defs/recipe/NEW.jsonc", "pointer": [], "absent": true}"#,
         ),
     );
-    let failure = plan.publish().unwrap_err();
+    let failure = publish(&plan).unwrap_err();
     assert!(!failure.applied);
     assert!(
         has(&failure.problems, "tx.path", "differ only in case"),
@@ -813,7 +851,7 @@ fn files_whose_paths_differ_only_in_case_are_not_published() {
     {"op": "test", "path": "defs/KIND/b.jsonc", "pointer": [], "absent": true}"#,
         ),
     );
-    let failure = plan.publish().unwrap_err();
+    let failure = publish(&plan).unwrap_err();
     assert!(
         has(
             &failure.problems,
@@ -1244,7 +1282,7 @@ fn the_result_is_validated_again_under_the_lock() {
     let removing = planned(root, &remove);
     apply(root, &reference);
     let before = snapshot(root);
-    let failure = removing.publish().unwrap_err();
+    let failure = publish(&removing).unwrap_err();
     assert!(!failure.applied);
     assert!(
         failure
@@ -1269,7 +1307,7 @@ fn a_blocked_deletion_keeps_its_file() {
     // name.
     fs::create_dir(root.join("defs/recipe/.chest.jsonc.tilewright-tmp")).unwrap();
     let before = snapshot(root);
-    let failure = plan.publish().unwrap_err();
+    let failure = publish(&plan).unwrap_err();
     assert!(!failure.applied && !failure.cleaned, "{failure:#?}");
     assert!(
         failure
@@ -1300,7 +1338,7 @@ fn a_failed_stage_leaves_nothing_behind() {
     let plan = planned(root, &tx);
     let obstacle = root.join("planes/overworld/.plane.jsonc.tilewright-tmp");
     fs::create_dir(&obstacle).unwrap();
-    let failure = plan.publish().unwrap_err();
+    let failure = publish(&plan).unwrap_err();
     assert!(!failure.applied, "{failure:#?}");
     fs::remove_dir(&obstacle).unwrap();
     assert!(!root.join("planes/overworld/layers/9").exists());
@@ -1317,7 +1355,7 @@ fn a_sync_failure_after_publishing_reports_the_result_applied() {
     );
     let plan = planned(root, &tx);
     publish::FAIL_SYNC.with(|fail| fail.set(true));
-    let failure = plan.publish().unwrap_err();
+    let failure = publish(&plan).unwrap_err();
     publish::FAIL_SYNC.with(|fail| fail.set(false));
     assert!(failure.applied, "{failure:#?}");
     assert!(
@@ -1421,7 +1459,7 @@ fn a_stale_staging_entry_that_cannot_go_is_reported() {
     );
     fs::create_dir(root.join("planes/overworld/.plane.jsonc.tilewright-tmp")).unwrap();
     let plan = planned(root, &tx);
-    let failure = plan.publish().unwrap_err();
+    let failure = publish(&plan).unwrap_err();
     // Windows cannot sync a directory, so there nothing is durable.
     assert!(
         failure.applied && failure.durable == cfg!(unix) && !failure.cleaned,
@@ -1523,7 +1561,7 @@ fn a_rolled_back_deletion_keeps_its_permissions() {
     );
     let plan = planned(root, &tx);
     publish::FAIL_STEP.with(|fail| fail.set(Some(1)));
-    let failure = plan.publish().unwrap_err();
+    let failure = publish(&plan).unwrap_err();
     publish::FAIL_STEP.with(|fail| fail.set(None));
     assert!(!failure.applied);
     let mode = fs::metadata(&recipe).unwrap().permissions().mode();
@@ -1555,7 +1593,7 @@ fn a_directory_that_cannot_be_pruned_is_reported() {
             r#"{"op": "object.remove", "plane": "overworld", "layer": 7, "at": [0, 0], "index": 0, "expect": {"proto": "tree"}}"#,
         ),
     );
-    let outcome = plan.publish();
+    let outcome = publish(&plan);
     fs::set_permissions(&layers, fs::Permissions::from_mode(0o755)).unwrap();
     if !writable {
         let failure = outcome.unwrap_err();
@@ -1608,7 +1646,7 @@ fn cleanup_that_cannot_be_done_is_reported_with_the_outcome() {
             fs::write(hook_staging.join("x"), "").unwrap();
         }));
     });
-    let failure = plan.publish().unwrap_err();
+    let failure = publish(&plan).unwrap_err();
     assert!(!failure.applied && !failure.cleaned, "{failure:#?}");
     assert_eq!(
         failure.summary(),
@@ -1649,7 +1687,7 @@ fn a_plan_publishes_into_the_root_it_was_made_on() {
         fs::create_dir_all(target.parent().unwrap()).unwrap();
         fs::write(target, bytes).unwrap();
     }
-    plan.publish().unwrap();
+    publish(&plan).unwrap();
     // Through directory handles the plan stays on the tree it was made on;
     // by path (Windows) it publishes into what the path names.
     let (published, untouched) = if cfg!(unix) {
@@ -1850,7 +1888,7 @@ fn terrain_addresses_are_checked_again_when_publishing() {
     );
     // The profile, which the operations do not read, loses the grid.
     fs::write(&profile, &original).unwrap();
-    let failure = plan.publish().unwrap_err();
+    let failure = publish(&plan).unwrap_err();
     assert!(!failure.applied);
     // Each operation is reported, at its own line.
     let lines: Vec<usize> = failure
@@ -2133,9 +2171,9 @@ fn long_lists_name_ten_and_count_the_rest() {
 }
 
 /// Publishes `plan` with `hook` run between staging and the checks.
-fn publish_with(plan: &Plan, hook: impl FnOnce() + 'static) -> PublishError {
+fn publish_hooked(plan: &Plan, hook: impl FnOnce() + 'static) -> PublishError {
     publish::BEFORE_CHECK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
-    plan.publish().unwrap_err()
+    publish(plan).unwrap_err()
 }
 
 #[test]
@@ -2152,7 +2190,7 @@ fn a_created_directory_left_full_is_reported() {
         root.join("planes/overworld/layers/7"),
         root.join("planes/overworld/zones.jsonc"),
     );
-    let failure = publish_with(&plan, move || {
+    let failure = publish_hooked(&plan, move || {
         fs::write(layer.join("note.txt"), "").unwrap();
         let text = fs::read_to_string(&zones).unwrap();
         fs::write(&zones, format!("{text}\n")).unwrap();
@@ -2175,7 +2213,7 @@ fn a_file_grown_too_large_while_publishing_is_a_conflict() {
         ),
     );
     let zones = root.join("planes/overworld/zones.jsonc");
-    let failure = publish_with(&plan, move || {
+    let failure = publish_hooked(&plan, move || {
         fs::write(&zones, vec![b' '; (64 << 20) + 1]).unwrap();
     });
     assert!(
@@ -2198,7 +2236,7 @@ fn permissions_narrowed_while_publishing_are_a_conflict() {
     );
     let target = root.join("planes/overworld/plane.jsonc");
     let hook_target = target.clone();
-    let failure = publish_with(&plan, move || {
+    let failure = publish_hooked(&plan, move || {
         fs::set_permissions(&hook_target, fs::Permissions::from_mode(0o600)).unwrap();
     });
     assert!(
@@ -2270,7 +2308,7 @@ fn a_deleted_file_permissions_are_checked_before_publishing() {
     // Its permissions are noted with the others, so a change before
     // publishing is caught rather than restored with on failure.
     let hook_target = target.clone();
-    let failure = publish_with(&plan, move || {
+    let failure = publish_hooked(&plan, move || {
         fs::set_permissions(&hook_target, fs::Permissions::from_mode(0o600)).unwrap();
     });
     assert!(
@@ -2468,7 +2506,7 @@ fn a_file_with_an_access_control_list_is_not_replaced() {
             r#"{"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["title"], "value": "Changed"}"#,
         ),
     );
-    let failure = plan.publish().unwrap_err();
+    let failure = publish(&plan).unwrap_err();
     assert!(
         has(&failure.problems, "tx.io", "access control list"),
         "{failure:#?}"
@@ -2505,7 +2543,7 @@ fn a_directory_that_gives_new_files_an_access_control_list_is_refused() {
             r#"{"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["title"], "value": "Changed"}"#,
         ),
     );
-    let failure = plan.publish().unwrap_err();
+    let failure = publish(&plan).unwrap_err();
     assert!(!failure.applied);
     assert!(
         has(&failure.problems, "tx.io", "access control list"),
@@ -2553,7 +2591,7 @@ fn files_a_transaction_changes_must_have_the_same_readers() {
             r#"{"op": "object.move", "plane": "overworld", "layer": 0, "at": [15, 0], "index": 0, "expect": {"proto": "wall"}, "to": {"at": [-31, 1]}}"#,
         ),
     );
-    let failure = plan.publish().unwrap_err();
+    let failure = publish(&plan).unwrap_err();
     assert!(!failure.applied);
     assert!(
         has(
@@ -2625,7 +2663,7 @@ fn modes_whose_classes_do_not_nest_are_refused() {
                 r#"{"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["title"], "value": "Changed"}"#,
             ),
         );
-        let failure = plan.publish().unwrap_err();
+        let failure = publish(&plan).unwrap_err();
         assert!(!failure.applied);
         assert!(
             has(
@@ -2664,7 +2702,7 @@ fn a_file_its_inverse_could_not_make_again_is_not_deleted() {
         &transaction(r#"{"op": "document.delete", "path": "defs/recipe/chest.jsonc"}"#),
     );
     let before = snapshot(root);
-    let failure = plan.publish().unwrap_err();
+    let failure = publish(&plan).unwrap_err();
     assert!(!failure.applied);
     assert!(
         has(&failure.problems, "tx.io", "could be read by other users"),
@@ -2823,7 +2861,7 @@ fn a_file_replaced_by_a_directory_while_publishing_is_a_conflict() {
         ),
     );
     let consulted = root.join("defs/proto/coin.jsonc");
-    let failure = publish_with(&plan, move || {
+    let failure = publish_hooked(&plan, move || {
         fs::remove_file(&consulted).unwrap();
         fs::create_dir(&consulted).unwrap();
     });
@@ -2867,7 +2905,7 @@ fn publish_time_terrain_conflicts_past_the_limit_say_so() {
         &transaction(&vec![operation; limits::DIAGNOSTICS + 1].join(",\n    ")),
     );
     fs::write(&profile, &original).unwrap();
-    let failure = plan.publish().unwrap_err();
+    let failure = publish(&plan).unwrap_err();
     assert_eq!(failure.problems.len(), limits::DIAGNOSTICS);
     assert!(
         has(&failure.problems, "tx.limit", "the rest are not reported"),
@@ -2894,7 +2932,7 @@ fn directories_that_others_cannot_search_are_part_of_the_audience() {
             r#"{"op": "object.move", "plane": "overworld", "layer": 0, "at": [15, 0], "index": 0, "expect": {"proto": "wall"}, "to": {"layer": 1}}"#,
         ),
     );
-    let failure = plan.publish().unwrap_err();
+    let failure = publish(&plan).unwrap_err();
     assert!(
         has(
             &failure.problems,
@@ -3021,7 +3059,7 @@ fn a_read_only_file_is_not_replaced_on_windows() {
             r#"{"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["title"], "value": "Changed"}"#,
         ),
     );
-    let failure = plan.publish().unwrap_err();
+    let failure = publish(&plan).unwrap_err();
     assert!(!failure.applied);
     assert!(has(&failure.problems, "tx.io", "read-only"), "{failure:#?}");
     assert_eq!(snapshot(root), snapshot(&fixture()));

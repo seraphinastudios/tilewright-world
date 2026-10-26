@@ -316,15 +316,23 @@ guarantees:
 | Labels (SELinux, Smack) | Compared, never set | None | None |
 | The lock | `flock` of the root | `flock` of the root | The file `.tilewright.lock` in the root |
 | Directory syncs | Yes | Yes | No: renames may not be durable yet |
+| Publishes by default | Yes | No: only with unchecked access | No: only with unchecked access |
 
 Only on Linux does publishing keep every guarantee of this section. On
 macOS and Windows it is a best effort: it is supported only in trees that
 no one else can change, and in which no file or directory has an access
 control list of its own (on Windows, a file has the list its directory
 gives it), since a replaced file, or one an inverse makes again, takes
-the access its directory gives a new file. Elsewhere, the BSDs included,
-publishing is refused, with `tx.io`, and nothing is written: they are
-untested. Previewing and rebasing work everywhere.
+the access its directory gives a new file, and nothing can check that
+from safe code. So there publishing is refused by default, with `tx.io`,
+and nothing is written: it goes ahead only when the caller accepts what
+is not checked, with unchecked access (the library's
+`PublishOptions::unchecked_access`, the command line's
+`--unchecked-access`), and the command line then warns, naming it. On
+Linux, which checks everything, unchecked access changes nothing.
+Elsewhere, the BSDs included, publishing is refused, with `tx.io`, and
+nothing is written: they are untested. Previewing and rebasing work
+everywhere.
 
 Publishing a carried-out transaction works on the root it was carried out
 on: through directory handles, the directory opened then, whatever its
@@ -536,14 +544,14 @@ section 14) at the edited files.
 | `tx.result` | Replaying the transaction gave other bytes than its `result`. |
 | `tx.path` | A path no transaction may touch, or a symbolic link in the way. |
 | `tx.limit` | A limit of section 11. |
-| `tx.io` | Reading or writing failed. |
+| `tx.io` | Reading or writing failed, or publishing is refused on this platform or for the access of the files (section 9). |
 
 ## 13. Command line
 
 ```sh
 tilewright tx preview [--json] TRANSACTION ROOT
 tilewright tx rebase TRANSACTION ROOT OUTPUT
-tilewright tx apply TRANSACTION ROOT INVERSE
+tilewright tx apply [--unchecked-access] TRANSACTION ROOT INVERSE
 ```
 
 `preview` carries the transaction out and prints the files it would create
@@ -553,3 +561,7 @@ tree as it is to `OUTPUT`. `apply` writes the inverse to `INVERSE`, then
 publishes. Neither replaces an existing file, and neither writes into the
 source tree's `world.jsonc`, `profile/`, `planes/` or `defs/`, or at
 `.world.jsonc.tilewright-tmp`, where publishing stages `world.jsonc`.
+On macOS and Windows `apply` refuses, before writing anything, the
+inverse included, unless `--unchecked-access` accepts what publishing
+there does not check (section 9); it then warns on standard error,
+naming what is not checked.

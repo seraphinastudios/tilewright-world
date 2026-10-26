@@ -23,7 +23,7 @@ const USAGE: &str = "usage:
   tilewright diff [--json] [--allow ALLOWLIST] [--max-ids COUNT] OLD NEW
   tilewright tx preview [--json] TRANSACTION ROOT
   tilewright tx rebase TRANSACTION ROOT OUTPUT
-  tilewright tx apply TRANSACTION ROOT INVERSE
+  tilewright tx apply [--unchecked-access] TRANSACTION ROOT INVERSE
   tilewright --version
 
 inspect verifies the pack. It stops once the chunks decode to more than
@@ -40,7 +40,9 @@ be read.
 
 tx preview validates a transaction's result without writing; tx rebase
 writes it replayed on ROOT as it is now; tx apply writes the inverse to
-INVERSE, then applies it. OUTPUT and INVERSE must not exist.";
+INVERSE, then applies it. OUTPUT and INVERSE must not exist. On macOS and
+Windows tx apply does not check everything (SECURITY.md), so it refuses
+unless --unchecked-access accepts that; Linux checks everything.";
 
 fn main() -> ExitCode {
     // Paths need not be UTF-8, so arguments are read as OS strings.

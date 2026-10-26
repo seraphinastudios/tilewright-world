@@ -17,7 +17,10 @@
 //! beside its target, checks the files and validates the result again, and
 //! renames the staged files into place, restoring what it published if a
 //! later step fails. Each file changes atomically; the set of files does
-//! not, so the inverse is also the way to repair an interrupted apply.
+//! not, so the inverse is also the way to repair an interrupted apply. On
+//! macOS and Windows publishing does not check everything
+//! ([`UNCHECKED_ACCESS`]), so there it is refused unless the caller accepts
+//! that with [`Plan::publish_with`] and [`PublishOptions::unchecked_access`].
 //!
 //! ```no_run
 //! use std::path::Path;
@@ -47,7 +50,9 @@ mod terrain;
 mod transaction;
 mod uids;
 
-pub use publish::{PUBLISH_CONFINED, PUBLISH_SUPPORTED, PublishError, Published};
+pub use publish::{
+    PUBLISH_CONFINED, PUBLISH_SUPPORTED, PublishError, PublishOptions, Published, UNCHECKED_ACCESS,
+};
 pub use transaction::{Digests, FORMAT, Transaction};
 
 use engine::{Failure, Primitive, Workspace};
@@ -100,7 +105,8 @@ pub enum Code {
     Path,
     /// A bound of [`limits`] was exceeded.
     Limit,
-    /// Reading or writing failed.
+    /// Reading or writing failed, or publishing is refused on this
+    /// platform or for the access of the files.
     Io,
 }
 

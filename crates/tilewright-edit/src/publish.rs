@@ -120,13 +120,41 @@ fn not_applied(problems: Vec<Diagnostic>) -> PublishError {
 /// reached by path after checking it for links, which a local process
 /// changing the tree at the same moment can race, and access control lists
 /// are neither checked nor kept. So publishing there is supported only in
-/// trees that no one else can change. Other systems, the BSDs among them,
-/// are untested, and publishing is refused there.
+/// trees that no one else can change, and only when the caller accepts
+/// what is not checked ([`PublishOptions::unchecked_access`]). Other
+/// systems, the BSDs among them, are untested, and publishing is refused
+/// there.
 pub const PUBLISH_SUPPORTED: bool = cfg!(any(target_os = "linux", target_os = "macos", windows));
 
 /// Whether publishing here keeps every guarantee of the specification:
 /// only on Linux (see [`PUBLISH_SUPPORTED`]).
 pub const PUBLISH_CONFINED: bool = cfg!(target_os = "linux");
+
+/// What publishing here does not check, where it is supported but does not
+/// keep every guarantee (on macOS and Windows), for a caller to show its
+/// user; `None` elsewhere. Publishing there is refused unless the caller
+/// accepts it with [`PublishOptions::unchecked_access`].
+pub const UNCHECKED_ACCESS: Option<&str> = if cfg!(target_os = "macos") {
+    Some(
+        "access control lists are neither checked nor kept: a file replaced, or made again by an inverse or a rollback, gets only the access its directory gives a new file, so a file whose own list keeps users out that its mode lets in can become readable by them",
+    )
+} else if cfg!(windows) {
+    Some(
+        "access control lists are neither checked nor kept: a file replaced, or made again by an inverse or a rollback, gets only the list its directory gives a new file, so a file whose own list keeps users out can become readable by them; and files are reached by path, so a process changing the tree during the apply can redirect a write, rename or removal by swapping a link in",
+    )
+} else {
+    None
+};
+
+/// How to publish a plan.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PublishOptions {
+    /// Publish even though the platform does not check everything that
+    /// [`UNCHECKED_ACCESS`] names: on macOS and Windows. Without it,
+    /// publishing there is refused, with a `tx.io` diagnostic, and nothing
+    /// is written. Linux checks everything, so there it changes nothing.
+    pub unchecked_access: bool,
+}
 
 /// Why publishing is refused where it is not supported.
 const UNSUPPORTED: &str = "applying a transaction is supported only on Linux, macOS and Windows; preview and rebase work everywhere";
@@ -793,6 +821,16 @@ impl Plan {
         }
     }
 
+    /// Writes the plan's files with the default [`PublishOptions`]: on macOS
+    /// and Windows, which do not check everything, that refuses. See
+    /// [`Plan::publish_with`].
+    ///
+    /// # Errors
+    /// As [`Plan::publish_with`].
+    pub fn publish(&self) -> Result<Published, PublishError> {
+        self.publish_with(&PublishOptions::default())
+    }
+
     /// Writes the plan's files. The root's lock is held throughout. Every
     /// file the plan touched or consulted must still be as it was planned,
     /// and the tree with the plan's files must still validate, since files
@@ -807,12 +845,24 @@ impl Plan {
     /// Cleanup that could not be done and directories that could not be
     /// synced are reported too, with `cleaned` or `durable` unset, whether
     /// or not every file was published. Where [`PUBLISH_SUPPORTED`] is
-    /// false, publishing is refused with a `tx.io` diagnostic, and a plan
-    /// with two files whose paths differ only in case with a `tx.path` one;
-    /// either way nothing is written.
-    pub fn publish(&self) -> Result<Published, PublishError> {
+    /// false, publishing is refused with a `tx.io` diagnostic; so it is
+    /// where [`UNCHECKED_ACCESS`] names what is not checked and `options`
+    /// do not accept it; and a plan with two files whose paths differ only
+    /// in case with a `tx.path` one. Each time nothing is written.
+    pub fn publish_with(&self, options: &PublishOptions) -> Result<Published, PublishError> {
         if !PUBLISH_SUPPORTED {
             return Err(not_applied(problem(".", Code::Io, UNSUPPORTED)));
+        }
+        if let Some(unchecked) = UNCHECKED_ACCESS
+            && !options.unchecked_access
+        {
+            return Err(not_applied(problem(
+                ".",
+                Code::Io,
+                format!(
+                    "publishing here does not check everything ({unchecked}); it is refused unless the caller accepts that with unchecked access, so nothing was written"
+                ),
+            )));
         }
         if let Some(problems) = self.path_aliases() {
             return Err(not_applied(problems));

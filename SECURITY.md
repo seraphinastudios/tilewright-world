@@ -62,8 +62,13 @@ platform:
 
 So on macOS and Windows applying transactions is supported only in a tree
 that no one else can change and in which no file or directory has an
-access control list of its own. On other platforms, the BSDs among them,
-applying is refused; previewing and rebasing work everywhere. On every
+access control list of its own. Nothing there checks that, so applying is
+refused by default and goes ahead only when the caller accepts it
+explicitly: `PublishOptions::unchecked_access` in the library,
+`tilewright tx apply --unchecked-access` on the command line, which then
+warns, naming what is not checked. Linux checks everything and needs no
+such consent. On other platforms, the BSDs among them, applying is
+refused; previewing and rebasing work everywhere. On every
 platform the access checks are made before anything is written and again
 just before the first rename, but as with verifying packs, applying
 transactions in a tree that others can write to is not supported: such a

@@ -71,7 +71,8 @@ rebase` replays it on the tree as it is and records the new base; `tx
 apply` writes its inverse, then applies it: with every guarantee on Linux,
 and as a best effort on macOS and Windows, where it is supported only in
 trees no one else can change and without access control lists of their
-own (see SECURITY.md and docs/spec/TRANSACTIONS.md section 9).
+own, and runs only with `--unchecked-access`, which accepts that those
+are not checked (see SECURITY.md and docs/spec/TRANSACTIONS.md section 9).
 `fixtures/basic` is a small synthetic world that uses every feature of the
 format except terrain transitions, which `fixtures/terrain` shows.
 
