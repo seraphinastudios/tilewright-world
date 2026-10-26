@@ -43,8 +43,16 @@ export function initialize(source) {
     return Promise.resolve();
   }
   if (state === "unloaded") {
+    // Normalizing can throw, as a `then` getter can; the module is then
+    // still unloaded.
+    let module_or_path;
+    try {
+      module_or_path = source === undefined ? undefined : fetchable(source);
+    } catch (error) {
+      return Promise.reject(error);
+    }
     state = "loading";
-    loading = initialize_(source === undefined ? undefined : { module_or_path: fetchable(source) }).then(
+    loading = initialize_(module_or_path === undefined ? undefined : { module_or_path }).then(
       () => {
         state = "ready";
       },
@@ -83,18 +91,22 @@ function branded(value, type) {
   }
 }
 
+// A source as the loader takes it. A promise, of any realm, is settled
+// first, and what it settles to is normalized as a declared promised
+// source is: a Response of another realm becomes its body, and a URL,
+// string or Request is not fetched.
 function fetchable(source) {
-  // A promise, of any realm, is normalized once it settles.
   if (typeof source === "object" && source !== null && typeof source.then === "function") {
-    return Promise.resolve(source).then(fetchable);
-  }
-  if (branded(source, globalThis.Response)) {
-    return source.arrayBuffer();
+    return Promise.resolve(source).then(body);
   }
   if (branded(source, globalThis.Request) || branded(source, globalThis.URL)) {
     return fetch(source);
   }
-  return source;
+  return body(source);
+}
+
+function body(source) {
+  return branded(source, globalThis.Response) ? source.arrayBuffer() : source;
 }
 
 /**

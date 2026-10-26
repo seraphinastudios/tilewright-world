@@ -31,6 +31,15 @@ async function withoutTableGrowth(run) {
 }
 
 test("initialize() can be retried after a failed download or compilation, not after a failed start", async () => {
+  // A source whose normalization throws, as a hostile `then` getter does,
+  // rejects and leaves the module unloaded.
+  const hostile = Object.defineProperty({}, "then", {
+    get() {
+      throw new SyntaxError("hostile then");
+    },
+  });
+  await assert.rejects(initialize(hostile), /hostile then/);
+  assert.throws(() => openPack(valid), /initialize/);
   await assert.rejects(initialize(broken), WebAssembly.CompileError);
   assert.throws(() => openPack(valid), /initialize/);
   // The instance's start fails once wasm-bindgen has installed it.
