@@ -416,50 +416,13 @@ jobs:
           if [[ ${NPM} == true ]]; then npm_flag=(--npm); fi
           python3 tools/release/package.py verify --version "${VERSION}" "${npm_flag[@]}" dist/release
 
-      # Both tags are created first, at the revision, in one atomic push.
-      # Pushing a new tag fails if it exists, so the release cannot end up on
-      # a tag someone else created at another commit, and neither tag exists
-      # without the other. A re-run accepts tags a failed attempt left at the
-      # revision, and a release that attempt already published, which the
-      # last step checks like a new one.
+      # Both tags first, at the revision, in one atomic push; tags.sh says
+      # why, and how a re-run picks up what a failed attempt left.
       - name: Create the release and Go tags
         id: tag
-        run: |
-          set -euo pipefail
-          missing=()
-          for tag in "${TAG}" "${GO_TAG}"; do
-            tagged=$(gh api "repos/${GH_REPO}/git/ref/tags/${tag}" --jq '.object.type + " " + .object.sha' 2>/dev/null || true)
-            if [[ -z ${tagged} ]]; then
-              missing+=("${REVISION}:refs/tags/${tag}")
-            elif [[ ${tagged} != "commit ${REVISION}" ]]; then
-              echo "::error::${tag} exists and does not point at ${REVISION}"
-              exit 1
-            else
-              echo "::notice::${tag} already points at ${REVISION}"
-            fi
-          done
-          if [[ ${#missing[@]} -gt 0 ]]; then
-            # The token reaches git through the environment, not the command line.
-            auth=$(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 -w0)
-            echo "::add-mask::${auth}"
-            GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
-              GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth}" \
-              git push --atomic origin "${missing[@]}"
-          fi
-          if [[ $(gh api "repos/${GH_REPO}/releases/tags/${TAG}" --jq .draft 2>/dev/null || true) == false ]]; then
-            echo "::notice::${TAG} is already published; checking it"
-            echo "published=true" >>"${GITHUB_OUTPUT}"
-          else
-            # A failed attempt may have left a draft for the tag; drafts are
-            # private and mutable, and the release is created afresh.
-            gh api --paginate "repos/${GH_REPO}/releases" \
-              | jq -r --arg tag "${TAG}" '.[] | select(.draft and .tag_name == $tag) | .id' \
-              | while read -r draft; do
-                  echo "::notice::deleting draft release ${draft} left for ${TAG}"
-                  gh api --method DELETE "repos/${GH_REPO}/releases/${draft}"
-                done
-            echo "published=false" >>"${GITHUB_OUTPUT}"
-          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash tools/release/tags.sh
 
       - name: Write the release notes
         if: steps.tag.outputs.published != 'true'
