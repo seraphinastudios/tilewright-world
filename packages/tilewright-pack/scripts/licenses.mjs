@@ -92,13 +92,19 @@ function leadingComment(path) {
     .trim();
 }
 
-/** A crate's license files: the MIT ones where it offers MIT, else all. */
+/**
+ * A crate's license files: the MIT ones where its license is a choice that
+ * offers MIT, else all. An expression with AND, such as `(MIT OR
+ * Apache-2.0) AND Unicode-3.0`, requires more than the choice, so it keeps
+ * all of them.
+ */
 function licenseFiles(directory, license) {
   const files = readdirSync(directory)
     .filter((name) => /^(licen[cs]e|copying|notice|unlicense)([-._].*)?$/i.test(name))
-    .sort();
+    .sort(byCodeUnit);
   const mit = files.filter((name) => /mit|notice/i.test(name));
-  return /\bMIT\b/.test(license ?? "") && mit.some((name) => /mit/i.test(name)) ? mit : files;
+  const choice = /\bMIT\b/.test(license ?? "") && !/\bAND\b/.test(license ?? "");
+  return choice && mit.some((name) => /mit/i.test(name)) ? mit : files;
 }
 
 const sqlite = crate("sqlite-wasm-rs");
