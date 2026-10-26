@@ -291,11 +291,16 @@ source releases (its `docs/CRATE-RELEASE.md`):
   The ruleset keeps such tags from being deleted, so the plan job of every
   later run on that branch stops until that release is published.
 - **"Publish the GitHub release" failed its checks after publishing**: the
-  release exists. Do not delete it. Read the error, fix the cause (for
-  example, turn immutable releases back on), then re-run the failed jobs:
-  the re-run skips publishing, checks the existing release again, and goes
-  on to npm. A release that came out mutable stays as it is
-  for the owner to review.
+  release exists. Do not delete an immutable release. Read the error, fix
+  the cause, then re-run the failed jobs: the re-run skips publishing,
+  checks the existing release again, and goes on to npm.
+- **The release came out mutable** (immutable releases were off when it was
+  published): GitHub cannot make it immutable afterwards, so its checks
+  keep failing, and the plan job of every later run on the branch stops at
+  it. To repair it, turn immutable releases back on, delete the release
+  and its two tags (which takes the owner's bypass of the tag ruleset), and
+  re-run the failed jobs within 30 days. The re-run creates both tags and
+  the release again from the same attested assets.
 - **"Publish to npm" failed**: re-run it. It checks the release again and
   publishes from the release's commit. If npm already has that version, the
   publication succeeded earlier.

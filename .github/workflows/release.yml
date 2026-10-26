@@ -119,10 +119,12 @@ jobs:
           echo "::notice title=Release plan::$(jq -r .reason "${plan}")"
           # A release tag is created before its release is published. If a
           # run failed in between, finish that release before any newer one,
-          # which would otherwise count from a tag that has no release.
+          # which would otherwise count from a tag that has no release. A
+          # release that came out mutable stops newer ones too, until the
+          # owner has dealt with it.
           previous=$(jq -r '.previous_tag // empty' "${plan}")
-          if [[ -n ${previous} ]] && [[ $(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${previous}" --jq .draft || true) != false ]]; then
-            echo "::error::${previous}, the latest release tag on ${BRANCH}, has no published release. Re-run the failed jobs of the run that created it first; see docs/RELEASING.md."
+          if [[ -n ${previous} ]] && [[ $(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${previous}" --jq '.draft == false and .immutable == true' || true) != true ]]; then
+            echo "::error::${previous}, the latest release tag on ${BRANCH}, has no published immutable release. Finish or repair that release first; see \"When a release fails\" in docs/RELEASING.md."
             exit 1
           fi
           publish=$(jq -r .publish "${plan}")
