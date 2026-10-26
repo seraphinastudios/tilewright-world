@@ -88,7 +88,7 @@ configures the commit analyzer with it, as in the other two repositories:
 | Push before any `vX.Y.Z` tag exists | The plan job only, which says the first release has to be started by hand. Merging never cuts the first release. |
 | Run workflow (`workflow_dispatch`) on `main` | The same as a push, except that it can also cut the first release |
 | Run workflow on a maintenance branch `MAJOR.MINOR.x` | The plan job only, which says what it would release; publishing from maintenance branches is off |
-| Pull request that changes the release workflows, `scripts/release/`, `tools/release/`, `tools/build-wasm.sh`, `packages/tilewright-pack/`, `rust-toolchain.toml`, `Cargo.lock` or a `Cargo.toml` | The tests, plan, five builds, npm build and packaging under the version `0.0.0-check.N` (N is the pull request number), as a check. A pull request into another pull request's branch is planned as one into `main`. Nothing is attested or published. |
+| Pull request that changes the release workflows, `.releaserc.json`, `scripts/release/`, `tools/release/`, `tools/build-wasm.sh`, `packages/tilewright-pack/`, `rust-toolchain.toml`, `Cargo.lock` or a `Cargo.toml` | The tests, plan, five builds, npm build and packaging under the version `0.0.0-check.N` (N is the pull request number), as a check. A pull request into another pull request's branch is planned as one into `main`. Nothing is attested or published: the plan job never plans publication for a pull request, and the attest, release and npm jobs refuse to run for one. |
 
 To cut the first release, run the Release workflow on `main`, either from
 the Actions tab or with:
@@ -107,6 +107,12 @@ release, because a merge's run stops at that release. Start such a run
 again once no Release run is queued on `main`. Before the first release,
 runs only plan, so they take a minute or two.
 
+The same holds the other way round. A re-run of an older run joins the
+same queue, and if a merge's run is waiting there, GitHub cancels that
+run. Before you re-run an older run's jobs, check that no Release run is
+waiting on `main`. Otherwise, run the workflow on `main` once the re-run
+is done, so the cancelled merge is released.
+
 Releases of a branch run one at a time. If several merges land while a
 release runs, the next run releases them together. Each branch queues on
 its own, so a maintenance release never displaces a release of `main`.
@@ -115,7 +121,7 @@ its own, so a maintenance release never displaces a release of `main`.
 
 | Job | Runner | Permissions | Does |
 | --- | --- | --- | --- |
-| Plan release | ubuntu-24.04 | `contents: read` | Runs the policy, planner and packaging tests, then `scripts/release/plan.mjs`, which finds the last release tag the branch contains, analyzes the commits since it, and decides the version and whether to publish. Stops if that last tag has no published, immutable release. |
+| Plan release | ubuntu-24.04 | `contents: read` | Runs the policy, planner and packaging tests, then `scripts/release/plan.mjs`, which finds the last release tag the branch contains, analyzes the commits since it, and decides the version and whether to publish. Checks that the plan is for the run's own commit and branch, and that the tags follow from the version. Every later job builds the run's commit, not a commit the planner names. Except for pull requests, stops if that last tag has no published, immutable release. |
 | Revalidate | ubuntu-24.04 | `contents: read` | Runs `validate.yml`, so `tools/validate.sh`, on the released commit |
 | Build TARGET | one per platform | `contents: read` | `tools/release/build.sh`: builds with the pinned toolchain and `--locked`, then runs the binary to validate, compile and verify `fixtures/basic` |
 | Build the npm package | ubuntu-24.04 | `contents: read` | `tools/build-wasm.sh`, then `npm pack` at the release version (only when `packages/tilewright-pack/package.json` exists) |
@@ -206,7 +212,10 @@ The pipeline changes no settings. It relies on:
   Go checksum database is what pins a Go version: it rejects changed
   content for any version that someone has fetched once.
 - **The Actions allowlist**, for checkout, setup-node, upload-artifact,
-  download-artifact and attest-build-provenance.
+  download-artifact, attest-build-provenance and the `actions/attest` it
+  calls, and `actions/setup-go`, which Revalidate runs through
+  `validate.yml`. `dependency-review.yml` also needs
+  `actions/dependency-review-action`.
 
 Repository writers are trusted. Anyone who can push a branch can run
 workflow code of their own with `contents: write` and create tags and
@@ -294,7 +303,8 @@ source releases (its `docs/CRATE-RELEASE.md`):
 
 - **Anything before "Publish the GitHub release"**: nothing was published.
   Fix the cause. The next merge releases everything since the last
-  release, or re-run the failed jobs.
+  release, or re-run the failed jobs. A failed first release is not
+  retried by a merge: run the workflow on `main` again.
 - **"Publish the GitHub release" failed before publishing**: the tags may
   exist, and a draft release may be left, but nothing is published. Re-run
   the failed jobs within 30 days, while the run's artifacts last. The re-run
@@ -302,6 +312,8 @@ source releases (its `docs/CRATE-RELEASE.md`):
   The re-run accepts tags the failed attempt created at the same commit.
   The ruleset keeps such tags from being deleted, so the plan job of every
   later run on that branch stops until that release is published.
+  Nothing re-runs the merges whose runs stopped there, so once the release
+  is published, run the workflow on `main` to release them.
   A re-run runs the workflow of the run's own commit, so it cannot pick
   up a fix to the workflow, and it fails once the artifacts have expired.
   If a re-run cannot succeed, nothing has been published, and the owner
@@ -316,7 +328,10 @@ source releases (its `docs/CRATE-RELEASE.md`):
      tilewright-editor and tilewright-renderer. Add `tilewright-world` to
      its excluded repositories, delete both tags, then remove the
      exclusion.
-  3. Run the workflow again.
+  3. Run the workflow on `main` again. If the failure needed a fix to the
+     workflow, merge the fix after step 2 instead, and its merge's run
+     cuts the release. Pull request checks skip the unfinished-release
+     check, so the fix's checks can pass while the tags still exist.
 - **"Publish the GitHub release" failed its checks after publishing**: the
   release exists. Do not delete an immutable release. Read the error, fix
   the cause, then re-run the failed jobs: the re-run skips publishing,
@@ -329,8 +344,9 @@ source releases (its `docs/CRATE-RELEASE.md`):
   `gh api --method PATCH repos/seraphinastudios/tilewright-world/releases/RELEASE_ID -F draft=true`.
   Then re-run the failed jobs within 30 days. The re-run accepts the tags,
   deletes the draft and publishes the release afresh, now immutable, from
-  the same attested assets. After 30 days, delete the release instead and
-  start over as described above.
+  the same attested assets. Then run the workflow on `main` to release the
+  merges whose runs stopped at it. After 30 days, delete the release
+  instead and start over as described above.
 - **"Publish to npm" failed**: re-run it. It checks the release again and
   publishes from the release's commit. If npm already has that version,
   the job compares npm's copy with the release's tarball and succeeds if

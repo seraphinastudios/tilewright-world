@@ -42,8 +42,10 @@ permissions: {}
 # pending run for a newer one. For merges that is safe: the newer run's
 # commit contains the older one's. A merge's run can neither cut the first
 # release nor finish an unpublished one, so a waiting dispatch or re-run
-# that it displaces has to be started again (docs/RELEASING.md). Each branch
-# has its own group, so a maintenance release never displaces one of main.
+# that it displaces has to be started again, and a re-run of an older run
+# displaces a waiting merge's run (docs/RELEASING.md says what to do). Each
+# branch has its own group, so a maintenance release never displaces one of
+# main.
 concurrency:
   group: ${{ github.event_name == 'pull_request' && format('world-release-check-{0}', github.event.pull_request.number) || format('world-release-{0}', github.ref) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
