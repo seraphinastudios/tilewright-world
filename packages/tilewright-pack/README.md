@@ -136,7 +136,8 @@ verifies has none.
 [PACK.md](../../docs/spec/PACK.md) section 4, such as `pack.chunk_record` or
 `pack.digest`. Bytes in memory never fail with `pack.io` or
 `pack.not_a_file`, and a pack too large for the module's memory fails with
-`pack.sqlite`. Invalid arguments throw `TypeError`.
+`pack.sqlite`. Invalid arguments throw `TypeError`, as does a key longer
+than 1,048,576 characters, which no valid pack has.
 
 A call into the module that fails other than by rejecting a pack, such as
 a trap from running out of memory (a `WebAssembly.RuntimeError`) or a

@@ -211,8 +211,14 @@ function argument(condition, message) {
   }
 }
 
+// The longest key a read takes, in UTF-16 code units. A pack's keys are
+// identifiers of at most 128 bytes, so this is generous; a longer key is
+// refused rather than copied into the module's memory, which never shrinks.
+const MAX_KEY = 2 ** 20;
+
 function text(value, name) {
   argument(typeof value === "string", `${name} must be a string`);
+  argument(value.length <= MAX_KEY, `${name} must be at most ${MAX_KEY} characters`);
   return value;
 }
 

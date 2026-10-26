@@ -400,7 +400,7 @@ test("options are read from the bag's own properties only", async () => {
   }
 });
 
-test("keys of any length are looked up, as the other readers look them up", async () => {
+test("keys are looked up as the other readers look them up, up to a generous length", async () => {
   await initialize(module);
   const pack = openPack(valid);
   // A damaged pack can hold a row whose key is longer than an identifier
@@ -428,6 +428,16 @@ test("keys of any length are looked up, as the other readers look them up", asyn
     pack.chunkKeys(long, 0),
   ]) {
     assert.deepEqual([...listing], []);
+  }
+  // The longest key is looked up; a longer one is refused, not copied into
+  // the module's memory.
+  assert.equal(pack.plane("a".repeat(2 ** 20)), undefined);
+  for (const read of [
+    () => pack.plane("a".repeat(2 ** 20 + 1)),
+    () => pack.zone("overworld", "a".repeat(2 ** 20 + 1)),
+    () => pack.definitions("a".repeat(2 ** 20 + 1)),
+  ]) {
+    assert.throws(read, (error) => error instanceof TypeError && /at most 1048576 characters/.test(error.message));
   }
   pack.close();
   assert.throws(() => pack.plane(long), /closed/);
