@@ -25,13 +25,12 @@ fi
 
 missing=()
 for tag in "${TAG}" "${GO_TAG}"; do
-  # When a request fails, gh prints the error body instead of the filter's
-  # output, so only a successful lookup says anything about the tag. A
-  # failed lookup counts as a missing tag, which is safe: the push below
-  # refuses a tag that exists at another commit.
-  if ! tagged=$(gh api "repos/${GH_REPO}/git/ref/tags/${tag}" --jq '.object.type + " " + .object.sha' 2>/dev/null); then
-    tagged=
-  fi
+  # matching-refs lists the refs that start with a name, and an empty list
+  # when there are none, so a failed request stops the script instead of
+  # passing for a missing tag. (A failed lookup of the tag itself prints
+  # gh's error body, not the --jq output.)
+  tagged=$(gh api --paginate "repos/${GH_REPO}/git/matching-refs/tags/${tag}" \
+    | jq -r --arg ref "refs/tags/${tag}" '.[] | select(.ref == $ref) | .object.type + " " + .object.sha')
   if [[ -z ${tagged} ]]; then
     missing+=("${REVISION}:refs/tags/${tag}")
   elif [[ ${tagged} != "commit ${REVISION}" ]]; then
@@ -43,6 +42,8 @@ for tag in "${TAG}" "${GO_TAG}"; do
 done
 if [[ ${#missing[@]} -gt 0 ]]; then
   # The token reaches git through the environment, not the command line.
+  # A tag someone creates after the lookup still stops the push, which
+  # does not force.
   auth=$(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 -w0)
   echo "::add-mask::${auth}"
   GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
@@ -50,13 +51,14 @@ if [[ ${#missing[@]} -gt 0 ]]; then
     git push --atomic origin "${missing[@]}"
 fi
 
-# GitHub finds only a published release by its tag.
-if published=$(gh api "repos/${GH_REPO}/releases/tags/${TAG}" --jq '.draft == false' 2>/dev/null) && [[ ${published} == true ]]; then
+# Every release, drafts included, from the list, so that a failed request
+# stops the script instead of passing for an unpublished release.
+releases=$(gh api --paginate "repos/${GH_REPO}/releases?per_page=100" | jq -c -s 'add // []')
+if jq -e --arg tag "${TAG}" 'any(.[]; .tag_name == $tag and .draft == false)' <<<"${releases}" >/dev/null; then
   echo "::notice::${TAG} is already published; checking it"
   echo "published=true" >>"${GITHUB_OUTPUT}"
 else
-  gh api --paginate "repos/${GH_REPO}/releases" \
-    | jq -r --arg tag "${TAG}" '.[] | select(.draft and .tag_name == $tag) | .id' \
+  jq -r --arg tag "${TAG}" '.[] | select(.draft and .tag_name == $tag) | .id' <<<"${releases}" \
     | while read -r draft; do
         echo "::notice::deleting draft release ${draft} left for ${TAG}"
         gh api --method DELETE "repos/${GH_REPO}/releases/${draft}" >/dev/null

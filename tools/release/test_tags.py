@@ -17,7 +17,9 @@ SCRIPT = Path(__file__).resolve().parent / "tags.sh"
 
 # Answers the gh api calls tags.sh makes. Tags come from the bare
 # repository, releases from a JSON state file. Like gh, a failed request
-# prints its error body on stdout and exits with 1.
+# prints its error body on stdout and exits with 1. The state can make the
+# ref or release lookups fail, or hide the refs, as if a tag were created
+# after the lookup.
 FAKE_GH = r'''#!/usr/bin/env python3
 import json, os, subprocess, sys
 
@@ -59,26 +61,24 @@ def answer(value):
                              stdout=subprocess.PIPE).stdout, end="")
 
 
-if path.startswith("git/ref/tags/"):
+if path.startswith("git/matching-refs/tags/") and method == "GET":
+    assert paginate
     if state.get("fail_ref_lookups"):
         fail(502, "Server Error")
-    ref = "refs/tags/" + path[len("git/ref/tags/"):]
-    bare = os.environ["FAKE_GH_BARE"]
-    found = subprocess.run(["git", "-C", bare, "rev-parse", "--verify", "--quiet", ref],
-                           text=True, stdout=subprocess.PIPE)
-    if found.returncode != 0:
-        fail(404, "Not Found")
-    kind = subprocess.run(["git", "-C", bare, "cat-file", "-t", ref], text=True, check=True,
-                          stdout=subprocess.PIPE).stdout.strip()
-    answer({"ref": ref, "object": {"type": kind, "sha": found.stdout.strip()}})
-elif path.startswith("releases/tags/"):
-    tag = path[len("releases/tags/"):]
-    published = [release for release in state["releases"] if release["tag_name"] == tag and not release["draft"]]
-    if not published:
-        fail(404, "Not Found")
-    answer(published[0])
-elif path == "releases" and method == "GET":
+    prefix = "refs/tags/" + path[len("git/matching-refs/tags/"):]
+    listed = subprocess.run(
+        ["git", "-C", os.environ["FAKE_GH_BARE"], "for-each-ref", "--format=%(refname) %(objecttype) %(objectname)",
+         "refs/tags/"], text=True, check=True, stdout=subprocess.PIPE).stdout.split("\n")
+    refs = []
+    for line in filter(None, listed):
+        ref, kind, sha = line.split(" ")
+        if ref.startswith(prefix) and not state.get("hide_refs"):
+            refs.append({"ref": ref, "object": {"type": kind, "sha": sha}})
+    answer(refs)
+elif path == "releases?per_page=100" and method == "GET":
     assert paginate
+    if state.get("fail_release_lookups"):
+        fail(502, "Server Error")
     answer(state["releases"])
 elif path.startswith("releases/") and method == "DELETE":
     identifier = int(path[len("releases/"):])
@@ -129,8 +129,8 @@ class TagsTest(unittest.TestCase):
         self.output.write_text("", encoding="utf-8")
         self.write_state(releases=[])
 
-    def write_state(self, releases: list[dict], fail_ref_lookups: bool = False) -> None:
-        state = {"releases": releases, "deleted": [], "fail_ref_lookups": fail_ref_lookups}
+    def write_state(self, releases: list[dict], **failures: bool) -> None:
+        state = {"releases": releases, "deleted": [], **failures}
         self.state.write_text(json.dumps(state), encoding="utf-8")
 
     def remote_tag(self, tag: str) -> str | None:
@@ -192,15 +192,40 @@ class TagsTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("::error::v0.2.0 exists and does not point at", result.stdout)
 
-    def test_a_failed_lookup_cannot_move_a_tag(self) -> None:
-        # The lookup fails, so the script pushes both tags; the push refuses
-        # the existing tag and, being atomic, creates neither.
-        git(self.work, "push", "--quiet", "origin", f"{self.older}:refs/tags/v0.2.0")
+    def test_only_the_exact_tag_counts(self) -> None:
+        # matching-refs also lists tags that merely start with the name.
+        git(self.work, "push", "--quiet", "origin", f"{self.older}:refs/tags/v0.2.0-rc.1")
+        git(self.work, "push", "--quiet", "origin", f"{self.older}:refs/tags/go/v0.2.01")
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.remote_tag("v0.2.0"), self.revision)
+        self.assertEqual(self.remote_tag("go/v0.2.0"), self.revision)
+
+    def test_a_failed_tag_lookup_stops_before_pushing(self) -> None:
         self.write_state(releases=[], fail_ref_lookups=True)
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIsNone(self.remote_tag("v0.2.0"))
+        self.assertIsNone(self.remote_tag("go/v0.2.0"))
+        self.assertEqual(self.output.read_text(encoding="utf-8"), "")
+
+    def test_a_tag_created_after_the_lookup_is_not_moved(self) -> None:
+        # The lookup misses the tag, so the script pushes both; the push
+        # refuses the existing tag and, being atomic, creates neither.
+        git(self.work, "push", "--quiet", "origin", f"{self.older}:refs/tags/v0.2.0")
+        self.write_state(releases=[], hide_refs=True)
         result = self.run_script()
         self.assertNotEqual(result.returncode, 0, result.stdout)
         self.assertEqual(self.remote_tag("v0.2.0"), self.older)
         self.assertIsNone(self.remote_tag("go/v0.2.0"))
+
+    def test_a_failed_release_lookup_stops_without_an_answer(self) -> None:
+        # Not knowing whether the release is published must not lead to
+        # publishing it again.
+        self.write_state(releases=[], fail_release_lookups=True)
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.output.read_text(encoding="utf-8"), "")
 
     def test_a_published_release_is_checked_not_recreated(self) -> None:
         git(self.work, "push", "--quiet", "origin", f"{self.revision}:refs/tags/v0.2.0")
