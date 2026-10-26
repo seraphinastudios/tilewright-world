@@ -2863,9 +2863,10 @@ fn the_root_listing_is_not_charged_to_the_load_budget() {
         .find(|entries| plan(root, &tx, &options(*entries)).is_ok())
         .unwrap();
     // Files at the root, which a load does not list, do not count: fill
-    // the root to the budget it has of its own.
+    // the root to the budget it has of its own, but for the lock file
+    // publishing makes there on Windows.
     let there = fs::read_dir(root).unwrap().count();
-    for index in 0..(smallest + 1).saturating_sub(there) {
+    for index in 0..smallest.saturating_sub(there) {
         fs::write(root.join(format!("note{index}.txt")), "").unwrap();
     }
     let plan = plan(root, &tx, &options(smallest)).unwrap();
