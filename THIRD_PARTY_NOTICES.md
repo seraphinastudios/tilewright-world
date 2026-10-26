@@ -27,7 +27,8 @@ target `rusqlite` takes SQLite from `sqlite-wasm-rs` instead of
 | Parts of [musl](https://musl.libc.org/) libc (string, stdlib, math and stdio functions) | `sqlite-wasm-rs` | MIT |
 | [printf](https://github.com/eyalroz/printf) | `sqlite-wasm-rs` | MIT |
 | `rsqlite-vfs` 0.1.1, SQLite's in-memory file system | `sqlite-wasm-rs` | MIT |
-| `wasm-bindgen` 0.2.129 and `js-sys` 0.3.106, and through `js-sys` `futures-core`, `futures-task`, `futures-util`, `pin-project-lite` and `slab` | `tilewright-pack-wasm` | MIT OR Apache-2.0 (`slab`: MIT) |
+| `hashbrown` 0.16.1, and through it `foldhash` 0.2.0, and `thiserror` 2.0.21 | `rsqlite-vfs` | MIT OR Apache-2.0 (`foldhash`: Zlib) |
+| `wasm-bindgen` 0.2.129, `wasm-bindgen-shared` 0.2.129 and `js-sys` 0.3.106; through `wasm-bindgen-shared` `unicode-ident` 1.0.27; and through `js-sys` `futures-core`, `futures-task`, `futures-util`, `pin-project-lite` and `slab` | `tilewright-pack-wasm` | MIT OR Apache-2.0 (`slab`: MIT; `unicode-ident`: (MIT OR Apache-2.0) AND Unicode-3.0) |
 
 The package carries `THIRD_PARTY_LICENSES.md`, the license text of every
 crate and C library compiled into the module. Its
