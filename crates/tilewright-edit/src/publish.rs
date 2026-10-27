@@ -22,9 +22,14 @@ thread_local! {
         std::cell::RefCell::new(None);
     /// Fails every directory sync, for tests.
     pub(crate) static FAIL_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Takes every directory to be on this file system, whose access
-    /// control publishing cannot check, for tests.
-    pub(crate) static FOREIGN: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+    /// Takes the directory, the first, to be on the file system named
+    /// second, whose access control lists publishing does not read, for
+    /// tests.
+    pub(crate) static FOREIGN: std::cell::Cell<Option<(&'static str, &'static str)>> =
+        const { std::cell::Cell::new(None) };
+    /// Fails removing the entry at this path, for tests.
+    pub(crate) static FAIL_REMOVE: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Why publishing did not finish.
@@ -124,23 +129,26 @@ fn not_applied(problems: Vec<Diagnostic>) -> PublishError {
 /// changing the tree at the same moment can race, and access control lists
 /// are neither checked nor kept. So publishing there is supported only in
 /// trees that no one else can change, and only when the caller accepts
-/// what is not checked ([`PublishOptions::unchecked_access`]). Other
+/// what is not checked ([`PublishOptions::unchecked_access`]); so it is on
+/// Linux in a tree on any file system but the local ones whose access
+/// control lists publishing reads ([`Plan::unchecked_access`]). Other
 /// systems, the BSDs among them, are untested, and publishing is refused
 /// there.
 pub const PUBLISH_SUPPORTED: bool = cfg!(any(target_os = "linux", target_os = "macos", windows));
 
 /// Whether publishing here keeps every guarantee of the specification:
-/// only on Linux (see [`PUBLISH_SUPPORTED`]), and there only on file
-/// systems that show their access control lists (see
+/// only on Linux (see [`PUBLISH_SUPPORTED`]), and there only on the local
+/// file systems whose access control lists publishing reads (see
 /// [`Plan::unchecked_access`]).
 pub const PUBLISH_CONFINED: bool = cfg!(target_os = "linux");
 
 /// What publishing here does not check, where it is supported but does not
 /// keep every guarantee (on macOS and Windows), for a caller to show its
 /// user; `None` elsewhere. Publishing there is refused unless the caller
-/// accepts it with [`PublishOptions::unchecked_access`]. On Linux it can
-/// still be refused for a tree on a file system whose access control lists
-/// Linux does not show; [`Plan::unchecked_access`] says, for a plan.
+/// accepts it with [`PublishOptions::unchecked_access`]. On Linux it is
+/// refused too for a tree on any file system but the local ones whose
+/// access control lists publishing reads; [`Plan::unchecked_access`] says
+/// what a plan needs accepted, on every platform.
 pub const UNCHECKED_ACCESS: Option<&str> = if cfg!(target_os = "macos") {
     Some(UNKEPT_LISTS)
 } else if cfg!(windows) {
@@ -159,10 +167,11 @@ const UNKEPT_LISTS: &str = "access control lists are neither checked nor kept: a
 pub struct PublishOptions {
     /// Publish even though publishing does not check everything, as
     /// [`Plan::unchecked_access`] says: on macOS and Windows, and on Linux
-    /// in a tree on a file system whose access control lists Linux does
-    /// not show (SMB, 9p, FUSE or NTFS). Without it, publishing there is
-    /// refused, with a `tx.io` diagnostic, and nothing is written.
-    /// Elsewhere it changes nothing.
+    /// in a tree on any file system but the local ones whose access control
+    /// lists it reads (ext2, ext3, ext4, XFS, Btrfs, tmpfs, F2FS, ZFS,
+    /// overlayfs and bcachefs). Without it, publishing there is refused,
+    /// with a `tx.io` diagnostic, and nothing is written. Elsewhere it
+    /// changes nothing.
     pub unchecked_access: bool,
 }
 
@@ -255,6 +264,13 @@ impl<'r> Directories<'r> {
     /// there was none, or the directory is not empty. A removal records its
     /// parent as changed, to sync.
     fn remove(&mut self, path: &str, directory: bool) -> Result<bool, AccessError> {
+        #[cfg(test)]
+        if FAIL_REMOVE.with(|fail| fail.borrow().as_deref() == Some(path)) {
+            return Err(AccessError::Io(
+                path.to_owned(),
+                std::io::Error::other("injected removal failure"),
+            ));
+        }
         let (parent, name) = split(path);
         // A directory's own handle is closed first: on Windows a removal
         // may otherwise wait for it.
@@ -282,11 +298,7 @@ impl<'r> Directories<'r> {
         match self.remove(path, directory) {
             Ok(removed) => removed,
             Err(error) => {
-                self.leftover(diagnostic::file(
-                    path,
-                    Code::Io.as_str(),
-                    format!("could not be removed ({error}); remove it by hand"),
-                ));
+                self.leftover(unremoved(path, &error));
                 false
             }
         }
@@ -310,11 +322,7 @@ impl<'r> Directories<'r> {
                 Ok(true) => continue,
                 Ok(false) => matches!(self.root.directory(&path, false), Ok(None)),
                 Err(error) => {
-                    self.leftover(diagnostic::file(
-                        &path,
-                        Code::Io.as_str(),
-                        format!("could not be removed ({error}); remove it by hand"),
-                    ));
+                    self.leftover(unremoved(&path, &error));
                     continue;
                 }
             };
@@ -428,6 +436,19 @@ impl<'r> Directories<'r> {
             Err(error) => Some(io(path, &error)),
         }
     }
+}
+
+/// A leftover the cleanup could not remove: by hand, unless its removal
+/// took effect and only waits for another program to close it, as on
+/// Windows on some file systems.
+fn unremoved(path: &str, error: &AccessError) -> Diagnostic {
+    let message = if error.removal_pending() {
+        "is removed once another program that has it open closes it; there is nothing to do"
+            .to_owned()
+    } else {
+        format!("could not be removed ({error}); remove it by hand")
+    };
+    diagnostic::file(path, Code::Io.as_str(), message)
 }
 
 /// What publishing read of the files it changes and of the directories
@@ -576,18 +597,20 @@ fn survey(
 
 /// The first directory, among the root and those there are above each
 /// changed file, that is on a file system whose access control lists
-/// publishing cannot read, and that file system's name.
+/// publishing does not read, and that file system's name.
 fn foreign(
     directories: &mut Directories<'_>,
     changed: &[&FileChange],
-) -> Result<Option<(String, &'static str)>, Vec<Diagnostic>> {
+) -> Result<Option<(String, String)>, Vec<Diagnostic>> {
     let mut seen = BTreeSet::new();
     for file in changed {
         let mut directory = split(&file.path).0;
         while seen.insert(directory.to_owned()) {
             #[cfg(test)]
-            if let Some(name) = FOREIGN.with(std::cell::Cell::get) {
-                return Ok(Some((directory.to_owned(), name)));
+            if let Some((path, name)) = FOREIGN.with(std::cell::Cell::get)
+                && path == directory
+            {
+                return Ok(Some((directory.to_owned(), name.to_owned())));
             }
             let found = match directories.get(directory, None) {
                 Ok(Some(handle)) => handle.unchecked_file_system(),
@@ -607,8 +630,9 @@ fn foreign(
     Ok(None)
 }
 
-/// On Linux, refuses a tree on a file system whose access control lists it
-/// does not show, unless the caller accepts that with `unchecked_access`.
+/// On Linux, refuses a tree on a file system whose access control lists
+/// publishing does not read, unless the caller accepts that with
+/// `unchecked_access`.
 fn refuse_foreign(
     directories: &mut Directories<'_>,
     changed: &[&FileChange],
@@ -624,17 +648,17 @@ fn refuse_foreign(
             Code::Io,
             format!(
                 "{}; it is refused unless the caller accepts that with unchecked access, so nothing was written",
-                foreign_message(&directory, name)
+                foreign_message(&directory, &name)
             ),
         )),
     }
 }
 
 /// What is not checked in a directory on a file system whose access
-/// control lists publishing cannot read.
+/// control lists publishing does not read.
 fn foreign_message(directory: &str, name: &str) -> String {
     format!(
-        "{} is on a file system ({name}) whose access control lists Linux does not show, so {UNKEPT_LISTS}",
+        "{} is on a file system ({name}) other than the local ones whose access control lists publishing reads (ext2, ext3, ext4, XFS, Btrfs, tmpfs, F2FS, ZFS, overlayfs and bcachefs), so {UNKEPT_LISTS}",
         shown(directory)
     )
 }
@@ -811,9 +835,12 @@ impl Plan {
     /// the caller accepts it with [`PublishOptions::unchecked_access`], in
     /// words for the caller to show its user: [`UNCHECKED_ACCESS`] on macOS
     /// and Windows, and on Linux, where the tree, or a directory above a
-    /// file the plan changes, is on a file system whose access control
-    /// lists Linux does not show (SMB, 9p, FUSE or NTFS), that. `None` when
-    /// publishing checks everything, or is not supported here.
+    /// file the plan changes, is on a file system other than the local
+    /// ones whose access control lists publishing reads (ext2, ext3, ext4,
+    /// XFS, Btrfs, tmpfs, F2FS, ZFS, overlayfs and bcachefs), that, naming
+    /// the file system. `None` when publishing checks everything, or is not
+    /// supported here. Ask before writing the inverse, so that a refusal
+    /// writes nothing.
     ///
     /// # Errors
     /// The `tx.io` or `tx.path` diagnostics of a directory that could not
@@ -829,7 +856,7 @@ impl Plan {
         let changed: Vec<&FileChange> =
             self.files.iter().filter(|file| file.is_changed()).collect();
         Ok(foreign(&mut directories, &changed)?
-            .map(|(directory, name)| foreign_message(&directory, name)))
+            .map(|(directory, name)| foreign_message(&directory, &name)))
     }
 
     /// A file of the plan whose path another file system could take for
@@ -991,8 +1018,10 @@ impl Plan {
         }
     }
 
-    /// Writes the plan's files with the default [`PublishOptions`]: on macOS
-    /// and Windows, which do not check everything, that refuses. See
+    /// Writes the plan's files with the default [`PublishOptions`], which
+    /// refuse wherever [`Plan::unchecked_access`] names something publishing
+    /// does not check: on macOS and Windows, and on Linux on any file system
+    /// but the local ones whose access control lists it reads. See
     /// [`Plan::publish_with`].
     ///
     /// # Errors
@@ -1004,7 +1033,10 @@ impl Plan {
     /// Writes the plan's files. The root's lock is held throughout. Every
     /// file the plan touched or consulted must still be as it was planned,
     /// and the tree with the plan's files must still validate, since files
-    /// the plan did not touch may have changed since it was made.
+    /// the plan did not touch may have changed since it was made. A
+    /// directory deleting files emptied is removed, unless its mode or group
+    /// is not that of the directory above it, which an inverse would give
+    /// it: then it is left, empty.
     ///
     /// # Errors
     /// Returns a [`PublishError`]. With nothing written: a `tx.conflict`

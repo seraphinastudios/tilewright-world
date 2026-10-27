@@ -439,10 +439,11 @@ impl Directory {
         Ok(())
     }
 
-    /// The file system this directory is on, where Linux does not show its
-    /// access control lists; see [`unchecked_file_system`].
+    /// The file system this directory is on, by name, where it is not one
+    /// whose access control lists publishing reads; see
+    /// [`unchecked_file_system`].
     #[cfg(target_os = "linux")]
-    pub(crate) fn unchecked_file_system(&self) -> Result<Option<&'static str>, Refused> {
+    pub(crate) fn unchecked_file_system(&self) -> Result<Option<String>, Refused> {
         #[cfg(test)]
         if let Some(magic) = GIVEN_FILE_SYSTEM.with(std::cell::Cell::get) {
             return Ok(unchecked_file_system(magic));
@@ -458,7 +459,7 @@ impl Directory {
     /// Elsewhere access control lists are not read at all.
     #[cfg(not(target_os = "linux"))]
     #[allow(clippy::unnecessary_wraps, clippy::unused_self)]
-    pub(crate) fn unchecked_file_system(&self) -> Result<Option<&'static str>, Refused> {
+    pub(crate) fn unchecked_file_system(&self) -> Result<Option<String>, Refused> {
         Ok(None)
     }
 
@@ -536,28 +537,63 @@ const ACCESS_CONTROL_LISTS: [&str; 4] = [
     "system.richacl",
 ];
 
-/// File systems whose access control lists Linux does not show as the
-/// attributes above, by the magic number `statfs` gives: who may read a
-/// file there is not what its mode bits and those attributes say.
+/// The local file systems that keep their access control lists, where
+/// they have any, as the attributes above, by the magic number `statfs`
+/// gives: ext2, ext3 and ext4, XFS, Btrfs, tmpfs, F2FS, ZFS, overlayfs
+/// (whose layers are such file systems where it is used for a tree) and
+/// bcachefs. On any other, network, host-shared, FUSE and foreign ones
+/// among them, who may read a file may not be what its mode bits and
+/// those attributes say.
 #[cfg(target_os = "linux")]
-const UNCHECKED_FILE_SYSTEMS: [(u32, &str); 7] = [
+const CHECKED_FILE_SYSTEMS: [u32; 8] = [
+    0x0000_EF53,
+    0x5846_5342,
+    0x9123_683E,
+    0x0102_1994,
+    0xF2F5_2010,
+    0x2FC1_2FC1,
+    0x794C_7630,
+    0xCA45_1A4E,
+];
+
+/// The names of file systems that are not checked, for messages; any
+/// other is named by its magic number.
+#[cfg(target_os = "linux")]
+const FILE_SYSTEM_NAMES: [(u32, &str); 16] = [
     (0xFF53_4D42, "SMB"),
     (0xFE53_4D42, "SMB"),
     (0x0000_517B, "SMB"),
+    (0x0000_6969, "NFS"),
     (0x0102_1997, "9p"),
     (0x6573_5546, "FUSE"),
     (0x5346_544E, "NTFS"),
     (0x7366_746E, "NTFS"),
+    (0x786F_4256, "vboxsf"),
+    (0x7C7C_6673, "prl_fs"),
+    (0x6B41_4653, "AFS"),
+    (0x5346_414F, "AFS"),
+    (0x4750_4653, "GPFS"),
+    (0x00C3_6400, "Ceph"),
+    (0x0000_4D44, "FAT"),
+    (0x2011_BAB0, "exFAT"),
 ];
 
-/// The name of a file system whose access control lists Linux does not
-/// show, by its `statfs` magic number; `None` for any other.
+/// The name of the file system with this `statfs` magic number where it
+/// is not one of [`CHECKED_FILE_SYSTEMS`]; `None` where it is.
 #[cfg(target_os = "linux")]
-pub(crate) fn unchecked_file_system(magic: u32) -> Option<&'static str> {
-    UNCHECKED_FILE_SYSTEMS
-        .iter()
-        .find(|(known, _)| *known == magic)
-        .map(|(_, name)| *name)
+pub(crate) fn unchecked_file_system(magic: u32) -> Option<String> {
+    if CHECKED_FILE_SYSTEMS.contains(&magic) {
+        return None;
+    }
+    Some(
+        FILE_SYSTEM_NAMES
+            .iter()
+            .find(|(known, _)| *known == magic)
+            .map_or_else(
+                || format!("type {magic:#x}"),
+                |(_, name)| (*name).to_owned(),
+            ),
+    )
 }
 
 /// The mandatory access control labels Linux security modules keep, which

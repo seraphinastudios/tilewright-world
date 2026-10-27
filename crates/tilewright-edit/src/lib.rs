@@ -17,10 +17,12 @@
 //! beside its target, checks the files and validates the result again, and
 //! renames the staged files into place, restoring what it published if a
 //! later step fails. Each file changes atomically; the set of files does
-//! not, so the inverse is also the way to repair an interrupted apply. On
-//! macOS and Windows publishing does not check everything
-//! ([`UNCHECKED_ACCESS`]), so there it is refused unless the caller accepts
-//! that with [`Plan::publish_with`] and [`PublishOptions::unchecked_access`].
+//! not, so the inverse is also the way to repair an interrupted apply.
+//! Where publishing does not check everything, as [`Plan::unchecked_access`]
+//! says (on macOS and Windows, and on Linux on any file system but the
+//! local ones whose access control lists it reads), it is refused unless
+//! the caller accepts that with [`Plan::publish_with`] and
+//! [`PublishOptions::unchecked_access`]. Ask before writing the inverse.
 //!
 //! ```no_run
 //! use std::path::Path;
@@ -30,6 +32,12 @@
 //! let transaction = Transaction::parse("place-tree.jsonc", text).map_err(|problems| problems.len())?;
 //! let plan = plan(Path::new("content"), &transaction, &Options::default())
 //!     .map_err(|problems| problems.len())?;
+//! // Publishing that does not check everything is refused by default, so
+//! // ask first, before writing anything.
+//! if let Some(unchecked) = plan.unchecked_access().map_err(|problems| problems.len())? {
+//!     eprintln!("not applied: publishing here does not check everything: {unchecked}");
+//!     return Ok(());
+//! }
 //! // The inverse is the recovery record: written atomically and synced,
 //! // before anything is published.
 //! let durable = tilewright_edit::write_new(Path::new("undo.jsonc"), plan.inverse()).unwrap();

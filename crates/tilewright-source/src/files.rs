@@ -856,25 +856,35 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn file_systems_whose_access_control_lists_linux_does_not_show_are_named() {
+    fn only_local_file_systems_that_show_their_access_control_lists_are_checked() {
         let directory = tree();
         let root = super::beneath::Root::new(directory.path());
         let dir = root.directory(&["dir"], false).unwrap();
         // A test's own directory is on a local file system.
         assert_eq!(dir.unchecked_file_system().unwrap(), None);
+        // Only the local file systems that keep their lists as the
+        // attributes publishing reads are checked; any other is named, by
+        // its magic number where its name is not known.
         for (magic, name) in [
+            (0xEF53, None),
+            (0x5846_5342, None),
+            (0x9123_683E, None),
+            (0x0102_1994, None),
+            (0x2FC1_2FC1, None),
+            (0x794C_7630, None),
             (0xFF53_4D42, Some("SMB")),
-            (0xFE53_4D42, Some("SMB")),
             (0x0102_1997, Some("9p")),
             (0x6573_5546, Some("FUSE")),
             (0x7366_746E, Some("NTFS")),
-            (0xEF53, None),
-            (0x5846_5342, None),
+            (0x0000_6969, Some("NFS")),
+            (0x786F_4256, Some("vboxsf")),
+            (0x7C7C_6673, Some("prl_fs")),
+            (0x1234_5678, Some("type 0x12345678")),
         ] {
             super::beneath::GIVEN_FILE_SYSTEM.with(|given| given.set(Some(magic)));
             let found = dir.unchecked_file_system().unwrap();
             super::beneath::GIVEN_FILE_SYSTEM.with(|given| given.set(None));
-            assert_eq!(found, name, "{magic:x}");
+            assert_eq!(found.as_deref(), name, "{magic:x}");
         }
     }
 

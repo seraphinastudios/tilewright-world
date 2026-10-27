@@ -2789,31 +2789,105 @@ fn a_file_no_transaction_could_change_again_is_not_made() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn a_tree_whose_access_control_lists_linux_cannot_read_needs_consent() {
+fn a_tree_whose_access_control_lists_publishing_does_not_read_needs_consent() {
     let tree = copy();
     let root = tree.path();
     let before = snapshot(root);
-    let plan = planned(
+    let deleting = planned(
+        root,
+        &transaction(r#"{"op": "document.delete", "path": "defs/recipe/chest.jsonc"}"#),
+    );
+    let elsewhere = planned(
         root,
         &transaction(
             r#"{"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["title"], "value": "Changed"}"#,
         ),
     );
-    assert_eq!(plan.unchecked_access().unwrap(), None);
-    publish::FOREIGN.with(|foreign| foreign.set(Some("SMB")));
-    let unchecked = plan.unchecked_access().unwrap().unwrap();
-    let refused = plan.publish().unwrap_err();
-    let accepted = publish(&plan);
+    assert_eq!(deleting.unchecked_access().unwrap(), None);
+    // defs, a directory above the deleted file but not its own, is on a
+    // file system publishing does not read lists on; the root and planes
+    // are not.
+    publish::FOREIGN.with(|foreign| foreign.set(Some(("defs", "SMB"))));
+    let unchecked = deleting.unchecked_access().unwrap();
+    let refused = deleting.publish().unwrap_err();
+    let unaffected = elsewhere.unchecked_access().unwrap();
+    let accepted = publish(&deleting);
     publish::FOREIGN.with(|foreign| foreign.set(None));
-    assert!(unchecked.contains("(SMB)"), "{unchecked}");
+    let unchecked = unchecked.unwrap();
+    assert!(
+        unchecked.starts_with("defs is on a file system (SMB)"),
+        "{unchecked}"
+    );
     assert!(!refused.applied && refused.cleaned, "{refused:#?}");
+    assert_eq!(refused.problems[0].path, "defs", "{refused:#?}");
     assert!(
         has(&refused.problems, "tx.io", &unchecked)
             && has(&refused.problems, "tx.io", "unless the caller accepts"),
         "{refused:#?}"
     );
+    assert_eq!(unaffected, None);
     accepted.unwrap();
     assert_ne!(snapshot(root), before);
+}
+
+#[test]
+fn an_emptied_directory_that_cannot_be_removed_is_reported() {
+    let tree = copy();
+    let root = tree.path();
+    apply(
+        root,
+        &transaction(
+            r#"{"op": "object.insert", "plane": "overworld", "layer": 7, "at": [0, 0], "object": {"proto": "tree"}}"#,
+        ),
+    );
+    let plan = planned(
+        root,
+        &transaction(
+            r#"{"op": "object.remove", "plane": "overworld", "layer": 7, "at": [0, 0], "index": 0, "expect": {"proto": "tree"}}"#,
+        ),
+    );
+    publish::FAIL_REMOVE
+        .with(|fail| *fail.borrow_mut() = Some("planes/overworld/layers/7".to_owned()));
+    let outcome = publish(&plan);
+    publish::FAIL_REMOVE.with(|fail| *fail.borrow_mut() = None);
+    let failure = outcome.unwrap_err();
+    assert!(failure.applied && !failure.cleaned, "{failure:#?}");
+    assert_eq!(failure.problems.len(), 1, "{failure:#?}");
+    assert_eq!(failure.problems[0].path, "planes/overworld/layers/7");
+    assert!(
+        failure.problems[0].message.contains("remove it by hand"),
+        "{failure:#?}"
+    );
+    assert!(!root.join("planes/overworld/layers/7/0_0.jsonc").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_staging_entry_that_cannot_be_removed_is_reported_once() {
+    let tree = copy();
+    let root = tree.path().to_path_buf();
+    let plan = planned(
+        &root,
+        &transaction(r#"{"op": "document.delete", "path": "defs/recipe/chest.jsonc"}"#),
+    );
+    // The empty file staged beside the deleted one becomes a directory
+    // that is not empty, which removing a file cannot remove.
+    let staged = root.join("defs/recipe/.chest.jsonc.tilewright-tmp");
+    let hook_path = staged.clone();
+    let failure = publish_hooked(&plan, move || {
+        fs::remove_file(&hook_path).unwrap();
+        fs::create_dir(&hook_path).unwrap();
+        fs::write(hook_path.join("inside"), "").unwrap();
+    });
+    assert!(!failure.applied && !failure.cleaned, "{failure:#?}");
+    let reported = failure
+        .problems
+        .iter()
+        .filter(|problem| problem.path.ends_with(".chest.jsonc.tilewright-tmp"))
+        .count();
+    assert_eq!(reported, 1, "{failure:#?}");
+    assert!(root.join("defs/recipe/chest.jsonc").exists());
+    assert!(staged.is_dir());
 }
 
 #[test]

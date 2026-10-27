@@ -452,13 +452,16 @@ impl SourceDirectory {
             .map_err(|error| refused(&self.entry(name), error))
     }
 
-    /// The file system this directory is on, by name, where publishing
-    /// cannot read the access control lists of what is in it: on Linux an
-    /// SMB, 9p (such as WSL's Windows drives), FUSE or NTFS one, whose
-    /// lists Linux does not show as the attributes publishing reads.
-    /// `None` where it can, and on other platforms, which do not read
-    /// access control lists at all.
-    pub fn unchecked_file_system(&self) -> Result<Option<&'static str>, AccessError> {
+    /// The file system this directory is on, by name, or by its `statfs`
+    /// magic number, where publishing does not read the access control
+    /// lists of what is in it: on Linux any but the local ones that keep
+    /// them as the attributes publishing reads (ext2, ext3, ext4, XFS,
+    /// Btrfs, tmpfs, F2FS, ZFS, overlayfs and bcachefs), so network,
+    /// host-shared (such as WSL's Windows drives or a virtual machine's
+    /// shared folders), FUSE and NTFS ones among them. `None` where it
+    /// does, and on other platforms, which do not read access control
+    /// lists at all.
+    pub fn unchecked_file_system(&self) -> Result<Option<String>, AccessError> {
         self.directory
             .unchecked_file_system()
             .map_err(|error| refused(&self.path, error))

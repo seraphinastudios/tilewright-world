@@ -445,7 +445,7 @@ impl Directory {
 
     /// Access control lists are not read here at all.
     #[allow(clippy::unnecessary_wraps, clippy::unused_self, dead_code)]
-    pub(crate) fn unchecked_file_system(&self) -> Result<Option<&'static str>, Refused> {
+    pub(crate) fn unchecked_file_system(&self) -> Result<Option<String>, Refused> {
         Ok(None)
     }
 
