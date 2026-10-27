@@ -30,6 +30,15 @@ jobs:
           go-version-file: go/go.mod
           cache: false
 
+      # The Node.js packages/tilewright-pack/.node-version names, for the
+      # WebAssembly pack reader's tests. The reader's build tools are pinned
+      # and checksum-verified by tools/build-wasm.sh. No cache.
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: packages/tilewright-pack/.node-version
+          package-manager-cache: false
+
       - name: Validate
         run: tools/validate.sh
 

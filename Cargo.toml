@@ -5,6 +5,7 @@ members = [
   "crates/tilewright-edit",
   "crates/tilewright-jsonc",
   "crates/tilewright-pack",
+  "crates/tilewright-pack-wasm",
   "crates/tilewright-source",
 ]
 resolver = "3"
@@ -28,6 +29,18 @@ rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"
 sha2 = "0.11.0"
 tempfile = "3.27.0"
 zstd = { version = "0.14.3", default-features = false }
+# The WebAssembly reader. `wasm-bindgen` must be the version of the
+# `wasm-bindgen` command that tools/build-wasm.sh installs.
+js-sys = "=0.3.106"
+wasm-bindgen = "=0.2.129"
+
+# The WebAssembly reader's build (tools/build-wasm.sh): small over fast, as a
+# browser downloads it.
+[profile.wasm]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -38,6 +38,7 @@ All are drafts until format 1.0 is frozen.
 | `tilewright-diff` | Compares the IDs of two worlds, source trees or packs, and reports removals, additions and renames |
 | `tilewright-edit` | Transactions: lossless structural edits, preview, rebase, staged apply with rollback, and inverses |
 | `tilewright-cli` | The `tilewright` command |
+| `tilewright-pack-wasm` | The pack reader for WebAssembly, behind the browser package |
 
 ## Go pack reader
 
@@ -46,6 +47,14 @@ All are drafts until format 1.0 is frozen.
 reads and verifies packs for Go servers and tools. Its versions are tags of
 the form `go/vX.Y.Z`. It and the Rust reader run the same conformance
 fixtures, [`fixtures/packs`](fixtures/packs/README.md).
+
+## Browser pack reader
+
+[`packages/tilewright-pack`](packages/tilewright-pack/README.md) is the npm
+package `@seraphinastudios/tilewright-pack`: the Rust reader compiled to
+WebAssembly (`crates/tilewright-pack-wasm`) with a TypeScript-typed ESM API,
+for games that read packs in the browser. It runs the same conformance
+fixtures. `tools/build-wasm.sh` builds it.
 
 ## Command line
 
@@ -80,7 +89,9 @@ format except terrain transitions, which `fixtures/terrain` shows.
 
 ## Development
 
-Rust 1.97.1 and Go 1.27.2 are pinned.
+Rust 1.97.1, Go 1.27.2 and, for the browser package's tests, Node.js
+26.10.0 are pinned. `tools/validate.sh` also builds the browser package with
+the wasm tools that `tools/build-wasm.sh` pins and downloads once.
 
 ```sh
 tools/validate.sh

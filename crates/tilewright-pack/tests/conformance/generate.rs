@@ -353,6 +353,38 @@ fn open_cases(base: &mut Base<'_>, length: u64) {
             |path| sql(path, &change),
         );
     }
+    // SQLite's header bytes 18 and 19: the file format write and read
+    // versions, 1 in every pack.
+    for (name, rule, write, read) in [
+        (
+            "open-header-wal",
+            "the SQLite header declares WAL: file format versions 2 and 2",
+            2,
+            2,
+        ),
+        (
+            "open-header-write-version",
+            "the SQLite header's file format write version is 2",
+            2,
+            1,
+        ),
+        (
+            "open-header-read-version",
+            "the SQLite header's file format read version is 2",
+            1,
+            2,
+        ),
+    ] {
+        base.add(
+            Case::new(format!("{name}.twpack"), rule).open(ErrorCode::Identity),
+            |path| {
+                bytes(path, |data| {
+                    data[18] = write;
+                    data[19] = read;
+                });
+            },
+        );
+    }
     base.add(
         Case::new(
             "open-free-pages.twpack",
@@ -580,6 +612,9 @@ fn row_cases(base: &mut Base<'_>) {
             |path| sql(path, change),
         );
     }
+    // An ID longer than an identifier can be, which a lookup by that ID
+    // still finds and refuses.
+    let long_plane = format!("vault{}", "a".repeat(195));
     for (name, rule, change, op, read, code) in [
         (
             "plane-kind",
@@ -594,6 +629,16 @@ fn row_cases(base: &mut Base<'_>) {
             "a plane's ID is not an identifier",
             "UPDATE planes SET id = 'Vault', document = replace(document, '\"id\":\"vault\"', '\"id\":\"Vault\"') WHERE id = 'vault'",
             keyed_op("plane", ("id", "Vault"), None),
+            Some(ErrorCode::Plane),
+            ErrorCode::Plane,
+        ),
+        (
+            "plane-id-long",
+            "a plane's ID is longer than an identifier can be",
+            &format!(
+                "UPDATE planes SET id = '{long_plane}', document = replace(document, '\"id\":\"vault\"', '\"id\":\"{long_plane}\"') WHERE id = 'vault'"
+            ),
+            keyed_op("plane", ("id", &long_plane), None),
             Some(ErrorCode::Plane),
             ErrorCode::Plane,
         ),
@@ -638,11 +683,27 @@ fn row_cases(base: &mut Base<'_>) {
             ErrorCode::Zone,
         ),
         (
+            "zone-plane-id",
+            "a zone's plane is not an identifier",
+            "UPDATE zones SET plane = 'Attic' WHERE id = 'village'",
+            keyed_op("zone", ("plane", "Attic"), Some(("id", "village"))),
+            Some(ErrorCode::Zone),
+            ErrorCode::Zone,
+        ),
+        (
             "anchor-plane",
             "an anchor names a plane the pack does not have",
             "UPDATE anchors SET plane = 'attic' WHERE id = 'village.well'",
             keyed_op("anchor", ("plane", "attic"), Some(("id", "village.well"))),
             None,
+            ErrorCode::Anchor,
+        ),
+        (
+            "anchor-plane-id",
+            "an anchor's plane is not an identifier",
+            "UPDATE anchors SET plane = 'Attic' WHERE id = 'village.well'",
+            keyed_op("anchor", ("plane", "Attic"), Some(("id", "village.well"))),
+            Some(ErrorCode::Anchor),
             ErrorCode::Anchor,
         ),
         (

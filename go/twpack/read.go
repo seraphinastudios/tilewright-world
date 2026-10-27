@@ -506,27 +506,21 @@ type Zone struct {
 }
 
 func zoneSQL(where string) string {
-	return "SELECT " + boundedIdentifier("id") + ", parent IS NULL, " + boundedIdentifier("parent") + ", " +
-		boundedText("document", "?1") + " FROM zones " + where
+	return "SELECT " + boundedIdentifier("plane") + ", " + boundedIdentifier("id") + ", parent IS NULL, " +
+		boundedIdentifier("parent") + ", " + boundedText("document", "?1") + " FROM zones " + where
 }
 
-// scanZone reads the zones of plane.
-func scanZone(plane string) func(interface{ Scan(...any) error }) (Zone, error) {
-	return func(rows interface{ Scan(...any) error }) (Zone, error) {
-		zone, err := scanZoneRow(rows)
-		zone.Plane = plane
-		return zone, err
-	}
-}
-
-func scanZoneRow(rows interface{ Scan(...any) error }) (Zone, error) {
-	var id, parent, document sql.NullString
+// scanZone reads a zone row, whose plane, like its other keys, must be an
+// identifier.
+func scanZone(rows interface{ Scan(...any) error }) (Zone, error) {
+	var plane, id, parent, document sql.NullString
 	var root bool
-	if err := rows.Scan(&id, &root, &parent, &document); err != nil {
+	if err := rows.Scan(&plane, &id, &root, &parent, &document); err != nil {
 		return Zone{}, err
 	}
-	if !id.Valid || !isIdentifier(id.String) || (!root && (!parent.Valid || !isIdentifier(parent.String))) {
-		return Zone{}, reject(CodeZone, "a zone has an invalid ID or parent")
+	if !plane.Valid || !isIdentifier(plane.String) || !id.Valid || !isIdentifier(id.String) ||
+		(!root && (!parent.Valid || !isIdentifier(parent.String))) {
+		return Zone{}, reject(CodeZone, "a zone has an invalid plane, ID or parent")
 	}
 	document, err := nullableText(document, CodeZone)
 	if err != nil {
@@ -543,14 +537,14 @@ func scanZoneRow(rows interface{ Scan(...any) error }) (Zone, error) {
 	if !agrees {
 		return Zone{}, reject(CodeZone, "the document of zone "+id.String+" disagrees with its row")
 	}
-	return Zone{ID: id.String, Parent: parent.String, Document: document.String}, nil
+	return Zone{Plane: plane.String, ID: id.String, Parent: parent.String, Document: document.String}, nil
 }
 
 // Zone returns a zone of a plane, and whether the pack has it. Whether
 // the plane and parent exist is checked by Verify.
 func (p *Pack) Zone(ctx context.Context, plane, id string) (Zone, bool, error) {
 	row := p.conn.QueryRowContext(ctx, zoneSQL("WHERE plane = ?2 AND id = ?3"), maxDocumentBytes, plane, id)
-	zone, err := scanZone(plane)(row)
+	zone, err := scanZone(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Zone{}, false, nil
 	}
@@ -562,7 +556,7 @@ func (p *Pack) Zone(ctx context.Context, plane, id string) (Zone, bool, error) {
 
 // Zones yields the zones of a plane, in ID order.
 func (p *Pack) Zones(ctx context.Context, plane string) iter.Seq2[Zone, error] {
-	return query(ctx, p, zoneSQL("WHERE plane = ?2 ORDER BY id"), scanZone(plane), maxDocumentBytes, plane)
+	return query(ctx, p, zoneSQL("WHERE plane = ?2 ORDER BY id"), scanZone, maxDocumentBytes, plane)
 }
 
 // Anchor is a named position on a plane.
@@ -574,30 +568,31 @@ type Anchor struct {
 }
 
 func anchorSQL(where string) string {
-	return "SELECT " + boundedIdentifier("id") + ", " + boundedInteger("layer", -1<<31, 1<<31-1) + ", " +
+	return "SELECT " + boundedIdentifier("plane") + ", " + boundedIdentifier("id") + ", " +
+		boundedInteger("layer", -1<<31, 1<<31-1) + ", " +
 		boundedInteger("x", -MaxSafeInteger, MaxSafeInteger) + ", " +
 		boundedInteger("y", -MaxSafeInteger, MaxSafeInteger) + " FROM anchors " + where
 }
 
-// scanAnchor reads the anchors of plane.
-func scanAnchor(plane string) func(interface{ Scan(...any) error }) (Anchor, error) {
-	return func(rows interface{ Scan(...any) error }) (Anchor, error) {
-		var id sql.NullString
-		var layer, x, y sql.NullInt64
-		if err := rows.Scan(&id, &layer, &x, &y); err != nil {
-			return Anchor{}, err
-		}
-		if !id.Valid || !isIdentifier(id.String) || !layer.Valid || !x.Valid || !y.Valid {
-			return Anchor{}, reject(CodeAnchor, "an anchor has an invalid ID, layer or position")
-		}
-		return Anchor{Plane: plane, ID: id.String, Layer: int32(layer.Int64), X: x.Int64, Y: y.Int64}, nil
+// scanAnchor reads an anchor row, whose plane, like its ID, must be an
+// identifier.
+func scanAnchor(rows interface{ Scan(...any) error }) (Anchor, error) {
+	var plane, id sql.NullString
+	var layer, x, y sql.NullInt64
+	if err := rows.Scan(&plane, &id, &layer, &x, &y); err != nil {
+		return Anchor{}, err
 	}
+	if !plane.Valid || !isIdentifier(plane.String) || !id.Valid || !isIdentifier(id.String) ||
+		!layer.Valid || !x.Valid || !y.Valid {
+		return Anchor{}, reject(CodeAnchor, "an anchor has an invalid plane, ID, layer or position")
+	}
+	return Anchor{Plane: plane.String, ID: id.String, Layer: int32(layer.Int64), X: x.Int64, Y: y.Int64}, nil
 }
 
 // Anchor returns an anchor of a plane, and whether the pack has it.
 func (p *Pack) Anchor(ctx context.Context, plane, id string) (Anchor, bool, error) {
 	row := p.conn.QueryRowContext(ctx, anchorSQL("WHERE plane = ?1 AND id = ?2"), plane, id)
-	anchor, err := scanAnchor(plane)(row)
+	anchor, err := scanAnchor(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Anchor{}, false, nil
 	}
@@ -609,7 +604,7 @@ func (p *Pack) Anchor(ctx context.Context, plane, id string) (Anchor, bool, erro
 
 // Anchors yields the anchors of a plane, in ID order.
 func (p *Pack) Anchors(ctx context.Context, plane string) iter.Seq2[Anchor, error] {
-	return query(ctx, p, anchorSQL("WHERE plane = ?1 ORDER BY id"), scanAnchor(plane), plane)
+	return query(ctx, p, anchorSQL("WHERE plane = ?1 ORDER BY id"), scanAnchor, plane)
 }
 
 // Definition is a definition row and its stored document.
