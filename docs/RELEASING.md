@@ -367,11 +367,16 @@ source releases (its `docs/CRATE-RELEASE.md`):
   the job went on. If the warning says `proxy.golang.org` or
   `sum.golang.org` did not answer, record the version by hand:
   `GOPROXY=https://proxy.golang.org go mod download -json github.com/seraphinastudios/tilewright-world/go@vX.Y.Z`.
-  If the step failed because the proxy serves the version from another
-  commit whose `go/` or `LICENSE` differ, tell the owner. Go users get that
-  other commit's module for this version, and the checksum database pins
-  it. Only a start-over that ignored its step 1 leads there. A start-over
-  that kept `go/` and `LICENSE` the same only gets a notice.
+  If it warns that git could not compare the proxy's commit with the
+  release's, compare them by hand:
+  `git fetch origin COMMIT && git diff --stat COMMIT vX.Y.Z -- go LICENSE`.
+  If that prints nothing, the content is the same and nothing is wrong;
+  record the version by hand if the step did not. If the step failed
+  because the proxy serves the version from another commit whose `go/` or
+  `LICENSE` differ, tell the owner. Go users get that other commit's module
+  for this version, and the checksum database pins it. Only a start-over
+  that ignored its step 1 leads there. A start-over that kept `go/` and
+  `LICENSE` the same only gets a notice.
 - **"Publish to npm" failed**: re-run it. It checks the release again and
   publishes from the release's commit. If npm already has that version,
   the job compares npm's copy with the release's tarball and succeeds if

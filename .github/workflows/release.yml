@@ -493,9 +493,9 @@ jobs:
       # step fails, but not the job, if the proxy serves the version from
       # a commit whose module files differ from the release's.
       - name: Record the Go module version in the checksum database
-        # At most 220 s for the proxy, 60 s for git and 280 s for the
-        # checksum database: under 10 minutes.
-        timeout-minutes: 12
+        # At most 220 s for the proxy, 140 s for git and 280 s for the
+        # checksum database: under 11 minutes.
+        timeout-minutes: 15
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -535,12 +535,28 @@ jobs:
             # After a start-over (docs/RELEASING.md), the proxy keeps the
             # commit it saw first. The module zip holds go/ and the root
             # LICENSE, so the content is the same if those are.
-            if timeout 60 git fetch --quiet --depth=1 origin "${resolved}" &&
-              git diff --quiet "${resolved}" "${REVISION}" -- go LICENSE; then
+            fetched=false
+            for ((attempt = 1; attempt <= 3; attempt++)); do
+              if timeout 40 git fetch --quiet --depth=1 origin "${resolved}"; then
+                fetched=true
+                break
+              fi
+              if ((attempt < 3)); then
+                sleep 10
+              fi
+            done
+            compared=2
+            if [[ ${fetched} == true ]]; then
+              compared=0
+              git diff --quiet "${resolved}" "${REVISION}" -- go LICENSE || compared=$?
+            fi
+            if ((compared == 0)); then
               echo "::notice::proxy.golang.org serves ${module}@${TAG} from ${resolved}, an earlier commit with the same go/ and LICENSE as ${REVISION}"
-            else
-              echo "::error::proxy.golang.org serves ${module}@${TAG} from ${resolved}, not ${REVISION}, and its go/ or LICENSE differ or could not be compared"
+            elif ((compared == 1)); then
+              echo "::error::proxy.golang.org serves ${module}@${TAG} from ${resolved}, not ${REVISION}, and their go/ or LICENSE differ"
               exit 1
+            else
+              echo "::warning::proxy.golang.org serves ${module}@${TAG} from ${resolved}, not ${REVISION}, and git could not compare the two; compare them by hand as docs/RELEASING.md says"
             fi
           fi
 
