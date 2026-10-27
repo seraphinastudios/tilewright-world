@@ -338,8 +338,10 @@ source releases (its `docs/CRATE-RELEASE.md`):
      exclusion.
   3. Run the workflow on `main` again. If the failure needed a fix to the
      workflow, merge the fix after step 2 instead, and its merge's run
-     cuts the release. Pull request checks skip the unfinished-release
-     check, so the fix's checks can pass while the tags still exist.
+     cuts the release. If it was the first release, though, a merge does
+     not cut it: run the workflow on `main` once the fix has merged. Pull
+     request checks skip the unfinished-release check, so the fix's checks
+     can pass while the tags still exist.
 - **"Publish the GitHub release" failed its checks after publishing**: the
   release exists. Do not delete an immutable release. Read the error, fix
   the cause, then re-run the failed jobs: the re-run skips publishing,
