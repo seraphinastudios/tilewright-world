@@ -682,7 +682,7 @@ fn refuse_foreign(
 /// control lists publishing does not read.
 fn foreign_message(directory: &str, name: &str) -> String {
     format!(
-        "{} is on a file system ({name}) other than the local ones whose access control lists publishing reads (ext2, ext3, ext4, XFS, Btrfs, tmpfs, F2FS, ZFS and bcachefs), so {UNKEPT_LISTS}",
+        "{} is on a file system publishing does not check ({name}): it checks only the local ones whose access control lists it reads (ext2, ext3, ext4, XFS, Btrfs, tmpfs, F2FS, ZFS and bcachefs), told by their mounts, so {UNKEPT_LISTS}",
         shown(directory)
     )
 }

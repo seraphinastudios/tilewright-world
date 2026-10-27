@@ -862,10 +862,19 @@ mod tests {
         let directory = tree();
         let root = super::beneath::Root::new(directory.path());
         let dir = root.directory(&["dir"], false).unwrap();
-        // A test's own directory is on a local file system, found by its
-        // mount in this process's mounts.
+        // A test's own directory is found by its mount among this process's
+        // mounts, and told as its type and magic number say: checked on a
+        // local file system, not on a container's overlay root.
         let mounts = super::beneath::Mounts::read();
-        assert_eq!(dir.unchecked_file_system(&mounts).unwrap(), None);
+        let told = dir.unchecked_file_system(&mounts).unwrap();
+        match dir.mount_id().unwrap().map(|id| mounts.type_of(id)) {
+            Some(Ok(found)) => assert_eq!(
+                told,
+                super::beneath::unchecked_file_system(found, dir.magic().unwrap())
+            ),
+            // Without /proc, as in a plain chroot, it cannot be told.
+            _ => assert!(told.unwrap().starts_with("one that could not be told: ")),
+        }
         // Both the type of the mount and the magic number must be a
         // checked file system's: a 9p share passes on its host's magic
         // number, and an overlay's upper layer may be remote.
@@ -879,7 +888,7 @@ mod tests {
             ("overlay", 0x794C_7630, Some("overlay")),
             ("cifs", 0xFF53_4D42, Some("cifs")),
             ("vboxsf", 0x786F_4256, Some("vboxsf")),
-            ("fuse.sshfs", 0x6573_5546, Some("fuse.sshfs")),
+            ("fuse.a\tb", 0x6573_5546, Some("fuse.a\\tb")),
             (
                 "ext4",
                 0x0102_1997,
@@ -895,29 +904,115 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn mountinfo_is_read_strictly_and_within_bounds() {
-        use super::mounts::parse;
+    fn a_file_system_that_cannot_be_told_is_not_checked() {
+        use super::mounts::Mounts;
+        let directory = tree();
+        let root = super::beneath::Root::new(directory.path());
+        let dir = root.directory(&["dir"], false).unwrap();
+        let told = |mounts: &Mounts| dir.unchecked_file_system(mounts).unwrap();
+        let real = Mounts::read();
+        // Without /proc, as in a plain chroot, nothing can be told.
+        let Some(id) = dir.mount_id().unwrap() else {
+            assert!(
+                told(&real)
+                    .unwrap()
+                    .starts_with("one that could not be told: ")
+            );
+            return;
+        };
+        let line = |id: u64, rest: &str| format!("{id} 1 8:1 / /mnt rw - {rest}\n");
+        // Mounts that could not be read, a table without the mount, and a
+        // line for it that is malformed or too long each leave its file
+        // system untold, and so not checked.
+        for (mounts, reason) in [
+            (
+                Mounts::failed("it is not there"),
+                "it is not there".to_owned(),
+            ),
+            (
+                Mounts::parsed(b""),
+                format!("its mount, {id}, is not in /proc/self/mountinfo"),
+            ),
+            (
+                Mounts::parsed(line(id, "ext\\9 /dev/sda1 rw").as_bytes()),
+                "its line in /proc/self/mountinfo is malformed".to_owned(),
+            ),
+            (
+                Mounts::parsed(
+                    format!("{id} 1 8:1 / /{} rw - ext4 x rw\n", "a".repeat(70_000)).as_bytes(),
+                ),
+                "its line in /proc/self/mountinfo is longer than 65536 bytes".to_owned(),
+            ),
+            (
+                Mounts::parsed((line(id, "ext4 a rw") + &line(id, "ext4 b rw")).as_bytes()),
+                format!("its mount, {id}, is listed twice in /proc/self/mountinfo"),
+            ),
+        ] {
+            assert_eq!(
+                told(&mounts),
+                Some(format!("one that could not be told: {reason}"))
+            );
+        }
+        // A hostile line for another mount changes nothing for this one.
+        let Ok(found) = real.type_of(id) else {
+            return;
+        };
+        let found = found.escape_ascii().to_string();
+        let mut table = line(id + 1, "fuse.\u{7f} x rw").into_bytes();
+        table.extend(format!("{} 1 8:1 / /mnt rw - fuse.", id + 2).as_bytes());
+        table.extend([0xFF, b' ', b'x', b'\n']);
+        table.extend(line(id, &format!("{found} x rw")).as_bytes());
+        table.extend(line(id + 3, &"\\040".repeat(400)).as_bytes());
+        assert_eq!(told(&Mounts::parsed(&table)), told(&real));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn mountinfo_is_read_a_line_at_a_time() {
+        use super::mounts::scan;
         let text = b"22 1 8:1 / / rw,relatime shared:1 - ext4 /dev/sda1 rw\n\
 36 22 0:32 / /mnt/with\\040space rw - 9p host rw,trans=virtio\n\
-37 22 0:33 / /mnt/\xff\xfe rw master:2 shared:3 - fuse.s\\134shfs host rw\n";
-        let mounts = parse(text).unwrap();
-        assert_eq!(mounts.get(&22).map(String::as_str), Some("ext4"));
-        assert_eq!(mounts.get(&36).map(String::as_str), Some("9p"));
-        assert_eq!(mounts.get(&37).map(String::as_str), Some("fuse.s\\shfs"));
-        for bad in [
-            &b"22 1 8:1 / / rw ext4 /dev/sda1 rw\n"[..],
-            b"x 1 8:1 / / rw - ext4 /dev/sda1 rw\n",
-            b"22 1 8:1 / / rw -\n",
-            b"22 1 8:1 / / rw - ext\\9 /dev/sda1 rw\n",
-            b"22 1 8:1 / / rw - \xff /dev/sda1 rw\n",
-            b"22 1 8:1 / / rw - ext4 a\n22 1 8:1 / / rw - ext4 b\n",
-        ] {
-            assert!(parse(bad).is_err(), "{}", String::from_utf8_lossy(bad));
+37 22 0:33 / /mnt/\xff\xfe rw master:2 shared:3 - fuse.s\\134sh\xff host rw\n\
+38 22 8:1 / / rw ext4 /dev/sda1 rw\n\
+x 1 8:1 / / rw - ext4 /dev/sda1 rw\n\
+39 22 8:1 / / rw -\n\
+40 22 8:1 / / rw - ext\\9 /dev/sda1 rw\n\
+41 22 8:1 / / rw - xfs a rw";
+        // A small buffer, so lines are read across its edges.
+        let mounts = scan(std::io::BufReader::with_capacity(7, &text[..])).unwrap();
+        assert_eq!(mounts[&22].as_deref(), Ok(&b"ext4"[..]));
+        assert_eq!(mounts[&36].as_deref(), Ok(&b"9p"[..]));
+        assert_eq!(mounts[&37].as_deref(), Ok(&b"fuse.s\\sh\xff"[..]));
+        assert_eq!(mounts[&41].as_deref(), Ok(&b"xfs"[..]));
+        for id in [38, 39, 40] {
+            assert!(mounts[&id].is_err(), "{id}");
         }
+        // A line without a mount ID is left out.
+        assert_eq!(mounts.len(), 7);
         let mut long = b"22 1 8:1 / /".to_vec();
         long.extend(std::iter::repeat_n(b'a', 70_000));
-        long.extend(b" rw - ext4 /dev/sda1 rw\n");
-        assert!(parse(&long).unwrap_err().contains("longer than"));
+        long.extend(b" rw - ext4 /dev/sda1 rw\n23 1 8:1 / / rw - xfs a rw\n");
+        let mounts = scan(&long[..]).unwrap();
+        assert!(mounts[&22].as_ref().unwrap_err().contains("longer than"));
+        assert_eq!(mounts[&23].as_deref(), Ok(&b"xfs"[..]));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fdinfo_gives_the_mount_statx_does() {
+        use rustix::fs::{AtFlags, StatxFlags, statx};
+        use std::os::fd::AsRawFd as _;
+        if !std::path::Path::new("/proc/self/fdinfo").is_dir() {
+            return;
+        }
+        let directory = tree();
+        let file = fs::File::open(directory.path().join("dir")).unwrap();
+        let found = statx(&file, "", AtFlags::EMPTY_PATH, StatxFlags::MNT_ID).unwrap();
+        let fdinfo = super::mounts::fdinfo_mount_id(file.as_raw_fd());
+        assert!(fdinfo.is_some());
+        if found.stx_mask & StatxFlags::MNT_ID.bits() != 0 {
+            assert_eq!(fdinfo, Some(found.stx_mnt_id));
+        }
     }
 
     #[test]

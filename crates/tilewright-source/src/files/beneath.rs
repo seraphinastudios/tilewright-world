@@ -439,6 +439,23 @@ impl Directory {
         Ok(())
     }
 
+    /// The ID of the mount this directory is on: from `statx`, or before
+    /// Linux 5.8, whose `statx` does not give it, from the descriptor's
+    /// `/proc/self/fdinfo` entry; `None` where neither says.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn mount_id(&self) -> Result<Option<u64>, Refused> {
+        use rustix::fs::{StatxFlags, statx};
+        use std::os::fd::AsRawFd as _;
+        match statx(&self.0, "", AtFlags::EMPTY_PATH, StatxFlags::MNT_ID) {
+            Ok(found) if found.stx_mask & StatxFlags::MNT_ID.bits() != 0 => {
+                return Ok(Some(found.stx_mnt_id));
+            }
+            Ok(_) | Err(Errno::NOSYS) => {}
+            Err(errno) => return Err(Refused::Io(errno.into())),
+        }
+        Ok(super::mounts::fdinfo_mount_id(self.0.as_raw_fd()))
+    }
+
     /// The file system this directory is on, where it is not one whose
     /// access control lists publishing reads, or why it could not be told;
     /// see [`unchecked_file_system`]. Its mount is found by mount ID among
@@ -446,29 +463,29 @@ impl Directory {
     /// that type's magic number too.
     #[cfg(target_os = "linux")]
     pub(crate) fn unchecked_file_system(&self, mounts: &Mounts) -> Result<Option<String>, Refused> {
-        use rustix::fs::{StatxFlags, statx};
         #[cfg(test)]
         if let Some((found, magic)) = GIVEN_FILE_SYSTEM.with(std::cell::Cell::get) {
-            return Ok(unchecked_file_system(found, magic));
+            return Ok(unchecked_file_system(found.as_bytes(), magic));
         }
         let unknown = |reason: &str| Ok(Some(format!("one that could not be told: {reason}")));
-        let id = match statx(&self.0, "", AtFlags::EMPTY_PATH, StatxFlags::MNT_ID) {
-            Ok(found) if found.stx_mask & StatxFlags::MNT_ID.bits() != 0 => found.stx_mnt_id,
-            Ok(_) | Err(Errno::NOSYS) => {
-                return unknown("the kernel does not say which mount it is on");
-            }
-            Err(errno) => return Err(Refused::Io(errno.into())),
+        let Some(id) = self.mount_id()? else {
+            return unknown("the kernel does not say which mount it is on");
         };
         let found = match mounts.type_of(id) {
             Ok(found) => found,
             Err(reason) => return unknown(&reason),
         };
+        Ok(unchecked_file_system(found, self.magic()?))
+    }
+
+    /// The magic number `statfs` gives the file system of this directory.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn magic(&self) -> Result<u32, Refused> {
         let statistics = rustix::fs::fstatfs(&self.0).map_err(|errno| Refused::Io(errno.into()))?;
         // The magic numbers are 32 bits wide, whatever the width of the
         // field.
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let magic = statistics.f_type as u32;
-        Ok(unchecked_file_system(found, magic))
+        Ok(statistics.f_type as u32)
     }
 
     /// Elsewhere access control lists are not read at all.
@@ -575,13 +592,19 @@ const CHECKED_FILE_SYSTEMS: [(&str, u32); 9] = [
 
 /// The file system of type `found` with the `statfs` magic number `magic`,
 /// in words, where it is not one of [`CHECKED_FILE_SYSTEMS`] with its own
-/// magic number; `None` where it is.
+/// magic number; `None` where it is. A type is shown with every byte that
+/// is not printable ASCII escaped, since anyone who mounts a FUSE file
+/// system chooses its type.
 #[cfg(target_os = "linux")]
-pub(crate) fn unchecked_file_system(found: &str, magic: u32) -> Option<String> {
-    match CHECKED_FILE_SYSTEMS.iter().find(|(name, _)| *name == found) {
+pub(crate) fn unchecked_file_system(found: &[u8], magic: u32) -> Option<String> {
+    let shown = found.escape_ascii().to_string();
+    match CHECKED_FILE_SYSTEMS
+        .iter()
+        .find(|(name, _)| name.as_bytes() == found)
+    {
         Some((_, expected)) if *expected == magic => None,
-        Some(_) => Some(format!("{found}, though statfs gives type {magic:#x}")),
-        None => Some(found.to_owned()),
+        Some(_) => Some(format!("{shown}, though statfs gives type {magic:#x}")),
+        None => Some(shown),
     }
 }
 

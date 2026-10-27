@@ -487,7 +487,8 @@ impl SourceDirectory {
     /// among them. The directory's mount is found by its ID in `mounts`,
     /// and both the type the kernel names it with and the magic number
     /// `statfs` gives must be such a file system's; one that cannot be
-    /// told, as where `/proc/self/mountinfo` cannot be read, is not checked
+    /// told, as where `/proc` cannot be read or the mount's line is
+    /// malformed, is not checked
     /// either, and says why. `None` where it is checked, and on other
     /// platforms, which do not read access control lists at all.
     pub fn unchecked_file_system(&self, mounts: &Mounts) -> Result<Option<String>, AccessError> {
