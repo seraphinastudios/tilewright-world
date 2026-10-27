@@ -13,18 +13,20 @@
 #
 # Appends published=true or published=false to GITHUB_OUTPUT.
 #
-# usage: TAG=vX.Y.Z GO_TAG=go/vX.Y.Z REVISION=SHA GH_REPO=OWNER/REPO GH_TOKEN=TOKEN \
-#   GITHUB_OUTPUT=FILE tools/release/tags.sh
+# usage: VERSION=X.Y.Z TAG=vX.Y.Z GO_TAG=go/vX.Y.Z REVISION=SHA GH_REPO=OWNER/REPO \
+#   GH_TOKEN=TOKEN GITHUB_OUTPUT=FILE tools/release/tags.sh
 set -euo pipefail
 
 if [[ $# -ne 0 ]]; then
   echo "usage: tools/release/tags.sh (configured through the environment)" >&2
   exit 2
 fi
-: "${TAG:?}" "${GO_TAG:?}" "${REVISION:?}" "${GH_REPO:?}" "${GH_TOKEN:?}" "${GITHUB_OUTPUT:?}"
-# The tags come from the plan job, which runs third-party npm code.
-if [[ ! ${TAG} =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ || ${GO_TAG} != "go/${TAG}" || ! ${REVISION} =~ ^[0-9a-f]{40}$ ]]; then
-  echo "::error::invalid release tags or revision: ${TAG} ${GO_TAG} ${REVISION}"
+: "${VERSION:?}" "${TAG:?}" "${GO_TAG:?}" "${REVISION:?}" "${GH_REPO:?}" "${GH_TOKEN:?}" "${GITHUB_OUTPUT:?}"
+# The version and tags come from the plan job, which runs third-party npm
+# code; this job runs none. The tags must be the version's, which the
+# assets carry.
+if [[ ! ${VERSION} =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ || ${TAG} != "v${VERSION}" || ${GO_TAG} != "go/${TAG}" || ! ${REVISION} =~ ^[0-9a-f]{40}$ ]]; then
+  echo "::error::invalid release version, tags or revision: $(printf '%q ' "${VERSION}" "${TAG}" "${GO_TAG}" "${REVISION}")"
   exit 1
 fi
 

@@ -86,10 +86,19 @@ jobs:
       - name: Install the locked planner tools without lifecycle scripts
         run: npm ci --prefix scripts/release --ignore-scripts --no-audit --no-fund
 
+      # The planner's npm dependencies run in this step and the next. They
+      # get none of the runner's file commands (outputs, environment, PATH,
+      # summary), and the runner ignores workflow commands in their output.
       - name: Test the release policy, planner and packaging
         run: |
-          node scripts/release/test-release-policy.cjs
-          node scripts/release/test-plan.mjs
+          set -euo pipefail
+          resume=$(openssl rand -hex 16)
+          echo "::stop-commands::${resume}"
+          env -u GITHUB_OUTPUT -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY -u GITHUB_STATE \
+            node scripts/release/test-release-policy.cjs
+          env -u GITHUB_OUTPUT -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY -u GITHUB_STATE \
+            node scripts/release/test-plan.mjs
+          echo "::${resume}::"
           python3 -m unittest discover -s tools/release
 
       - name: Plan
@@ -116,8 +125,12 @@ jobs:
             exit 1
           fi
           plan="${RUNNER_TEMP}/plan.json"
+          resume=$(openssl rand -hex 16)
+          echo "::stop-commands::${resume}"
           TILEWRIGHT_RELEASE_TRIGGER=${EVENT} TILEWRIGHT_RELEASE_BRANCH=${BRANCH} \
+            env -u GITHUB_OUTPUT -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY -u GITHUB_STATE \
             node scripts/release/plan.mjs >"${plan}"
+          echo "::${resume}::"
           {
             echo '### Release plan'
             echo
@@ -125,20 +138,22 @@ jobs:
             jq . "${plan}"
             echo '```'
           } >>"${GITHUB_STEP_SUMMARY}"
-          echo "::notice title=Release plan::$(jq -r .reason "${plan}")"
+          # Escaped as workflow command data, so the reason cannot start a
+          # command of its own.
+          echo "::notice title=Release plan::$(jq -r '.reason | tostring | gsub("%"; "%25") | gsub("\r"; "%0D") | gsub("\n"; "%0A")' "${plan}")"
           # The planner runs third-party npm code, so its answer is checked:
           # it plans this run's commit and branch, and a release's tags
           # follow from its version. Every later job builds github.sha.
           revision=$(jq -r .revision "${plan}")
           planned_branch=$(jq -r .branch "${plan}")
           if [[ ${revision} != "${GITHUB_SHA}" || ${planned_branch} != "${BRANCH}" ]]; then
-            echo "::error::the planner planned ${revision} on ${planned_branch}, not ${GITHUB_SHA} on ${BRANCH}"
+            echo "::error::the planner planned $(jq -c '[.revision, .branch]' "${plan}"), not ${GITHUB_SHA} on ${BRANCH}"
             exit 1
           fi
           previous_tag=$(jq -r '.previous_tag // empty' "${plan}")
           release_version='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
           if [[ -n ${previous_tag} && ! ${previous_tag} =~ ^v${release_version}$ ]]; then
-            echo "::error::the planner named an invalid previous tag: ${previous_tag}"
+            echo "::error::the planner named an invalid previous tag: $(jq -c .previous_tag "${plan}")"
             exit 1
           fi
           tag=
