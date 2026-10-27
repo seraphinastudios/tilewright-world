@@ -127,7 +127,7 @@ its own, so a maintenance release never displaces a release of `main`.
 | Build the npm package | ubuntu-24.04 | `contents: read` | `tools/build-wasm.sh`, then `npm pack` at the release version (only when `packages/tilewright-pack/package.json` exists) |
 | Package release assets | ubuntu-24.04 | `contents: read` | `tools/release/package.py assemble`: archives, license bundles, the source archive and `SHA256SUMS`; checks that all five platforms compiled the fixture to the same pack |
 | Attest build provenance | ubuntu-24.04 | `contents: read`, `id-token: write`, `attestations: write` | Verifies the assets, then `actions/attest-build-provenance` for every asset and each bare binary |
-| Publish the GitHub release | ubuntu-24.04 | `contents: write` | Creates `vX.Y.Z` and `go/vX.Y.Z` at the commit in one atomic push, which fails if either exists elsewhere. Then it publishes the release on the tag with every asset at once, and checks that the release is immutable, that both tags point at the commit, and that GitHub's asset digests equal `SHA256SUMS`. |
+| Publish the GitHub release | ubuntu-24.04 | `contents: write` | Creates `vX.Y.Z` and `go/vX.Y.Z` at the commit in one atomic push, which fails if either exists elsewhere. Then it publishes the release on the tag with every asset at once, and checks that the release is immutable, that both tags point at the commit, and that GitHub's asset digests equal `SHA256SUMS`. Last, it has `sum.golang.org` record the new Go version, which only warns if the proxy is slow. |
 | Publish to npm | ubuntu-24.04 | `contents: read`, `attestations: read`, `id-token: write`, environment `npm` | Publishes the release's npm tarball for a release from `main`; skipped unless npm publication is on |
 
 The build runners are `ubuntu-24.04` (x86_64 Linux), `ubuntu-24.04-arm`
@@ -191,8 +191,13 @@ gh release verify-asset vX.Y.Z tilewright-X.Y.Z-linux-amd64.tar.gz -R seraphinas
 ```
 
 Go users get the module through the Go module proxy, and the Go checksum
-database (`sum.golang.org`) pins its content the first time anyone fetches a
-version.
+database (`sum.golang.org`) pins a version's content the first time anyone
+fetches it. The release job asks for the new version right after
+publishing, so that happens at release time. Its last step looks the
+version up on `proxy.golang.org` and `sum.golang.org`, retrying for a few
+minutes, checks that the proxy resolved `go/vX.Y.Z` to the release commit,
+and writes the recorded `h1:` checksums to the run's summary. The `go`
+command checks every download against them.
 
 ## Repository settings it relies on
 
@@ -202,15 +207,14 @@ The pipeline changes no settings. It relies on:
   assets cannot change. The release job checks `immutable: true` after
   publishing and fails loudly if it is not.
 - **The organization ruleset "Tilewright 04 - Immutable release tags"**. It
-  covers `refs/tags/v[0-9]*` and `refs/tags/go/v[0-9]*`, has no bypass
-  list, and has two rules: tags cannot be deleted, and cannot be moved to a
-  commit that does not contain their current one. It does not stop a tag
-  from being moved forward, to a later commit. Once a release is published,
-  immutable releases also lock its `vX.Y.Z` tag. A `go/vX.Y.Z` tag has no
-  release, so only the ruleset protects it. The ruleset's "Restrict updates"
-  rule would stop it from moving forward too. Until it has that rule, the
-  Go checksum database is what pins a Go version: it rejects changed
-  content for any version that someone has fetched once.
+  covers `refs/tags/v[0-9]*` and `refs/tags/go/v[0-9]*` in this repository,
+  tilewright-editor and tilewright-renderer, and has no bypass list. Its
+  rules forbid deleting such a tag and moving it to any other commit
+  (non-fast-forward and "Restrict updates"), and allow creating one. This
+  is what protects `go/vX.Y.Z`, which has no release. Once a release is
+  published, immutable releases also lock its `vX.Y.Z` tag. On top of
+  that, the release job has the Go checksum database record each new Go
+  version as soon as the release is out (see "Verifying a download").
 - **The Actions allowlist**, for checkout, setup-node, upload-artifact,
   download-artifact, attest-build-provenance and the `actions/attest` it
   calls, and `actions/setup-go`, which Revalidate runs through
@@ -347,6 +351,12 @@ source releases (its `docs/CRATE-RELEASE.md`):
   the same attested assets. Then run the workflow on `main` to release the
   merges whose runs stopped at it. After 30 days, delete the release
   instead and start over as described above.
+- **The Go checksum step warned or failed**: the release is published and
+  the job went on. If the proxy was slow, record the version by hand:
+  `GOPROXY=https://proxy.golang.org go mod download -json github.com/seraphinastudios/tilewright-world/go@vX.Y.Z`.
+  If the proxy resolved the version to another commit, tell the owner. The
+  tags cannot move, so this should not happen, and the checksum database
+  has now pinned whatever the proxy served.
 - **"Publish to npm" failed**: re-run it. It checks the release again and
   publishes from the release's commit. If npm already has that version,
   the job compares npm's copy with the release's tarball and succeeds if

@@ -434,7 +434,7 @@ jobs:
     needs: [plan, attest]
     if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.plan.outputs.publish == 'true' && github.ref_type == 'branch' && needs.attest.result == 'success' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     permissions:
       contents: write
     env:
@@ -518,6 +518,54 @@ jobs:
             echo
             echo "${GO_TAG} -> ${REVISION}"
           } >>"${GITHUB_STEP_SUMMARY}"
+
+      # The Go module proxy and checksum database learn of a version the
+      # first time someone asks for it. Asking right away has sum.golang.org
+      # record the module's checksum at release time, so that version's
+      # content can never change for any Go user. The release is already
+      # published, so a slow proxy only warns. A proxy that resolves the
+      # version to another commit fails the step but not the job.
+      - name: Record the Go module version in the checksum database
+        timeout-minutes: 10
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          module=$(awk '$1 == "module" { print $2; exit }' go/go.mod)
+          # Proxy paths escape capital letters; this module path has none.
+          if [[ ! ${module} =~ ^[a-z0-9./_-]+$ ]]; then
+            echo "::warning::cannot ask the Go proxy for the module path '${module}'"
+            exit 0
+          fi
+          info="${RUNNER_TEMP}/go-module.info"
+          record="${RUNNER_TEMP}/go-module.sum"
+          attempts=8
+          for ((attempt = 1; ; attempt++)); do
+            if curl -fsS --max-time 30 -o "${info}" "https://proxy.golang.org/${module}/@v/${TAG}.info" &&
+              curl -fsS --max-time 60 -o "${record}" "https://sum.golang.org/lookup/${module}@${TAG}"; then
+              break
+            fi
+            if ((attempt == attempts)); then
+              echo "::warning::the Go proxy did not serve ${module}@${TAG} after ${attempts} attempts. The release is published; to record the checksum, run: GOPROXY=https://proxy.golang.org go mod download -json ${module}@${TAG}"
+              exit 0
+            fi
+            sleep 30
+          done
+          resolved=$(jq -r '.Origin.Hash // empty' "${info}")
+          if [[ -z ${resolved} ]]; then
+            echo "::warning::the Go proxy did not say which commit ${module}@${TAG} is"
+          elif [[ ${resolved} != "${REVISION}" ]]; then
+            echo "::error::the Go proxy resolved ${module}@${TAG} to ${resolved}, not ${REVISION}"
+            exit 1
+          fi
+          {
+            echo
+            echo "sum.golang.org records ${module}@${TAG}:"
+            echo
+            echo '```'
+            grep -F "${module} ${TAG}" "${record}" || true
+            echo '```'
+          } >>"${GITHUB_STEP_SUMMARY}"
+          echo "::notice::sum.golang.org recorded ${module}@${TAG}"
 
   npm-publish:
     name: Publish to npm
