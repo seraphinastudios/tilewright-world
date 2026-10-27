@@ -194,7 +194,8 @@ lacks is added in the same way. After the operations, every chunk that tile
 operations touched and that holds no content (no objects, and every terrain
 grid empty: no cell set, every height 0) is deleted. Applying a transaction
 creates the directories new files need and removes those that deleting files
-left empty, below `planes/`, `defs/` and `profile/`.
+left empty, below `planes/`, `defs/` and `profile/`, unless one's mode or
+group is not that of the directory above it (section 9).
 
 ## 5. Terrain
 
@@ -312,31 +313,34 @@ guarantees:
 | --- | --- | --- | --- |
 | Reaches files | Through directory handles | Through directory handles | By path, each component checked first |
 | A link swapped in by another process during the apply | Never followed | Never followed | Can redirect a write, rename or removal |
-| Access control lists | Refused; on SMB, 9p, FUSE and NTFS file systems neither checked nor kept | Neither checked nor kept | Neither checked nor kept |
+| Access control lists | Refused on the local file systems below; on any other neither checked nor kept | Neither checked nor kept | Neither checked nor kept |
 | Labels (SELinux, Smack) | Compared, never set | None | None |
 | The lock | `flock` of the root | `flock` of the root | The file `.tilewright.lock` in the root |
 | Directory syncs | Yes | Yes, with `F_FULLFSYNC` where the file system has it | No: renames may not be durable yet |
-| Publishes by default | Yes, but on SMB, 9p, FUSE and NTFS file systems only with unchecked access | No: only with unchecked access | No: only with unchecked access |
+| Publishes by default | On the local file systems below; on any other only with unchecked access | No: only with unchecked access | No: only with unchecked access |
 
 Only on Linux does publishing keep every guarantee of this section, and
-there only on file systems that show their access control lists as the
-extended attributes it reads (below). On macOS and Windows it is a best
-effort: it is supported only in trees that no one else can change, and in
-which no file or directory has an access control list of its own (on
-Windows, a file has the list its directory gives it), since a replaced
-file, or one an inverse makes again, takes the access its directory gives
-a new file, and nothing can check that from safe code. The same holds on
-Linux for a tree, or a directory above a file the transaction changes,
-on an SMB, 9p (such as WSL's mounts of Windows drives), FUSE or NTFS file
-system, whose lists Linux does not show, which publishing tells by the
-file system's type (`statfs`). So in each of these cases publishing is
+there only on the local file systems that keep their access control lists
+as the extended attributes it reads (below): ext2, ext3, ext4, XFS, Btrfs,
+tmpfs, F2FS, ZFS, overlayfs and bcachefs. On macOS and Windows it is a
+best effort: it is supported only in trees that no one else can change,
+and in which no file or directory has an access control list of its own
+(on Windows, a file has the list its directory gives it), since a
+replaced file, or one an inverse makes again, takes the access its
+directory gives a new file, and nothing can check that from safe code.
+The same holds on Linux for a tree, or a directory above a file the
+transaction changes, on any other file system, which publishing tells by
+its type (`statfs`): network, host-shared (WSL's mounts of Windows drives,
+a virtual machine's shared folders), FUSE and NTFS ones among them, whose
+lists Linux may not show at all. So in each of these cases publishing is
 refused by default, with `tx.io`, and nothing is written: it goes ahead
 only when the caller accepts what is not checked, with unchecked access
 (the library's `PublishOptions::unchecked_access`, the command line's
-`--unchecked-access`), and the command line then warns, naming it.
-Elsewhere unchecked access changes nothing. On other systems, the BSDs
-included, publishing is refused, with `tx.io`, and nothing is written:
-they are untested. Previewing and rebasing work everywhere.
+`--unchecked-access`), and the command line then warns, naming it, and on
+Linux the file system, by name or by its magic number. Elsewhere
+unchecked access changes nothing. On other systems, the BSDs included,
+publishing is refused, with `tx.io`, and nothing is written: they are
+untested. Previewing and rebasing work everywhere.
 
 Publishing a carried-out transaction works on the root it was carried out
 on: through directory handles, the directory opened then, whatever its

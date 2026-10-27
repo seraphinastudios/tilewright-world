@@ -37,11 +37,14 @@ platform:
   directory handles opened while the transaction was carried out, so
   changing the tree cannot redirect it. A file or directory with an access
   control list (POSIX, NFS version 4 or rich) is refused, since a
-  replacement could not keep it. On SMB, 9p (such as WSL's mounts of
-  Windows drives), FUSE and NTFS file systems, Linux does not show the
-  access control lists at all, so there, told by the file system's type,
-  applying needs the same explicit consent as on macOS and Windows. The
-  mandatory access control labels (SELinux, Smack) of the entries compared
+  replacement could not keep it. That holds on the local file systems
+  that keep their lists as the attributes publishing reads (ext2, ext3,
+  ext4, XFS, Btrfs, tmpfs, F2FS, ZFS, overlayfs and bcachefs). On any
+  other, told by the file system's type, Linux may not show the lists at
+  all (network, host-shared, FUSE and NTFS ones among them, such as WSL's
+  mounts of Windows drives or a virtual machine's shared folders), so
+  there applying needs the same explicit consent as on macOS and Windows.
+  The mandatory access control labels (SELinux, Smack) of the entries compared
   must be the same, and the system's policy must give every file publishing
   writes, and directory it creates, that label, which is checked before a
   byte is written; publishing never sets a label. For a new file, which is
@@ -67,15 +70,15 @@ platform:
   in the root, `.tilewright.lock`, shared with no one and deleted when
   released.
 
-So on macOS and Windows, and on Linux on those file systems, applying
+So on macOS and Windows, and on Linux on any other file system, applying
 transactions is supported only in a tree that no one else can change and
 in which no file or directory has an access control list of its own.
 Nothing there checks that, so applying is refused by default and goes
 ahead only when the caller accepts it explicitly:
 `PublishOptions::unchecked_access` in the library, `tilewright tx apply
 --unchecked-access` on the command line, which then warns, naming what is
-not checked. Elsewhere on Linux, which checks everything, no such consent
-is needed. On other platforms, the BSDs among them, applying is
+not checked. On Linux on the local file systems above, which checks
+everything, no such consent is needed. On other platforms, the BSDs among them, applying is
 refused; previewing and rebasing work everywhere. On every
 platform the access checks are made before anything is written and again
 just before the first rename, but as with verifying packs, applying
