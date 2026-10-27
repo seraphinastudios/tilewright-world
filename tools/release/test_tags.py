@@ -147,13 +147,12 @@ class TagsTest(unittest.TestCase):
         go_tag: str = "go/v0.2.0",
         version: str = "0.2.0",
         revision: str | None = None,
-        previous_tag: str = "v0.1.0",
+        previous_tag: str | None = "v0.1.0",
     ) -> subprocess.CompletedProcess:
         environment = {
             **os.environ,
             "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
             "VERSION": version,
-            "PREVIOUS_TAG": previous_tag,
             "TAG": tag,
             "GO_TAG": go_tag,
             "REVISION": self.revision if revision is None else revision,
@@ -163,6 +162,9 @@ class TagsTest(unittest.TestCase):
             "FAKE_GH_STATE": str(self.state),
             "FAKE_GH_BARE": str(self.bare),
         }
+        environment.pop("PREVIOUS_TAG", None)
+        if previous_tag is not None:
+            environment["PREVIOUS_TAG"] = previous_tag
         return subprocess.run(
             ["bash", str(SCRIPT)],
             cwd=self.work,
@@ -178,6 +180,18 @@ class TagsTest(unittest.TestCase):
         self.assertEqual(self.remote_tag("v0.2.0"), self.revision)
         self.assertEqual(self.remote_tag("go/v0.2.0"), self.revision)
         self.assertEqual(self.output.read_text(encoding="utf-8"), "published=false\n")
+
+    def test_the_first_release_has_an_empty_previous_tag(self) -> None:
+        result = self.run_script(previous_tag="")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.remote_tag("v0.2.0"), self.revision)
+        self.assertEqual(self.remote_tag("go/v0.2.0"), self.revision)
+
+    def test_an_unset_previous_tag_is_a_first_release(self) -> None:
+        result = self.run_script(previous_tag=None)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.remote_tag("v0.2.0"), self.revision)
+        self.assertEqual(self.remote_tag("go/v0.2.0"), self.revision)
 
     def test_accepts_a_tag_a_failed_attempt_left_at_the_revision(self) -> None:
         git(self.work, "push", "--quiet", "origin", f"{self.revision}:refs/tags/v0.2.0")
