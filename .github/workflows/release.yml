@@ -540,10 +540,13 @@ jobs:
       # first time someone asks for it. Asking right away has sum.golang.org
       # record the module's checksum at release time, so that version's
       # content can never change for any Go user. The release is already
-      # published, so a slow proxy only warns. A proxy that resolves the
-      # version to another commit fails the step but not the job.
+      # published, so a slow proxy or checksum database only warns. The
+      # step fails, but not the job, if the proxy serves the version from
+      # a commit whose module files differ from the release's.
       - name: Record the Go module version in the checksum database
-        timeout-minutes: 10
+        # At most 220 s for the proxy, 60 s for git and 280 s for the
+        # checksum database: under 10 minutes.
+        timeout-minutes: 12
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -553,26 +556,49 @@ jobs:
             echo "::warning::cannot ask the Go proxy for the module path '${module}'"
             exit 0
           fi
+          by_hand="GOPROXY=https://proxy.golang.org go mod download -json ${module}@${TAG}"
+          # Six tries, each limited to $3 seconds, 20 seconds apart.
+          fetch() {
+            local attempt
+            for ((attempt = 1; attempt <= 6; attempt++)); do
+              if curl -fsS --max-time "$3" -o "$2" "$1"; then
+                return 0
+              fi
+              if ((attempt < 6)); then
+                sleep 20
+              fi
+            done
+            return 1
+          }
+
           info="${RUNNER_TEMP}/go-module.info"
-          record="${RUNNER_TEMP}/go-module.sum"
-          attempts=8
-          for ((attempt = 1; ; attempt++)); do
-            if curl -fsS --max-time 30 -o "${info}" "https://proxy.golang.org/${module}/@v/${TAG}.info" &&
-              curl -fsS --max-time 60 -o "${record}" "https://sum.golang.org/lookup/${module}@${TAG}"; then
-              break
-            fi
-            if ((attempt == attempts)); then
-              echo "::warning::the Go proxy did not serve ${module}@${TAG} after ${attempts} attempts. The release is published; to record the checksum, run: GOPROXY=https://proxy.golang.org go mod download -json ${module}@${TAG}"
-              exit 0
-            fi
-            sleep 30
-          done
+          if ! fetch "https://proxy.golang.org/${module}/@v/${TAG}.info" "${info}" 20; then
+            echo "::warning::proxy.golang.org did not serve ${module}@${TAG}. The release is published; to record the version, run: ${by_hand}"
+            exit 0
+          fi
           resolved=$(jq -r '.Origin.Hash // empty' "${info}")
           if [[ -z ${resolved} ]]; then
-            echo "::warning::the Go proxy did not say which commit ${module}@${TAG} is"
-          elif [[ ${resolved} != "${REVISION}" ]]; then
-            echo "::error::the Go proxy resolved ${module}@${TAG} to ${resolved}, not ${REVISION}"
+            echo "::warning::proxy.golang.org did not say which commit ${module}@${TAG} is"
+          elif [[ ! ${resolved} =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::proxy.golang.org named an invalid commit for ${module}@${TAG}: $(jq -c .Origin.Hash "${info}")"
             exit 1
+          elif [[ ${resolved} != "${REVISION}" ]]; then
+            # After a start-over (docs/RELEASING.md), the proxy keeps the
+            # commit it saw first. The module zip holds go/ and the root
+            # LICENSE, so the content is the same if those are.
+            if timeout 60 git fetch --quiet --depth=1 origin "${resolved}" &&
+              git diff --quiet "${resolved}" "${REVISION}" -- go LICENSE; then
+              echo "::notice::proxy.golang.org serves ${module}@${TAG} from ${resolved}, an earlier commit with the same go/ and LICENSE as ${REVISION}"
+            else
+              echo "::error::proxy.golang.org serves ${module}@${TAG} from ${resolved}, not ${REVISION}, and its go/ or LICENSE differ or could not be compared"
+              exit 1
+            fi
+          fi
+
+          record="${RUNNER_TEMP}/go-module.sum"
+          if ! fetch "https://sum.golang.org/lookup/${module}@${TAG}" "${record}" 30; then
+            echo "::warning::sum.golang.org did not record ${module}@${TAG}. The release is published; to record the version, run: ${by_hand}"
+            exit 0
           fi
           {
             echo

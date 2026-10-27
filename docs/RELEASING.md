@@ -196,10 +196,12 @@ Go users get the module through the Go module proxy, and the Go checksum
 database (`sum.golang.org`) pins a version's content the first time anyone
 fetches it. The release job asks for the new version right after
 publishing, so that happens at release time. Its last step looks the
-version up on `proxy.golang.org` and `sum.golang.org`, retrying for a few
-minutes, checks that the proxy resolved `go/vX.Y.Z` to the release commit,
-and writes the recorded `h1:` checksums to the run's summary. The `go`
-command checks every download against them.
+version up on `proxy.golang.org`, then on `sum.golang.org`, retrying each
+for a few minutes. It checks that the proxy resolved `go/vX.Y.Z` to the
+release commit, or, after a start-over (see "When a release fails"), to an
+earlier commit with the same `go/` directory and root `LICENSE`, which
+is all the module zip holds. It then writes the recorded `h1:` checksums
+to the run's summary. The `go` command checks every download against them.
 
 ## Repository settings it relies on
 
@@ -354,11 +356,14 @@ source releases (its `docs/CRATE-RELEASE.md`):
   merges whose runs stopped at it. After 30 days, delete the release
   instead and start over as described above.
 - **The Go checksum step warned or failed**: the release is published and
-  the job went on. If the proxy was slow, record the version by hand:
+  the job went on. If the warning says `proxy.golang.org` or
+  `sum.golang.org` did not answer, record the version by hand:
   `GOPROXY=https://proxy.golang.org go mod download -json github.com/seraphinastudios/tilewright-world/go@vX.Y.Z`.
-  If the proxy resolved the version to another commit, tell the owner. The
-  tags cannot move, so this should not happen, and the checksum database
-  has now pinned whatever the proxy served.
+  If the step failed because the proxy serves the version from another
+  commit whose `go/` or `LICENSE` differ, tell the owner. Go users get that
+  other commit's module for this version, and the checksum database pins
+  it. Only a start-over that ignored its step 1 leads there. A start-over
+  that kept `go/` and `LICENSE` the same only gets a notice.
 - **"Publish to npm" failed**: re-run it. It checks the release again and
   publishes from the release's commit. If npm already has that version,
   the job compares npm's copy with the release's tarball and succeeds if
