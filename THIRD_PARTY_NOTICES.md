@@ -111,4 +111,5 @@ adapts commit-parsing logic from conventional-commits-parser,
 conventional-commits-filter and @semantic-release/commit-analyzer (MIT)
 and conventional-changelog-conventionalcommits (ISC), as `PROVENANCE.md`
 records; `scripts/release/THIRD_PARTY_LICENSES.md` holds their notices.
-None of it is in a release.
+It is not in the CLI binaries or the npm package; the release's source
+archive carries it together with those notices.

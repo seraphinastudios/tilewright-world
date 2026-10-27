@@ -64,7 +64,8 @@ function rulesForBranch(branch, pre10 = PRE_1_0) {
 
 // The release a parsed commit causes under the rules, as the commit analyzer
 // decides it: the highest release of every rule that matches. A commit
-// without a Conventional Commits type causes none.
+// without a Conventional Commits type causes none, unless it reverts a
+// commit or carries a BREAKING CHANGE note.
 function releaseForCommit(branch, commit, pre10 = PRE_1_0) {
   let release = null;
   for (const rule of rulesForBranch(branch, pre10)) {

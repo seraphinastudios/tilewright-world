@@ -49,6 +49,10 @@ never copied, adapted or used as a dependency.
   on npm. The code was rewritten in CommonJS without dependencies, and
   only what decides a release was kept (no bodies, footers, mentions or
   reference lists). It answers as the packages did on every message
-  tried. The one exception is a breaking-change note that runs into a
-  trailing `-field-` line: the parser threw on it, and the note now counts.
+  tried, with two deliberate differences. First, the contents of
+  `-name-` field lines are ignored. The parser copied them onto the commit,
+  so a field such as `-type-`, `-revert-`, `-hash-` or `-tag-` changed the
+  analyzer's answer, and `-notes-` or `-references-` made it throw.
+  Second, a breaking-change note that runs into a trailing field line
+  counts; the parser threw on it.
   `scripts/release/THIRD_PARTY_LICENSES.md` holds their notices.

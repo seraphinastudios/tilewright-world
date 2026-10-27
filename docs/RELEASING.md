@@ -60,13 +60,17 @@ published to the npm registry until the owner turns that on (see below).
 
 `scripts/release/release-policy.cjs` holds the policy, with release rules
 of the form the commit analyzer of semantic-release takes, as in the other
-two repositories. `scripts/release/commits.cjs` reads commit messages the
-way that analyzer does with the conventionalcommits preset, so versions
-follow the same rules, but it has no dependencies: the release planner
-runs only code from this repository. `scripts/release/test-commits.cjs`
-checks it against the analyzer's answers. As in the analyzer, a
-`BREAKING CHANGE:` note after a line such as `---` (a Markdown rule in a
-pull request body) is not read; use a `!` title instead.
+two repositories. `scripts/release/commits.cjs` reads commit messages as
+that analyzer does with the conventionalcommits preset, so the same
+commits release the same versions. It has no dependencies, so the release
+planner runs only code from this repository, and
+`scripts/release/test-commits.cjs` checks it against the analyzer's
+answers. As in the analyzer, a `BREAKING CHANGE:` note after a line such
+as `---` (a Markdown rule in a pull request body) is not read, so use a `!`
+title instead. One difference is deliberate: the analyzer read the
+contents of `-name-` lines such as `-type-` or `-revert-` as commit
+properties, which could change a release or make it fail, and
+`commits.cjs` ignores them.
 
 - Every release from `main` bumps the minor version. Patch versions belong
   to maintenance branches named `MAJOR.MINOR.x`. A maintenance branch can
@@ -74,7 +78,8 @@ pull request body) is not read; use a `!` title instead.
   stops the release. Releases from maintenance branches are off for now
   (see "Repository settings it relies on").
 - A squash merge's commit message is the pull request's Conventional
-  Commits title. A commit without a type releases nothing.
+  Commits title. A commit without a type releases nothing, unless it
+  reverts a commit or carries a `BREAKING CHANGE:` note.
 - The first release is `0.1.0`. Releases stay at `0.x` until world format
   1.0 is frozen: until then a breaking change (`feat!:` or a
   `BREAKING CHANGE:` footer) bumps the minor version, as Cargo and Go treat
@@ -131,7 +136,7 @@ its own, so a maintenance release never displaces a release of `main`.
 | Plan release | ubuntu-24.04 | `contents: read` | Runs the policy, planner and packaging tests, then `scripts/release/plan.mjs`, which finds the last release tag the branch contains, analyzes the commits since it, and decides the version and whether to publish. The planner and its tests run only code from this repository. The job checks that the plan is one JSON object for the run's own commit and branch, and that the version and previous tag are release versions. Every later job builds the run's commit, the release job takes the branch from the run's ref and the tags from the version, and `tags.sh` checks the version and previous tag again. Except for pull requests, stops if that last tag has no published, immutable release. |
 | Revalidate | ubuntu-24.04 | `contents: read` | Runs `validate.yml`, so `tools/validate.sh`, on the released commit |
 | Build TARGET | one per platform | `contents: read` | `tools/release/build.sh`: builds with the pinned toolchain and `--locked`, then runs the binary to validate, compile and verify `fixtures/basic` |
-| Build the npm package | ubuntu-24.04 | `contents: read` | `tools/build-wasm.sh`, then `npm pack` at the release version. The only outside code it runs is the pinned wasi-sdk and wasm-bindgen, with nothing more than read access to the repository; its tarball reaches the release only through packaging, which checks the package's name, version and module |
+| Build the npm package | ubuntu-24.04 | `contents: read` | `tools/build-wasm.sh`, then `npm pack` at the release version. All the outside code it runs is pinned: the Rust toolchain and the crates in `Cargo.lock` (their build scripts and macros run, as in the CLI builds), the Node that `.node-version` names, and wasi-sdk and wasm-bindgen, checked by SHA-256. The job can only read the repository. Its tarball reaches the release only through packaging, which checks the package's name, version and module |
 | Package release assets | ubuntu-24.04 | `contents: read` | `tools/release/package.py assemble`: archives, license bundles, the source archive and `SHA256SUMS`; checks that all five platforms compiled the fixture to the same pack |
 | Attest build provenance | ubuntu-24.04 | `contents: read`, `id-token: write`, `attestations: write` | Verifies the assets, then `actions/attest-build-provenance` for every asset and each bare binary |
 | Publish the GitHub release | ubuntu-24.04 | `contents: write` | Creates `vX.Y.Z` and `go/vX.Y.Z` at the commit in one atomic push, which fails if either exists elsewhere. Then it publishes the release on the tag with every asset at once, and checks that the release is immutable, that both tags point at the commit, and that GitHub's asset digests equal `SHA256SUMS`. Last, it has `sum.golang.org` record the new Go version, which only warns if the proxy is slow. |
@@ -149,8 +154,8 @@ last Intel macOS image. When it is retired, build `x86_64-apple-darwin` on
 Every action is pinned to a full commit SHA and is on the organization's
 allowlist, and no job restores a cache. The release planner has no
 dependencies. The WebAssembly build tools are pinned and checked by
-SHA-256 in `tools/build-wasm.sh`, and they run only in the npm build job,
-which can read the repository and nothing more. No job uses a secret.
+SHA-256 in `tools/build-wasm.sh`. They run in the npm build job and in
+Revalidate, which both only read the repository. No job uses a secret.
 
 Builds are reproducible where practical. The toolchain is pinned by
 `rust-toolchain.toml`, dependencies by `Cargo.lock` (`--locked`), the
@@ -341,7 +346,9 @@ source releases (its `docs/CRATE-RELEASE.md`):
   2. The tag ruleset has no bypass list, and it also covers
      tilewright-editor and tilewright-renderer. Add `tilewright-world` to
      its excluded repositories, delete both tags, then remove the
-     exclusion.
+     exclusion. Deleting the tags on GitHub leaves any local copies, which
+     a plain `git fetch` does not move: delete them too
+     (`git tag -d vX.Y.Z go/vX.Y.Z`).
   3. Run the workflow on `main` again. If the failure needed a fix to the
      workflow, merge the fix after step 2 instead, and its merge's run
      cuts the release. If it was the first release, though, a merge does
@@ -368,10 +375,12 @@ source releases (its `docs/CRATE-RELEASE.md`):
   `sum.golang.org` did not answer, record the version by hand:
   `GOPROXY=https://proxy.golang.org go mod download -json github.com/seraphinastudios/tilewright-world/go@vX.Y.Z`.
   If it warns that git could not compare the proxy's commit with the
-  release's, compare them by hand:
-  `git fetch origin COMMIT && git diff --stat COMMIT vX.Y.Z -- go LICENSE`.
+  release's, compare the two commits the warning names, by SHA, not by
+  tag, since a local `vX.Y.Z` can still name the old commit:
+  `git fetch origin COMMIT REVISION && git diff --stat COMMIT REVISION -- go LICENSE`.
   If that prints nothing, the content is the same and nothing is wrong;
-  record the version by hand if the step did not. If the step failed
+  record the version by hand if the step did not. If it prints anything,
+  tell the owner, as for the failure below. If the step failed
   because the proxy serves the version from another commit whose `go/` or
   `LICENSE` differ, tell the owner. Go users get that other commit's module
   for this version, and the checksum database pins it. Only a start-over
