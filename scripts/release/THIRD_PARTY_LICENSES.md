@@ -2,7 +2,8 @@
 
 `scripts/release/commits.cjs` adapts parsing and filtering logic from these
 packages (see `PROVENANCE.md`). Their copyright and permission notices
-follow; only the license names were made headings here.
+follow; only the license names were made headings here, and a trailing
+space was dropped.
 
 ## conventional-commits-parser 6.4.0
 
@@ -92,4 +93,4 @@ FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
 INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
 LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
 OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
-PERFORMANCE OF THIS SOFTWARE. 
+PERFORMANCE OF THIS SOFTWARE.
