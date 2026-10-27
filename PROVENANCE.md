@@ -18,3 +18,10 @@ never copied, adapted or used as a dependency.
   David Stafford's "Mix13". Only these five constants are used; the function
   is written here from them, and no code is copied. Notice: the author
   dedicated `splitmix64.c` to the public domain under CC0 1.0.
+- **musl's COPYRIGHT.** `packages/tilewright-pack/scripts/musl-COPYRIGHT` is
+  musl libc's `COPYRIGHT` file at tag `v1.2.5`
+  (<https://git.musl-libc.org/cgit/musl/plain/COPYRIGHT?h=v1.2.5>), MIT,
+  copied unchanged. It is the license notice for the musl code that
+  `sqlite-wasm-rs` compiles into the WebAssembly reader, and
+  `scripts/licenses.mjs` reproduces it in the package's
+  `THIRD_PARTY_LICENSES.md`. No musl code is copied into this repository.
