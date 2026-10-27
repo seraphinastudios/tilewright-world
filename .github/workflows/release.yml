@@ -26,7 +26,6 @@ on:
     paths:
       - .github/workflows/release.yml
       - .github/workflows/validate.yml
-      - .releaserc.json
       - scripts/release/**
       - tools/release/**
       - tools/build-wasm.sh
@@ -60,16 +59,13 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+    # Only repository code runs here: the planner (scripts/release) has no
+    # dependencies. The jobs that use these outputs check them again.
     outputs:
-      branch: ${{ steps.plan.outputs.branch }}
       version: ${{ steps.plan.outputs.version }}
-      tag: ${{ steps.plan.outputs.tag }}
-      go_tag: ${{ steps.plan.outputs.go_tag }}
       previous_tag: ${{ steps.plan.outputs.previous_tag }}
-      latest: ${{ steps.plan.outputs.latest }}
       build: ${{ steps.plan.outputs.build }}
       publish: ${{ steps.plan.outputs.publish }}
-      npm: ${{ steps.plan.outputs.npm }}
     steps:
       - name: Check out with tags
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -83,22 +79,12 @@ jobs:
           node-version: 24.18.1
           package-manager-cache: false
 
-      - name: Install the locked planner tools without lifecycle scripts
-        run: npm ci --prefix scripts/release --ignore-scripts --no-audit --no-fund
-
-      # The planner's npm dependencies run in this step and the next. They
-      # get none of the runner's file commands (outputs, environment, PATH,
-      # summary), and the runner ignores workflow commands in their output.
       - name: Test the release policy, planner and packaging
         run: |
           set -euo pipefail
-          resume=$(openssl rand -hex 16)
-          echo "::stop-commands::${resume}"
-          env -u GITHUB_OUTPUT -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY -u GITHUB_STATE \
-            node scripts/release/test-release-policy.cjs
-          env -u GITHUB_OUTPUT -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY -u GITHUB_STATE \
-            node scripts/release/test-plan.mjs
-          echo "::${resume}::"
+          node scripts/release/test-release-policy.cjs
+          node scripts/release/test-commits.cjs
+          node scripts/release/test-plan.mjs
           python3 -m unittest discover -s tools/release
 
       - name: Plan
@@ -125,12 +111,17 @@ jobs:
             exit 1
           fi
           plan="${RUNNER_TEMP}/plan.json"
-          resume=$(openssl rand -hex 16)
-          echo "::stop-commands::${resume}"
           TILEWRIGHT_RELEASE_TRIGGER=${EVENT} TILEWRIGHT_RELEASE_BRANCH=${BRANCH} \
-            env -u GITHUB_OUTPUT -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY -u GITHUB_STATE \
             node scripts/release/plan.mjs >"${plan}"
-          echo "::${resume}::"
+          # One JSON object, for the run's own commit and branch.
+          if ! jq -se 'length == 1 and (.[0] | type) == "object"' "${plan}" >/dev/null; then
+            echo "::error::the planner did not print one JSON object"
+            exit 1
+          fi
+          if [[ $(jq -r .revision "${plan}") != "${GITHUB_SHA}" || $(jq -r .branch "${plan}") != "${BRANCH}" ]]; then
+            echo "::error::the plan is for $(jq -c '[.revision, .branch]' "${plan}"), not ${GITHUB_SHA} on ${BRANCH}"
+            exit 1
+          fi
           {
             echo '### Release plan'
             echo
@@ -138,30 +129,17 @@ jobs:
             jq . "${plan}"
             echo '```'
           } >>"${GITHUB_STEP_SUMMARY}"
-          # Escaped as workflow command data, so the reason cannot start a
-          # command of its own.
           echo "::notice title=Release plan::$(jq -r '.reason | tostring | gsub("%"; "%25") | gsub("\r"; "%0D") | gsub("\n"; "%0A")' "${plan}")"
-          # The planner runs third-party npm code, so its answer is checked:
-          # it plans this run's commit and branch, and a release's tags
-          # follow from its version. Every later job builds github.sha.
-          revision=$(jq -r .revision "${plan}")
-          planned_branch=$(jq -r .branch "${plan}")
-          if [[ ${revision} != "${GITHUB_SHA}" || ${planned_branch} != "${BRANCH}" ]]; then
-            echo "::error::the planner planned $(jq -c '[.revision, .branch]' "${plan}"), not ${GITHUB_SHA} on ${BRANCH}"
-            exit 1
-          fi
-          previous_tag=$(jq -r '.previous_tag // empty' "${plan}")
           release_version='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
+          previous_tag=$(jq -r '.previous_tag // empty' "${plan}")
           if [[ -n ${previous_tag} && ! ${previous_tag} =~ ^v${release_version}$ ]]; then
-            echo "::error::the planner named an invalid previous tag: $(jq -c .previous_tag "${plan}")"
+            echo "::error::invalid previous release tag: $(jq -c .previous_tag "${plan}")"
             exit 1
           fi
-          tag=
-          go_tag=
           if [[ ${EVENT} == pull_request ]]; then
-            # A check build under a version that can never be released.
-            # Pull requests never publish, whatever the planner says; the
-            # publishing jobs also check the event themselves.
+            # A check build under a version that can never be released. A
+            # pull request never publishes; the publishing jobs also check
+            # the event themselves.
             publish=false
             build=true
             version="0.0.0-check.${PULL_REQUEST}"
@@ -169,10 +147,8 @@ jobs:
             publish=true
             build=true
             version=$(jq -r .version "${plan}")
-            tag="v${version}"
-            go_tag="go/${tag}"
-            if [[ ! ${version} =~ ^${release_version}$ || $(jq -r .tag "${plan}") != "${tag}" || $(jq -r .go_tag "${plan}") != "${go_tag}" ]]; then
-              echo "::error::the planner's version and tags do not agree: $(jq -c '[.version, .tag, .go_tag]' "${plan}")"
+            if [[ ! ${version} =~ ^${release_version}$ ]]; then
+              echo "::error::invalid release version: $(jq -c .version "${plan}")"
               exit 1
             fi
           else
@@ -180,26 +156,11 @@ jobs:
             build=false
             version=
           fi
-          if [[ ${BRANCH} == main ]]; then
-            latest=true
-          else
-            latest=false
-          fi
-          if [[ -f ${NPM_PACKAGE_DIRECTORY}/package.json ]]; then
-            npm=true
-          else
-            npm=false
-          fi
           {
-            echo "branch=${BRANCH}"
             echo "version=${version}"
-            echo "tag=${tag}"
-            echo "go_tag=${go_tag}"
             echo "previous_tag=${previous_tag}"
-            echo "latest=${latest}"
             echo "build=${build}"
             echo "publish=${publish}"
-            echo "npm=${npm}"
           } >>"${GITHUB_OUTPUT}"
 
       # A release tag is created before its release is published. If a run
@@ -214,7 +175,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PREVIOUS_TAG: ${{ steps.plan.outputs.previous_tag }}
-          BRANCH: ${{ steps.plan.outputs.branch }}
+          BRANCH: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           if [[ -z ${PREVIOUS_TAG} ]]; then
@@ -299,7 +260,7 @@ jobs:
   npm:
     name: Build the npm package
     needs: plan
-    if: needs.plan.outputs.build == 'true' && needs.plan.outputs.npm == 'true'
+    if: needs.plan.outputs.build == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -344,7 +305,7 @@ jobs:
   package:
     name: Package release assets
     needs: [plan, build, npm]
-    if: ${{ !cancelled() && needs.plan.outputs.build == 'true' && needs.build.result == 'success' && (needs.plan.outputs.npm != 'true' || needs.npm.result == 'success') }}
+    if: ${{ !cancelled() && needs.plan.outputs.build == 'true' && needs.build.result == 'success' && needs.npm.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -363,7 +324,6 @@ jobs:
           merge-multiple: true
 
       - name: Collect the npm tarball
-        if: needs.plan.outputs.npm == 'true'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: npm-package
@@ -373,21 +333,16 @@ jobs:
         env:
           VERSION: ${{ needs.plan.outputs.version }}
           REVISION: ${{ github.sha }}
-          NPM: ${{ needs.plan.outputs.npm }}
         run: |
           set -euo pipefail
-          npm_tarball=()
-          if [[ ${NPM} == true ]]; then
-            tarballs=(dist/npm/*.tgz)
-            if [[ ${#tarballs[@]} -ne 1 || ! -f ${tarballs[0]} ]]; then
-              echo "expected exactly one npm tarball" >&2
-              exit 1
-            fi
-            npm_tarball=(--npm-tarball "${tarballs[0]}")
+          tarballs=(dist/npm/*.tgz)
+          if [[ ${#tarballs[@]} -ne 1 || ! -f ${tarballs[0]} ]]; then
+            echo "expected exactly one npm tarball" >&2
+            exit 1
           fi
           python3 tools/release/package.py assemble --version "${VERSION}" \
             --revision "${REVISION}" --binaries dist/binaries --output dist/release \
-            "${npm_tarball[@]}"
+            --npm-tarball "${tarballs[0]}"
           {
             echo "### Release assets for ${VERSION}"
             echo
@@ -431,11 +386,7 @@ jobs:
       - name: Verify the assets before attesting them
         env:
           VERSION: ${{ needs.plan.outputs.version }}
-          NPM: ${{ needs.plan.outputs.npm }}
-        run: |
-          npm_flag=()
-          if [[ ${NPM} == true ]]; then npm_flag=(--npm); fi
-          python3 tools/release/package.py verify --version "${VERSION}" "${npm_flag[@]}" dist/release
+        run: python3 tools/release/package.py verify --version "${VERSION}" --npm dist/release
 
       # One attestation covers every asset, SHA256SUMS included, and the bare
       # binaries the archives hold, so an installed binary verifies too.
@@ -456,14 +407,15 @@ jobs:
       contents: write
     env:
       GH_REPO: ${{ github.repository }}
+      # The tags follow from the version, the branch is the run's own, and
+      # tags.sh checks the version and the previous tag before any tag.
       VERSION: ${{ needs.plan.outputs.version }}
-      TAG: ${{ needs.plan.outputs.tag }}
-      GO_TAG: ${{ needs.plan.outputs.go_tag }}
+      TAG: ${{ format('v{0}', needs.plan.outputs.version) }}
+      GO_TAG: ${{ format('go/v{0}', needs.plan.outputs.version) }}
       REVISION: ${{ github.sha }}
-      BRANCH: ${{ needs.plan.outputs.branch }}
+      BRANCH: ${{ github.ref_name }}
       PREVIOUS_TAG: ${{ needs.plan.outputs.previous_tag }}
-      LATEST: ${{ needs.plan.outputs.latest }}
-      NPM: ${{ needs.plan.outputs.npm }}
+      LATEST: ${{ github.ref_name == 'main' }}
     steps:
       - name: Check out the release revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -477,10 +429,7 @@ jobs:
           path: dist/release
 
       - name: Verify the assets
-        run: |
-          npm_flag=()
-          if [[ ${NPM} == true ]]; then npm_flag=(--npm); fi
-          python3 tools/release/package.py verify --version "${VERSION}" "${npm_flag[@]}" dist/release
+        run: python3 tools/release/package.py verify --version "${VERSION}" --npm dist/release
 
       # Both tags first, at the revision, in one atomic push; tags.sh says
       # why, and how a re-run picks up what a failed attempt left.
@@ -617,7 +566,7 @@ jobs:
     # to true; see docs/RELEASING.md. Only releases from main are published,
     # and the npm environment admits only main. Publishing in the release's
     # own run gives npm's provenance the release's commit.
-    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.plan.outputs.publish == 'true' && needs.plan.outputs.npm == 'true' && needs.plan.outputs.branch == 'main' && github.ref == 'refs/heads/main' && needs.release.result == 'success' && vars.TILEWRIGHT_NPM_PUBLISH == 'true' }}
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.plan.outputs.publish == 'true' && github.ref == 'refs/heads/main' && needs.release.result == 'success' && vars.TILEWRIGHT_NPM_PUBLISH == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: npm
@@ -627,7 +576,7 @@ jobs:
       id-token: write
     env:
       GH_REPO: ${{ github.repository }}
-      TAG: ${{ needs.plan.outputs.tag }}
+      TAG: ${{ format('v{0}', needs.plan.outputs.version) }}
       VERSION: ${{ needs.plan.outputs.version }}
       REVISION: ${{ github.sha }}
       PACKAGE: '@seraphinastudios/tilewright-pack'

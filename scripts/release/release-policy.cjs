@@ -1,10 +1,12 @@
 "use strict";
 
 // The release policy: which commits release, and how far they move the
-// version. `.releaserc.json` loads the rules through `release-rules.cjs`, and
-// `plan.mjs` uses them to plan each release. As in tilewright-renderer and
+// version. `commits.cjs` applies the rules to commit messages, and `plan.mjs`
+// uses both to plan each release. As in tilewright-renderer and
 // tilewright-editor, every release from main bumps the minor version, and
-// patch versions belong to maintenance branches named MAJOR.MINOR.x.
+// patch versions belong to maintenance branches named MAJOR.MINOR.x. The
+// rules have the form of the commit analyzer's release rules, which those
+// repositories configure the same way.
 
 const MAINTENANCE_BRANCH = /^([0-9]+)\.([0-9]+)\.x$/;
 const RELEASE_TAG = /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/;

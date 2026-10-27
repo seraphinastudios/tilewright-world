@@ -1,20 +1,18 @@
-// Runs plan.mjs against small fixture repositories. Needs the pinned tools:
-// run `npm ci --ignore-scripts` in this directory first.
+// Runs plan.mjs against small fixture repositories.
 
 import assert from "node:assert/strict";
 import {execFileSync, spawnSync} from "node:child_process";
-import {copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync} from "node:fs";
+import {copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {dirname, join} from "node:path";
 import {fileURLToPath} from "node:url";
 
 const scripts = dirname(fileURLToPath(import.meta.url));
-const repository = join(scripts, "../..");
 
 function fixture({pre10 = true, maintenanceReleases = false} = {}) {
   const root = mkdtempSync(join(tmpdir(), "tilewright-world-plan-test-"));
   mkdirSync(join(root, "scripts/release"), {recursive: true});
-  for (const name of ["plan.mjs", "release-rules.cjs"]) {
+  for (const name of ["plan.mjs", "commits.cjs"]) {
     copyFileSync(join(scripts, name), join(root, "scripts/release", name));
   }
   const policy = readFileSync(join(scripts, "release-policy.cjs"), "utf8");
@@ -27,8 +25,6 @@ function fixture({pre10 = true, maintenanceReleases = false} = {}) {
     adjusted = adjusted.replace(maintenanceMarker, "const MAINTENANCE_RELEASES = true;");
   }
   writeFileSync(join(root, "scripts/release/release-policy.cjs"), adjusted);
-  symlinkSync(join(scripts, "node_modules"), join(root, "scripts/release/node_modules"), "dir");
-  copyFileSync(join(repository, ".releaserc.json"), join(root, ".releaserc.json"));
   const git = (...args) => execFileSync("git", args, {cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"]}).trim();
   git("init", "--quiet", "--initial-branch=main");
   git("config", "user.name", "Release fixture");

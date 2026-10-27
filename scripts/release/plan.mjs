@@ -1,22 +1,19 @@
 // Plans a release from the checked-out commit without any credentials: finds
-// the latest release tag the branch contains, analyzes the commits since it
-// with the commit analyzer and the rules in .releaserc.json, and prints one
-// JSON object saying what to release and whether to publish it.
+// the latest release tag the branch contains, works out the release the
+// commits since it call for with commits.cjs and the rules in
+// release-policy.cjs, and prints one JSON object saying what to release and
+// whether to publish it. It runs only code from this repository.
 //
 // Environment:
 //   TILEWRIGHT_RELEASE_BRANCH   the branch being released (default: from GITHUB_REF_NAME)
 //   TILEWRIGHT_RELEASE_TRIGGER  push, workflow_dispatch or pull_request
-//   NODE_PATH                   where the pinned tools from package.json are installed
 
 import {execFileSync} from "node:child_process";
-import {readFileSync} from "node:fs";
 import {createRequire} from "node:module";
-import {join} from "node:path";
-import {pathToFileURL} from "node:url";
 
 const require = createRequire(import.meta.url);
 const policy = require("./release-policy.cjs");
-const {analyzeCommits} = await import(pathToFileURL(require.resolve("@semantic-release/commit-analyzer")).href);
+const {releaseLevel} = require("./commits.cjs");
 
 const TRIGGERS = new Set(["push", "workflow_dispatch", "pull_request"]);
 const trigger = process.env.TILEWRIGHT_RELEASE_TRIGGER;
@@ -25,17 +22,6 @@ if (!TRIGGERS.has(trigger)) {
 }
 
 const cwd = process.cwd();
-const configuration = JSON.parse(readFileSync(join(cwd, ".releaserc.json"), "utf8"));
-if (configuration.tagFormat !== "v${version}") {
-  throw new Error("release tags must have the form v${version}");
-}
-const analyzer = configuration.plugins.find(
-  (plugin) => Array.isArray(plugin) && plugin[0] === "@semantic-release/commit-analyzer",
-);
-if (!analyzer) {
-  throw new Error(".releaserc.json configures no commit analyzer");
-}
-
 const git = (...args) => execFileSync("git", args, {cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024}).trim();
 const lines = (text) => text.split("\n").filter((line) => line.length > 0);
 
@@ -61,8 +47,7 @@ for (let index = 0; index + 1 < records.length; index += 2) {
     commits.push({hash, message: records[index + 1]});
   }
 }
-const quiet = {log() {}, error() {}, success() {}, warn() {}};
-const level = await analyzeCommits(analyzer[1], {cwd, branch: {name: branch}, commits, logger: quiet});
+const level = releaseLevel({branch, commits, pre10: policy.PRE_1_0});
 const version = policy.planVersion({branch, lastTag, level});
 
 let tag = null;

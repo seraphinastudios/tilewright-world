@@ -58,8 +58,15 @@ published to the npm registry until the owner turns that on (see below).
 
 ## Versions
 
-`scripts/release/release-policy.cjs` holds the policy. `.releaserc.json`
-configures the commit analyzer with it, as in the other two repositories:
+`scripts/release/release-policy.cjs` holds the policy, with release rules
+of the form the commit analyzer of semantic-release takes, as in the other
+two repositories. `scripts/release/commits.cjs` reads commit messages the
+way that analyzer does with the conventionalcommits preset, so versions
+follow the same rules, but it has no dependencies: the release planner
+runs only code from this repository. `scripts/release/test-commits.cjs`
+checks it against the analyzer's answers. As in the analyzer, a
+`BREAKING CHANGE:` note after a line such as `---` (a Markdown rule in a
+pull request body) is not read; use a `!` title instead.
 
 - Every release from `main` bumps the minor version. Patch versions belong
   to maintenance branches named `MAJOR.MINOR.x`. A maintenance branch can
@@ -88,7 +95,7 @@ configures the commit analyzer with it, as in the other two repositories:
 | Push before any `vX.Y.Z` tag exists | The plan job only, which says the first release has to be started by hand. Merging never cuts the first release. |
 | Run workflow (`workflow_dispatch`) on `main` | The same as a push, except that it can also cut the first release |
 | Run workflow on a maintenance branch `MAJOR.MINOR.x` | The plan job only, which says what it would release; publishing from maintenance branches is off |
-| Pull request that changes the release workflows, `.releaserc.json`, `scripts/release/`, `tools/release/`, `tools/build-wasm.sh`, `packages/tilewright-pack/`, `rust-toolchain.toml`, `Cargo.lock` or a `Cargo.toml` | The tests, plan, five builds, npm build and packaging under the version `0.0.0-check.N` (N is the pull request number), as a check. A pull request into another pull request's branch is planned as one into `main`. Nothing is attested or published: the plan job never plans publication for a pull request, and the attest, release and npm jobs refuse to run for one. |
+| Pull request that changes the release workflows, `scripts/release/`, `tools/release/`, `tools/build-wasm.sh`, `packages/tilewright-pack/`, `rust-toolchain.toml`, `Cargo.lock` or a `Cargo.toml` | The tests, plan, five builds, npm build and packaging under the version `0.0.0-check.N` (N is the pull request number), as a check. A pull request into another pull request's branch is planned as one into `main`. Nothing is attested or published: the plan job never plans publication for a pull request, and the attest, release and npm jobs refuse to run for one. |
 
 To cut the first release, run the Release workflow on `main`, either from
 the Actions tab or with:
@@ -121,10 +128,10 @@ its own, so a maintenance release never displaces a release of `main`.
 
 | Job | Runner | Permissions | Does |
 | --- | --- | --- | --- |
-| Plan release | ubuntu-24.04 | `contents: read` | Runs the policy, planner and packaging tests, then `scripts/release/plan.mjs`, which finds the last release tag the branch contains, analyzes the commits since it, and decides the version and whether to publish. The planner's npm code runs without the runner's file commands, with workflow commands in its output ignored. The job then checks that the plan is for the run's own commit and branch, and that the tags follow from the version. The release job checks the tags against the version again, in a job that runs no npm code. Every later job builds the run's commit, not a commit the planner names. Except for pull requests, stops if that last tag has no published, immutable release. |
+| Plan release | ubuntu-24.04 | `contents: read` | Runs the policy, planner and packaging tests, then `scripts/release/plan.mjs`, which finds the last release tag the branch contains, analyzes the commits since it, and decides the version and whether to publish. The planner and its tests run only code from this repository. The job checks that the plan is one JSON object for the run's own commit and branch, and that the version and previous tag are release versions. Every later job builds the run's commit, the release job takes the branch from the run's ref and the tags from the version, and `tags.sh` checks the version and previous tag again. Except for pull requests, stops if that last tag has no published, immutable release. |
 | Revalidate | ubuntu-24.04 | `contents: read` | Runs `validate.yml`, so `tools/validate.sh`, on the released commit |
 | Build TARGET | one per platform | `contents: read` | `tools/release/build.sh`: builds with the pinned toolchain and `--locked`, then runs the binary to validate, compile and verify `fixtures/basic` |
-| Build the npm package | ubuntu-24.04 | `contents: read` | `tools/build-wasm.sh`, then `npm pack` at the release version (only when `packages/tilewright-pack/package.json` exists) |
+| Build the npm package | ubuntu-24.04 | `contents: read` | `tools/build-wasm.sh`, then `npm pack` at the release version. The only outside code it runs is the pinned wasi-sdk and wasm-bindgen, with nothing more than read access to the repository; its tarball reaches the release only through packaging, which checks the package's name, version and module |
 | Package release assets | ubuntu-24.04 | `contents: read` | `tools/release/package.py assemble`: archives, license bundles, the source archive and `SHA256SUMS`; checks that all five platforms compiled the fixture to the same pack |
 | Attest build provenance | ubuntu-24.04 | `contents: read`, `id-token: write`, `attestations: write` | Verifies the assets, then `actions/attest-build-provenance` for every asset and each bare binary |
 | Publish the GitHub release | ubuntu-24.04 | `contents: write` | Creates `vX.Y.Z` and `go/vX.Y.Z` at the commit in one atomic push, which fails if either exists elsewhere. Then it publishes the release on the tag with every asset at once, and checks that the release is immutable, that both tags point at the commit, and that GitHub's asset digests equal `SHA256SUMS`. Last, it has `sum.golang.org` record the new Go version, which only warns if the proxy is slow. |
@@ -140,11 +147,10 @@ last Intel macOS image. When it is retired, build `x86_64-apple-darwin` on
 `macos-15` with `rustup target add`, or drop the target.
 
 Every action is pinned to a full commit SHA and is on the organization's
-allowlist, and no job restores a cache. The planner's npm tools are locked
-with integrity hashes in `scripts/release/package-lock.json` and installed
-with `npm ci --ignore-scripts` in a job with read-only permissions. The
-WebAssembly build tools are pinned and checked by SHA-256 in
-`tools/build-wasm.sh`. No job uses a secret.
+allowlist, and no job restores a cache. The release planner has no
+dependencies. The WebAssembly build tools are pinned and checked by
+SHA-256 in `tools/build-wasm.sh`, and they run only in the npm build job,
+which can read the repository and nothing more. No job uses a secret.
 
 Builds are reproducible where practical. The toolchain is pinned by
 `rust-toolchain.toml`, dependencies by `Cargo.lock` (`--locked`), the

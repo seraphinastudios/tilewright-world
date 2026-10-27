@@ -13,8 +13,8 @@
 #
 # Appends published=true or published=false to GITHUB_OUTPUT.
 #
-# usage: VERSION=X.Y.Z TAG=vX.Y.Z GO_TAG=go/vX.Y.Z REVISION=SHA GH_REPO=OWNER/REPO \
-#   GH_TOKEN=TOKEN GITHUB_OUTPUT=FILE tools/release/tags.sh
+# usage: VERSION=X.Y.Z TAG=vX.Y.Z GO_TAG=go/vX.Y.Z REVISION=SHA [PREVIOUS_TAG=vX.Y.Z] \
+#   GH_REPO=OWNER/REPO GH_TOKEN=TOKEN GITHUB_OUTPUT=FILE tools/release/tags.sh
 set -euo pipefail
 
 if [[ $# -ne 0 ]]; then
@@ -22,11 +22,13 @@ if [[ $# -ne 0 ]]; then
   exit 2
 fi
 : "${VERSION:?}" "${TAG:?}" "${GO_TAG:?}" "${REVISION:?}" "${GH_REPO:?}" "${GH_TOKEN:?}" "${GITHUB_OUTPUT:?}"
-# The version and tags come from the plan job, which runs third-party npm
-# code; this job runs none. The tags must be the version's, which the
-# assets carry.
-if [[ ! ${VERSION} =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ || ${TAG} != "v${VERSION}" || ${GO_TAG} != "go/${TAG}" || ! ${REVISION} =~ ^[0-9a-f]{40}$ ]]; then
-  echo "::error::invalid release version, tags or revision: $(printf '%q ' "${VERSION}" "${TAG}" "${GO_TAG}" "${REVISION}")"
+# The version and the previous tag come from the plan job. The tags must
+# be the version's, which the assets carry, and the previous tag, which the
+# release notes count from, must be a release tag.
+release_version='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
+if [[ ! ${VERSION} =~ ^${release_version}$ || ${TAG} != "v${VERSION}" || ${GO_TAG} != "go/${TAG}" ||
+  ! ${REVISION} =~ ^[0-9a-f]{40}$ || (-n ${PREVIOUS_TAG-} && ! ${PREVIOUS_TAG} =~ ^v${release_version}$) ]]; then
+  echo "::error::invalid release version, tags or revision: $(printf '%q ' "${VERSION}" "${TAG}" "${GO_TAG}" "${REVISION}" "${PREVIOUS_TAG-}")"
   exit 1
 fi
 

@@ -142,12 +142,18 @@ class TagsTest(unittest.TestCase):
         return found.stdout.strip() if found.returncode == 0 else None
 
     def run_script(
-        self, tag: str = "v0.2.0", go_tag: str = "go/v0.2.0", version: str = "0.2.0", revision: str | None = None
+        self,
+        tag: str = "v0.2.0",
+        go_tag: str = "go/v0.2.0",
+        version: str = "0.2.0",
+        revision: str | None = None,
+        previous_tag: str = "v0.1.0",
     ) -> subprocess.CompletedProcess:
         environment = {
             **os.environ,
             "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}",
             "VERSION": version,
+            "PREVIOUS_TAG": previous_tag,
             "TAG": tag,
             "GO_TAG": go_tag,
             "REVISION": self.revision if revision is None else revision,
@@ -196,20 +202,23 @@ class TagsTest(unittest.TestCase):
         self.assertIn("::error::v0.2.0 exists and does not point at", result.stdout)
 
     def test_invalid_tags_stop_before_any_request(self) -> None:
-        for version, tag, go_tag, revision in (
-            ("0.2.0-rc.1", "v0.2.0-rc.1", "go/v0.2.0-rc.1", None),
-            ("0.2", "v0.2", "go/v0.2", None),
-            ("0.2.0", "0.2.0", "go/0.2.0", None),
-            ("0.2.0", "v0.2.0", "go/v0.3.0", None),
-            ("0.2.0", "v0.2.0", "v0.2.0", None),
+        for version, tag, go_tag, revision, previous_tag in (
+            ("0.2.0-rc.1", "v0.2.0-rc.1", "go/v0.2.0-rc.1", None, ""),
+            ("0.2", "v0.2", "go/v0.2", None, ""),
+            ("0.2.0", "0.2.0", "go/0.2.0", None, ""),
+            ("0.2.0", "v0.2.0", "go/v0.3.0", None, ""),
+            ("0.2.0", "v0.2.0", "v0.2.0", None, ""),
             # Tags that do not match the version the assets carry.
-            ("0.3.0", "v0.9.0", "go/v0.9.0", None),
-            ("0.2.0\n", "v0.2.0\n", "go/v0.2.0\n", None),
-            ("0.2.0", "v0.2.0", "go/v0.2.0", "HEAD"),
-            ("0.2.0", "v0.2.0", "go/v0.2.0", "0123456"),
+            ("0.3.0", "v0.9.0", "go/v0.9.0", None, ""),
+            ("0.2.0\n", "v0.2.0\n", "go/v0.2.0\n", None, ""),
+            ("0.2.0", "v0.2.0", "go/v0.2.0", "HEAD", ""),
+            ("0.2.0", "v0.2.0", "go/v0.2.0", "0123456", ""),
+            # A previous tag that is not a release tag.
+            ("0.2.0", "v0.2.0", "go/v0.2.0", None, "main"),
+            ("0.2.0", "v0.2.0", "go/v0.2.0", None, "v0.1.0\n## injected"),
         ):
-            result = self.run_script(tag, go_tag, version, revision)
-            self.assertNotEqual(result.returncode, 0, (version, tag, go_tag, revision))
+            result = self.run_script(tag, go_tag, version, revision, previous_tag)
+            self.assertNotEqual(result.returncode, 0, (version, tag, go_tag, revision, previous_tag))
             self.assertIn("::error::invalid release version, tags or revision", result.stdout)
         self.assertEqual(git(self.bare, "tag", "--list"), "")
         self.assertEqual(self.output.read_text(encoding="utf-8"), "")

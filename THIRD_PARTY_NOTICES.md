@@ -13,7 +13,9 @@ contribute.
 
 Rust crate dependencies keep their own licenses as recorded in `Cargo.lock`
 and their crate metadata. No outside source code is copied into this
-repository; `PROVENANCE.md` records the outside license notices it keeps.
+repository except the release planner's commit parsing (see "Release
+tooling" below); `PROVENANCE.md` records that and the outside license
+notices it keeps.
 Each release archive of the CLI carries `THIRD_PARTY_LICENSES.txt`, which
 `tools/release/package.py` assembles from the license files of every crate
 that binary compiles in.
@@ -104,13 +106,9 @@ GPL-2.0 and is used under BSD-3-Clause. To list what a build compiles in, run
 
 ## Release tooling (`scripts/release/`)
 
-The release planner runs these npm packages in CI, locked in
-`scripts/release/package-lock.json`. Nothing of them is distributed.
-
-| Package | Version | License |
-| --- | --- | --- |
-| [@semantic-release/commit-analyzer](https://github.com/semantic-release/commit-analyzer) | 13.0.1 | MIT |
-| [conventional-changelog-conventionalcommits](https://github.com/conventional-changelog/conventional-changelog) | 9.3.1 | ISC |
-
-Their 28 dependencies in the lockfile are MIT, ISC, BSD-2-Clause
-(`uglify-js`) or BSD-3-Clause (`source-map`) licensed.
+The release planner has no dependencies. `scripts/release/commits.cjs`
+adapts commit-parsing logic from conventional-commits-parser,
+conventional-commits-filter and @semantic-release/commit-analyzer (MIT)
+and conventional-changelog-conventionalcommits (ISC), as `PROVENANCE.md`
+records; `scripts/release/THIRD_PARTY_LICENSES.md` holds their notices.
+None of it is in a release.

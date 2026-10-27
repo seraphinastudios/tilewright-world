@@ -67,11 +67,6 @@ try {
   assert.equal(currentBranch(), "main");
   process.env.TILEWRIGHT_RELEASE_BRANCH = "0.2.x";
   assert.equal(currentBranch(), "0.2.x");
-  delete require.cache[require.resolve("./release-rules.cjs")];
-  assert.equal(require("./release-rules.cjs").at(-1).release, "patch");
-  process.env.TILEWRIGHT_RELEASE_BRANCH = "main";
-  delete require.cache[require.resolve("./release-rules.cjs")];
-  assert.equal(require("./release-rules.cjs").at(-1).release, "minor");
 } finally {
   for (const key of Object.keys(process.env)) {
     if (!(key in saved)) delete process.env[key];
