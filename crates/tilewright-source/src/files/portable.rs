@@ -445,7 +445,7 @@ impl Directory {
 
     /// Access control lists are not read here at all.
     #[allow(clippy::unnecessary_wraps, clippy::unused_self, dead_code)]
-    pub(crate) fn unchecked_file_system(&self) -> Result<Option<String>, Refused> {
+    pub(crate) fn unchecked_file_system(&self, _: &Mounts) -> Result<Option<String>, Refused> {
         Ok(None)
     }
 
@@ -463,6 +463,16 @@ impl Directory {
         }
         #[cfg(not(unix))]
         Ok(false)
+    }
+}
+
+/// There are no mounts to read here.
+pub(crate) struct Mounts;
+
+impl Mounts {
+    #[allow(dead_code)]
+    pub(crate) fn read() -> Self {
+        Self
     }
 }
 

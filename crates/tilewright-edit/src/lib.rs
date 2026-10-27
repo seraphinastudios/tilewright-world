@@ -20,7 +20,8 @@
 //! not, so the inverse is also the way to repair an interrupted apply.
 //! Where publishing does not check everything, as [`Plan::unchecked_access`]
 //! says (on macOS and Windows, and on Linux on any file system but the
-//! local ones whose access control lists it reads), it is refused unless
+//! local ones whose access control lists it reads, overlayfs and file
+//! systems it cannot tell included), it is refused unless
 //! the caller accepts that with [`Plan::publish_with`] and
 //! [`PublishOptions::unchecked_access`]. Ask before writing the inverse.
 //!

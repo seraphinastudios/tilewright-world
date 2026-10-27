@@ -11,7 +11,9 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
 };
-use tilewright_source::{Access, AccessError, Audience, Diagnostic, SourceDirectory, SourceRoot};
+use tilewright_source::{
+    Access, AccessError, Audience, Diagnostic, Mounts, SourceDirectory, SourceRoot,
+};
 
 #[cfg(test)]
 thread_local! {
@@ -27,8 +29,9 @@ thread_local! {
     /// tests.
     pub(crate) static FOREIGN: std::cell::Cell<Option<(&'static str, &'static str)>> =
         const { std::cell::Cell::new(None) };
-    /// Fails removing the entry at this path, for tests.
-    pub(crate) static FAIL_REMOVE: std::cell::RefCell<Option<String>> =
+    /// Fails removing the entry at this path, for tests: as a removal left
+    /// pending if the flag is set.
+    pub(crate) static FAIL_REMOVE: std::cell::RefCell<Option<(String, bool)>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -43,8 +46,11 @@ pub struct PublishError {
     pub durable: bool,
     /// Whether the cleanup finished: no staging file or emptied directory
     /// was left that should have gone. One left is named in the problems,
-    /// to remove by hand; a staging file left below `planes/` or `defs/`
-    /// keeps the tree from validating.
+    /// to remove by hand, unless its removal took effect and only waits
+    /// for another program that has it open to close it, as on Windows on
+    /// some file systems: then it goes by itself and there is nothing to
+    /// do. A staging file left below `planes/` or `defs/` keeps the tree
+    /// from validating.
     pub cleaned: bool,
     pub problems: Vec<Diagnostic>,
 }
@@ -168,8 +174,8 @@ pub struct PublishOptions {
     /// Publish even though publishing does not check everything, as
     /// [`Plan::unchecked_access`] says: on macOS and Windows, and on Linux
     /// in a tree on any file system but the local ones whose access control
-    /// lists it reads (ext2, ext3, ext4, XFS, Btrfs, tmpfs, F2FS, ZFS,
-    /// overlayfs and bcachefs). Without it, publishing there is refused,
+    /// lists it reads (ext2, ext3, ext4, XFS, Btrfs, tmpfs, F2FS, ZFS and
+    /// bcachefs), or one it cannot tell. Without it, publishing there is refused,
     /// with a `tx.io` diagnostic, and nothing is written. Elsewhere it
     /// changes nothing.
     pub unchecked_access: bool,
@@ -194,6 +200,8 @@ struct Directories<'r> {
     /// Cleanup that could not be done, and how many more past the limit.
     leftovers: Vec<Diagnostic>,
     dropped: usize,
+    /// What the cleanup could not remove, not tried again.
+    unremoved: BTreeSet<String>,
 }
 
 impl<'r> Directories<'r> {
@@ -205,6 +213,7 @@ impl<'r> Directories<'r> {
             changed: BTreeSet::new(),
             leftovers: Vec::new(),
             dropped: 0,
+            unremoved: BTreeSet::new(),
         }
     }
 
@@ -265,11 +274,19 @@ impl<'r> Directories<'r> {
     /// parent as changed, to sync.
     fn remove(&mut self, path: &str, directory: bool) -> Result<bool, AccessError> {
         #[cfg(test)]
-        if FAIL_REMOVE.with(|fail| fail.borrow().as_deref() == Some(path)) {
-            return Err(AccessError::Io(
-                path.to_owned(),
-                std::io::Error::other("injected removal failure"),
-            ));
+        if let Some(pending) = FAIL_REMOVE.with(|fail| {
+            fail.borrow()
+                .as_ref()
+                .and_then(|(failing, pending)| (failing == path).then_some(*pending))
+        }) {
+            return Err(if pending {
+                AccessError::pending_removal(path)
+            } else {
+                AccessError::Io(
+                    path.to_owned(),
+                    std::io::Error::other("injected removal failure"),
+                )
+            });
         }
         let (parent, name) = split(path);
         // A directory's own handle is closed first: on Windows a removal
@@ -294,10 +311,16 @@ impl<'r> Directories<'r> {
 
     /// Cleans up the file, or empty directory, at `path`. A failure is kept
     /// as a leftover to report; returns whether it was removed.
+    /// One that failed is reported once, and not tried again, however many
+    /// deleted files it held.
     fn clean(&mut self, path: &str, directory: bool) -> bool {
+        if self.unremoved.contains(path) {
+            return false;
+        }
         match self.remove(path, directory) {
             Ok(removed) => removed,
             Err(error) => {
+                self.unremoved.insert(path.to_owned());
                 self.leftover(unremoved(path, &error));
                 false
             }
@@ -603,6 +626,7 @@ fn foreign(
     changed: &[&FileChange],
 ) -> Result<Option<(String, String)>, Vec<Diagnostic>> {
     let mut seen = BTreeSet::new();
+    let mounts = Mounts::read();
     for file in changed {
         let mut directory = split(&file.path).0;
         while seen.insert(directory.to_owned()) {
@@ -613,7 +637,7 @@ fn foreign(
                 return Ok(Some((directory.to_owned(), name.to_owned())));
             }
             let found = match directories.get(directory, None) {
-                Ok(Some(handle)) => handle.unchecked_file_system(),
+                Ok(Some(handle)) => handle.unchecked_file_system(&mounts),
                 Ok(None) => Ok(None),
                 Err(error) => Err(error),
             }
@@ -658,7 +682,7 @@ fn refuse_foreign(
 /// control lists publishing does not read.
 fn foreign_message(directory: &str, name: &str) -> String {
     format!(
-        "{} is on a file system ({name}) other than the local ones whose access control lists publishing reads (ext2, ext3, ext4, XFS, Btrfs, tmpfs, F2FS, ZFS, overlayfs and bcachefs), so {UNKEPT_LISTS}",
+        "{} is on a file system ({name}) other than the local ones whose access control lists publishing reads (ext2, ext3, ext4, XFS, Btrfs, tmpfs, F2FS, ZFS and bcachefs), so {UNKEPT_LISTS}",
         shown(directory)
     )
 }
@@ -837,8 +861,11 @@ impl Plan {
     /// and Windows, and on Linux, where the tree, or a directory above a
     /// file the plan changes, is on a file system other than the local
     /// ones whose access control lists publishing reads (ext2, ext3, ext4,
-    /// XFS, Btrfs, tmpfs, F2FS, ZFS, overlayfs and bcachefs), that, naming
-    /// the file system. `None` when publishing checks everything, or is not
+    /// XFS, Btrfs, tmpfs, F2FS, ZFS and bcachefs, each told by the type of
+    /// its mount in `/proc/self/mountinfo` and its `statfs` magic number),
+    /// that, naming the file system, or why it could not be told: overlayfs
+    /// and other stacked, network and host-shared file systems need
+    /// consent. `None` when publishing checks everything, or is not
     /// supported here. Ask before writing the inverse, so that a refusal
     /// writes nothing.
     ///

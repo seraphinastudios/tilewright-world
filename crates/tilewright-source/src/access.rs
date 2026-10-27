@@ -52,6 +52,18 @@ impl fmt::Display for AccessError {
 impl std::error::Error for AccessError {}
 
 impl AccessError {
+    /// A removal of `path` that took effect but is not finished, as
+    /// [`removal_pending`](Self::removal_pending) says, for tests of what
+    /// is made of one; only Windows makes them otherwise.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn pending_removal(path: &str) -> Self {
+        Self::Io(
+            path.to_owned(),
+            std::io::Error::new(std::io::ErrorKind::ResourceBusy, RemovalPending),
+        )
+    }
+
     /// Whether this is a removal that took effect but is not finished: on
     /// Windows a removed entry stays, on some file systems, until another
     /// program closes it, and goes then.
@@ -359,6 +371,20 @@ impl SourceRoot {
     }
 }
 
+/// The mounts of this process, read once to tell the file systems of
+/// several directories ([`SourceDirectory::unchecked_file_system`]): on
+/// Linux from `/proc/self/mountinfo`, bounded; elsewhere nothing.
+pub struct Mounts(platform::Mounts);
+
+impl Mounts {
+    /// Reads the mounts. Where they cannot be read, every directory's file
+    /// system is one that cannot be told.
+    #[must_use]
+    pub fn read() -> Self {
+        Self(platform::Mounts::read())
+    }
+}
+
 /// The root's lock; see [`SourceRoot::lock`].
 pub struct SourceLock(#[allow(dead_code)] platform::Lock);
 
@@ -452,18 +478,21 @@ impl SourceDirectory {
             .map_err(|error| refused(&self.entry(name), error))
     }
 
-    /// The file system this directory is on, by name, or by its `statfs`
-    /// magic number, where publishing does not read the access control
-    /// lists of what is in it: on Linux any but the local ones that keep
-    /// them as the attributes publishing reads (ext2, ext3, ext4, XFS,
-    /// Btrfs, tmpfs, F2FS, ZFS, overlayfs and bcachefs), so network,
-    /// host-shared (such as WSL's Windows drives or a virtual machine's
-    /// shared folders), FUSE and NTFS ones among them. `None` where it
-    /// does, and on other platforms, which do not read access control
-    /// lists at all.
-    pub fn unchecked_file_system(&self) -> Result<Option<String>, AccessError> {
+    /// The file system this directory is on, in words, where publishing
+    /// does not read the access control lists of what is in it: on Linux
+    /// any but the local ones that keep them as the attributes publishing
+    /// reads (ext2, ext3, ext4, XFS, Btrfs, tmpfs, F2FS, ZFS and bcachefs),
+    /// so network, host-shared (such as WSL's Windows drives or a virtual
+    /// machine's shared folders), FUSE, NTFS and stacked ones (overlayfs)
+    /// among them. The directory's mount is found by its ID in `mounts`,
+    /// and both the type the kernel names it with and the magic number
+    /// `statfs` gives must be such a file system's; one that cannot be
+    /// told, as where `/proc/self/mountinfo` cannot be read, is not checked
+    /// either, and says why. `None` where it is checked, and on other
+    /// platforms, which do not read access control lists at all.
+    pub fn unchecked_file_system(&self, mounts: &Mounts) -> Result<Option<String>, AccessError> {
         self.directory
-            .unchecked_file_system()
+            .unchecked_file_system(&mounts.0)
             .map_err(|error| refused(&self.path, error))
     }
 

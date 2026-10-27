@@ -9,6 +9,8 @@
 
 #[cfg(unix)]
 pub(crate) mod beneath;
+#[cfg(target_os = "linux")]
+pub(crate) mod mounts;
 #[cfg(any(not(unix), test))]
 pub(crate) mod portable;
 
@@ -860,32 +862,62 @@ mod tests {
         let directory = tree();
         let root = super::beneath::Root::new(directory.path());
         let dir = root.directory(&["dir"], false).unwrap();
-        // A test's own directory is on a local file system.
-        assert_eq!(dir.unchecked_file_system().unwrap(), None);
-        // Only the local file systems that keep their lists as the
-        // attributes publishing reads are checked; any other is named, by
-        // its magic number where its name is not known.
-        for (magic, name) in [
-            (0xEF53, None),
-            (0x5846_5342, None),
-            (0x9123_683E, None),
-            (0x0102_1994, None),
-            (0x2FC1_2FC1, None),
-            (0x794C_7630, None),
-            (0xFF53_4D42, Some("SMB")),
-            (0x0102_1997, Some("9p")),
-            (0x6573_5546, Some("FUSE")),
-            (0x7366_746E, Some("NTFS")),
-            (0x0000_6969, Some("NFS")),
-            (0x786F_4256, Some("vboxsf")),
-            (0x7C7C_6673, Some("prl_fs")),
-            (0x1234_5678, Some("type 0x12345678")),
+        // A test's own directory is on a local file system, found by its
+        // mount in this process's mounts.
+        let mounts = super::beneath::Mounts::read();
+        assert_eq!(dir.unchecked_file_system(&mounts).unwrap(), None);
+        // Both the type of the mount and the magic number must be a
+        // checked file system's: a 9p share passes on its host's magic
+        // number, and an overlay's upper layer may be remote.
+        for (found, magic, name) in [
+            ("ext4", 0xEF53, None),
+            ("xfs", 0x5846_5342, None),
+            ("btrfs", 0x9123_683E, None),
+            ("tmpfs", 0x0102_1994, None),
+            ("zfs", 0x2FC1_2FC1, None),
+            ("9p", 0xEF53, Some("9p")),
+            ("overlay", 0x794C_7630, Some("overlay")),
+            ("cifs", 0xFF53_4D42, Some("cifs")),
+            ("vboxsf", 0x786F_4256, Some("vboxsf")),
+            ("fuse.sshfs", 0x6573_5546, Some("fuse.sshfs")),
+            (
+                "ext4",
+                0x0102_1997,
+                Some("ext4, though statfs gives type 0x1021997"),
+            ),
         ] {
-            super::beneath::GIVEN_FILE_SYSTEM.with(|given| given.set(Some(magic)));
-            let found = dir.unchecked_file_system().unwrap();
+            super::beneath::GIVEN_FILE_SYSTEM.with(|given| given.set(Some((found, magic))));
+            let told = dir.unchecked_file_system(&mounts).unwrap();
             super::beneath::GIVEN_FILE_SYSTEM.with(|given| given.set(None));
-            assert_eq!(found.as_deref(), name, "{magic:x}");
+            assert_eq!(told.as_deref(), name, "{found} {magic:x}");
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn mountinfo_is_read_strictly_and_within_bounds() {
+        use super::mounts::parse;
+        let text = b"22 1 8:1 / / rw,relatime shared:1 - ext4 /dev/sda1 rw\n\
+36 22 0:32 / /mnt/with\\040space rw - 9p host rw,trans=virtio\n\
+37 22 0:33 / /mnt/\xff\xfe rw master:2 shared:3 - fuse.s\\134shfs host rw\n";
+        let mounts = parse(text).unwrap();
+        assert_eq!(mounts.get(&22).map(String::as_str), Some("ext4"));
+        assert_eq!(mounts.get(&36).map(String::as_str), Some("9p"));
+        assert_eq!(mounts.get(&37).map(String::as_str), Some("fuse.s\\shfs"));
+        for bad in [
+            &b"22 1 8:1 / / rw ext4 /dev/sda1 rw\n"[..],
+            b"x 1 8:1 / / rw - ext4 /dev/sda1 rw\n",
+            b"22 1 8:1 / / rw -\n",
+            b"22 1 8:1 / / rw - ext\\9 /dev/sda1 rw\n",
+            b"22 1 8:1 / / rw - \xff /dev/sda1 rw\n",
+            b"22 1 8:1 / / rw - ext4 a\n22 1 8:1 / / rw - ext4 b\n",
+        ] {
+            assert!(parse(bad).is_err(), "{}", String::from_utf8_lossy(bad));
+        }
+        let mut long = b"22 1 8:1 / /".to_vec();
+        long.extend(std::iter::repeat_n(b'a', 70_000));
+        long.extend(b" rw - ext4 /dev/sda1 rw\n");
+        assert!(parse(&long).unwrap_err().contains("longer than"));
     }
 
     #[test]

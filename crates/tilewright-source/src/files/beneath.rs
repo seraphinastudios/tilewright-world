@@ -439,27 +439,42 @@ impl Directory {
         Ok(())
     }
 
-    /// The file system this directory is on, by name, where it is not one
-    /// whose access control lists publishing reads; see
-    /// [`unchecked_file_system`].
+    /// The file system this directory is on, where it is not one whose
+    /// access control lists publishing reads, or why it could not be told;
+    /// see [`unchecked_file_system`]. Its mount is found by mount ID among
+    /// `mounts`, whose type must be one of those, and `statfs` must give
+    /// that type's magic number too.
     #[cfg(target_os = "linux")]
-    pub(crate) fn unchecked_file_system(&self) -> Result<Option<String>, Refused> {
+    pub(crate) fn unchecked_file_system(&self, mounts: &Mounts) -> Result<Option<String>, Refused> {
+        use rustix::fs::{StatxFlags, statx};
         #[cfg(test)]
-        if let Some(magic) = GIVEN_FILE_SYSTEM.with(std::cell::Cell::get) {
-            return Ok(unchecked_file_system(magic));
+        if let Some((found, magic)) = GIVEN_FILE_SYSTEM.with(std::cell::Cell::get) {
+            return Ok(unchecked_file_system(found, magic));
         }
-        let found = rustix::fs::fstatfs(&self.0).map_err(|errno| Refused::Io(errno.into()))?;
+        let unknown = |reason: &str| Ok(Some(format!("one that could not be told: {reason}")));
+        let id = match statx(&self.0, "", AtFlags::EMPTY_PATH, StatxFlags::MNT_ID) {
+            Ok(found) if found.stx_mask & StatxFlags::MNT_ID.bits() != 0 => found.stx_mnt_id,
+            Ok(_) | Err(Errno::NOSYS) => {
+                return unknown("the kernel does not say which mount it is on");
+            }
+            Err(errno) => return Err(Refused::Io(errno.into())),
+        };
+        let found = match mounts.type_of(id) {
+            Ok(found) => found,
+            Err(reason) => return unknown(&reason),
+        };
+        let statistics = rustix::fs::fstatfs(&self.0).map_err(|errno| Refused::Io(errno.into()))?;
         // The magic numbers are 32 bits wide, whatever the width of the
         // field.
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let magic = found.f_type as u32;
-        Ok(unchecked_file_system(magic))
+        let magic = statistics.f_type as u32;
+        Ok(unchecked_file_system(found, magic))
     }
 
     /// Elsewhere access control lists are not read at all.
     #[cfg(not(target_os = "linux"))]
     #[allow(clippy::unnecessary_wraps, clippy::unused_self)]
-    pub(crate) fn unchecked_file_system(&self) -> Result<Option<String>, Refused> {
+    pub(crate) fn unchecked_file_system(&self, _: &Mounts) -> Result<Option<String>, Refused> {
         Ok(None)
     }
 
@@ -538,62 +553,52 @@ const ACCESS_CONTROL_LISTS: [&str; 4] = [
 ];
 
 /// The local file systems that keep their access control lists, where
-/// they have any, as the attributes above, by the magic number `statfs`
-/// gives: ext2, ext3 and ext4, XFS, Btrfs, tmpfs, F2FS, ZFS, overlayfs
-/// (whose layers are such file systems where it is used for a tree) and
-/// bcachefs. On any other, network, host-shared, FUSE and foreign ones
-/// among them, who may read a file may not be what its mode bits and
-/// those attributes say.
+/// they have any, as the attributes above: each by the type the kernel
+/// names its mounts with and the magic number `statfs` gives. On any
+/// other, network, host-shared, FUSE, stacked (overlayfs, whose upper layer
+/// may be remote) and foreign ones among them, who may read a file may not
+/// be what its mode bits and those attributes say. Both are asked, since a
+/// file system that shares another, as 9p does, may pass on its magic
+/// number.
 #[cfg(target_os = "linux")]
-const CHECKED_FILE_SYSTEMS: [u32; 8] = [
-    0x0000_EF53,
-    0x5846_5342,
-    0x9123_683E,
-    0x0102_1994,
-    0xF2F5_2010,
-    0x2FC1_2FC1,
-    0x794C_7630,
-    0xCA45_1A4E,
+const CHECKED_FILE_SYSTEMS: [(&str, u32); 9] = [
+    ("ext2", 0x0000_EF53),
+    ("ext3", 0x0000_EF53),
+    ("ext4", 0x0000_EF53),
+    ("xfs", 0x5846_5342),
+    ("btrfs", 0x9123_683E),
+    ("tmpfs", 0x0102_1994),
+    ("f2fs", 0xF2F5_2010),
+    ("zfs", 0x2FC1_2FC1),
+    ("bcachefs", 0xCA45_1A4E),
 ];
 
-/// The names of file systems that are not checked, for messages; any
-/// other is named by its magic number.
+/// The file system of type `found` with the `statfs` magic number `magic`,
+/// in words, where it is not one of [`CHECKED_FILE_SYSTEMS`] with its own
+/// magic number; `None` where it is.
 #[cfg(target_os = "linux")]
-const FILE_SYSTEM_NAMES: [(u32, &str); 16] = [
-    (0xFF53_4D42, "SMB"),
-    (0xFE53_4D42, "SMB"),
-    (0x0000_517B, "SMB"),
-    (0x0000_6969, "NFS"),
-    (0x0102_1997, "9p"),
-    (0x6573_5546, "FUSE"),
-    (0x5346_544E, "NTFS"),
-    (0x7366_746E, "NTFS"),
-    (0x786F_4256, "vboxsf"),
-    (0x7C7C_6673, "prl_fs"),
-    (0x6B41_4653, "AFS"),
-    (0x5346_414F, "AFS"),
-    (0x4750_4653, "GPFS"),
-    (0x00C3_6400, "Ceph"),
-    (0x0000_4D44, "FAT"),
-    (0x2011_BAB0, "exFAT"),
-];
-
-/// The name of the file system with this `statfs` magic number where it
-/// is not one of [`CHECKED_FILE_SYSTEMS`]; `None` where it is.
-#[cfg(target_os = "linux")]
-pub(crate) fn unchecked_file_system(magic: u32) -> Option<String> {
-    if CHECKED_FILE_SYSTEMS.contains(&magic) {
-        return None;
+pub(crate) fn unchecked_file_system(found: &str, magic: u32) -> Option<String> {
+    match CHECKED_FILE_SYSTEMS.iter().find(|(name, _)| *name == found) {
+        Some((_, expected)) if *expected == magic => None,
+        Some(_) => Some(format!("{found}, though statfs gives type {magic:#x}")),
+        None => Some(found.to_owned()),
     }
-    Some(
-        FILE_SYSTEM_NAMES
-            .iter()
-            .find(|(known, _)| *known == magic)
-            .map_or_else(
-                || format!("type {magic:#x}"),
-                |(_, name)| (*name).to_owned(),
-            ),
-    )
+}
+
+/// The mounts of this process, read once to tell the file systems of
+/// several directories.
+#[cfg(target_os = "linux")]
+pub(crate) use super::mounts::Mounts;
+
+/// Elsewhere there are no mounts to read.
+#[cfg(not(target_os = "linux"))]
+pub(crate) struct Mounts;
+
+#[cfg(not(target_os = "linux"))]
+impl Mounts {
+    pub(crate) fn read() -> Self {
+        Self
+    }
 }
 
 /// The mandatory access control labels Linux security modules keep, which
@@ -718,9 +723,10 @@ thread_local! {
 
 #[cfg(all(test, target_os = "linux"))]
 thread_local! {
-    /// The `statfs` magic number every directory reports, for tests: the
-    /// file systems it matters for cannot be mounted in one.
-    pub(crate) static GIVEN_FILE_SYSTEM: std::cell::Cell<Option<u32>> =
+    /// The file system type and `statfs` magic number every directory
+    /// reports, for tests: the file systems it matters for cannot be
+    /// mounted in one.
+    pub(crate) static GIVEN_FILE_SYSTEM: std::cell::Cell<Option<(&'static str, u32)>> =
         const { std::cell::Cell::new(None) };
 }
 

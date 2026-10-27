@@ -433,8 +433,9 @@ mod tests {
         )
         .unwrap();
         let applied = run(&["tx", "apply", &path("tx.jsonc"), &root, &path("undo.jsonc")]);
-        // Only Linux checks everything, here, and needs no consent.
-        let Some(unchecked) = tilewright_edit::UNCHECKED_ACCESS else {
+        // Only Linux checks everything, on the local file systems a test's
+        // directory is on, and needs no consent.
+        let Some(unchecked) = planned.unchecked_access().unwrap() else {
             assert!(super::consent(&planned, false).unwrap().is_none());
             assert!(super::consent(&planned, true).unwrap().is_none());
             assert!(applied.unwrap().contains("applied; the inverse is in"));
@@ -443,7 +444,7 @@ mod tests {
         };
         let refused = applied.unwrap_err();
         assert!(
-            refused.message.contains(unchecked) && refused.message.contains("--unchecked-access"),
+            refused.message.contains(&unchecked) && refused.message.contains("--unchecked-access"),
             "{}",
             refused.message
         );
@@ -451,7 +452,7 @@ mod tests {
         assert!(!Path::new(&path("undo.jsonc")).exists());
         assert!(!chunk.exists());
         let warning = super::consent(&planned, true).unwrap().unwrap();
-        assert!(warning.starts_with("warning: ") && warning.contains(unchecked));
+        assert!(warning.starts_with("warning: ") && warning.contains(&unchecked));
         run(&[
             "tx",
             "apply",

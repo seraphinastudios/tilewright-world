@@ -46,7 +46,7 @@ use std::{collections::BTreeMap, path::Path, sync::Arc};
 use tilewright_jsonc::Limits;
 
 pub use access::{
-    Access, AccessError, Audience, LOCK_NAME, SourceDirectory, SourceLock, SourceRoot,
+    Access, AccessError, Audience, LOCK_NAME, Mounts, SourceDirectory, SourceLock, SourceRoot,
 };
 use diagnostic::Diagnostics;
 pub use diagnostic::{Code, Diagnostic};

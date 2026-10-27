@@ -664,13 +664,17 @@ fn publishing_where_access_is_unchecked_needs_the_callers_consent() {
             r#"{"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["title"], "value": "Changed"}"#,
         ),
     );
-    // Only Linux checks everything, and needs no consent.
+    // Only Linux checks everything, and needs no consent, on the local file
+    // systems a test's directory is on.
     assert_eq!(UNCHECKED_ACCESS.is_none(), PUBLISH_CONFINED);
-    if let Some(unchecked) = UNCHECKED_ACCESS {
+    if let Some(unchecked) = plan.unchecked_access().unwrap() {
+        if let Some(platform) = UNCHECKED_ACCESS {
+            assert_eq!(unchecked, platform);
+        }
         let failure = plan.publish().unwrap_err();
         assert!(!failure.applied && failure.durable && failure.cleaned);
         assert!(
-            has(&failure.problems, "tx.io", unchecked)
+            has(&failure.problems, "tx.io", &unchecked)
                 && has(&failure.problems, "tx.io", "unless the caller accepts"),
             "{:#?}",
             failure.problems
@@ -2831,34 +2835,51 @@ fn a_tree_whose_access_control_lists_publishing_does_not_read_needs_consent() {
 }
 
 #[test]
-fn an_emptied_directory_that_cannot_be_removed_is_reported() {
-    let tree = copy();
-    let root = tree.path();
-    apply(
-        root,
-        &transaction(
-            r#"{"op": "object.insert", "plane": "overworld", "layer": 7, "at": [0, 0], "object": {"proto": "tree"}}"#,
-        ),
-    );
-    let plan = planned(
-        root,
-        &transaction(
-            r#"{"op": "object.remove", "plane": "overworld", "layer": 7, "at": [0, 0], "index": 0, "expect": {"proto": "tree"}}"#,
-        ),
-    );
-    publish::FAIL_REMOVE
-        .with(|fail| *fail.borrow_mut() = Some("planes/overworld/layers/7".to_owned()));
-    let outcome = publish(&plan);
-    publish::FAIL_REMOVE.with(|fail| *fail.borrow_mut() = None);
-    let failure = outcome.unwrap_err();
-    assert!(failure.applied && !failure.cleaned, "{failure:#?}");
-    assert_eq!(failure.problems.len(), 1, "{failure:#?}");
-    assert_eq!(failure.problems[0].path, "planes/overworld/layers/7");
-    assert!(
-        failure.problems[0].message.contains("remove it by hand"),
-        "{failure:#?}"
-    );
-    assert!(!root.join("planes/overworld/layers/7/0_0.jsonc").exists());
+fn an_emptied_directory_that_cannot_be_removed_is_reported_once() {
+    for pending in [false, true] {
+        let tree = copy();
+        let root = tree.path();
+        apply(
+            root,
+            &transaction(
+                r#"{"op": "object.insert", "plane": "overworld", "layer": 7, "at": [0, 0], "object": {"proto": "tree"}},
+    {"op": "object.insert", "plane": "overworld", "layer": 7, "at": [32, 0], "object": {"proto": "tree"}}"#,
+            ),
+        );
+        // Both chunks of the layer go, so its directory is emptied twice.
+        let plan = planned(
+            root,
+            &transaction(
+                r#"{"op": "object.remove", "plane": "overworld", "layer": 7, "at": [0, 0], "index": 0, "expect": {"proto": "tree"}},
+    {"op": "object.remove", "plane": "overworld", "layer": 7, "at": [32, 0], "index": 0, "expect": {"proto": "tree"}}"#,
+            ),
+        );
+        assert_eq!(
+            plan.files().iter().filter(|file| file.is_changed()).count(),
+            2
+        );
+        publish::FAIL_REMOVE.with(|fail| {
+            *fail.borrow_mut() = Some(("planes/overworld/layers/7".to_owned(), pending));
+        });
+        let outcome = publish(&plan);
+        publish::FAIL_REMOVE.with(|fail| *fail.borrow_mut() = None);
+        let failure = outcome.unwrap_err();
+        assert!(failure.applied && !failure.cleaned, "{failure:#?}");
+        assert_eq!(failure.problems.len(), 1, "{failure:#?}");
+        assert_eq!(failure.problems[0].path, "planes/overworld/layers/7");
+        // A removal Windows left pending goes by itself.
+        let message = &failure.problems[0].message;
+        if pending {
+            assert!(
+                message.contains("there is nothing to do") && !message.contains("by hand"),
+                "{message}"
+            );
+        } else {
+            assert!(message.contains("remove it by hand"), "{message}");
+        }
+        assert!(!root.join("planes/overworld/layers/7/0_0.jsonc").exists());
+        assert!(!root.join("planes/overworld/layers/7/1_0.jsonc").exists());
+    }
 }
 
 #[cfg(unix)]
