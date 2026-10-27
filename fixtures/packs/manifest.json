@@ -379,6 +379,21 @@
     },
     {"file": "open-page-size.twpack", "rule": "the pages are 8192 bytes", "open": "pack.identity"},
     {
+      "file": "open-header-wal.twpack",
+      "rule": "the SQLite header declares WAL: file format versions 2 and 2",
+      "open": "pack.identity"
+    },
+    {
+      "file": "open-header-write-version.twpack",
+      "rule": "the SQLite header's file format write version is 2",
+      "open": "pack.identity"
+    },
+    {
+      "file": "open-header-read-version.twpack",
+      "rule": "the SQLite header's file format read version is 2",
+      "open": "pack.identity"
+    },
+    {
       "file": "open-free-pages.twpack",
       "rule": "pages freed by a dropped table are kept as free pages",
       "open": "pack.free_pages"
@@ -517,6 +532,18 @@
       "verify": "pack.plane"
     },
     {
+      "file": "plane-id-long.twpack",
+      "rule": "a plane's ID is longer than an identifier can be",
+      "reads": [
+        {
+          "op": "plane",
+          "id": "vaultaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "error": "pack.plane"
+        }
+      ],
+      "verify": "pack.plane"
+    },
+    {
       "file": "plane-chunk-size.twpack",
       "rule": "a plane's chunks are not 32 tiles square",
       "reads": [
@@ -557,10 +584,26 @@
       "verify": "pack.zone"
     },
     {
+      "file": "zone-plane-id.twpack",
+      "rule": "a zone's plane is not an identifier",
+      "reads": [
+        {"op": "zone", "plane": "Attic", "id": "village", "error": "pack.zone"}
+      ],
+      "verify": "pack.zone"
+    },
+    {
       "file": "anchor-plane.twpack",
       "rule": "an anchor names a plane the pack does not have",
       "reads": [
         {"op": "anchor", "plane": "attic", "id": "village.well", "error": null}
+      ],
+      "verify": "pack.anchor"
+    },
+    {
+      "file": "anchor-plane-id.twpack",
+      "rule": "an anchor's plane is not an identifier",
+      "reads": [
+        {"op": "anchor", "plane": "Attic", "id": "village.well", "error": "pack.anchor"}
       ],
       "verify": "pack.anchor"
     },
