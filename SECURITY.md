@@ -39,11 +39,17 @@ platform:
   control list (POSIX, NFS version 4 or rich) is refused, since a
   replacement could not keep it. That holds on the local file systems
   that keep their lists as the attributes publishing reads (ext2, ext3,
-  ext4, XFS, Btrfs, tmpfs, F2FS, ZFS, overlayfs and bcachefs). On any
-  other, told by the file system's type, Linux may not show the lists at
-  all (network, host-shared, FUSE and NTFS ones among them, such as WSL's
-  mounts of Windows drives or a virtual machine's shared folders), so
-  there applying needs the same explicit consent as on macOS and Windows.
+  ext4, XFS, Btrfs, tmpfs, F2FS, ZFS and bcachefs). On any other, Linux
+  may not show the lists at all (network, host-shared, FUSE, NTFS and
+  stacked ones among them, such as WSL's mounts of Windows drives, a
+  virtual machine's 9p or shared folders, or a container's overlay root),
+  so there applying needs the same explicit consent as on macOS and
+  Windows. A directory's file system is told by both the type of its mount
+  in `/proc/self/mountinfo`, found by mount ID, and the magic number
+  `statfs` gives, since a 9p share passes on its host's magic number;
+  where the mounts cannot be read, consent is needed too. In a container,
+  keep the tree on a bind-mounted local volume rather than the overlay
+  root.
   The mandatory access control labels (SELinux, Smack) of the entries compared
   must be the same, and the system's policy must give every file publishing
   writes, and directory it creates, that label, which is checked before a

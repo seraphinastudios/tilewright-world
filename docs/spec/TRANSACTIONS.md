@@ -322,25 +322,34 @@ guarantees:
 Only on Linux does publishing keep every guarantee of this section, and
 there only on the local file systems that keep their access control lists
 as the extended attributes it reads (below): ext2, ext3, ext4, XFS, Btrfs,
-tmpfs, F2FS, ZFS, overlayfs and bcachefs. On macOS and Windows it is a
-best effort: it is supported only in trees that no one else can change,
-and in which no file or directory has an access control list of its own
-(on Windows, a file has the list its directory gives it), since a
-replaced file, or one an inverse makes again, takes the access its
-directory gives a new file, and nothing can check that from safe code.
-The same holds on Linux for a tree, or a directory above a file the
-transaction changes, on any other file system, which publishing tells by
-its type (`statfs`): network, host-shared (WSL's mounts of Windows drives,
-a virtual machine's shared folders), FUSE and NTFS ones among them, whose
-lists Linux may not show at all. So in each of these cases publishing is
-refused by default, with `tx.io`, and nothing is written: it goes ahead
-only when the caller accepts what is not checked, with unchecked access
-(the library's `PublishOptions::unchecked_access`, the command line's
-`--unchecked-access`), and the command line then warns, naming it, and on
-Linux the file system, by name or by its magic number. Elsewhere
-unchecked access changes nothing. On other systems, the BSDs included,
-publishing is refused, with `tx.io`, and nothing is written: they are
-untested. Previewing and rebasing work everywhere.
+tmpfs, F2FS, ZFS and bcachefs. On macOS and Windows it is a best effort:
+it is supported only in trees that no one else can change, and in which no
+file or directory has an access control list of its own (on Windows, a
+file has the list its directory gives it), since a replaced file, or one
+an inverse makes again, takes the access its directory gives a new file,
+and nothing can check that from safe code. The same holds on Linux for a
+tree, or a directory above a file the transaction changes, on any other
+file system: network, host-shared (WSL's mounts of Windows drives, a
+virtual machine's shared folders), FUSE, NTFS and stacked ones among them,
+whose lists Linux may not show at all. Publishing tells a directory's file
+system by both the type the kernel names its mount with, found by mount
+ID (`statx`) in `/proc/self/mountinfo`, and the magic number `statfs`
+gives, which must be that type's: a 9p share passes on its host's magic
+number, but its mount's type is `9p`. Where that cannot be told, because
+`/proc/self/mountinfo` cannot be read (as in some hardened containers),
+the kernel does not give a mount ID (before Linux 5.8) or the mount is
+not listed, the file system counts as unchecked too. overlayfs is not
+checked either, since its upper layer may be remote, so a tree on a
+container's overlay root needs unchecked access; a local volume
+bind-mounted into the container does not. So in each of these cases
+publishing is refused by default, with `tx.io`, and nothing is written: it
+goes ahead only when the caller accepts what is not checked, with
+unchecked access (the library's `PublishOptions::unchecked_access`, the
+command line's `--unchecked-access`), and the command line then warns,
+naming it, and on Linux the file system, or why it could not be told.
+Elsewhere unchecked access changes nothing. On other systems, the BSDs
+included, publishing is refused, with `tx.io`, and nothing is written:
+they are untested. Previewing and rebasing work everywhere.
 
 Publishing a carried-out transaction works on the root it was carried out
 on: through directory handles, the directory opened then, whatever its
@@ -384,9 +393,10 @@ path names later; on Windows, the absolute path it was opened at. It:
    every directory whose entries changed. An emptied directory whose mode
    or group is not that of the directory above it is left, empty: an
    inverse makes a directory again with the access of the nearest one
-   that is there, so it would make it, and the file in it, otherwise. A staging entry or an emptied
-   directory that cannot be removed is reported, the former since the tree
-   does not validate while it is there.
+   that is there, so it would make it, and the file in it, otherwise. A
+   staging entry or an emptied directory that cannot be removed is
+   reported, once, the former since the tree does not validate while it is
+   there.
 
 A transaction moves content between files: a renamed file's, a moved
 object's, a deleted file's that its inverse creates again. So the files it
@@ -472,7 +482,10 @@ not be restored. Whenever nothing is published, the cleanup is synced too.
 An error always says three things: whether every file was published,
 whether every directory it changed was synced, and whether the cleanup
 finished, naming any staging file or directory it could not remove, to be
-removed by hand. If the process stops during step 4 (a crash or power
+removed by hand; one whose removal took effect but waits for another
+program that has it open to close it, as on Windows on file systems without
+POSIX removal (FAT, exFAT, some SMB shares), is named as going by itself,
+with nothing to do. If the process stops during step 4 (a crash or power
 loss), some files have the new bytes and the others the old ones, and
 staging files may remain; the loader rejects a staging file below `planes/`
 or `defs/`, so the tree fails validation until it is repaired. To repair
