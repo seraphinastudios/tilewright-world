@@ -88,7 +88,7 @@ Each merge to `main` is released once the first release exists, as in
 the renderer and the editor. A release is an immutable GitHub release
 `vX.Y.Z`. It holds the `tilewright` CLI for Linux (x86_64 and ARM64,
 static), macOS (Intel and Apple silicon) and Windows x86_64, a source
-archive and, once it exists, the browser pack reader's npm tarball, with
+archive and the browser pack reader's npm tarball, with
 `SHA256SUMS` and build provenance attestations. It also tags the Go module
 `go/vX.Y.Z`. Versions stay at 0.x until format 1.0. See
 [docs/RELEASING.md](docs/RELEASING.md) for what is released, how to verify

@@ -13,7 +13,7 @@ contribute.
 
 Rust crate dependencies keep their own licenses as recorded in `Cargo.lock`
 and their crate metadata. No outside source code is copied into this
-repository; `PROVENANCE.md` records the one outside license notice it keeps.
+repository; `PROVENANCE.md` records the outside license notices it keeps.
 Each release archive of the CLI carries `THIRD_PARTY_LICENSES.txt`, which
 `tools/release/package.py` assembles from the license files of every crate
 that binary compiles in.

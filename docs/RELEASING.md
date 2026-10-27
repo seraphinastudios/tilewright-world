@@ -15,7 +15,7 @@ build provenance attestation. `.github/workflows/release.yml` does the work.
 | `tilewright-X.Y.Z-macos-arm64.tar.gz` | The CLI for macOS on Apple silicon |
 | `tilewright-X.Y.Z-windows-amd64.zip` | The CLI for Windows x86_64, with the C runtime linked in |
 | `tilewright-world-X.Y.Z-source.tar.gz` | `git archive` of the released commit |
-| `seraphinastudios-tilewright-pack-X.Y.Z.tgz` | The npm package `@seraphinastudios/tilewright-pack`, the browser pack reader, once `packages/tilewright-pack` exists |
+| `seraphinastudios-tilewright-pack-X.Y.Z.tgz` | The npm package `@seraphinastudios/tilewright-pack`, the browser pack reader (`packages/tilewright-pack`), built by `tools/build-wasm.sh` |
 | `SHA256SUMS` | The SHA-256 digest of every other asset |
 
 Each CLI archive holds one directory, `tilewright-X.Y.Z-PLATFORM/`, with
@@ -140,9 +140,11 @@ last Intel macOS image. When it is retired, build `x86_64-apple-darwin` on
 `macos-15` with `rustup target add`, or drop the target.
 
 Every action is pinned to a full commit SHA and is on the organization's
-allowlist. The planner's npm tools are locked with integrity hashes in
-`scripts/release/package-lock.json` and installed with `npm ci
---ignore-scripts` in a job with read-only permissions. No job uses a secret.
+allowlist, and no job restores a cache. The planner's npm tools are locked
+with integrity hashes in `scripts/release/package-lock.json` and installed
+with `npm ci --ignore-scripts` in a job with read-only permissions. The
+WebAssembly build tools are pinned and checked by SHA-256 in
+`tools/build-wasm.sh`. No job uses a secret.
 
 Builds are reproducible where practical. The toolchain is pinned by
 `rust-toolchain.toml`, dependencies by `Cargo.lock` (`--locked`), the
