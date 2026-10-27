@@ -73,10 +73,38 @@ assert.equal(level("0.3.x", [added, reverted]), "minor");
 assert.equal(level("0.3.x", [reverted]), "patch");
 assert.equal(level("main", [{hash: hash(6), message: "  "}, untyped]), null);
 assert.equal(level("main", []), null);
+// The reverted commit must match by hash as well as header: a revert of a
+// commit outside the range leaves a commit with the same header counting.
+const elsewhere = {hash: hash(7), message: `Revert "feat: add"\n\nThis reverts commit ${hash(9)}.`};
+assert.equal(level("main", [elsewhere, added]), "minor");
+assert.equal(level("0.3.x", [elsewhere, added]), "minor");
+// Headers match with surrounding white space ignored.
+const spaced = {hash: hash(8), message: `Revert " feat: add "\n\nThis reverts commit ${hash(1)}.`};
+assert.equal(level("main", [spaced, added]), null);
 
-// The analyzer failed on a note that runs into a trailing "-field-" line;
-// the note counts.
+// Deliberate differences from the analyzer: it failed on a note that runs
+// into a trailing "-field-" line, and here the note counts; it read the
+// contents of "-name-" field lines as commit properties, and here they are
+// ignored (the analyzer gave this one a minor release).
 assert.equal(parseCommit("fix: x\n\nBREAKING CHANGE: a\n-f-").breaking, true);
+assert.deepEqual(parseCommit("tidy\n\n-type-\nfeat"), {header: "tidy", type: null, breaking: false, revert: null});
+assert.equal(level("main", [{hash: hash(10), message: "tidy\n\n-type-\nfeat"}]), null);
+// A field hides notes until a "--" line ends it.
+assert.equal(parseCommit("fix: x\n\n-f-\nBREAKING CHANGE: hidden").breaking, false);
+assert.equal(parseCommit("fix: x\n\n-f-\ntext\n--\nBREAKING CHANGE: read").breaking, true);
+
+// Reading is linear: long lines, such as a pasted blob in a pull request
+// body, take no time. The parser's issue-reference pattern took minutes.
+for (const message of [
+  "feat!: x\n\nBREAKING CHANGE: y\n" + "a".repeat(20000),
+  "fix: x\n\n" + "a#".repeat(10000) + "\nBREAKING CHANGE: y",
+  "fix: x\n\n-" + "a".repeat(20000),
+]) {
+  const started = process.hrtime.bigint();
+  releaseLevel({branch: "main", commits: [{hash: hash(11), message}], pre10: true});
+  const milliseconds = Number(process.hrtime.bigint() - started) / 1e6;
+  assert.ok(milliseconds < 1000, `a 20,000-character line took ${milliseconds} ms`);
+}
 assert.throws(() => parseCommit("  \n"), /expected a commit message/);
 
 console.log("release commits: " + cases.length + " messages and the revert rules match the commit analyzer");

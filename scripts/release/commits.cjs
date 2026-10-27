@@ -14,6 +14,14 @@
 // records the adaptation, and THIRD_PARTY_LICENSES.md here holds the
 // packages' MIT and ISC notices. test-commits.cjs holds messages whose
 // results were checked against those packages.
+//
+// Two differences are deliberate. The parser copied each "-name-" field
+// line onto the commit, so a field such as "-type-", "-revert-", "-hash-"
+// or "-tag-" changed the analyzer's answer, and "-notes-" or
+// "-references-" made it throw. Here field lines only hide what follows
+// them, as they did from the note search, and their contents are ignored.
+// And where the analyzer threw on a note running into a trailing field,
+// the note counts.
 
 const {releaseForCommit} = require("./release-policy.cjs");
 
@@ -23,8 +31,6 @@ const NOTE = /^[\s|*]*(BREAKING CHANGE|BREAKING-CHANGE)[:\s]+(.*)/i;
 const REVERT = /^(?:Revert|revert:)\s"?([\s\S]+?)"?\s*This reverts commit (\w*)\./i;
 const FIELD = /^-(.*?)-$/;
 const GPG = /^\s*gpg:/;
-const URL = /\b(?:https?):\/\/(?:www\.)?([-a-zA-Z0-9@:%_+.~#?&//=])+\b/;
-const ACTIONS = "close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved";
 const RELEASE_RANK = {patch: 1, minor: 2, major: 3};
 
 // Leading and trailing line breaks removed, as the parser does.
@@ -40,24 +46,6 @@ function trimNewLines(input) {
   return input.substring(first, last + 1);
 }
 
-// Whether a line holds an issue reference such as "#12" or "fixes #12".
-// A reference ends a breaking-change note, which decides whether the line
-// after it is read for another note.
-function hasReference(line) {
-  const references = new RegExp(`(${ACTIONS})(?:\\s+(.*?))(?=(?:${ACTIONS})|$)`, "gi");
-  const sentences = [];
-  if (references.test(line)) {
-    references.lastIndex = 0;
-    for (let match = references.exec(line); match; match = references.exec(line)) {
-      sentences.push(match[2] || "");
-    }
-  } else {
-    sentences.push(line);
-  }
-  const parts = new RegExp("(?:.*?)??\\s*([\\w-\\.\\/]*?)??(#)([\\w-]+)(?=\\s|$|[,;)\\]])", "gi");
-  return sentences.some((sentence) => !URL.test(sentence) && parts.test(sentence));
-}
-
 // The parts of a commit message that decide a release: {header, type,
 // breaking, revert}. `revert` is null or {header, hash} of the reverted
 // commit.
@@ -68,13 +56,8 @@ function parseCommit(message) {
   const lines = trimNewLines(message)
     .split(/\r?\n/)
     .filter((line) => !GPG.test(line));
-  let index = 0;
-  let notes = 0;
-  const available = () => index < lines.length;
-
   // The first line is the header; the preset has no merge pattern.
-  const header = lines[index] || null;
-  index += 1;
+  const header = lines[0] || null;
   let type = null;
   if (header) {
     const matches = header.match(BREAKING_HEADER) || header.match(HEADER);
@@ -83,68 +66,29 @@ function parseCommit(message) {
     }
   }
 
-  // A "-field-" line starts a field that takes every line after it, so
-  // nothing after it is read for notes. A "--" line is skipped.
-  function readFields() {
-    let field = null;
-    let read = false;
-    while (available()) {
-      const matches = lines[index].match(FIELD);
-      if (matches) {
-        field = matches[1] || null;
-        index += 1;
-      } else if (field) {
-        read = true;
-        index += 1;
-      } else {
-        break;
-      }
+  // A commit is breaking if "type!:" says so or a line after the header
+  // starts a BREAKING CHANGE note. The parser does not read lines inside a
+  // field for notes: a "-name-" line starts one and a "--" line ends it.
+  // Nothing after the first note changes the answer, so reading stops
+  // there.
+  let breaking = header !== null && BREAKING_HEADER.test(header);
+  let field = null;
+  for (const line of lines.slice(1)) {
+    if (breaking) {
+      break;
     }
-    return read;
-  }
-
-  // A note runs until a field, another note, or a line with a reference.
-  function readNote() {
-    if (!available() || !NOTE.test(lines[index])) {
-      return false;
+    const matches = line.match(FIELD);
+    if (matches) {
+      field = matches[1] || null;
+    } else if (!field && NOTE.test(line)) {
+      breaking = true;
     }
-    notes += 1;
-    index += 1;
-    while (available()) {
-      if (readFields() || readNote()) {
-        return true;
-      }
-      if (!available()) {
-        break;
-      }
-      const reference = hasReference(lines[index]);
-      index += 1;
-      if (reference) {
-        break;
-      }
-    }
-    return true;
-  }
-
-  while (available()) {
-    readFields();
-    readNote();
-    // The line after a note is taken as body or footer without being
-    // read for a field or a note.
-    if (available()) {
-      index += 1;
-    }
-  }
-
-  // "type!:" is a breaking change when no note says so.
-  if (notes === 0 && header && BREAKING_HEADER.test(header)) {
-    notes = 1;
   }
   const reverted = message.match(REVERT);
   return {
     header,
     type,
-    breaking: notes > 0,
+    breaking,
     revert: reverted ? {header: reverted[1] || null, hash: reverted[2] || null} : null,
   };
 }
@@ -183,8 +127,9 @@ function releaseLevel({branch, commits, pre10}) {
     .map(({hash, message}) => ({hash, ...parseCommit(message)}));
   let level = null;
   for (const commit of withoutReverted(parsed)) {
-    // The analyzer's default rules apply only when no rule of the policy
-    // matches. They match nothing the policy's rules do not.
+    // The analyzer's default rules applied only when no rule of the
+    // policy matched. Without fields they match nothing the policy's
+    // rules do not.
     const release = releaseForCommit(
       branch,
       {type: commit.type, breaking: commit.breaking, revert: commit.revert !== null},
