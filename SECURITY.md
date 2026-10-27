@@ -46,10 +46,13 @@ platform:
   so there applying needs the same explicit consent as on macOS and
   Windows. A directory's file system is told by both the type of its mount
   in `/proc/self/mountinfo`, found by mount ID, and the magic number
-  `statfs` gives, since a 9p share passes on its host's magic number;
-  where the mounts cannot be read, consent is needed too. In a container,
-  keep the tree on a bind-mounted local volume rather than the overlay
-  root.
+  `statfs` gives, since a 9p share passes on its host's magic number.
+  Where it cannot be told, consent is needed too: without a readable
+  `/proc` (some hardened containers, a plain chroot), on kernels before
+  3.15, which give no mount ID, or where the mount's own line is malformed.
+  Each line is read on its own, so another user's mount cannot make every
+  tree need consent. In a container, keep the tree on a bind-mounted local
+  volume rather than the overlay root.
   The mandatory access control labels (SELinux, Smack) of the entries compared
   must be the same, and the system's policy must give every file publishing
   writes, and directory it creates, that label, which is checked before a

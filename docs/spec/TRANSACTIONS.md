@@ -333,12 +333,17 @@ file system: network, host-shared (WSL's mounts of Windows drives, a
 virtual machine's shared folders), FUSE, NTFS and stacked ones among them,
 whose lists Linux may not show at all. Publishing tells a directory's file
 system by both the type the kernel names its mount with, found by mount
-ID (`statx`) in `/proc/self/mountinfo`, and the magic number `statfs`
-gives, which must be that type's: a 9p share passes on its host's magic
-number, but its mount's type is `9p`. Where that cannot be told, because
-`/proc/self/mountinfo` cannot be read (as in some hardened containers),
-the kernel does not give a mount ID (before Linux 5.8) or the mount is
-not listed, the file system counts as unchecked too. overlayfs is not
+ID (from `statx`, or before Linux 5.8 from the descriptor's
+`/proc/self/fdinfo` entry) in `/proc/self/mountinfo`, and the magic number
+`statfs` gives, which must be that type's: a 9p share passes on its host's
+magic number, but its mount's type is `9p`. `/proc/self/mountinfo` is read
+a line at a time, each on its own, so a line that is malformed or longer
+than 64 KiB, as anyone who mounts a FUSE file system can make one, leaves
+only its own mount untold. Where a directory's file system cannot be told,
+because `/proc` cannot be read (as in some hardened containers or a plain
+chroot), the kernel gives no mount ID (before Linux 3.15), or its mount's
+line is not there or cannot be read, it counts as unchecked too, and the
+refusal says why rather than naming a file system. overlayfs is not
 checked either, since its upper layer may be remote, so a tree on a
 container's overlay root needs unchecked access; a local volume
 bind-mounted into the container does not. So in each of these cases

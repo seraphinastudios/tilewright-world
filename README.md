@@ -83,7 +83,8 @@ trees no one else can change and without access control lists of their
 own, and runs only with `--unchecked-access`, which accepts that those
 are not checked, as it does on Linux for trees on any file system but
 ext2/3/4, XFS, Btrfs, tmpfs, F2FS, ZFS and bcachefs, a container's overlay
-root included; there, keep the tree on a bind-mounted local volume (see
+root included (keep the tree on a bind-mounted local volume there), and
+where it cannot tell the file system, as without a readable `/proc` (see
 SECURITY.md and docs/spec/TRANSACTIONS.md section 9).
 `fixtures/basic` is a small synthetic world that uses every feature of the
 format except terrain transitions, which `fixtures/terrain` shows.
@@ -97,6 +98,10 @@ the wasm tools that `tools/build-wasm.sh` pins and downloads once.
 ```sh
 tools/validate.sh
 ```
+
+Where the temporary directory is on a file system publishing does not
+check, such as a container's overlay root, `tools/validate.sh` runs its
+transaction round trip with `--unchecked-access` and says so.
 
 Development is primarily agent-driven, under maintainer direction, review,
 tests and repository validation. Direct human-written code contributions are
