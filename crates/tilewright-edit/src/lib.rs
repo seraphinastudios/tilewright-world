@@ -786,8 +786,8 @@ impl Plan {
     /// fail for reasons of its own, such as permissions or input and
     /// output.
     ///
-    /// It costs about as much as planning the transaction twice more,
-    /// without validating, and nothing when it is not called.
+    /// It is bounded as carrying out is, twice over, and costs nothing when
+    /// it is not called.
     ///
     /// # Errors
     /// Returns, on the transaction's name, what would refuse the undo or
@@ -798,8 +798,14 @@ impl Plan {
             load: self.load,
             rebase: false,
         };
-        // The undo, on the tree this plan leaves.
-        let leaves = self.overlay();
+        // The undo, on the tree this plan leaves, as far as an inverse
+        // reads it: the files it changed, as it leaves them.
+        let leaves: Overlay = self
+            .files
+            .iter()
+            .filter(|file| file.is_changed())
+            .map(|file| (file.path.clone(), file.after.clone()))
+            .collect();
         let undo = Transaction::parse(&self.name, self.inverse.as_str())
             .map_err(|problems| self.refused("its inverse is not a transaction", problems))?;
         let (files, redo) =
