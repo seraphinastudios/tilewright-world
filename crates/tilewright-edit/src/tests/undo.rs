@@ -478,73 +478,60 @@ fn a_document_deleted_and_made_again_settles_on_a_shorter_undo() {
     assert_ne!(rounds[2], rounds[0]);
 }
 
-/// A random transaction of operations that are valid on the fixture:
-/// objects placed, and placed and removed again; terrain painted and
-/// cleared, which creates and deletes chunks; definitions created, renamed
-/// and grown; anchors added.
-fn random_transaction(random: &mut Random) -> String {
+/// A random transaction of operations that are valid on the fixture, or
+/// often are, many of which return a file to a state it was in: values
+/// set back and forth, one of them large, which its redo holds; terrain
+/// painted and cleared in a few cells, creating and deleting a chunk;
+/// objects placed and then moved, or placed and removed again; anchors
+/// added and removed; a definition deleted and made again.
+fn revisiting_transaction(random: &mut Random) -> String {
+    let coin = {
+        let mut text = String::new();
+        tilewright_jsonc::write_json_string(&read(&fixture(), "defs/proto/coin.jsonc"), &mut text);
+        text
+    };
+    let pad = "p".repeat(4_000);
     let mut operations = Vec::new();
     for step in 0..random.between(1, 6) {
-        let (x, y) = (random.between(-40, 70), random.between(0, 40));
-        let layer = random.between(0, 1);
-        let operation = match random.below(8) {
-            0 => format!(
-                r#"{{"op": "object.insert", "plane": "overworld", "layer": {layer}, "at": [{x}, {y}], "object": {{"proto": "{}"}}}}"#,
-                random.pick(&["tree", "wall", "coin"])
-            ),
-            1 => format!(
-                r#"{{"op": "object.insert", "plane": "overworld", "layer": {layer}, "at": [{x}, {y}], "object": {{"uid": "random.{step}", "proto": "tree"}}}},
-    {{"op": "object.remove", "uid": "random.{step}", "expect": {{"proto": "tree"}}}}"#
-            ),
-            2 | 3 => {
-                let grid = if random.below(3) == 0 {
-                    "height"
-                } else {
-                    "floor"
-                };
-                let mut seen = BTreeSet::new();
-                let mut cells = Vec::new();
-                for _ in 0..random.between(1, 40) {
-                    let at = (x + random.between(0, 40), y + random.between(0, 8));
-                    if !seen.insert(at) {
-                        continue;
-                    }
-                    let value = if grid == "height" {
-                        random.between(-1, 2).to_string()
-                    } else {
-                        let value = random.pick(&["grass", "sand", "cave_floor", "null"]);
-                        if value == "null" {
-                            value.to_owned()
-                        } else {
-                            format!("\"{value}\"")
-                        }
-                    };
-                    cells.push(format!(
-                        "{{\"at\": [{}, {}], \"value\": {value}}}",
-                        at.0, at.1
-                    ));
-                }
+        let operation = match random.below(10) {
+            0 | 1 => {
+                let value = random.pick(&["1", "2", "pad"]);
+                let value = if value == "pad" { format!("\"{pad}\"") } else { value.to_owned() };
                 format!(
-                    r#"{{"op": "terrain.set", "plane": "overworld", "layer": {layer}, "grid": "{grid}", "cells": [{}]}}"#,
+                    r#"{{"op": "set", "path": "defs/proto/tree.jsonc", "pointer": ["custom"], "value": {{"example.org/a": {value}}}}}"#
+                )
+            }
+            2 | 3 => {
+                let cells: Vec<String> = (0..random.between(1, 3))
+                    .map(|offset| {
+                        let value = random.pick(&["\"grass\"", "\"sand\"", "\"cave_floor\"", "null"]);
+                        format!("{{\"at\": [{}, 3], \"value\": {value}}}", 30 + offset)
+                    })
+                    .collect();
+                format!(
+                    r#"{{"op": "terrain.set", "plane": "overworld", "layer": 0, "grid": "floor", "cells": [{}]}}"#,
                     cells.join(", ")
                 )
             }
-            4 => format!(
-                r#"{{"op": "document.create", "path": "defs/proto/random{step}.jsonc", "text": "{{\"format\": \"tilewright.def/1\", \"type\": \"proto\", \"id\": \"random{step}\", \"fields\": {{\"face\": \"{}\", \"layer\": \"item\"}}}}\n"}}"#,
-                "f".repeat(usize::try_from(random.below(120)).unwrap() + 1)
-            ),
+            4 => r#"{"op": "object.insert", "plane": "overworld", "layer": 0, "at": [7, 0], "index": 0, "object": {"proto": "wall"}},
+    {"op": "object.move", "plane": "overworld", "layer": 0, "at": [7, 0], "index": 0, "expect": {"proto": "wall"}, "to": {"at": [8, 0]}}"#
+                .to_owned(),
             5 => format!(
-                r#"{{"op": "document.create", "path": "defs/proto/moved{step}.jsonc", "document": {{"format": "tilewright.def/1", "type": "proto", "id": "moved{step}", "fields": {{"face": "m.png", "layer": "item"}}}}}},
-    {{"op": "document.rename", "path": "defs/proto/moved{step}.jsonc", "to": "defs/proto/renamed{step}.jsonc"}}"#
+                r#"{{"op": "object.insert", "plane": "overworld", "layer": 0, "at": [5, 5], "object": {{"uid": "random.{step}", "proto": "tree"}}}},
+    {{"op": "object.remove", "uid": "random.{step}", "expect": {{"proto": "tree"}}}}"#
             ),
             6 => format!(
-                r#"{{"op": "set", "path": "defs/proto/tree.jsonc", "pointer": ["custom"], "value": {{"example.org/pad": "{}"}}}}"#,
-                "p".repeat(usize::try_from(random.below(6_000)).unwrap())
+                r#"{{"op": "insert", "path": "planes/overworld/anchors.jsonc", "pointer": ["anchors", 0], "value": {{"id": "random.{step}", "layer": 0, "at": [1, 1]}}}}"#
+            ),
+            7 => r#"{"op": "remove", "path": "planes/overworld/anchors.jsonc", "pointer": ["anchors", 0]}"#
+                .to_owned(),
+            8 => format!(
+                r#"{{"op": "set", "path": "defs/proto/coin.jsonc", "pointer": ["fields", "weight"], "value": {}}}"#,
+                random.below(3)
             ),
             _ => format!(
-                r#"{{"op": "insert", "path": "planes/overworld/anchors.jsonc", "pointer": ["anchors", 0], "value": {{"id": "random.{step}", "layer": 0, "at": [{}, {}]}}}}"#,
-                x.rem_euclid(32),
-                y.rem_euclid(32)
+                r#"{{"op": "document.delete", "path": "defs/proto/coin.jsonc"}},
+    {{"op": "document.create", "path": "defs/proto/coin.jsonc", "text": {coin}}}"#
             ),
         };
         operations.push(operation);
@@ -552,68 +539,147 @@ fn random_transaction(random: &mut Random) -> String {
     operations.join(",\n    ")
 }
 
+/// Plans six rounds after publishing `plan`, each the inverse of the one
+/// before, publishing each that plans. Returns the transactions of the
+/// rounds that planned, and the round that did not with its problems.
+fn rounds(root: &Path, plan: &Plan) -> (Vec<String>, Option<(usize, Vec<Diagnostic>)>) {
+    let before = snapshot(root);
+    published(plan);
+    let after = snapshot(root);
+    let mut text = plan.inverse().to_owned();
+    let mut done = Vec::new();
+    for round in 0..6 {
+        match crate::plan(root, &reparsed("round.jsonc", &text), &Options::default()) {
+            Ok(planned) => {
+                published(&planned);
+                let expected = if round % 2 == 0 { &before } else { &after };
+                assert!(snapshot(root) == *expected, "round {round}");
+                done.push(std::mem::replace(&mut text, planned.inverse().to_owned()));
+            }
+            Err(problems) => return (done, Some((round, problems))),
+        }
+    }
+    (done, None)
+}
+
 #[test]
-fn the_check_passes_exactly_when_the_undo_and_the_redo_plan() {
-    let mut random = Random(0x7e57_ab1e_5eed_0001);
-    // Transactions refused themselves, checks passed, checks refused.
-    let mut outcomes = [0_u32; 3];
+fn the_check_passes_exactly_when_every_undo_and_redo_plans() {
+    let mut random = Random(0x7e57_ab1e_5eed_0002);
+    // Transactions refused themselves, checks passed, checks refused, and
+    // passed transactions whose undo is not the third round's.
+    let mut outcomes = [0_u32; 4];
     for case in 0..160 {
         let tree = copy();
         let root = tree.path();
-        let text = random_transaction(&mut random);
+        let text = revisiting_transaction(&mut random);
         let tx = transaction(&text);
         // Budgets around what such transactions read and do, or the
         // defaults.
-        let lowered = (random.below(4) != 0)
+        let _lowered = (random.below(4) != 0)
             .then(|| Lowered::to(random.below(24 << 10), random.below(160 << 10)));
         let Ok(plan) = crate::plan(root, &tx, &Options::default()) else {
             outcomes[0] += 1;
             continue;
         };
         let checked = plan.check_undo();
-        outcomes[if checked.is_ok() { 1 } else { 2 }] += 1;
-        published(&plan);
-        let undo = reparsed("undo.jsonc", plan.inverse());
-        let actual = crate::plan(root, &undo, &Options::default()).and_then(|undone| {
-            published(&undone);
-            let redo = reparsed("redo.jsonc", undone.inverse());
-            crate::plan(root, &redo, &Options::default())
-        });
-        assert_eq!(
-            checked.is_ok(),
-            actual.is_ok(),
-            "case {case}:\n{text}\n{checked:#?}\n{actual:#?}"
-        );
-        match (checked, actual) {
-            (Ok(()), Ok(redone)) => {
-                // The redo gives what the transaction did.
-                published(&redone);
-                for file in plan.files() {
-                    assert_eq!(
-                        fs::read_to_string(root.join(&file.path)).ok(),
-                        file.after,
-                        "case {case}: {}",
-                        file.path
-                    );
+        let (done, failed) = rounds(root, &plan);
+        match (checked, failed) {
+            (Ok(()), None) => {
+                outcomes[1] += 1;
+                // Settled by the third round: each is the one two before.
+                assert!(
+                    done[4] == done[2] && done[5] == done[3],
+                    "case {case}:\n{text}"
+                );
+                if done[2] != done[0] {
+                    outcomes[3] += 1;
                 }
             }
-            (Err(found), Err(failed)) => {
+            (Err(found), Some((round, failed))) => {
+                outcomes[2] += 1;
+                // The check refused the round that fails, for its reason.
                 for problem in &failed {
                     assert!(
-                        found.iter().any(|check| check.code == problem.code),
-                        "case {case}:\n{found:#?}\n{failed:#?}"
+                        gives(&found, ROUNDS[round], problem),
+                        "case {case}:\n{text}\n{found:#?}\n{failed:#?}"
                     );
                 }
             }
-            _ => unreachable!(),
+            (checked, failed) => {
+                panic!("case {case}:\n{text}\n{checked:#?}\n{failed:#?}")
+            }
         }
-        drop(lowered);
     }
-    // Each kind of outcome happens, the refusals in some number.
+    // Each kind of outcome happens. Refusals by the check are few here;
+    // the next test finds them at the boundary.
     assert!(
-        outcomes[0] > 10 && outcomes[1] > 40 && outcomes[2] > 10,
+        outcomes[0] > 10 && outcomes[1] > 40 && outcomes[2] > 4 && outcomes[3] > 10,
         "{outcomes:?}"
     );
+}
+
+#[test]
+fn at_the_least_budget_the_check_accepts_every_undo_and_redo_plans() {
+    let mut random = Random(0x0b0e_dace_5eed_0003);
+    // Which round of the check bound the budget: the undo, the redo, or a
+    // later one; or the transaction itself.
+    let mut bound = [0_u32; 4];
+    for case in 0..24 {
+        let text = revisiting_transaction(&mut random);
+        let tx = transaction(&text);
+        for budget in [Budget::Read, Budget::Work] {
+            let probe = copy();
+            let passes = |value| {
+                let _lowered = lowered(budget, value);
+                crate::plan(probe.path(), &tx, &Options::default())
+                    .is_ok_and(|plan| plan.check_undo().is_ok())
+            };
+            let (mut low, mut high) = (0, 1 << 19);
+            if passes(low) || !passes(high) {
+                continue;
+            }
+            while high - low > 1 {
+                let middle = low + (high - low) / 2;
+                if passes(middle) {
+                    high = middle;
+                } else {
+                    low = middle;
+                }
+            }
+            // At the least budget, every round plans.
+            let at = copy();
+            {
+                let _lowered = lowered(budget, high);
+                let plan = planned(at.path(), &tx);
+                plan.check_undo().unwrap();
+                let (_, failed) = rounds(at.path(), &plan);
+                assert!(failed.is_none(), "case {case}:\n{text}\n{failed:#?}");
+            }
+            // One below, the transaction is refused, or the check refuses
+            // it and that round fails.
+            let below = copy();
+            let _lowered = lowered(budget, low);
+            let Ok(plan) = crate::plan(below.path(), &tx, &Options::default()) else {
+                bound[3] += 1;
+                continue;
+            };
+            let found = plan.check_undo().unwrap_err();
+            let (_, failed) = rounds(below.path(), &plan);
+            let Some((round, failed)) = failed else {
+                panic!("case {case}:\n{text}\n{found:#?}");
+            };
+            bound[round.min(2)] += 1;
+            for problem in &failed {
+                assert!(
+                    gives(&found, ROUNDS[round], problem),
+                    "case {case}:\n{text}\n{found:#?}\n{failed:#?}"
+                );
+            }
+        }
+    }
+    // The undo bound some budgets and the redo others. (Later rounds do
+    // not: each holds no more than the one two before it.)
+    assert!(bound[0] > 3 && bound[1] > 3, "{bound:?}");
 }
 
 #[test]
