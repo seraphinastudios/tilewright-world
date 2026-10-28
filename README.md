@@ -101,7 +101,8 @@ tools/validate.sh
 
 Where the temporary directory is on a file system publishing does not
 check, such as a container's overlay root, `tools/validate.sh` runs its
-transaction round trip with `--unchecked-access` and says so.
+transaction round trip with `--unchecked-access` and says so; with `CI`
+set it does not, so CI shows that an apply needs no consent there.
 
 Development is primarily agent-driven, under maintainer direction, review,
 tests and repository validation. Direct human-written code contributions are

@@ -47,9 +47,14 @@ platform:
   Windows. A directory's file system is told by both the type of its mount
   in `/proc/self/mountinfo`, found by mount ID, and the magic number
   `statfs` gives, since a 9p share passes on its host's magic number.
-  Where it cannot be told, consent is needed too: without a readable
-  `/proc` (some hardened containers, a plain chroot), on kernels before
-  3.15, which give no mount ID, or where the mount's own line is malformed.
+  Wherever it cannot be told, consent is needed too, and the refusal says
+  why. For example: without a readable `/proc` (some hardened containers,
+  a chroot without one), on kernels before 3.15, which give no mount ID,
+  where the mount's own line is malformed, or where the mount is not listed
+  at all, as in a chroot whose root is not a mount point (the kernel lists
+  only mounts reachable from the root, so the one holding the tree may be
+  missing even with `/proc` mounted) or for a mount made after the list
+  was read.
   Each line is read on its own, so another user's mount cannot make every
   tree need consent. In a container, keep the tree on a bind-mounted local
   volume rather than the overlay root.
