@@ -4,6 +4,8 @@
 use super::*;
 use std::{collections::BTreeMap, fmt::Write as _, fs};
 
+mod undo;
+
 const CHUNK: &str = "planes/overworld/layers/0/0_0.jsonc";
 const WEST: &str = "planes/overworld/layers/0/-1_0.jsonc";
 

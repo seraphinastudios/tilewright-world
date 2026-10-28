@@ -303,6 +303,57 @@ any transaction, so its result must validate: the inverse of a transaction
 that made an invalid tree valid recreates the invalid tree, is refused, and
 such a tree is restored from version control instead.
 
+### 8.1 Undo check
+
+That an inverse is a valid transaction does not mean that it can be carried
+out, even on the very tree the transaction leaves. Carrying it out reads
+every file the transaction changed as the transaction left it, a file it
+created or grew included, so it can read more than the transaction did; it
+has an operation for each edit, which reads its whole document again, where
+the transaction may have made many edits with one operation that read the
+document once; and it records an inverse of its own, which holds every
+value the transaction wrote in full: an insertion with its key, colon and
+regions for each entry the transaction added to a palette, which the
+inverse removes in a few lines, and the whole text of each file the
+transaction created, which the inverse deletes in one. Any of these can pass
+a limit of section 11 that the transaction was within.
+
+So a carried-out transaction can be checked, before anything is written,
+for whether it can be undone, and the undo redone. The check carries out
+the inverse in memory on the tree as the transaction leaves it, and then
+the inverse's own inverse on the tree that leaves, each with every check
+carrying it out then would make (sections 6, 7 and 11) but validating its
+result: its `base`, every operation and its preconditions, the read and
+work budgets, the counts of files and operations, its `result`, and that
+its sealed form and its own inverse are transactions within the limits.
+The inverse of the inverse's own inverse is the inverse again, byte for
+byte, so every later undo and redo is one of the two the check carries out.
+The check reads nothing from disk: an inverse names only files the
+transaction changed, whose text the carried-out transaction holds. It is
+bounded as carrying out is, twice over, and deterministic. A transaction
+that fails it is refused with a diagnostic on the transaction, without a
+position, that says whether undoing or redoing it would fail and why, with
+the code of what would fail: `tx.limit` for a limit.
+
+When a transaction passes, its inverse can be carried out after it is
+published, and the inverse's own inverse after that, provided that the
+tree the transaction was carried out on validates under the same load
+options and nothing else changes the files. That tree is not validated by
+the check: the inverse restores it, byte for byte, in every file the
+transaction touched or consulted, and it is the tree an editor loaded, or
+the one an earlier transaction left. The redo leaves the tree the
+transaction did, which carrying it out validated. Not guaranteed:
+
+- the inverse of a transaction that made an invalid tree valid passes the
+  check, and is refused, as above;
+- applied after other changes to the files the transaction touched or
+  consulted, the inverse is a `tx.conflict`, as any transaction is: an
+  editor that saves each step and keeps its inverse for undo sees this when
+  another program edits those files between the save and the undo;
+- other files changed meanwhile can make the restored tree fail
+  validation;
+- publishing can fail for reasons of its own (section 9).
+
 ## 9. Applying
 
 Publishing is supported on Linux only. Elsewhere it is refused, with
@@ -448,7 +499,8 @@ stops there. A file a transaction deletes must be valid JSONC, so that its
 inverse can create it again.
 The sealed transaction and the inverse must themselves be valid transactions
 under these limits; a transaction whose inverse would not be is rejected
-before anything is written, and should be split.
+before anything is written, and should be split. Whether the inverse can
+also be carried out within them is the undo check of section 8.1.
 
 ## 12. Diagnostics
 
@@ -481,3 +533,8 @@ tree as it is to `OUTPUT`. `apply` writes the inverse to `INVERSE`, then
 publishes. Neither replaces an existing file, and neither writes into the
 source tree's `world.jsonc`, `profile/`, `planes/` or `defs/`, or at
 `.world.jsonc.tilewright-tmp`, where publishing stages `world.jsonc`.
+
+Each command runs the undo check of section 8.1 after carrying the
+transaction out, and refuses a transaction that fails it, writing nothing:
+the inverse `apply` writes is the way back and must be one that can be
+applied, and `preview` and `rebase` refuse what `apply` would.

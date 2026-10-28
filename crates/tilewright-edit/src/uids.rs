@@ -26,9 +26,10 @@ pub(crate) struct Index {
 }
 
 impl Index {
-    /// Loads the tree at `root` for the chunk of every uid.
-    pub fn load(root: &SourceRoot, options: &LoadOptions) -> Self {
-        let loaded = match tilewright_source::load_edited_in(root, options, &Overlay::new()) {
+    /// Loads the tree at `root`, with the files of `under` laid over it,
+    /// for the chunk of every uid.
+    pub fn load(root: &SourceRoot, options: &LoadOptions, under: &Overlay) -> Self {
+        let loaded = match tilewright_source::load_edited_in(root, options, under) {
             Ok(world) => Ok(world
                 .object_uids()
                 .iter()

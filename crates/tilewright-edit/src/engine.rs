@@ -10,7 +10,7 @@ use crate::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use tilewright_jsonc::{Document, Limits, Span, Value};
-use tilewright_source::{AccessError, SourceRoot};
+use tilewright_source::{AccessError, Overlay, SourceRoot};
 
 /// Why an operation cannot be carried out.
 #[derive(Debug)]
@@ -224,6 +224,35 @@ fn plus(left: (u64, usize), right: (u64, usize)) -> (u64, usize) {
     )
 }
 
+/// The read and work budgets of carrying a transaction out:
+/// [`limits::READ_BYTES`] and [`limits::WORK`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Budgets {
+    pub read_bytes: u64,
+    pub work: u64,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Lower budgets for the workspaces a test makes on its thread, so
+    /// that small trees reach them.
+    pub(crate) static TEST_BUDGETS: std::cell::Cell<Option<Budgets>> =
+        const { std::cell::Cell::new(None) };
+}
+
+impl Budgets {
+    fn current() -> Self {
+        #[cfg(test)]
+        if let Some(budgets) = TEST_BUDGETS.get() {
+            return budgets;
+        }
+        Self {
+            read_bytes: limits::READ_BYTES,
+            work: limits::WORK,
+        }
+    }
+}
+
 /// The files a transaction touches, and its budgets.
 ///
 /// Work is metered coarsely, so that no lookup needs metering of its own:
@@ -234,6 +263,12 @@ fn plus(left: (u64, usize), right: (u64, usize)) -> (u64, usize) {
 /// of what it is charged.
 pub(crate) struct Workspace<'r> {
     root: &'r SourceRoot,
+    /// Files in memory over the files of `root`: a file named here is read
+    /// from here, under the same bounds, and not from disk.
+    under: &'r Overlay,
+    budgets: Budgets,
+    /// How the inverse is named in messages.
+    inverse_name: &'r str,
     pub entries: BTreeMap<String, Entry>,
     read_bytes: u64,
     work: u64,
@@ -264,10 +299,32 @@ fn limits() -> Limits {
     Limits::default()
 }
 
+/// Reads `path` as [`SourceRoot::read`] does, from `under` when it names
+/// the file: its text, or its absence, is the file's.
+fn read(
+    root: &SourceRoot,
+    under: &Overlay,
+    path: &str,
+    limit: u64,
+) -> Result<Option<Vec<u8>>, AccessError> {
+    match under.get(path) {
+        Some(Some(text)) if u64::try_from(text.len()).unwrap_or(u64::MAX) > limit => {
+            Err(AccessError::TooLarge(path.to_owned()))
+        }
+        Some(text) => Ok(text.clone().map(String::into_bytes)),
+        None => root.read(path, limit),
+    }
+}
+
 impl<'r> Workspace<'r> {
-    pub fn new(root: &'r SourceRoot) -> Self {
+    /// A workspace over the tree at `root` with the files of `under` laid
+    /// over it. Its inverse is called `inverse_name` in messages.
+    pub fn new(root: &'r SourceRoot, under: &'r Overlay, inverse_name: &'r str) -> Self {
         Self {
             root,
+            under,
+            budgets: Budgets::current(),
+            inverse_name,
             entries: BTreeMap::new(),
             read_bytes: 0,
             work: 0,
@@ -345,15 +402,12 @@ impl<'r> Workspace<'r> {
                 }
                 // A file is read only as far as the allowance left, and
                 // once that is spent nothing more is read.
-                let spent = || {
-                    Failure::limit(format!(
-                        "the touched files hold more than {} bytes",
-                        limits::READ_BYTES
-                    ))
-                };
+                let budget = self.budgets.read_bytes;
+                let spent =
+                    || Failure::limit(format!("the touched files hold more than {budget} bytes"));
                 let file_limit = u64::try_from(limits().max_input_bytes).unwrap_or(u64::MAX);
-                let left = limits::READ_BYTES.saturating_sub(self.read_bytes);
-                let bytes = match root.read(path, file_limit.min(left)) {
+                let left = budget.saturating_sub(self.read_bytes);
+                let bytes = match read(root, self.under, path, file_limit.min(left)) {
                     Ok(bytes) => bytes,
                     // A file past either bound rejects the transaction, so
                     // nothing more is carried out.
@@ -414,11 +468,11 @@ impl<'r> Workspace<'r> {
         self.work = self
             .work
             .saturating_add(u64::try_from(units.max(1)).unwrap_or(u64::MAX));
-        if self.work > limits::WORK {
+        if self.work > self.budgets.work {
             self.spent = true;
             return Err(Failure::limit(format!(
                 "the transaction needs more than {} bytes of work: its operations, the documents each reads, and its edits",
-                limits::WORK
+                self.budgets.work
             )));
         }
         Ok(())
@@ -438,7 +492,8 @@ impl<'r> Workspace<'r> {
         if self.inverse_operations > limits::OPERATIONS {
             self.spent = true;
             return Err(Failure::limit(format!(
-                "the inverse would hold more than {} operations; split the transaction",
+                "{} would hold more than {} operations; split the transaction",
+                self.inverse_name,
                 limits::OPERATIONS
             )));
         }
@@ -446,7 +501,8 @@ impl<'r> Workspace<'r> {
         if self.inverse_bytes > limit {
             self.spent = true;
             return Err(Failure::limit(format!(
-                "the inverse would hold more than {limit} bytes; split the transaction"
+                "{} would hold more than {limit} bytes; split the transaction",
+                self.inverse_name
             )));
         }
         Ok(())

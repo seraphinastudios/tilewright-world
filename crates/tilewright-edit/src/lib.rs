@@ -19,6 +19,13 @@
 //! later step fails. Each file changes atomically; the set of files does
 //! not, so the inverse is also the way to repair an interrupted apply.
 //!
+//! That the inverse is a valid transaction does not mean it can be carried
+//! out: it may read, do or record more than the transaction did.
+//! [`Plan::check_undo`] carries it out in memory on the tree the plan
+//! leaves, and its own inverse on the tree that leaves, with every check
+//! planning makes but validation, so that a caller that keeps inverses for
+//! undo never records a step it could not undo.
+//!
 //! ```no_run
 //! use std::path::Path;
 //! use tilewright_edit::{Options, Transaction, plan};
@@ -27,6 +34,9 @@
 //! let transaction = Transaction::parse("place-tree.jsonc", text).map_err(|problems| problems.len())?;
 //! let plan = plan(Path::new("content"), &transaction, &Options::default())
 //!     .map_err(|problems| problems.len())?;
+//! // A step that could not be undone is refused before anything is
+//! // written.
+//! plan.check_undo().map_err(|problems| problems.len())?;
 //! // The inverse is the recovery record: written atomically and synced,
 //! // before anything is published.
 //! let durable = tilewright_edit::write_new(Path::new("undo.jsonc"), plan.inverse()).unwrap();
@@ -156,6 +166,8 @@ pub fn digest(text: Option<&str>) -> Option<[u8; 32]> {
 #[derive(Debug)]
 pub struct Plan {
     root: PathBuf,
+    /// The transaction's name, which its diagnostics use.
+    name: String,
     /// The plane and grid of each terrain operation, checked again when
     /// publishing, with a conflict at the operation to report.
     terrain: Vec<(String, String, Diagnostic)>,
@@ -190,7 +202,8 @@ impl Plan {
     }
 
     /// The inverse transaction: applied after this one, it restores every
-    /// file byte for byte.
+    /// file byte for byte. [`Plan::check_undo`] checks that it can be
+    /// carried out then.
     #[must_use]
     pub fn inverse(&self) -> &str {
         &self.inverse
@@ -571,6 +584,110 @@ fn terrain_addresses(transaction: &Transaction) -> Vec<(String, String, Diagnost
         .collect()
 }
 
+/// Carries out `transaction` in memory on the tree at `source`, with the
+/// files of `under` laid over it, and checks what it recorded. The
+/// inverse is called `inverse_name` in messages.
+fn carry_out<'r>(
+    source: &'r SourceRoot,
+    under: &'r Overlay,
+    inverse_name: &'r str,
+    transaction: &Transaction,
+    options: &Options,
+) -> Result<Workspace<'r>, Vec<Diagnostic>> {
+    let mut workspace = Workspace::new(source, under, inverse_name);
+    let mut problems = Problems::new(transaction);
+    let done = if options.rebase {
+        BTreeSet::new()
+    } else {
+        check_base(&mut workspace, transaction, &mut problems)
+    };
+    // Uid addresses resolve through the world as loaded, and as the
+    // operations go on to edit it.
+    if problems.is_empty() && transaction.addresses_uids() {
+        workspace.uids = Some(uids::Index::load(source, &options.load, under));
+    }
+    let mut chunks = BTreeSet::new();
+    if problems.is_empty() {
+        run_operations(
+            &mut workspace,
+            transaction,
+            &done,
+            &mut chunks,
+            &mut problems,
+        );
+    }
+    if problems.is_empty()
+        && let Err(failure) = remove_empty_chunks(&mut workspace, &chunks)
+    {
+        problems.report(transaction.document.root().span(), failure);
+    }
+    if !options.rebase && problems.is_empty() {
+        check_recorded(&workspace, transaction, &mut problems);
+    }
+    if problems.is_empty() {
+        Ok(workspace)
+    } else {
+        Err(problems.finish())
+    }
+}
+
+/// Every file the workspace touched or consulted, before and after.
+fn file_changes(workspace: &Workspace<'_>) -> Vec<FileChange> {
+    workspace
+        .entries
+        .iter()
+        .map(|(path, entry)| FileChange {
+            path: path.clone(),
+            before: entry.base.clone(),
+            after: entry.current.text().map(str::to_owned),
+        })
+        .collect()
+}
+
+/// What carrying a transaction out records: the transaction sealed, and
+/// its inverse, as text and parsed.
+struct Records {
+    sealed: String,
+    inverse: String,
+    parsed_inverse: Transaction,
+}
+
+/// The sealed transaction and the inverse, each of which must be a
+/// transaction within the limits.
+fn records(
+    transaction: &Transaction,
+    workspace: &Workspace<'_>,
+    files: &[FileChange],
+    inverse_name: &str,
+) -> Result<Records, Vec<Diagnostic>> {
+    let sealed = seal(transaction, files);
+    let too_large = |what: &str, detail: &str| {
+        vec![diagnostic::file(
+            &transaction.name,
+            Code::Limit.as_str(),
+            format!(
+                "{what} would exceed the limits of a transaction{detail}; split the transaction"
+            ),
+        )]
+    };
+    let inverse = inverse(workspace).map_err(|TooLarge| too_large(inverse_name, ""))?;
+    let detail = |found: &[Diagnostic]| {
+        found.first().map_or_else(String::new, |problem| {
+            format!(": {} ({})", problem.message, problem.code)
+        })
+    };
+    if let Err(found) = Transaction::parse(&transaction.name, sealed.as_str()) {
+        return Err(too_large("the sealed transaction", &detail(&found)));
+    }
+    let parsed_inverse = Transaction::parse(&transaction.name, inverse.as_str())
+        .map_err(|found| too_large(inverse_name, &detail(&found)))?;
+    Ok(Records {
+        sealed,
+        inverse,
+        parsed_inverse,
+    })
+}
+
 /// Carries out `transaction` on the tree at `root` in memory and validates
 /// the result. Nothing is written.
 ///
@@ -595,74 +712,19 @@ pub fn plan(
         ..*options
     };
     let source = SourceRoot::new(root);
-    let mut workspace = Workspace::new(&source);
-    let mut problems = Problems::new(transaction);
-    let done = if options.rebase {
-        BTreeSet::new()
-    } else {
-        check_base(&mut workspace, transaction, &mut problems)
-    };
-    // Uid addresses resolve through the world as loaded, and as the
-    // operations go on to edit it.
-    if problems.is_empty() && transaction.addresses_uids() {
-        workspace.uids = Some(uids::Index::load(&source, &options.load));
-    }
-    let mut chunks = BTreeSet::new();
-    if problems.is_empty() {
-        run_operations(
-            &mut workspace,
-            transaction,
-            &done,
-            &mut chunks,
-            &mut problems,
-        );
-    }
-    if problems.is_empty()
-        && let Err(failure) = remove_empty_chunks(&mut workspace, &chunks)
-    {
-        problems.report(transaction.document.root().span(), failure);
-    }
-    if !options.rebase && problems.is_empty() {
-        check_recorded(&workspace, transaction, &mut problems);
-    }
-    if !problems.is_empty() {
-        return Err(problems.finish());
-    }
-
-    let files: Vec<FileChange> = workspace
-        .entries
-        .iter()
-        .map(|(path, entry)| FileChange {
-            path: path.clone(),
-            before: entry.base.clone(),
-            after: entry.current.text().map(str::to_owned),
-        })
-        .collect();
+    let on_disk = Overlay::new();
+    let workspace = carry_out(&source, &on_disk, INVERSE, transaction, options)?;
+    let files = file_changes(&workspace);
     let world = load_result(&source, &options.load, transaction, &files)?;
-    let sealed = seal(transaction, &files);
-    let too_large = |what: &str, detail: &str| {
-        vec![diagnostic::file(
-            &transaction.name,
-            Code::Limit.as_str(),
-            format!(
-                "the {what} would exceed the limits of a transaction{detail}; split the transaction"
-            ),
-        )]
-    };
-    let inverse = inverse(&workspace).map_err(|TooLarge| too_large("inverse", ""))?;
-    for (text, what) in [(&sealed, "sealed transaction"), (&inverse, "inverse")] {
-        if let Err(found) = Transaction::parse(&transaction.name, text.as_str()) {
-            let detail = found
-                .first()
-                .map_or_else(String::new, |problem| format!(": {}", problem.message));
-            return Err(too_large(what, &detail));
-        }
-    }
+    let Records {
+        sealed, inverse, ..
+    } = records(transaction, &workspace, &files, INVERSE)?;
     let terrain = terrain_addresses(transaction);
     // The plan keeps the very root it was carried out on.
     drop(workspace);
     Ok(Plan {
         root: root.to_path_buf(),
+        name: transaction.name.clone(),
         terrain,
         source,
         load: options.load,
@@ -671,6 +733,119 @@ pub fn plan(
         sealed,
         inverse,
     })
+}
+
+/// Carries out `transaction` as [`plan`] does on the tree at `source` with
+/// the files of `under` laid over it, but without loading the result.
+/// Returns the files it touched or consulted, and its inverse.
+fn carry_out_unloaded(
+    source: &SourceRoot,
+    under: &Overlay,
+    transaction: &Transaction,
+    options: &Options,
+) -> Result<(Vec<FileChange>, Transaction), Vec<Diagnostic>> {
+    let workspace = carry_out(source, under, OWN_INVERSE, transaction, options)?;
+    let files = file_changes(&workspace);
+    let records = records(transaction, &workspace, &files, OWN_INVERSE)?;
+    Ok((files, records.parsed_inverse))
+}
+
+/// How messages name the inverse of the transaction carried out.
+const INVERSE: &str = "the inverse";
+
+/// How messages name the inverse of an undo or a redo that a plan's undo
+/// check carries out.
+const OWN_INVERSE: &str = "its own inverse";
+
+impl Plan {
+    /// Checks, in memory and before anything is written, that this plan
+    /// can be undone and the undo redone: that planning [`Plan::inverse`]
+    /// on the tree this plan leaves succeeds, and so does planning the
+    /// inverse's own inverse on the tree that leaves.
+    ///
+    /// Each is carried out as [`plan`] would carry it out then, with every
+    /// check it makes: the `base` digests, every operation, every budget of
+    /// [`limits`] (the files it reads, as this plan leaves them, count
+    /// against [`limits::READ_BYTES`], and their documents against
+    /// [`limits::WORK`]), the counts of files and operations, the recorded
+    /// `result`, and that its own sealed form and inverse are transactions
+    /// within the limits. The inverse of the redo is the inverse again,
+    /// byte for byte, so every later undo and redo is one of the two
+    /// checked here. Nothing is read from disk: an inverse names only files
+    /// this plan changed, whose text it holds.
+    ///
+    /// One check of planning is left out: validating the tree each leaves.
+    /// The redo leaves the tree this plan validated; the undo restores the
+    /// tree this plan was carried out on, which was not validated. So when
+    /// that tree validated under the same [`LoadOptions`] (as a tree an
+    /// editor loaded, or the one an earlier plan left, does), and nothing
+    /// else changes the files, planning the inverse after publishing this
+    /// plan succeeds. Not guaranteed: an inverse planned after other
+    /// changes to the files this plan touched or consulted is a
+    /// `tx.conflict`, as any transaction is; other files changed meanwhile
+    /// may make the restored tree fail validation; and publishing may still
+    /// fail for reasons of its own, such as permissions or input and
+    /// output.
+    ///
+    /// It costs about as much as planning the transaction twice more,
+    /// without validating, and nothing when it is not called.
+    ///
+    /// # Errors
+    /// Returns, on the transaction's name, what would refuse the undo or
+    /// the redo, with that diagnostic's code: `tx.limit` for a budget or a
+    /// limit.
+    pub fn check_undo(&self) -> Result<(), Vec<Diagnostic>> {
+        let options = Options {
+            load: self.load,
+            rebase: false,
+        };
+        let refused = |what: &str, problems: Vec<Diagnostic>| {
+            let mut found: Vec<Diagnostic> = problems
+                .into_iter()
+                .map(|problem| {
+                    let split = if problem.code == Code::Limit.as_str()
+                        && !problem.message.ends_with("; split the transaction")
+                    {
+                        "; split the transaction"
+                    } else {
+                        ""
+                    };
+                    diagnostic::file(
+                        &self.name,
+                        problem.code,
+                        format!("{what}: {}{split}", problem.message),
+                    )
+                })
+                .collect();
+            found.sort();
+            found.dedup();
+            found
+        };
+        // The undo, on the tree this plan leaves.
+        let leaves = self.overlay();
+        let undo = Transaction::parse(&self.name, self.inverse.as_str())
+            .map_err(|problems| refused("its inverse is not a transaction", problems))?;
+        let (files, redo) =
+            carry_out_unloaded(&self.source, &leaves, &undo, &options).map_err(|problems| {
+                refused(
+                    "the transaction could not be undone: its inverse would be refused",
+                    problems,
+                )
+            })?;
+        // The redo, on the tree the undo leaves.
+        let mut restored = leaves;
+        for file in files {
+            restored.insert(file.path, file.after);
+        }
+        carry_out_unloaded(&self.source, &restored, &redo, &options)
+            .map(drop)
+            .map_err(|problems| {
+                refused(
+                    "the transaction could not be redone once undone: the inverse of its inverse would be refused",
+                    problems,
+                )
+            })
+    }
 }
 
 /// A digest list: one `{"path", "sha256"}` entry per line, in path order,

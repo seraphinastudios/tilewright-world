@@ -56,13 +56,20 @@ fn failed(problems: &[tilewright_source::Diagnostic], json: bool, path: &Path) -
     }
 }
 
+/// Plans `transaction` and checks that it could be undone and redone
+/// (`Plan::check_undo`): `apply` writes the inverse as the way back, so it
+/// must apply, and `preview` and `rebase` refuse what `apply` would.
 fn plan(transaction: &Transaction, root: &Path, rebase: bool, json: bool) -> Result<Plan, Failure> {
     let options = Options {
         rebase,
         ..Options::default()
     };
-    tilewright_edit::plan(root, transaction, &options)
-        .map_err(|problems| failed(&problems, json, Path::new(transaction.name())))
+    let refused = |problems: Vec<tilewright_source::Diagnostic>| {
+        failed(&problems, json, Path::new(transaction.name()))
+    };
+    let plan = tilewright_edit::plan(root, transaction, &options).map_err(refused)?;
+    plan.check_undo().map_err(refused)?;
+    Ok(plan)
 }
 
 fn change(file: &FileChange) -> &'static str {
@@ -339,6 +346,82 @@ mod tests {
         ] {
             assert!(run(arguments).unwrap_err().message.starts_with("usage:"));
         }
+    }
+
+    #[test]
+    fn a_transaction_that_could_not_be_undone_is_refused_before_anything_is_written() {
+        let (directory, root) = setup();
+        let path = |name: &str| directory.path().join(name).display().to_string();
+        // A thin stroke over 479 chunks, painting in each 32 values the
+        // palette lacks. Its inverse removes each entry it adds in 8 lines;
+        // the inverse's own inverse, built when the inverse is planned,
+        // puts each back in 16: past the 250,000 lines of a document, so
+        // the undo would be refused.
+        let defs = Path::new(&root).join("defs/proto");
+        for value in 0..32 {
+            fs::write(
+                defs.join(format!("p{value:02}.jsonc")),
+                format!(
+                    "{{\"format\": \"tilewright.def/1\", \"type\": \"proto\", \"id\": \"p{value:02}\", \"fields\": {{\"face\": \"p.png\", \"layer\": \"floor\"}}}}\n"
+                ),
+            )
+            .unwrap();
+        }
+        let layer = Path::new(&root).join("planes/overworld/layers/2");
+        fs::create_dir_all(&layer).unwrap();
+        let rows = vec![format!("        \"{}\"", "g".repeat(32)); 32].join(",\n");
+        let mut cells = Vec::new();
+        for cx in 0..479 {
+            fs::write(
+                layer.join(format!("{cx}_0.jsonc")),
+                format!(
+                    "{{\n  \"format\": \"tilewright.chunk/1\",\n  \"plane\": \"overworld\",\n  \"layer\": 2,\n  \"chunk\": [{cx}, 0],\n  \"terrain\": {{\n    \"floor\": {{\n      \"palette\": {{\"g\": \"grass\"}},\n      \"rows\": [\n{rows}\n      ]\n    }}\n  }}\n}}\n"
+                ),
+            )
+            .unwrap();
+            for value in 0..32 {
+                cells.push(format!(
+                    "{{\"at\": [{}, 0], \"value\": \"p{value:02}\"}}",
+                    cx * 32 + value
+                ));
+            }
+        }
+        fs::write(
+            path("stroke.jsonc"),
+            format!(
+                "{{\n  \"format\": \"tilewright.transaction/1\",\n  \"operations\": [\n    {{\"op\": \"terrain.set\", \"plane\": \"overworld\", \"layer\": 2, \"grid\": \"floor\", \"cells\": [\n{}\n    ]}}\n  ]\n}}\n",
+                cells.join(",\n")
+            ),
+        )
+        .unwrap();
+        let chunk = layer.join("0_0.jsonc");
+        let before = fs::read(&chunk).unwrap();
+        let refused = |failure: super::Failure| {
+            assert!(
+                failure.output.contains(
+                    ": tx.limit: the transaction could not be undone: its inverse would be refused: its own inverse would exceed the limits of a transaction: invalid JSONC (jsonc.too_many_lines); split the transaction"
+                ),
+                "{}",
+                failure.output
+            );
+        };
+        refused(run(&["tx", "preview", &path("stroke.jsonc"), &root]).unwrap_err());
+        // Publishing is supported on Linux only.
+        #[cfg(target_os = "linux")]
+        {
+            refused(
+                run(&[
+                    "tx",
+                    "apply",
+                    &path("stroke.jsonc"),
+                    &root,
+                    &path("undo.jsonc"),
+                ])
+                .unwrap_err(),
+            );
+            assert!(!Path::new(&path("undo.jsonc")).exists());
+        }
+        assert_eq!(fs::read(&chunk).unwrap(), before);
     }
 
     // Publishing is supported on Linux only.

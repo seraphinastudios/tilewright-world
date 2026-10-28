@@ -40,7 +40,9 @@ be read.
 
 tx preview validates a transaction's result without writing; tx rebase
 writes it replayed on ROOT as it is now; tx apply writes the inverse to
-INVERSE, then applies it. OUTPUT and INVERSE must not exist.";
+INVERSE, then applies it. OUTPUT and INVERSE must not exist. Each refuses a
+transaction that could not be undone, and its undo redone, within the
+limits of a transaction.";
 
 fn main() -> ExitCode {
     // Paths need not be UTF-8, so arguments are read as OS strings.
