@@ -65,6 +65,21 @@ fn undone_and_redone(root: &Path, plan: &Plan) -> Plan {
     undo
 }
 
+/// Whether the check found that `what` would fail for the reason `problem`
+/// gives, a problem of planning that round itself, whose messages name
+/// the round as the transaction.
+fn gives(found: &[Diagnostic], what: &str, problem: &Diagnostic) -> bool {
+    let reason = ["the transaction ", "the inverse "]
+        .iter()
+        .find_map(|subject| problem.message.strip_prefix(subject))
+        .unwrap_or(&problem.message);
+    found.iter().any(|check| {
+        check.code == problem.code
+            && check.message.starts_with(what)
+            && check.message.contains(reason)
+    })
+}
+
 /// A tree with `chunks` chunks of grass on layer 2 of the overworld, and
 /// `values` more floor protos, `p00` on.
 fn painted(chunks: i64, values: usize) -> tempfile::TempDir {
@@ -216,18 +231,18 @@ fn boundary(
         published(&plan);
         let undo = reparsed("undo.jsonc", plan.inverse());
         let (what, failed) = match crate::plan(root, &undo, &Options::default()) {
-            Err(failed) => ("could not be undone", failed),
+            Err(failed) => ("the transaction could not be undone", failed),
             Ok(undone) => {
                 published(&undone);
                 let redo = reparsed("redo.jsonc", undone.inverse());
-                ("could not be redone", problems(root, &redo))
+                (
+                    "the transaction could not be redone once undone",
+                    problems(root, &redo),
+                )
             }
         };
         for problem in &failed {
-            assert!(
-                has(&found, problem.code, what) && has(&found, problem.code, &problem.message),
-                "{found:#?}\n{failed:#?}"
-            );
+            assert!(gives(&found, what, problem), "{found:#?}\n{failed:#?}");
         }
         found
     };

@@ -60,7 +60,7 @@ mod uids;
 pub use publish::{PUBLISH_SUPPORTED, PublishError, Published};
 pub use transaction::{Digests, FORMAT, Transaction};
 
-use engine::{Failure, Primitive, Workspace};
+use engine::{Failure, Names, Primitive, Workspace};
 use render::json_string;
 use sha2::{Digest as _, Sha256};
 use splice::Step;
@@ -585,16 +585,16 @@ fn terrain_addresses(transaction: &Transaction) -> Vec<(String, String, Diagnost
 }
 
 /// Carries out `transaction` in memory on the tree at `source`, with the
-/// files of `under` laid over it, and checks what it recorded. The
-/// inverse is called `inverse_name` in messages.
+/// files of `under` laid over it, and checks what it recorded. Messages
+/// use `names`.
 fn carry_out<'r>(
     source: &'r SourceRoot,
     under: &'r Overlay,
-    inverse_name: &'r str,
+    names: Names,
     transaction: &Transaction,
     options: &Options,
 ) -> Result<Workspace<'r>, Vec<Diagnostic>> {
-    let mut workspace = Workspace::new(source, under, inverse_name);
+    let mut workspace = Workspace::new(source, under, names);
     let mut problems = Problems::new(transaction);
     let done = if options.rebase {
         BTreeSet::new()
@@ -658,7 +658,7 @@ fn records(
     transaction: &Transaction,
     workspace: &Workspace<'_>,
     files: &[FileChange],
-    inverse_name: &str,
+    names: Names,
 ) -> Result<Records, Vec<Diagnostic>> {
     let sealed = seal(transaction, files);
     let too_large = |what: &str, detail: &str| {
@@ -670,17 +670,17 @@ fn records(
             ),
         )]
     };
-    let inverse = inverse(workspace).map_err(|TooLarge| too_large(inverse_name, ""))?;
+    let inverse = inverse(workspace).map_err(|TooLarge| too_large(names.inverse, ""))?;
     let detail = |found: &[Diagnostic]| {
         found.first().map_or_else(String::new, |problem| {
             format!(": {} ({})", problem.message, problem.code)
         })
     };
     if let Err(found) = Transaction::parse(&transaction.name, sealed.as_str()) {
-        return Err(too_large("the sealed transaction", &detail(&found)));
+        return Err(too_large(names.sealed, &detail(&found)));
     }
     let parsed_inverse = Transaction::parse(&transaction.name, inverse.as_str())
-        .map_err(|found| too_large(inverse_name, &detail(&found)))?;
+        .map_err(|found| too_large(names.inverse, &detail(&found)))?;
     Ok(Records {
         sealed,
         inverse,
@@ -713,12 +713,12 @@ pub fn plan(
     };
     let source = SourceRoot::new(root);
     let on_disk = Overlay::new();
-    let workspace = carry_out(&source, &on_disk, INVERSE, transaction, options)?;
+    let workspace = carry_out(&source, &on_disk, Names::OWN, transaction, options)?;
     let files = file_changes(&workspace);
     let world = load_result(&source, &options.load, transaction, &files)?;
     let Records {
         sealed, inverse, ..
-    } = records(transaction, &workspace, &files, INVERSE)?;
+    } = records(transaction, &workspace, &files, Names::OWN)?;
     let terrain = terrain_addresses(transaction);
     // The plan keeps the very root it was carried out on.
     drop(workspace);
@@ -744,18 +744,11 @@ fn carry_out_unloaded(
     transaction: &Transaction,
     options: &Options,
 ) -> Result<(Vec<FileChange>, Transaction), Vec<Diagnostic>> {
-    let workspace = carry_out(source, under, OWN_INVERSE, transaction, options)?;
+    let workspace = carry_out(source, under, Names::NESTED, transaction, options)?;
     let files = file_changes(&workspace);
-    let records = records(transaction, &workspace, &files, OWN_INVERSE)?;
+    let records = records(transaction, &workspace, &files, Names::NESTED)?;
     Ok((files, records.parsed_inverse))
 }
-
-/// How messages name the inverse of the transaction carried out.
-const INVERSE: &str = "the inverse";
-
-/// How messages name the inverse of an undo or a redo that a plan's undo
-/// check carries out.
-const OWN_INVERSE: &str = "its own inverse";
 
 impl Plan {
     /// Checks, in memory and before anything is written, that this plan

@@ -224,6 +224,31 @@ fn plus(left: (u64, usize), right: (u64, usize)) -> (u64, usize) {
     )
 }
 
+/// How messages name the transaction carried out, its inverse and its
+/// sealed form.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Names {
+    pub transaction: &'static str,
+    pub inverse: &'static str,
+    pub sealed: &'static str,
+}
+
+impl Names {
+    /// A transaction carried out for itself.
+    pub const OWN: Self = Self {
+        transaction: "the transaction",
+        inverse: "the inverse",
+        sealed: "the sealed transaction",
+    };
+    /// An undo or a redo carried out by the undo check, whose messages
+    /// follow one that names it.
+    pub const NESTED: Self = Self {
+        transaction: "it",
+        inverse: "its own inverse",
+        sealed: "its sealed form",
+    };
+}
+
 /// The read and work budgets of carrying a transaction out:
 /// [`limits::READ_BYTES`] and [`limits::WORK`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -267,8 +292,7 @@ pub(crate) struct Workspace<'r> {
     /// from here, under the same bounds, and not from disk.
     under: &'r Overlay,
     budgets: Budgets,
-    /// How the inverse is named in messages.
-    inverse_name: &'r str,
+    names: Names,
     pub entries: BTreeMap<String, Entry>,
     read_bytes: u64,
     work: u64,
@@ -318,13 +342,13 @@ fn read(
 
 impl<'r> Workspace<'r> {
     /// A workspace over the tree at `root` with the files of `under` laid
-    /// over it. Its inverse is called `inverse_name` in messages.
-    pub fn new(root: &'r SourceRoot, under: &'r Overlay, inverse_name: &'r str) -> Self {
+    /// over it, whose messages use `names`.
+    pub fn new(root: &'r SourceRoot, under: &'r Overlay, names: Names) -> Self {
         Self {
             root,
             under,
             budgets: Budgets::current(),
-            inverse_name,
+            names,
             entries: BTreeMap::new(),
             read_bytes: 0,
             work: 0,
@@ -396,7 +420,8 @@ impl<'r> Workspace<'r> {
                     // The transaction is rejected; carrying on is useless.
                     self.spent = true;
                     return Err(Failure::limit(format!(
-                        "the transaction touches more than {} files",
+                        "{} touches more than {} files",
+                        self.names.transaction,
                         limits::FILES
                     )));
                 }
@@ -471,8 +496,8 @@ impl<'r> Workspace<'r> {
         if self.work > self.budgets.work {
             self.spent = true;
             return Err(Failure::limit(format!(
-                "the transaction needs more than {} bytes of work: its operations, the documents each reads, and its edits",
-                self.budgets.work
+                "{} needs more than {} bytes of work: its operations, the documents each reads, and its edits",
+                self.names.transaction, self.budgets.work
             )));
         }
         Ok(())
@@ -493,7 +518,7 @@ impl<'r> Workspace<'r> {
             self.spent = true;
             return Err(Failure::limit(format!(
                 "{} would hold more than {} operations; split the transaction",
-                self.inverse_name,
+                self.names.inverse,
                 limits::OPERATIONS
             )));
         }
@@ -502,7 +527,7 @@ impl<'r> Workspace<'r> {
             self.spent = true;
             return Err(Failure::limit(format!(
                 "{} would hold more than {limit} bytes; split the transaction",
-                self.inverse_name
+                self.names.inverse
             )));
         }
         Ok(())
