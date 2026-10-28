@@ -543,3 +543,34 @@ fn the_check_passes_exactly_when_the_undo_and_the_redo_plan() {
         "{outcomes:?}"
     );
 }
+
+#[test]
+fn the_note_that_there_may_be_more_stays_last_and_as_it_is() {
+    let tree = copy();
+    let plan = planned(
+        tree.path(),
+        &transaction(
+            r#"{"op": "set", "path": "defs/proto/tree.jsonc", "pointer": ["custom"], "value": {"example.org/a": 1}}"#,
+        ),
+    );
+    let note = more_note("tx.jsonc");
+    let found = plan.refused(
+        "the transaction could not be undone",
+        vec![
+            diagnostic::file("tx.jsonc", "tx.limit", "a limit"),
+            diagnostic::file("tx.jsonc", "tx.conflict", "a conflict"),
+            note.clone(),
+        ],
+    );
+    assert_eq!(found.last(), Some(&note));
+    assert_eq!(
+        found[..2]
+            .iter()
+            .map(|problem| problem.message.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "the transaction could not be undone: a conflict",
+            "the transaction could not be undone: a limit; split the transaction",
+        ]
+    );
+}

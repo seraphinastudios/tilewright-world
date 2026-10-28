@@ -332,17 +332,23 @@ impl<'a> Problems<'a> {
         found.sort();
         found.dedup();
         if self.more {
-            found.push(diagnostic::file(
-                self.name,
-                Code::Limit.as_str(),
-                format!(
-                    "{} problems are reported, as many as may be; there may be more",
-                    limits::DIAGNOSTICS - 1
-                ),
-            ));
+            found.push(more_note(self.name));
         }
         found
     }
+}
+
+/// The note, in the last place of a transaction's problems, that there may
+/// be more than are reported.
+fn more_note(name: &str) -> Diagnostic {
+    diagnostic::file(
+        name,
+        Code::Limit.as_str(),
+        format!(
+            "{} problems are reported, as many as may be; there may be more",
+            limits::DIAGNOSTICS - 1
+        ),
+    )
 }
 
 /// Checks the recorded base. Returns the files already at their result,
@@ -792,35 +798,13 @@ impl Plan {
             load: self.load,
             rebase: false,
         };
-        let refused = |what: &str, problems: Vec<Diagnostic>| {
-            let mut found: Vec<Diagnostic> = problems
-                .into_iter()
-                .map(|problem| {
-                    let split = if problem.code == Code::Limit.as_str()
-                        && !problem.message.ends_with("; split the transaction")
-                    {
-                        "; split the transaction"
-                    } else {
-                        ""
-                    };
-                    diagnostic::file(
-                        &self.name,
-                        problem.code,
-                        format!("{what}: {}{split}", problem.message),
-                    )
-                })
-                .collect();
-            found.sort();
-            found.dedup();
-            found
-        };
         // The undo, on the tree this plan leaves.
         let leaves = self.overlay();
         let undo = Transaction::parse(&self.name, self.inverse.as_str())
-            .map_err(|problems| refused("its inverse is not a transaction", problems))?;
+            .map_err(|problems| self.refused("its inverse is not a transaction", problems))?;
         let (files, redo) =
             carry_out_unloaded(&self.source, &leaves, &undo, &options).map_err(|problems| {
-                refused(
+                self.refused(
                     "the transaction could not be undone: its inverse would be refused",
                     problems,
                 )
@@ -833,11 +817,43 @@ impl Plan {
         carry_out_unloaded(&self.source, &restored, &redo, &options)
             .map(drop)
             .map_err(|problems| {
-                refused(
+                self.refused(
                     "the transaction could not be redone once undone: the inverse of its inverse would be refused",
                     problems,
                 )
             })
+    }
+
+    /// The problems of a round of the undo check, on the transaction's
+    /// name, each after `what` failed; the note that there may be more
+    /// stays last.
+    fn refused(&self, what: &str, mut problems: Vec<Diagnostic>) -> Vec<Diagnostic> {
+        let note = problems
+            .last()
+            .is_some_and(|last| *last == more_note(&self.name))
+            .then(|| problems.pop())
+            .flatten();
+        let mut found: Vec<Diagnostic> = problems
+            .into_iter()
+            .map(|problem| {
+                let split = if problem.code == Code::Limit.as_str()
+                    && !problem.message.ends_with("; split the transaction")
+                {
+                    "; split the transaction"
+                } else {
+                    ""
+                };
+                diagnostic::file(
+                    &self.name,
+                    problem.code,
+                    format!("{what}: {}{split}", problem.message),
+                )
+            })
+            .collect();
+        found.sort();
+        found.dedup();
+        found.extend(note);
+        found
     }
 }
 
