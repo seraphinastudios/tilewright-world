@@ -1,10 +1,11 @@
 // Copyright 2026 Seraphina Studios
 // SPDX-License-Identifier: MIT
 
-//! The undo check, [`Plan::check_undo`]: a plan whose inverse could not be
-//! carried out on the tree it leaves, or whose inverse's own inverse could
-//! not be carried out on the tree that leaves, is refused before anything
-//! is written, and one it passes can be undone and redone.
+//! The undo check, [`Plan::check_undo`]: a plan is refused before anything
+//! is written when its inverse could not be carried out on the tree it
+//! leaves, or the inverse's own inverse on the tree that leaves, and so on
+//! until undo and redo settle; and one it passes can be undone and redone
+//! as often as wanted.
 
 use super::*;
 use crate::engine::{Budgets, TEST_BUDGETS};
@@ -50,19 +51,27 @@ fn refused(plan: &Plan) -> Vec<Diagnostic> {
 }
 
 /// Publishes `plan`, which passed the undo check, then plans and publishes
-/// its undo and its redo: the undo restores every file, the redo gives
-/// every file the plan did, and the redo's inverse is the undo again, byte
-/// for byte. Returns the undo.
-fn undone_and_redone(root: &Path, plan: &Plan) -> Plan {
+/// its undo, its redo, and so on, until a round's inverse is the
+/// transaction of the round before it: from then on undo and redo
+/// alternate between two transactions. Each round plans; each undo
+/// restores every file and each redo gives every file the plan did.
+/// Returns the transactions of the rounds, the undo first, and the inverse
+/// of the last.
+fn cycled(root: &Path, plan: &Plan) -> Vec<String> {
     let before = snapshot(root);
     published(plan);
     let after = snapshot(root);
-    let undo = apply(root, &reparsed("undo.jsonc", plan.inverse()));
-    assert_eq!(snapshot(root), before);
-    let redo = apply(root, &reparsed("redo.jsonc", undo.inverse()));
-    assert_eq!(snapshot(root), after);
-    assert_eq!(redo.inverse(), plan.inverse());
-    undo
+    let mut rounds = vec![plan.inverse().to_owned()];
+    for round in 0..6 {
+        let planned = apply(root, &reparsed("round.jsonc", &rounds[round]));
+        let expected = if round % 2 == 0 { &before } else { &after };
+        assert!(snapshot(root) == *expected, "round {round}");
+        rounds.push(planned.inverse().to_owned());
+        if round >= 1 && rounds[round + 1] == rounds[round - 1] {
+            return rounds;
+        }
+    }
+    panic!("undo and redo do not settle in six rounds");
 }
 
 /// Whether the check found that `what` would fail for the reason `problem`
@@ -78,6 +87,11 @@ fn gives(found: &[Diagnostic], what: &str, problem: &Diagnostic) -> bool {
             && check.message.starts_with(what)
             && check.message.contains(reason)
     })
+}
+
+/// The number of operations of a transaction's text.
+fn operations(text: &str) -> usize {
+    reparsed("count.jsonc", text).len()
 }
 
 /// A tree with `chunks` chunks of grass on layer 2 of the overworld, and
@@ -172,9 +186,11 @@ fn a_stroke_just_short_of_the_line_limit_is_undone_and_redone() {
     let root = tree.path();
     let plan = planned(root, &stroke(478, 32));
     plan.check_undo().unwrap();
-    let undo = undone_and_redone(root, &plan);
-    let lines = undo.inverse().lines().count();
+    let rounds = cycled(root, &plan);
+    let lines = rounds[1].lines().count();
     assert!((249_000..=250_000).contains(&lines), "{lines}");
+    // The redo's inverse is the undo again.
+    assert_eq!(rounds.len(), 3);
 }
 
 /// Which budget [`boundary`] lowers.
@@ -231,14 +247,11 @@ fn boundary(
         published(&plan);
         let undo = reparsed("undo.jsonc", plan.inverse());
         let (what, failed) = match crate::plan(root, &undo, &Options::default()) {
-            Err(failed) => ("the transaction could not be undone", failed),
+            Err(failed) => (ROUNDS[0], failed),
             Ok(undone) => {
                 published(&undone);
                 let redo = reparsed("redo.jsonc", undone.inverse());
-                (
-                    "the transaction could not be redone once undone",
-                    problems(root, &redo),
-                )
+                (ROUNDS[1], problems(root, &redo))
             }
         };
         for problem in &failed {
@@ -251,7 +264,7 @@ fn boundary(
     let _lowered = lowered(budget, high);
     let plan = planned(at.path(), transaction);
     plan.check_undo().unwrap();
-    undone_and_redone(at.path(), &plan);
+    cycled(at.path(), &plan);
     (high, found)
 }
 
@@ -404,6 +417,67 @@ impl Random {
     }
 }
 
+// An inverse holds, for each file, only the edits since the file was last
+// as it began, so undoing a step that passes through a state it ends or
+// begins in gives a shorter inverse than the step's. The check goes on
+// until the rounds settle.
+
+#[test]
+fn a_step_that_passes_through_its_final_state_settles_on_a_shorter_undo() {
+    let tree = copy();
+    let root = tree.path();
+    let tx = transaction(
+        r#"{"op": "set", "path": "defs/proto/tree.jsonc", "pointer": ["custom"], "value": {"example.org/a": 1}},
+    {"op": "set", "path": "defs/proto/tree.jsonc", "pointer": ["custom"], "value": {"example.org/a": 2}},
+    {"op": "set", "path": "defs/proto/tree.jsonc", "pointer": ["custom"], "value": {"example.org/a": 1}}"#,
+    );
+    let plan = planned(root, &tx);
+    plan.check_undo().unwrap();
+    // The undo sets 2, then 1, then removes the member; planning it passes
+    // through the state the step ended in, so the redo only adds the
+    // member, and the next undo only removes it.
+    let rounds = cycled(root, &plan);
+    let counts: Vec<usize> = rounds.iter().map(|text| operations(text)).collect();
+    assert_eq!(counts, [3, 1, 1, 1]);
+    assert_ne!(rounds[2], rounds[0]);
+}
+
+#[test]
+fn placing_and_then_dragging_an_object_settles_on_a_shorter_undo_and_redo() {
+    let tree = copy();
+    let root = tree.path();
+    let tx = transaction(
+        r#"{"op": "object.insert", "plane": "overworld", "layer": 0, "at": [7, 0], "index": 0, "object": {"proto": "wall"}},
+    {"op": "object.move", "plane": "overworld", "layer": 0, "at": [7, 0], "index": 0, "expect": {"proto": "wall"}, "to": {"at": [8, 0]}}"#,
+    );
+    let plan = planned(root, &tx);
+    plan.check_undo().unwrap();
+    // Moving it passes through the chunk as it began, inside one
+    // operation: the undo and the redo hold every edit, but the redo
+    // passes through its own start, so the rounds after it hold only the
+    // last.
+    let rounds = cycled(root, &plan);
+    let counts: Vec<usize> = rounds.iter().map(|text| operations(text)).collect();
+    assert_eq!(counts, [3, 3, 1, 1, 1]);
+    assert_ne!(rounds[2], rounds[0]);
+    assert_ne!(rounds[3], rounds[1]);
+}
+
+#[test]
+fn a_document_deleted_and_made_again_settles_on_a_shorter_undo() {
+    let tree = copy();
+    let root = tree.path();
+    let tx = transaction(
+        r#"{"op": "document.delete", "path": "defs/proto/coin.jsonc"},
+    {"op": "document.create", "path": "defs/proto/coin.jsonc", "text": "{\"format\": \"tilewright.def/1\", \"type\": \"proto\", \"id\": \"coin\", \"fields\": {\"face\": \"coin.png\", \"layer\": \"item\"}}\n"},
+    {"op": "set", "path": "defs/proto/coin.jsonc", "pointer": ["fields", "weight"], "value": 0.5}"#,
+    );
+    let plan = planned(root, &tx);
+    plan.check_undo().unwrap();
+    let rounds = cycled(root, &plan);
+    assert_ne!(rounds[2], rounds[0]);
+}
+
 /// A random transaction of operations that are valid on the fixture:
 /// objects placed, and placed and removed again; terrain painted and
 /// cleared, which creates and deletes chunks; definitions created, renamed
@@ -512,9 +586,7 @@ fn the_check_passes_exactly_when_the_undo_and_the_redo_plan() {
         );
         match (checked, actual) {
             (Ok(()), Ok(redone)) => {
-                // The redo's inverse is the undo again, and the redo gives
-                // what the transaction did.
-                assert_eq!(redone.inverse(), plan.inverse(), "case {case}");
+                // The redo gives what the transaction did.
                 published(&redone);
                 for file in plan.files() {
                     assert_eq!(

@@ -22,9 +22,10 @@
 //! That the inverse is a valid transaction does not mean it can be carried
 //! out: it may read, do or record more than the transaction did.
 //! [`Plan::check_undo`] carries it out in memory on the tree the plan
-//! leaves, and its own inverse on the tree that leaves, with every check
-//! planning makes but validation, so that a caller that keeps inverses for
-//! undo never records a step it could not undo.
+//! leaves, then its own inverse on the tree that leaves, and so on until
+//! undo and redo settle, with every check planning makes but validation,
+//! so that a caller that keeps inverses for undo never records a step it
+//! could not undo.
 //!
 //! ```no_run
 //! use std::path::Path;
@@ -742,9 +743,10 @@ pub fn plan(
 }
 
 /// Carries out `transaction` as [`plan`] does on the tree at `source` with
-/// the files of `under` laid over it, but without loading the result.
-/// Returns the files it touched or consulted, and its inverse.
-fn carry_out_unloaded(
+/// the files of `under` laid over it, but without loading the result, as
+/// a round of the undo check. Returns the files it touched or consulted,
+/// and its inverse.
+fn carry_out_round(
     source: &SourceRoot,
     under: &Overlay,
     transaction: &Transaction,
@@ -756,78 +758,99 @@ fn carry_out_unloaded(
     Ok((files, records.parsed_inverse))
 }
 
+/// What each round of the undo check carries out, as its refusal says:
+/// the undo, the redo, and again each once more.
+const ROUNDS: [&str; 4] = [
+    "the transaction could not be undone: its inverse would be refused",
+    "the transaction could not be redone once undone: the inverse of its inverse would be refused",
+    "the transaction could not be undone again once redone: the inverse of its redo would be refused",
+    "the transaction could not be redone a second time: the inverse of its second undo would be refused",
+];
+
 impl Plan {
     /// Checks, in memory and before anything is written, that this plan
-    /// can be undone and the undo redone: that planning [`Plan::inverse`]
-    /// on the tree this plan leaves succeeds, and so does planning the
-    /// inverse's own inverse on the tree that leaves.
+    /// can be undone, the undo redone, and so on, as often as wanted.
     ///
-    /// Each is carried out as [`plan`] would carry it out then, with every
-    /// check it makes: the `base` digests, every operation, every budget of
-    /// [`limits`] (the files it reads, as this plan leaves them, count
-    /// against [`limits::READ_BYTES`], and their documents against
-    /// [`limits::WORK`]), the counts of files and operations, the recorded
-    /// `result`, and that its own sealed form and inverse are transactions
-    /// within the limits. The inverse of the redo is the inverse again,
-    /// byte for byte, so every later undo and redo is one of the two
-    /// checked here. Nothing is read from disk: an inverse names only files
-    /// this plan changed, whose text it holds.
+    /// It carries out [`Plan::inverse`], the undo, on the tree this plan
+    /// leaves; then the undo's own inverse, the redo, on the tree that
+    /// leaves; and so on, each round on the tree the one before leaves,
+    /// until a round's inverse is the transaction of the round before it,
+    /// byte for byte. From then on, undo and redo alternate between two
+    /// transactions it carried out, each on the tree it would then meet.
+    /// That happens by the fourth round. (An inverse holds, for each file,
+    /// only the edits since the file was last as it began, so a later
+    /// round can be shorter than the one two before it: when this plan
+    /// passes through the state it ends in, or through the one it began
+    /// in, as placing an object and then moving it does.)
     ///
-    /// One check of planning is left out: validating the tree each leaves.
-    /// The redo leaves the tree this plan validated; the undo restores the
-    /// tree this plan was carried out on, which was not validated. So when
-    /// that tree validated under the same [`LoadOptions`] (as a tree an
-    /// editor loaded, or the one an earlier plan left, does), and nothing
-    /// else changes the files, planning the inverse after publishing this
-    /// plan succeeds. Not guaranteed: an inverse planned after other
-    /// changes to the files this plan touched or consulted is a
-    /// `tx.conflict`, as any transaction is; other files changed meanwhile
-    /// may make the restored tree fail validation; and publishing may still
-    /// fail for reasons of its own, such as permissions or input and
-    /// output.
+    /// Each round is carried out as [`plan`] would carry it out then, with
+    /// every check it makes except validating its result: the `base`
+    /// digests, every operation, every budget of [`limits`] (the files it
+    /// reads count against [`limits::READ_BYTES`] as the round before left
+    /// them, and their documents against [`limits::WORK`]), the counts of
+    /// files and operations, the recorded `result`, and that its own
+    /// sealed form and inverse are transactions within the limits. Nothing
+    /// is read from disk: an inverse names only files this plan changed,
+    /// whose text it holds.
     ///
-    /// It is bounded as carrying out is, twice over, and costs nothing when
-    /// it is not called.
+    /// Validating is left out. The redos leave the tree this plan
+    /// validated; the undos restore the tree this plan was carried out on,
+    /// which was not validated. So when that tree validated under the
+    /// same [`LoadOptions`] (as a tree an editor loaded, or the one an
+    /// earlier plan left, does), and nothing else changes the files, every
+    /// undo and redo of this plan, published in turn, plans. Not
+    /// guaranteed: an undo or redo planned after other changes to the
+    /// files this plan touched or consulted is a `tx.conflict`, as any
+    /// transaction is; other files changed meanwhile may make the tree it
+    /// leaves fail validation; and publishing may fail for reasons of its
+    /// own, such as permissions or input and output.
+    ///
+    /// It is bounded as carrying out is, once for each of at most four
+    /// rounds, and costs nothing when it is not called.
     ///
     /// # Errors
-    /// Returns, on the transaction's name, what would refuse the undo or
-    /// the redo, with that diagnostic's code: `tx.limit` for a budget or a
-    /// limit.
+    /// Returns, on the transaction's name and without a position, what
+    /// would refuse the round that fails, with that problem's code:
+    /// `tx.limit` for a budget or a limit.
     pub fn check_undo(&self) -> Result<(), Vec<Diagnostic>> {
         let options = Options {
             load: self.load,
             rebase: false,
         };
-        // The undo, on the tree this plan leaves, as far as an inverse
-        // reads it: the files it changed, as it leaves them.
-        let leaves: Overlay = self
+        // The tree this plan leaves, as far as an inverse reads it: the
+        // files it changed, as it leaves them.
+        let mut tree: Overlay = self
             .files
             .iter()
             .filter(|file| file.is_changed())
             .map(|file| (file.path.clone(), file.after.clone()))
             .collect();
-        let undo = Transaction::parse(&self.name, self.inverse.as_str())
+        let mut current = Transaction::parse(&self.name, self.inverse.as_str())
             .map_err(|problems| self.refused("its inverse is not a transaction", problems))?;
-        let (files, redo) =
-            carry_out_unloaded(&self.source, &leaves, &undo, &options).map_err(|problems| {
-                self.refused(
-                    "the transaction could not be undone: its inverse would be refused",
-                    problems,
-                )
-            })?;
-        // The redo, on the tree the undo leaves.
-        let mut restored = leaves;
-        for file in files {
-            restored.insert(file.path, file.after);
+        let mut previous: Option<Transaction> = None;
+        for what in ROUNDS {
+            let (files, next) = carry_out_round(&self.source, &tree, &current, &options)
+                .map_err(|problems| self.refused(what, problems))?;
+            // Carrying out is deterministic, and every other round meets
+            // the same tree, as each round's recorded `result` makes sure:
+            // a round whose inverse is the transaction of the round before
+            // it closes the cycle.
+            if previous
+                .as_ref()
+                .is_some_and(|previous| previous.text() == next.text())
+            {
+                return Ok(());
+            }
+            for file in files {
+                tree.insert(file.path, file.after);
+            }
+            previous = Some(std::mem::replace(&mut current, next));
         }
-        carry_out_unloaded(&self.source, &restored, &redo, &options)
-            .map(drop)
-            .map_err(|problems| {
-                self.refused(
-                    "the transaction could not be redone once undone: the inverse of its inverse would be refused",
-                    problems,
-                )
-            })
+        Err(vec![diagnostic::file(
+            &self.name,
+            Code::Result.as_str(),
+            "the transaction could not be checked for undo: its undo and redo do not settle into a cycle by the fourth round; this is an internal error",
+        )])
     }
 
     /// The problems of a round of the undo check, on the transaction's

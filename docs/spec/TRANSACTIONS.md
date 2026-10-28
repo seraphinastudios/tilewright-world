@@ -279,11 +279,12 @@ the transaction changed, in path order:
 - `document.delete` for a file it created;
 - `document.create` with the exact `text` for a file it deleted, in pieces
   of at most 128 KiB, one a line;
-- otherwise the exact inverse of each edit, last first: `set` with the old
-  value's text, `insert` with the old item, key, colon and regions, `remove`
-  with the old region. An old value or key, and each step of a pointer, is
-  written on a line of its own, so no line of the inverse is longer than a
-  line of the file.
+- otherwise the exact inverse of each edit since the file was last as it
+  began, between operations, last first: `set` with the old value's text,
+  `insert` with the old item, key, colon and regions, `remove` with the old
+  region. An old value or key, and each step of a pointer, is written on a
+  line of its own, so no line of the inverse is longer than a line of the
+  file.
 
 An inverse names files by path and values by pointer, never objects by
 place or uid, whatever addresses the transaction used: it restores bytes,
@@ -319,39 +320,54 @@ transaction created, which the inverse deletes in one. Any of these can pass
 a limit of section 11 that the transaction was within.
 
 So a carried-out transaction can be checked, before anything is written,
-for whether it can be undone, and the undo redone. The check carries out
-the inverse in memory on the tree as the transaction leaves it, and then
-the inverse's own inverse on the tree that leaves, each with every check
-carrying it out then would make (sections 6, 7 and 11) but validating its
-result: its `base`, every operation and its preconditions, the read and
+for whether it can be undone, the undo redone, and so on. The check works
+in rounds: the first carries out the inverse, the undo, on the tree as the
+transaction leaves it; the second, the undo's own inverse, the redo, on the
+tree the undo leaves; each later one the inverse of the round before, on
+the tree that round leaves. Each round is carried out with every check
+carrying it out then would make (sections 6, 7 and 11) but validating
+its result: its `base`, every operation and its preconditions, the read and
 work budgets, the counts of files and operations, its `result`, and that
 its sealed form and its own inverse are transactions within the limits.
-The inverse of the inverse's own inverse is the inverse again, byte for
-byte, so every later undo and redo is one of the two the check carries out.
+
+Since an inverse holds only the edits since each file was last as it began,
+a round can be shorter than the one two before it, when the transaction or
+a round passes through a state it ends or began in: setting a value to 1,
+then 2, then 1 again, or placing an object and then moving it, which
+passes through the chunk as it was within one operation. The check stops
+at the first round whose inverse is, byte for byte, the transaction of the
+round before it. Carrying out is deterministic, and every other round meets
+the same tree, so from there undo and redo alternate between two
+transactions the check carried out, each on the tree it would meet. That
+happens by the fourth round, since the third round never passes through a
+state it ends or begins in, and so neither do those after it. The check
+carries out at most four rounds, and should the fourth not give the third
+back, which does not happen, it refuses the transaction with `tx.result`.
+
 The check reads nothing from disk: an inverse names only files the
 transaction changed, whose text the carried-out transaction holds. It is
-bounded as carrying out is, twice over, and deterministic. A transaction
-that fails it is refused with a diagnostic on the transaction, without a
-position, that says whether undoing or redoing it would fail and why, with
-the code of what would fail: `tx.limit` for a limit.
+deterministic, and bounded as carrying out is, once for each of at most
+four rounds. A transaction that fails it is refused with diagnostics on the
+transaction, without a position, that say which round would fail and why,
+each with the code of what would fail: `tx.limit` for a limit.
 
-When a transaction passes, its inverse can be carried out after it is
-published, and the inverse's own inverse after that, provided that the
-tree the transaction was carried out on validates under the same load
-options and nothing else changes the files. That tree is not validated by
-the check: the inverse restores it, byte for byte, in every file the
-transaction touched or consulted, and it is the tree an editor loaded, or
-the one an earlier transaction left. The redo leaves the tree the
-transaction did, which carrying it out validated. Not guaranteed:
+When a transaction passes, every undo and redo of it can be carried out in
+turn, each after the one before is published, provided that the tree the
+transaction was carried out on validates under the same load options and
+nothing else changes the files. That tree is not validated by the check:
+the undos restore it, byte for byte, in every file the transaction touched
+or consulted, and it is the tree an editor loaded, or the one an earlier
+transaction left. The redos leave the tree the transaction did, which
+carrying it out validated. Not guaranteed:
 
 - the inverse of a transaction that made an invalid tree valid passes the
   check, and is refused, as above;
 - applied after other changes to the files the transaction touched or
-  consulted, the inverse is a `tx.conflict`, as any transaction is: an
+  consulted, an undo or redo is a `tx.conflict`, as any transaction is: an
   editor that saves each step and keeps its inverse for undo sees this when
   another program edits those files between the save and the undo;
-- other files changed meanwhile can make the restored tree fail
-  validation;
+- other files changed meanwhile can make the tree an undo or redo leaves
+  fail validation;
 - publishing can fail for reasons of its own (section 9).
 
 ## 9. Applying
