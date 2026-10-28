@@ -2,8 +2,8 @@
 
 `scripts/release/commits.cjs` adapts parsing and filtering logic from these
 packages (see `PROVENANCE.md`). Their copyright and permission notices
-follow; only the license names were made headings here, and a trailing
-space was dropped.
+follow; only the license names were set in bold (two were headings
+upstream), and a trailing space was dropped.
 
 ## conventional-commits-parser 6.4.0
 

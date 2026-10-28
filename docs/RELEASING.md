@@ -67,19 +67,26 @@ planner runs only code from this repository, and
 `scripts/release/test-commits.cjs` checks it against the analyzer's
 answers. As in the analyzer, a `BREAKING CHANGE:` note after a line such
 as `---` (a Markdown rule in a pull request body) is not read, so use a `!`
-title instead. One difference is deliberate: the analyzer read the
+title instead. Two differences are deliberate. The analyzer read the
 contents of `-name-` lines such as `-type-` or `-revert-` as commit
 properties, which could change a release or make it fail, and
-`commits.cjs` ignores them.
+`commits.cjs` ignores them. And where the analyzer failed on a
+`BREAKING CHANGE:` note that runs into a trailing `-name-` line, the note
+counts.
 
 - Every release from `main` bumps the minor version. Patch versions belong
   to maintenance branches named `MAJOR.MINOR.x`. A maintenance branch can
   only release patches of its own line, so a `feat` or breaking commit there
   stops the release. Releases from maintenance branches are off for now
   (see "Repository settings it relies on").
-- A squash merge's commit message is the pull request's Conventional
-  Commits title. A commit without a type releases nothing, unless it
-  reverts a commit or carries a `BREAKING CHANGE:` note.
+- Pull requests are squash-merged. The commit's title is the pull
+  request's Conventional Commits title, and its message body is the pull
+  request's description. The title gives the commit its type. A
+  `BREAKING CHANGE:` (or `BREAKING-CHANGE:`) line anywhere in the
+  description counts too, in any letter case and also after `*` or `|`,
+  unless a `---` or other `-name-` line above it hides it. A commit
+  without a type releases nothing, unless it reverts a commit or carries
+  such a note.
 - The first release is `0.1.0`. Releases stay at `0.x` until world format
   1.0 is frozen: until then a breaking change (`feat!:` or a
   `BREAKING CHANGE:` footer) bumps the minor version, as Cargo and Go treat
@@ -217,6 +224,9 @@ to the run's summary. The `go` command checks every download against them.
 ## Repository settings it relies on
 
 The pipeline changes no settings. It relies on:
+
+- **Squash merges only**, with the pull request's title as the commit
+  title and its description as the commit message (see "Versions").
 
 - **Immutable releases**, which are on. A published release, its tag and its
   assets cannot change. The release job checks `immutable: true` after

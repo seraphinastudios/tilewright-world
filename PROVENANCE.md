@@ -35,8 +35,8 @@ never copied, adapted or used as a dependency.
   `scripts/release/commits.cjs` adapts the parts of these npm packages that
   decide a release:
   - conventional-commits-parser 6.4.0 (MIT): the line-by-line reading of
-    headers, `-field-` lines, breaking-change notes, issue references and
-    reverts, with their regular expressions;
+    headers, `-field-` lines, breaking-change notes and reverts, with their
+    regular expressions;
   - the parser options of conventional-changelog-conventionalcommits 9.3.1
     (ISC): the header, breaking-header, note and revert patterns;
   - conventional-commits-filter 5.0.0 (MIT): how a revert and the commit it
@@ -52,7 +52,8 @@ never copied, adapted or used as a dependency.
   tried, with two deliberate differences. First, the contents of
   `-name-` field lines are ignored. The parser copied them onto the commit,
   so a field such as `-type-`, `-revert-`, `-hash-` or `-tag-` changed the
-  analyzer's answer, and `-notes-` or `-references-` made it throw.
+  analyzer's answer, and `-notes-`, `-references-` or (with an @mention
+  in the message) `-mentions-` made it throw.
   Second, a breaking-change note that runs into a trailing field line
   counts; the parser threw on it.
   `scripts/release/THIRD_PARTY_LICENSES.md` holds their notices.

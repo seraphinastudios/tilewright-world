@@ -17,8 +17,9 @@
 //
 // Two differences are deliberate. The parser copied each "-name-" field
 // line onto the commit, so a field such as "-type-", "-revert-", "-hash-"
-// or "-tag-" changed the analyzer's answer, and "-notes-" or
-// "-references-" made it throw. Here field lines only hide what follows
+// or "-tag-" changed the analyzer's answer, and "-notes-",
+// "-references-" or (with an @mention in the message) "-mentions-" made
+// it throw. Here field lines only hide what follows
 // them, as they did from the note search, and their contents are ignored.
 // And where the analyzer threw on a note running into a trailing field,
 // the note counts.
