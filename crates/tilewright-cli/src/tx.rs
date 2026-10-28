@@ -435,7 +435,19 @@ mod tests {
         let applied = run(&["tx", "apply", &path("tx.jsonc"), &root, &path("undo.jsonc")]);
         // Only Linux checks everything, on the local file systems a test's
         // directory is on, and needs no consent.
-        let Some(unchecked) = planned.unchecked_access().unwrap() else {
+        let unchecked = planned.unchecked_access().unwrap();
+        // On Linux the file system may go untold only where /proc cannot
+        // be read.
+        if tilewright_edit::UNCHECKED_ACCESS.is_none()
+            && let Some(unchecked) = &unchecked
+            && unchecked.contains("could not be told")
+        {
+            assert!(
+                fs::File::open("/proc/self/mountinfo").is_err(),
+                "{unchecked}"
+            );
+        }
+        let Some(unchecked) = unchecked else {
             assert!(super::consent(&planned, false).unwrap().is_none());
             assert!(super::consent(&planned, true).unwrap().is_none());
             assert!(applied.unwrap().contains("applied; the inverse is in"));

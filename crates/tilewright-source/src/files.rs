@@ -867,13 +867,20 @@ mod tests {
         // local file system, not on a container's overlay root.
         let mounts = super::beneath::Mounts::read();
         let told = dir.unchecked_file_system(&mounts).unwrap();
-        match dir.mount_id().unwrap().map(|id| mounts.type_of(id)) {
-            Some(Ok(found)) => assert_eq!(
-                told,
-                super::beneath::unchecked_file_system(found, dir.magic().unwrap())
-            ),
-            // Without /proc, as in a plain chroot, it cannot be told.
-            _ => assert!(told.unwrap().starts_with("one that could not be told: ")),
+        if fs::File::open("/proc/self/mountinfo").is_err() {
+            // Only without a readable /proc may it not be told; in a chroot
+            // whose root is not a mount point, where the tree's mount is not
+            // listed, this test fails, as publishing there needs consent.
+            assert!(told.unwrap().starts_with("one that could not be told: "));
+        } else {
+            let id = dir.mount_id().unwrap().unwrap();
+            let found = mounts.type_of(id).unwrap();
+            let expected = super::beneath::unchecked_file_system(found, dir.magic().unwrap());
+            assert_eq!(told, expected);
+            // On a local file system, as CI's ext4 or a tmpfs, it is checked.
+            if matches!(found, b"ext4" | b"tmpfs" | b"xfs" | b"btrfs") {
+                assert_eq!(told, None);
+            }
         }
         // Both the type of the mount and the magic number must be a
         // checked file system's: a 9p share passes on its host's magic
@@ -911,15 +918,18 @@ mod tests {
         let dir = root.directory(&["dir"], false).unwrap();
         let told = |mounts: &Mounts| dir.unchecked_file_system(mounts).unwrap();
         let real = Mounts::read();
-        // Without /proc, as in a plain chroot, nothing can be told.
-        let Some(id) = dir.mount_id().unwrap() else {
+        // Only without a readable /proc may the mount not be known; in a
+        // chroot whose root is not a mount point, where the tree's mount is
+        // not listed, this test fails, as publishing there needs consent.
+        if fs::File::open("/proc/self/mountinfo").is_err() {
             assert!(
                 told(&real)
                     .unwrap()
                     .starts_with("one that could not be told: ")
             );
             return;
-        };
+        }
+        let id = dir.mount_id().unwrap().unwrap();
         let line = |id: u64, rest: &str| format!("{id} 1 8:1 / /mnt rw - {rest}\n");
         // Mounts that could not be read, a table without the mount, and a
         // line for it that is malformed or too long each leave its file
@@ -953,11 +963,26 @@ mod tests {
                 Some(format!("one that could not be told: {reason}"))
             );
         }
+        // Without /proc, mounts that could not be read are named as the
+        // cause, before a mount ID that fdinfo, in /proc too, cannot give;
+        // and where only fdinfo cannot be read, that is.
+        super::beneath::NO_STATX_MOUNT_ID.with(|no| no.set(Some("/nonexistent/fdinfo")));
+        let without_proc = told(&Mounts::failed("it is not there"));
+        let without_fdinfo = told(&real);
+        super::beneath::NO_STATX_MOUNT_ID.with(|no| no.set(None));
+        assert_eq!(
+            without_proc.as_deref(),
+            Some("one that could not be told: it is not there")
+        );
+        let without_fdinfo = without_fdinfo.unwrap();
+        assert!(
+            without_fdinfo.starts_with(
+                "one that could not be told: statx gives no mount ID, and /proc/self/fdinfo could not be read ("
+            ),
+            "{without_fdinfo}"
+        );
         // A hostile line for another mount changes nothing for this one.
-        let Ok(found) = real.type_of(id) else {
-            return;
-        };
-        let found = found.escape_ascii().to_string();
+        let found = real.type_of(id).unwrap().escape_ascii().to_string();
         let mut table = line(id + 1, "fuse.\u{7f} x rw").into_bytes();
         table.extend(format!("{} 1 8:1 / /mnt rw - fuse.", id + 2).as_bytes());
         table.extend([0xFF, b' ', b'x', b'\n']);
@@ -989,12 +1014,15 @@ x 1 8:1 / / rw - ext4 /dev/sda1 rw\n\
         }
         // A line without a mount ID is left out.
         assert_eq!(mounts.len(), 7);
+        // What follows the first 64 KiB of a long line is skipped to its
+        // newline, even where it reads as a line of its own.
         let mut long = b"22 1 8:1 / /".to_vec();
-        long.extend(std::iter::repeat_n(b'a', 70_000));
-        long.extend(b" rw - ext4 /dev/sda1 rw\n23 1 8:1 / / rw - xfs a rw\n");
+        long.resize(64 << 10, b'a');
+        long.extend(b"99 1 8:1 / / rw - ext4 x rw\n23 1 8:1 / / rw - xfs a rw\n");
         let mounts = scan(&long[..]).unwrap();
         assert!(mounts[&22].as_ref().unwrap_err().contains("longer than"));
         assert_eq!(mounts[&23].as_deref(), Ok(&b"xfs"[..]));
+        assert_eq!(mounts.keys().copied().collect::<Vec<_>>(), [22, 23]);
     }
 
     #[cfg(target_os = "linux")]
@@ -1007,11 +1035,29 @@ x 1 8:1 / / rw - ext4 /dev/sda1 rw\n\
         }
         let directory = tree();
         let file = fs::File::open(directory.path().join("dir")).unwrap();
-        let found = statx(&file, "", AtFlags::EMPTY_PATH, StatxFlags::MNT_ID).unwrap();
-        let fdinfo = super::mounts::fdinfo_mount_id(file.as_raw_fd());
+        // Before Linux 4.11, or where seccomp blocks it, there is no statx,
+        // and fdinfo is the only source.
+        let from_statx = match statx(&file, "", AtFlags::EMPTY_PATH, StatxFlags::MNT_ID) {
+            Ok(found) if found.stx_mask & StatxFlags::MNT_ID.bits() != 0 => Some(found.stx_mnt_id),
+            Ok(_) | Err(rustix::io::Errno::NOSYS) => None,
+            Err(errno) => panic!("{errno}"),
+        };
+        let fdinfo = super::mounts::fdinfo_mount_id("/proc/self/fdinfo", file.as_raw_fd()).unwrap();
         assert!(fdinfo.is_some());
-        if found.stx_mask & StatxFlags::MNT_ID.bits() != 0 {
-            assert_eq!(fdinfo, Some(found.stx_mnt_id));
+        if from_statx.is_some() {
+            assert_eq!(fdinfo, from_statx);
+        }
+        // A directory's mount ID comes from fdinfo where statx gives none,
+        // as before Linux 5.8.
+        let root = super::beneath::Root::new(directory.path());
+        let dir = root.directory(&["dir"], false).unwrap();
+        super::beneath::NO_STATX_MOUNT_ID.with(|no| no.set(Some("/proc/self/fdinfo")));
+        let fallback = dir.mount_id();
+        super::beneath::NO_STATX_MOUNT_ID.with(|no| no.set(None));
+        let fallback = fallback.unwrap().unwrap();
+        assert_eq!(Some(fallback), fdinfo);
+        if let Some(id) = from_statx {
+            assert_eq!(fallback, id);
         }
     }
 

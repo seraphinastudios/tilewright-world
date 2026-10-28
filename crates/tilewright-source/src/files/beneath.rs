@@ -441,19 +441,34 @@ impl Directory {
 
     /// The ID of the mount this directory is on: from `statx`, or before
     /// Linux 5.8, whose `statx` does not give it, from the descriptor's
-    /// `/proc/self/fdinfo` entry; `None` where neither says.
+    /// `/proc/self/fdinfo` entry; why not where neither says.
     #[cfg(target_os = "linux")]
-    pub(crate) fn mount_id(&self) -> Result<Option<u64>, Refused> {
+    pub(crate) fn mount_id(&self) -> Result<Result<u64, String>, Refused> {
         use rustix::fs::{StatxFlags, statx};
         use std::os::fd::AsRawFd as _;
-        match statx(&self.0, "", AtFlags::EMPTY_PATH, StatxFlags::MNT_ID) {
-            Ok(found) if found.stx_mask & StatxFlags::MNT_ID.bits() != 0 => {
-                return Ok(Some(found.stx_mnt_id));
+        #[cfg(test)]
+        let (ask_statx, fdinfo) = match NO_STATX_MOUNT_ID.with(std::cell::Cell::get) {
+            Some(fdinfo) => (false, fdinfo),
+            None => (true, "/proc/self/fdinfo"),
+        };
+        #[cfg(not(test))]
+        let (ask_statx, fdinfo) = (true, "/proc/self/fdinfo");
+        if ask_statx {
+            match statx(&self.0, "", AtFlags::EMPTY_PATH, StatxFlags::MNT_ID) {
+                Ok(found) if found.stx_mask & StatxFlags::MNT_ID.bits() != 0 => {
+                    return Ok(Ok(found.stx_mnt_id));
+                }
+                Ok(_) | Err(Errno::NOSYS) => {}
+                Err(errno) => return Err(Refused::Io(errno.into())),
             }
-            Ok(_) | Err(Errno::NOSYS) => {}
-            Err(errno) => return Err(Refused::Io(errno.into())),
         }
-        Ok(super::mounts::fdinfo_mount_id(self.0.as_raw_fd()))
+        Ok(
+            match super::mounts::fdinfo_mount_id(fdinfo, self.0.as_raw_fd()) {
+                Ok(Some(id)) => Ok(id),
+                Ok(None) => Err("the kernel does not say which mount it is on".to_owned()),
+                Err(reason) => Err(format!("statx gives no mount ID, and {reason}")),
+            },
+        )
     }
 
     /// The file system this directory is on, where it is not one whose
@@ -468,8 +483,13 @@ impl Directory {
             return Ok(unchecked_file_system(found.as_bytes(), magic));
         }
         let unknown = |reason: &str| Ok(Some(format!("one that could not be told: {reason}")));
-        let Some(id) = self.mount_id()? else {
-            return unknown("the kernel does not say which mount it is on");
+        // Mounts that could not be read are the cause, whatever else.
+        if let Some(reason) = mounts.unreadable() {
+            return unknown(reason);
+        }
+        let id = match self.mount_id()? {
+            Ok(id) => id,
+            Err(reason) => return unknown(&reason),
         };
         let found = match mounts.type_of(id) {
             Ok(found) => found,
@@ -746,6 +766,10 @@ thread_local! {
 
 #[cfg(all(test, target_os = "linux"))]
 thread_local! {
+    /// Takes `statx` to give no mount ID, as before Linux 5.8, and the
+    /// descriptors' fdinfo to be in this directory, for tests.
+    pub(crate) static NO_STATX_MOUNT_ID: std::cell::Cell<Option<&'static str>> =
+        const { std::cell::Cell::new(None) };
     /// The file system type and `statfs` magic number every directory
     /// reports, for tests: the file systems it matters for cannot be
     /// mounted in one.

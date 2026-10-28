@@ -39,12 +39,13 @@ cmp "${first}/sealed.jsonc" "${second}/sealed.jsonc"
 # Applying is refused, with nothing written, where publishing does not check
 # everything (docs/spec/TRANSACTIONS.md section 9), as where the scratch
 # tree is on a container's overlay root: then the round trip runs with
-# --unchecked-access, and says so.
+# --unchecked-access, and says so. On CI, whose scratch tree is on a local
+# file system, it must apply without it.
 apply() {
   local refusal
   if refusal=$(cargo run --locked --quiet --package tilewright-cli -- tx apply "$@" 2>&1); then
     printf '%s\n' "${refusal}"
-  elif [[ ${refusal} == *"pass --unchecked-access to accept that"* ]]; then
+  elif [[ -z ${CI:-} && ${refusal} == *"pass --unchecked-access to accept that"* ]]; then
     echo "tools/validate.sh: the scratch tree's file system is not checked here, so the round trip runs with --unchecked-access" >&2
     cargo run --locked --quiet --package tilewright-cli -- tx apply --unchecked-access "$@"
   else

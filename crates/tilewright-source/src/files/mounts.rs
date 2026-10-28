@@ -58,6 +58,11 @@ impl Mounts {
         Self(Err(reason.to_owned()))
     }
 
+    /// Why the mounts could not be read at all, if they could not.
+    pub(crate) fn unreadable(&self) -> Option<&str> {
+        self.0.as_ref().err().map(String::as_str)
+    }
+
     /// The file system type of the mount `id`, or why it is not known.
     pub(crate) fn type_of(&self, id: u64) -> Result<&[u8], String> {
         let mounts = self.0.as_ref().map_err(Clone::clone)?;
@@ -179,15 +184,16 @@ fn unescape(field: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// The mount ID of the open descriptor `fd`, from its `mnt_id:` line in
-/// `/proc/self/fdinfo`, which Linux has given since 3.15, before `statx`
-/// did (5.8); `None` where it cannot be read.
-pub(crate) fn fdinfo_mount_id(fd: std::os::fd::RawFd) -> Option<u64> {
+/// `fdinfo`, `/proc/self/fdinfo` but in tests, which Linux has given since
+/// 3.15, before `statx` did (5.8); `None` where the entry has no such
+/// line, and why where it cannot be read.
+pub(crate) fn fdinfo_mount_id(fdinfo: &str, fd: std::os::fd::RawFd) -> Result<Option<u64>, String> {
     let mut bytes = Vec::new();
-    std::fs::File::open(format!("/proc/self/fdinfo/{fd}"))
+    std::fs::File::open(format!("{fdinfo}/{fd}"))
         .and_then(|file| file.take(FDINFO).read_to_end(&mut bytes))
-        .ok()?;
-    bytes.split(|byte| *byte == b'\n').find_map(|line| {
+        .map_err(|error| format!("/proc/self/fdinfo could not be read ({error})"))?;
+    Ok(bytes.split(|byte| *byte == b'\n').find_map(|line| {
         let value = line.strip_prefix(b"mnt_id:")?;
         std::str::from_utf8(value).ok()?.trim().parse::<u64>().ok()
-    })
+    }))
 }

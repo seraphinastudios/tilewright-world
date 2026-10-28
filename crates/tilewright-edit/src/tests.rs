@@ -670,6 +670,8 @@ fn publishing_where_access_is_unchecked_needs_the_callers_consent() {
     if let Some(unchecked) = plan.unchecked_access().unwrap() {
         if let Some(platform) = UNCHECKED_ACCESS {
             assert_eq!(unchecked, platform);
+        } else {
+            assert_untold_only_without_proc(&unchecked);
         }
         let failure = plan.publish().unwrap_err();
         assert!(!failure.applied && failure.durable && failure.cleaned);
@@ -686,6 +688,18 @@ fn publishing_where_access_is_unchecked_needs_the_callers_consent() {
         plan.publish().unwrap();
     }
     assert_ne!(snapshot(root), before);
+}
+
+/// On Linux, a test's directory may be on a file system publishing does
+/// not check, as on a container's overlay root, but its file system may go
+/// untold only where /proc cannot be read: anywhere else that is a fault.
+fn assert_untold_only_without_proc(unchecked: &str) {
+    if cfg!(target_os = "linux") && unchecked.contains("could not be told") {
+        assert!(
+            fs::File::open("/proc/self/mountinfo").is_err(),
+            "{unchecked}"
+        );
+    }
 }
 
 /// Makes `link` a link to the directory `target`: a symbolic link on Unix,
@@ -2809,7 +2823,8 @@ fn a_tree_whose_access_control_lists_publishing_does_not_read_needs_consent() {
     );
     // A test's own directory may be on a file system publishing does not
     // check, as on a container's overlay root; then this cannot be shown.
-    if deleting.unchecked_access().unwrap().is_some() {
+    if let Some(baseline) = deleting.unchecked_access().unwrap() {
+        assert_untold_only_without_proc(&baseline);
         return;
     }
     // defs, a directory above the deleted file but not its own, is on a
