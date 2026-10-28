@@ -553,4 +553,9 @@ source tree's `world.jsonc`, `profile/`, `planes/` or `defs/`, or at
 Each command runs the undo check of section 8.1 after carrying the
 transaction out, and refuses a transaction that fails it, writing nothing:
 the inverse `apply` writes is the way back and must be one that can be
-applied, and `preview` and `rebase` refuse what `apply` would.
+applied, and `preview` and `rebase` refuse what `apply` would. An inverse is
+checked like any transaction, so applying one is refused when it carries
+out but its own undo and redo could not be; an inverse `apply` wrote passes,
+since the check of its transaction carried out every round its own check
+does. An inverse written otherwise, or a repair, that is refused for this
+is split, as any transaction would be.

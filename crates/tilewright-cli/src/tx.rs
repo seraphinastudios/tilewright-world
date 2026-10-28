@@ -58,7 +58,8 @@ fn failed(problems: &[tilewright_source::Diagnostic], json: bool, path: &Path) -
 
 /// Plans `transaction` and checks that it could be undone and redone
 /// (`Plan::check_undo`): `apply` writes the inverse as the way back, so it
-/// must apply, and `preview` and `rebase` refuse what `apply` would.
+/// must apply, and `preview` and `rebase` refuse what `apply` would. An
+/// inverse is checked like any transaction; one `apply` wrote passes.
 fn plan(transaction: &Transaction, root: &Path, rebase: bool, json: bool) -> Result<Plan, Failure> {
     let options = Options {
         rebase,
