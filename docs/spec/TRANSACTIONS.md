@@ -325,7 +325,7 @@ in rounds: the first carries out the inverse, the undo, on the tree as the
 transaction leaves it; the second, the undo's own inverse, the redo, on the
 tree the undo leaves; each later one the inverse of the round before, on
 the tree that round leaves. Each round is carried out with every check
-carrying it out then would make (sections 6, 7 and 11) but validating
+carrying it out then would make (sections 6, 7 and 11) except validating
 its result: its `base`, every operation and its preconditions, the read and
 work budgets, the counts of files and operations, its `result`, and that
 its sealed form and its own inverse are transactions within the limits.
@@ -520,9 +520,11 @@ also be carried out within them is the undo check of section 8.1.
 
 ## 12. Diagnostics
 
-Problems of a transaction are reported at byte spans of its document, with
-these codes; problems of the edited world use the loader's codes (FORMAT.md
-section 14) at the edited files.
+Problems of a transaction are reported at byte spans of its document, or
+without a position when they concern it as a whole, such as an inverse past
+the limits or the undo check (section 8.1), with these codes; problems of
+the edited world use the loader's codes (FORMAT.md section 14) at the
+edited files.
 
 | Code | Meaning |
 | --- | --- |

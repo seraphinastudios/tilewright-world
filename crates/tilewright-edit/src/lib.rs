@@ -23,9 +23,9 @@
 //! out: it may read, do or record more than the transaction did.
 //! [`Plan::check_undo`] carries it out in memory on the tree the plan
 //! leaves, then its own inverse on the tree that leaves, and so on until
-//! undo and redo settle, with every check planning makes but validation,
-//! so that a caller that keeps inverses for undo never records a step it
-//! could not undo.
+//! undo and redo settle, with every check planning makes except
+//! validation, so that a caller that keeps inverses for undo can refuse,
+//! before saving it, a step whose undo or redo would pass a limit.
 //!
 //! ```no_run
 //! use std::path::Path;
