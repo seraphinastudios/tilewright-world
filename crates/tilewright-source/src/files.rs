@@ -1015,14 +1015,25 @@ x 1 8:1 / / rw - ext4 /dev/sda1 rw\n\
         // A line without a mount ID is left out.
         assert_eq!(mounts.len(), 7);
         // What follows the first 64 KiB of a long line is skipped to its
-        // newline, even where it reads as a line of its own.
-        let mut long = b"22 1 8:1 / /".to_vec();
-        long.resize(64 << 10, b'a');
-        long.extend(b"99 1 8:1 / / rw - ext4 x rw\n23 1 8:1 / / rw - xfs a rw\n");
-        let mounts = scan(&long[..]).unwrap();
-        assert!(mounts[&22].as_ref().unwrap_err().contains("longer than"));
-        assert_eq!(mounts[&23].as_deref(), Ok(&b"xfs"[..]));
-        assert_eq!(mounts.keys().copied().collect::<Vec<_>>(), [22, 23]);
+        // newline, even where it reads as a line of its own, right at the
+        // cut or a buffer later, wherever the reader's buffer ends:
+        // Mounts::read reads through an 8 KiB one (BufReader::new).
+        for gap in [0, 8 << 10] {
+            let mut long = b"22 1 8:1 / /".to_vec();
+            long.resize((64 << 10) + gap, b'a');
+            long.extend(b"99 1 8:1 / / rw - ext4 x rw\n23 1 8:1 / / rw - xfs a rw\n");
+            for capacity in [4 << 10, 8 << 10, 64 << 10, 1 << 20] {
+                let reader = std::io::BufReader::with_capacity(capacity, &long[..]);
+                let mounts = scan(reader).unwrap();
+                let at = format!("gap {gap}, buffer {capacity}");
+                assert!(
+                    mounts[&22].as_ref().unwrap_err().contains("longer than"),
+                    "{at}"
+                );
+                assert_eq!(mounts[&23].as_deref(), Ok(&b"xfs"[..]), "{at}");
+                assert_eq!(mounts.keys().copied().collect::<Vec<_>>(), [22, 23], "{at}");
+            }
+        }
     }
 
     #[cfg(target_os = "linux")]

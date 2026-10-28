@@ -46,10 +46,11 @@ impl Mounts {
         )
     }
 
-    /// The mounts `bytes` lists, as `/proc/self/mountinfo` would, for tests.
+    /// The mounts `bytes` lists, as `/proc/self/mountinfo` would, for tests:
+    /// read through a buffer as [`Mounts::read`] reads.
     #[cfg(test)]
     pub(crate) fn parsed(bytes: &[u8]) -> Self {
-        Self(Ok(scan(bytes).unwrap()))
+        Self(Ok(scan(BufReader::new(bytes)).unwrap()))
     }
 
     /// Mounts that could not be read, for tests.
