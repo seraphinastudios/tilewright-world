@@ -40,6 +40,9 @@ const cases = [
   [`Revert "feat: add"\n\nThis reverts commit ${H1}.`, null, false, {header: "feat: add", hash: H1}, "minor", "minor", "patch"],
   ["Revert \"feat: add\"", null, false, null, null, null, null],
   ["Revert feat: add This reverts commit 123.", null, false, {header: "feat: add", hash: "123"}, "minor", "minor", "patch"],
+  // The header is never read as a note, so these release nothing.
+  ["breaking-change: drop the v1 reader", null, false, null, null, null, null],
+  ["BREAKING CHANGE: x", null, false, null, null, null, null],
 ];
 
 for (const [message, type, breaking, revert, main, main1, maintenance] of cases) {
@@ -96,7 +99,7 @@ assert.equal(parseCommit("fix: x\n\n-f-\ntext\n--\nBREAKING CHANGE: read").break
 // Reading is linear: long lines, such as a pasted blob in a pull request
 // body, take no time. The parser's issue-reference pattern took minutes.
 for (const message of [
-  "feat!: x\n\nBREAKING CHANGE: y\n" + "a".repeat(20000),
+  "fix: x\n\nBREAKING CHANGE: y\n" + "a".repeat(20000),
   "fix: x\n\n" + "a#".repeat(10000) + "\nBREAKING CHANGE: y",
   "fix: x\n\n-" + "a".repeat(20000),
 ]) {
