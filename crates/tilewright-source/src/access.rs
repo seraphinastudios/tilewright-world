@@ -15,7 +15,11 @@
 //! local process changing the tree at the same time can race.
 
 use crate::files::{Refused, components, platform};
-use std::{fmt, io::Read as _, path::Path};
+use std::{
+    fmt,
+    io::Read as _,
+    path::{Path, PathBuf},
+};
 
 /// Why a path beneath the root could not be used.
 #[derive(Debug)]
@@ -227,6 +231,7 @@ impl Access {
 /// A source tree root. The root itself may be a link; nothing beneath it is
 /// followed.
 pub struct SourceRoot {
+    path: PathBuf,
     root: platform::Root,
 }
 
@@ -238,6 +243,7 @@ impl SourceRoot {
     #[must_use]
     pub fn new(root: &Path) -> Self {
         Self {
+            path: root.to_path_buf(),
             root: platform::Root::new(root),
         }
     }
@@ -246,8 +252,18 @@ impl SourceRoot {
     #[must_use]
     pub fn try_clone(&self) -> Self {
         Self {
+            path: self.path.clone(),
             root: self.root.try_clone(),
         }
+    }
+
+    /// The path supplied when this root was opened, for display only.
+    /// It may be relative, moved or replaced; using it to reopen the tree
+    /// does not preserve this root's identity. Access files through this
+    /// root instead.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     pub(crate) fn platform(&self) -> platform::Root {

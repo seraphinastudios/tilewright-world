@@ -1679,6 +1679,103 @@ fn cleanup_that_cannot_be_done_is_reported_with_the_outcome() {
 }
 
 #[test]
+fn planning_in_an_opened_root_survives_a_retargeted_root_link() {
+    let selected = copy();
+    let replacement = copy();
+    let links = tempfile::tempdir().unwrap();
+    let link = links.path().join("selected");
+    link_directory(&link, selected.path());
+    let opened = SourceRoot::new(&link);
+    let borrowed = opened.try_clone();
+    assert_eq!(opened.path(), link);
+    assert_eq!(borrowed.path(), link);
+    let loaded =
+        tilewright_source::load_edited_in(&opened, &LoadOptions::default(), &Overlay::new())
+            .unwrap();
+    // A content digest cannot distinguish these two source roots.
+    assert_eq!(
+        loaded.source_digest(),
+        tilewright_source::load(replacement.path())
+            .unwrap()
+            .source_digest()
+    );
+    #[cfg(unix)]
+    fs::remove_file(&link).unwrap();
+    #[cfg(windows)]
+    fs::remove_dir(&link).unwrap();
+    link_directory(&link, replacement.path());
+    let tx = transaction(
+        r#"{"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["title"], "value": "Changed"}"#,
+    );
+    let pinned = plan_in(&borrowed, &tx, &Options::default()).unwrap();
+    assert_eq!(pinned.root(), link);
+    pinned.check_undo().unwrap();
+    // Planning owns its root; it does not borrow either caller's handle.
+    drop(opened);
+    drop(borrowed);
+    publish(&pinned).unwrap();
+    assert!(read(selected.path(), "planes/overworld/plane.jsonc").contains("\"Changed\""));
+    assert_eq!(snapshot(replacement.path()), snapshot(&fixture()));
+
+    // The path convenience wrapper intentionally opens its current target.
+    let reopened = planned(&link, &tx);
+    publish(&reopened).unwrap();
+    assert!(read(replacement.path(), "planes/overworld/plane.jsonc").contains("\"Changed\""));
+}
+
+#[test]
+fn opened_root_planning_matches_the_path_wrapper() {
+    let tree = copy();
+    let opened = SourceRoot::new(tree.path());
+    let tx = transaction(
+        r#"{"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["title"], "value": "Changed"}"#,
+    );
+    let from_path = planned(tree.path(), &tx);
+    let from_root = plan_in(&opened, &tx, &Options::default()).unwrap();
+    assert_eq!(from_root.root(), from_path.root());
+    assert_eq!(from_root.files(), from_path.files());
+    assert_eq!(from_root.sealed(), from_path.sealed());
+    assert_eq!(from_root.inverse(), from_path.inverse());
+    assert_eq!(
+        from_root.world().source_digest(),
+        from_path.world().source_digest()
+    );
+
+    let bad = transaction(
+        r#"{"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["missing"], "value": "Changed"}"#,
+    );
+    assert_eq!(
+        plan_in(&opened, &bad, &Options::default()).unwrap_err(),
+        plan(tree.path(), &bad, &Options::default()).unwrap_err()
+    );
+    assert_eq!(snapshot(tree.path()), snapshot(&fixture()));
+}
+
+#[cfg(unix)]
+#[test]
+fn planning_in_a_failed_root_does_not_reopen_its_path() {
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("not-opened");
+    let opened = SourceRoot::new(&root);
+    for (path, bytes) in snapshot(&fixture()) {
+        let target = root.join(path);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(target, bytes).unwrap();
+    }
+    let tx = transaction(
+        r#"{"op": "set", "path": "planes/overworld/plane.jsonc", "pointer": ["title"], "value": "Changed"}"#,
+    );
+    // The failed Unix open stays failed even after its path becomes valid.
+    assert!(
+        !plan_in(&opened, &tx, &Options::default())
+            .unwrap_err()
+            .is_empty()
+    );
+    assert!(plan(&root, &tx, &Options::default()).is_ok());
+    assert_eq!(snapshot(&root), snapshot(&fixture()));
+}
+
+#[test]
 fn a_plan_publishes_into_the_root_it_was_made_on() {
     let directory = tempfile::tempdir().unwrap();
     let planned_root = directory.path().join("source");
