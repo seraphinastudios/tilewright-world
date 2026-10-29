@@ -24,7 +24,7 @@ tilewright-edit = { path = "crates/tilewright-edit", version = "=0.1.0" }
 tilewright-jsonc = { path = "crates/tilewright-jsonc", version = "=0.1.0" }
 tilewright-pack = { path = "crates/tilewright-pack", version = "=0.1.0" }
 tilewright-source = { path = "crates/tilewright-source", version = "=0.1.0" }
-rustix = { version = "1.1.5", features = ["fs"] }
+rustix = { version = "1.1.5", features = ["fs", "process"] }
 rusqlite = { version = "0.40.2", default-features = false, features = ["bundled", "serialize"] }
 sha2 = "0.11.0"
 tempfile = "3.27.0"

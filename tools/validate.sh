@@ -36,9 +36,26 @@ for output in "${first}/sealed.jsonc" "${second}/sealed.jsonc"; do
   cargo run --locked --quiet --package tilewright-cli -- tx rebase fixtures/transactions/orchard.jsonc "${first}/source" "${output}"
 done
 cmp "${first}/sealed.jsonc" "${second}/sealed.jsonc"
-cargo run --locked --quiet --package tilewright-cli -- tx apply "${first}/sealed.jsonc" "${first}/source" "${first}/undo.jsonc"
+# Applying is refused, with nothing written, where publishing does not check
+# everything (docs/spec/TRANSACTIONS.md section 9), as where the scratch
+# tree is on a container's overlay root: then the round trip runs with
+# --unchecked-access, and says so. On CI, whose scratch tree is on a local
+# file system, it must apply without it.
+apply() {
+  local refusal
+  if refusal=$(cargo run --locked --quiet --package tilewright-cli -- tx apply "$@" 2>&1); then
+    printf '%s\n' "${refusal}"
+  elif [[ -z ${CI:-} && ${refusal} == *"pass --unchecked-access to accept that"* ]]; then
+    echo "tools/validate.sh: the scratch tree's file system is not checked here, so the round trip runs with --unchecked-access" >&2
+    cargo run --locked --quiet --package tilewright-cli -- tx apply --unchecked-access "$@"
+  else
+    printf '%s\n' "${refusal}" >&2
+    return 1
+  fi
+}
+apply "${first}/sealed.jsonc" "${first}/source" "${first}/undo.jsonc"
 cargo run --locked --quiet --package tilewright-cli -- validate "${first}/source"
-cargo run --locked --quiet --package tilewright-cli -- tx apply "${first}/undo.jsonc" "${first}/source" "${first}/redo.jsonc"
+apply "${first}/undo.jsonc" "${first}/source" "${first}/redo.jsonc"
 diff -r fixtures/basic "${first}/source"
 
 # The Go pack reader, whose tests run the shared fixtures in fixtures/packs.
