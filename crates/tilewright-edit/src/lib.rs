@@ -225,7 +225,8 @@ impl Plan {
         &self.inverse
     }
 
-    /// The source root.
+    /// The path supplied when the source root was opened, for display
+    /// only. Publishing uses the retained [`SourceRoot`], not this path.
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
@@ -721,6 +722,34 @@ pub fn plan(
     transaction: &Transaction,
     options: &Options,
 ) -> Result<Plan, Vec<Diagnostic>> {
+    plan_in(&SourceRoot::new(root), transaction, options)
+}
+
+/// Carries out `transaction` on an already opened source root in memory
+/// and validates the result. Nothing is written. The plan owns a clone
+/// of `root`, so the caller may drop its handle after planning.
+///
+/// Use the same [`SourceRoot`] with [`tilewright_source::load_edited_in`]
+/// and this function to retain the selected root from loading through
+/// planning and publishing, without reopening its original path. On Unix
+/// (including Linux and macOS), accesses use the opened directory handle;
+/// moving the directory or replacing its original path does not redirect
+/// them. Elsewhere the root retains the absolute path resolved when it
+/// was opened: changing the working directory or retargeting the original
+/// root link does not redirect it, but replacing that resolved path can.
+/// The platform's publishing safeguards and consent requirements remain
+/// those of [`Plan::publish_with`].
+///
+/// # Errors
+/// Returns the transaction's problems, each at its operation, or the
+/// diagnostics of the edited world, including failure to access or clone
+/// the opened root. It never falls back to reopening the original path.
+pub fn plan_in(
+    root: &SourceRoot,
+    transaction: &Transaction,
+    options: &Options,
+) -> Result<Plan, Vec<Diagnostic>> {
+    let source = root.try_clone();
     // The edited world's diagnostics are a transaction's too, and the
     // loader's note of those it dropped takes the last place.
     let options = &Options {
@@ -733,7 +762,6 @@ pub fn plan(
         },
         ..*options
     };
-    let source = SourceRoot::new(root);
     let on_disk = Overlay::new();
     let workspace = carry_out(&source, &on_disk, Names::OWN, transaction, options)?;
     let files = file_changes(&workspace);
@@ -745,7 +773,7 @@ pub fn plan(
     // The plan keeps the very root it was carried out on.
     drop(workspace);
     Ok(Plan {
-        root: root.to_path_buf(),
+        root: root.path().to_path_buf(),
         name: transaction.name.clone(),
         terrain,
         source,

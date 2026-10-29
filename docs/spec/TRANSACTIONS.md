@@ -426,7 +426,19 @@ they are untested. Previewing and rebasing work everywhere.
 
 Publishing a carried-out transaction works on the root it was carried out
 on: through directory handles, the directory opened then, whatever its
-path names later; on Windows, the absolute path it was opened at. It:
+path names later; on Windows, the absolute path it was opened at.
+
+A caller that selects and loads a root before planning can retain a
+`SourceRoot` and use `tilewright_source::load_edited_in` followed by
+`tilewright_edit::plan_in` on that same root. The plan keeps its own clone,
+without reopening the path. This preserves the selected directory on Unix,
+and the resolved absolute path on Windows, from loading through publishing.
+On Windows, replacing that resolved path can still redirect access, as in
+the table above. The path-based `plan` convenience function opens its root
+when called. `SourceRoot::path` and `Plan::root` report the originally
+supplied path for display; reopening it does not preserve root identity.
+
+Publishing:
 
 1. takes the source root's exclusive lock (an advisory `flock` of the root
    directory; on Windows the file `.tilewright.lock` in the root, created
