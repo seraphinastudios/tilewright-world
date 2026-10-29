@@ -89,17 +89,84 @@ a token; it is not an identity query. Do not supply browser cookies, invent a
 whoami request, or assume an authenticated GitHub CLI proves which crates.io
 account owns a pasted registry token.
 
-Execution tooling must retain this limitation explicitly. Any owner-confirmed
-identity ceremony, exact-byte upload and durable cross-host intent requires its
-own review before execution becomes available. An uncertain upload response
-cannot be resolved by observing a later 404 and retrying: the registry may still
-be processing the request. Preserve intent evidence and investigate publicly
-visible checksums and ownership; conflicting or missing evidence stops recovery.
+The owner has chosen an explicit human confirmation of the token's account,
+matching the renderer's first-publication procedure. This is a human assertion,
+not programmatic token authentication. The helper checks the public account
+`zoeyrose` with crates.io user ID `437663` (distinct from GitHub user ID
+`3865595`), verifies the existing GitHub CLI account and repository write
+permission, then checks public crate ownership after each upload. A token from
+the wrong account could publish a new crate under that account before the
+ownership check stops the batch. Use a newly created short-lived `publish-new`
+token from the intended account, limited to the five exact crate names.
+Do not widen token scope to work around an identity error.
 
-No publication command is currently provided by this helper. The remaining
-owner action is to approve the exact release and the reviewed identity/execution
-procedure, then execute that procedure locally. Preparation work is not that
-approval.
+## Owner execution, only after separate concrete-release approval
+
+Code review and merging this helper do not authorize execution. After the owner
+has approved the exact release decision, the owner runs the following from a
+clean checkout of that reviewed source revision, in their own POSIX terminal:
+
+```sh
+python3 tools/crates/owner_publish.py \
+  --decision /absolute/owner-local/decision.json \
+  --bundle /absolute/owner-local/tilewright-world-SOURCE_VERSION-crate-candidates.tar.gz \
+  --checksums /absolute/owner-local/SHA256SUMS \
+  --execute
+```
+
+The default command remains read-only. `--execute` repeats the full preflight,
+refuses CI or noninteractive use and registry token environment variables, then
+shows the exact pending coordinates and pinned release. It requires typing
+`PUBLISH AS zoeyrose` once and reads the one-use token through hidden terminal
+input. Cancellation before intent creation produces no upload reservation. The
+registry token stays in the Python process: it is never supplied to Cargo, a
+subprocess, environment, command arguments, files or logs. OS core dumps are
+disabled before token input; Python does not guarantee secure memory erasure.
+The GitHub CLI uses its existing owner-managed authentication for intent writes;
+this helper does not configure credentials or retrieve GitHub tokens.
+
+The allowlisted batch runs in dependency order. Before each upload, the helper
+checks the source release and clean checkout again, verifies the crate is still
+absent, and requires every internal dependency's exact published checksum and
+intended owner. Existing exact coordinates are skipped only after checking their
+public owner. The helper builds the documented Cargo API metadata from the
+already verified normalized manifest and sends the exact held `.crate` bytes;
+it never packages or builds while holding a token.
+
+Immediately before each PUT it creates an annotated tag object and atomically
+creates `refs/tags/crate-upload-intent/NAME/VERSION` in the World repository.
+The tag message records the repository ID, release/run/attempt/source/bundle/
+manifest pins, crate coordinate, archive and upload-metadata digests, and
+intended owner. The create-reference operation fences competing processes and
+hosts even if both observed an earlier 404. A failed or ambiguous intent creation
+never permits an upload. Intent creation can leave an unreferenced tag object
+on failure; the helper does not delete objects or reset reservations.
+
+Every PUT is attempted at most once, to the fixed crates.io HTTPS endpoint;
+redirects are refused, responses are bounded and server error text is never
+printed. After HTTP success it performs up to twelve public visibility checks,
+five seconds apart, then checks the exact downloaded archive and owner before
+starting the next crate. Inconsistent API/index state, conflicting bytes, changed
+source, ownership mismatch, unavailable service or ambiguous response stops the
+batch. Already completed crates remain published. Revoke the one-use token after
+success, cancellation or failure; the helper never revokes it automatically.
+
+## Interrupted or partial publication
+
+Keep the exact original decision and bundle. Run the default read-only preflight
+to inspect public state. An exact existing archive can be reconciled with its
+owner on a later explicit owner invocation; it will not be uploaded again. The
+same invocation can then proceed to crates that have no prior intent, after the
+owner's confirmation. A crate that remains absent but has any existing intent
+is blocked, even if the previous process died before PUT. A 404 cannot establish
+that an earlier request was never accepted or is no longer processing.
+
+Never delete, move or reuse an intent to retry. There is no retry/reset override.
+Unresolved intents, conflicting bytes or wrong owners need a separate owner
+investigation and reviewed recovery decision; this helper cannot repair them.
+GitHub repository writers remain trusted to preserve intent refs, just as they
+are trusted to preserve the release workflow. This tool does not add ref
+protection settings or claim its tags are repository-policy immutable.
 
 ## Protocol references
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import getpass
 import http.client
 import importlib.util
 import io
@@ -15,13 +16,21 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import struct
 import sys
 import tarfile
 import tempfile
+import time
+import tomllib
+import warnings
 from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[2]
 REPOSITORY = "seraphinastudios/tilewright-world"
+REPOSITORY_ID = 1423814231
+OWNER = "zoeyrose"
+OWNER_ID = 437663
+GITHUB_OWNER_ID = 3865595
 REPO_URL = f"https://github.com/{REPOSITORY}"
 WORKFLOW = f"{REPO_URL}/.github/workflows/release.yml@refs/heads/main"
 MAX_JSON = 4 * 1024 * 1024
@@ -66,7 +75,7 @@ def request(host, path, *, limit=MAX_JSON):
         require(len(data) <= limit, "public response exceeds size limit")
         return response.status, data
     except (OSError, http.client.HTTPException):
-        raise Refusal("public service request failed; no publication attempted") from None
+        raise Refusal("public service request failed; preserve any upload intents") from None
     finally:
         connection.close()
 
@@ -123,7 +132,7 @@ def bounded_file(path, limit):
 def release_evidence(plan):
     repository = api("")
     require(repository["full_name"] == REPOSITORY and repository["default_branch"] == "main" and
-            repository["archived"] is False, "repository identity or default branch changed")
+            repository["archived"] is False and repository["id"] == REPOSITORY_ID, "repository identity or default branch changed")
     release = api(f"releases/{plan['release_id']}")
     require(release["id"] == plan["release_id"] and release["tag_name"] == plan["tag"] and
             release["immutable"] is True and release["draft"] is False and
@@ -247,22 +256,264 @@ def preflight(plan, bundle, checksums):
     return manifest, files, archives, states
 
 
+def public_owner():
+    status, data = request("crates.io", f"/api/v1/users/{OWNER}")
+    require(status == 200, "intended public owner is unavailable")
+    user = decode(data)["user"]
+    require(user["login"] == OWNER and user["id"] == OWNER_ID, "intended public owner identity differs")
+
+
+def owned(row):
+    status, data = request("crates.io", f"/api/v1/crates/{row['name']}/owners")
+    require(status == 200, "published ownership is unavailable; stop the batch")
+    users = decode(data)["users"]
+    require(any(user.get("kind") == "user" and user.get("login") == OWNER and
+                user.get("id") == OWNER_ID for user in users), "published owner mismatch; stop the batch")
+
+
+def terminal_boundary():
+    require(os.name == "posix" and sys.stdin.isatty() and sys.stderr.isatty(),
+            "execution requires the owner's interactive POSIX terminal")
+    forbidden = ("CI", "GITHUB_ACTIONS", "ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+    require(not any(value and (key in forbidden or key.startswith("CARGO_REGISTR") or
+                    ("TOKEN" in key.upper() and any(word in key.upper() for word in ("CRATE", "CARGO"))))
+                    for key, value in os.environ.items()),
+            "execution refuses CI and registry credential environment variables")
+
+
+def github_call(path, body=None):
+    """Only owner execution calls this; registry tokens never enter this subprocess."""
+    arguments = ["gh", "api", "--hostname", "github.com", "--method", "POST" if body else "GET", path]
+    options = {"stdin": subprocess.DEVNULL}
+    if body is not None:
+        arguments += ["--input", "-"]
+        options = {"input": json.dumps(body, sort_keys=True).encode()}
+    # No registry credential is in the environment; the hidden token is a local
+    # Python value. GitHub CLI uses its existing owner-managed authentication.
+    try:
+        result = subprocess.run(arguments, cwd=ROOT, capture_output=True, timeout=60,
+                                check=False, **options)
+    except (OSError, subprocess.TimeoutExpired):
+        raise Refusal("GitHub operation unresolved; preserve any intent and do not retry uploads") from None
+    require(result.returncode == 0 and len(result.stdout) <= MAX_JSON,
+            "GitHub operation refused or unresolved; preserve any intent and do not retry uploads")
+    return decode(result.stdout)
+
+
+def github_authority():
+    actor = github_call("user")
+    require(actor["login"] == OWNER and actor["id"] == GITHUB_OWNER_ID, "wrong GitHub owner identity")
+    repository = github_call(f"repos/{REPOSITORY}")
+    require(repository["id"] == REPOSITORY_ID and repository["full_name"] == REPOSITORY and
+            repository["default_branch"] == "main" and repository["archived"] is False and
+            repository["permissions"]["push"] is True, "GitHub owner lacks intended repository authority")
+
+
+def intent_name(row):
+    return f"crate-upload-intent/{row['name']}/{row['version']}"
+
+
+def require_no_intent(row):
+    status, _ = request("api.github.com", f"/repos/{REPOSITORY}/git/ref/tags/{intent_name(row)}")
+    require(status == 404, "upload intent already exists; public absence never permits a retry")
+
+
+def reserve_intent(plan, row, metadata_digest):
+    """Create-only global fence; no update, reset, delete or retry operation exists."""
+    require_no_intent(row)
+    github_authority()
+    record = {"schema": 1, "kind": "world-first-crate-upload", "repository_id": REPOSITORY_ID,
+              "release": plan, "coordinate": {"name": row["name"], "version": row["version"],
+                                               "sha256": row["sha256"], "metadata_sha256": metadata_digest},
+              "owner": {"login": OWNER, "registry_id": OWNER_ID, "github_id": GITHUB_OWNER_ID}}
+    tag = github_call(f"repos/{REPOSITORY}/git/tags", {
+        "tag": intent_name(row), "message": json.dumps(record, sort_keys=True),
+        "object": plan["revision"], "type": "commit"})
+    require(re.fullmatch(r"[0-9a-f]{40}", tag["sha"]), "invalid intent object response")
+    ref = "refs/tags/" + intent_name(row)
+    # GitHub's create-reference endpoint atomically rejects an existing ref.
+    # Even two processes creating the same tag object cannot both win this step.
+    created = github_call(f"repos/{REPOSITORY}/git/refs", {"ref": ref, "sha": tag["sha"]})
+    require(created["ref"] == ref and created["object"]["type"] == "tag" and
+            created["object"]["sha"] == tag["sha"], "intent creation response unresolved")
+    observed = github_call(f"repos/{REPOSITORY}/git/ref/tags/{intent_name(row)}")
+    require(observed["ref"] == ref and observed["object"] == created["object"], "intent changed before upload")
+    return tag["sha"]
+
+
+def upload_metadata(files):
+    """Map Cargo's normalized manifest to the documented registry API, without Cargo."""
+    manifest = tomllib.loads(files["Cargo.toml"].decode())
+    package = manifest["package"]
+    dependencies = []
+    tables = [(None, manifest), *sorted(manifest.get("target", {}).items())]
+    for target, table in tables:
+        for section, kind in (("dependencies", "normal"), ("dev-dependencies", "dev"), ("build-dependencies", "build")):
+            for alias, specification in sorted(table.get(section, {}).items()):
+                specification = {"version": specification} if isinstance(specification, str) else specification
+                require(set(specification) <= {"version", "features", "optional", "default-features", "package"}
+                        and isinstance(specification.get("version"), str), "unsupported upload dependency metadata")
+                dependencies.append({"name": specification.get("package", alias), "version_req": specification["version"],
+                                     "features": specification.get("features", []), "optional": specification.get("optional", False),
+                                     "default_features": specification.get("default-features", True), "target": target,
+                                     "kind": kind, "registry": None,
+                                     "explicit_name_in_toml": alias if "package" in specification else None})
+    readme = package.get("readme")
+    require(readme is None or readme is False or isinstance(readme, str), "unsupported readme metadata")
+    require(not readme or readme in files, "packaged readme is missing")
+    result = {"name": package["name"], "vers": package["version"], "deps": dependencies,
+              "features": manifest.get("features", {}), "authors": package.get("authors", []),
+              "keywords": package.get("keywords", []), "categories": package.get("categories", []),
+              "readme": files[readme].decode() if readme else None, "readme_file": readme or None,
+              "license_file": package.get("license-file"), "rust_version": package.get("rust-version"),
+              "badges": manifest.get("badges", {})}
+    for key in ("description", "documentation", "homepage", "license", "repository", "links"):
+        result[key] = package.get(key)
+    return result
+
+
+def publication_order(manifest, archives):
+    rows = manifest["packages"]
+    metadata = {row["name"]: upload_metadata(archives[row["name"]]) for row in rows}
+    by_name = {row["name"]: row for row in rows}
+    dependencies = {}
+    for name, meta in metadata.items():
+        dependencies[name] = set()
+        require(meta["name"] == name and meta["vers"] == by_name[name]["version"], "upload metadata identity differs")
+        for dependency in meta["deps"]:
+            if dependency["name"] in by_name:
+                require(dependency["version_req"] == "=" + by_name[dependency["name"]]["version"],
+                        "internal upload dependency is not exact")
+                dependencies[name].add(dependency["name"])
+    ordered = []
+    remaining = list(by_name)
+    while remaining:
+        ready = [name for name in remaining if dependencies[name] <= {row["name"] for row in ordered}]
+        require(ready, "internal publication dependencies are cyclic")
+        for name in ready:
+            remaining.remove(name)
+            ordered.append(by_name[name])
+    return ordered, metadata, dependencies
+
+
+def put_once(data, metadata, token):
+    encoded = json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode()
+    require(len(encoded) <= MAX_JSON and len(data) <= 128 * 1024 * 1024, "upload payload exceeds limit")
+    body = struct.pack("<I", len(encoded)) + encoded + struct.pack("<I", len(data)) + data
+    connection = http.client.HTTPSConnection("crates.io", timeout=60)
+    try:
+        connection.request("PUT", "/api/v1/crates/new", body=body, headers={
+            "Authorization": token, "Content-Type": "application/octet-stream", "Accept": "application/json",
+            "User-Agent": "tilewright-world-owner-publication/1 (github.com/seraphinastudios/tilewright-world)"})
+        response = connection.getresponse()
+        require(response.status == 200, "upload outcome unresolved; preserve intent and do not retry")
+        reply = response.read(MAX_JSON + 1)
+        require(len(reply) <= MAX_JSON, "upload response exceeds limit; preserve intent")
+        result = decode(reply)
+        require(isinstance(result, dict) and not result.get("errors"), "registry refused upload; preserve intent")
+        # Never print server-controlled messages: a server could echo the token.
+    except (OSError, http.client.HTTPException, ValueError):
+        raise Refusal("upload outcome unresolved; preserve intent and do not retry") from None
+    finally:
+        connection.close()
+
+
+def confirm_publication(row):
+    # Read-only polling after a confirmed HTTP success, never a second PUT.
+    for attempt in range(12):
+        if registry_state(row) == "exact-existing":
+            owned(row)
+            return
+        if attempt < 11:
+            time.sleep(5)
+    raise Refusal("publication is not yet visible; preserve intent and use read-only preflight later")
+
+
+def execute(plan, manifest, files, archives, states):
+    terminal_boundary()
+    public_owner()
+    github_authority()
+    ordered, metadata, dependencies = publication_order(manifest, archives)
+    by_name = {row["name"]: row for row in ordered}
+    pending = []
+    for row in ordered:
+        if states[row["name"]] == "exact-existing":
+            owned(row)
+        else:
+            require_no_intent(row)
+            pending.append(row)
+    if not pending:
+        print("All five exact archives and intended public ownership are already confirmed; no upload needed.")
+        return
+    snapshot = release_evidence(plan)
+    print("First publication: " + ", ".join(f"{row['name']}@{row['version']}" for row in pending), file=sys.stderr)
+    print(f"Release {plan['tag']} ({plan['release_id']}), source {plan['revision']}, bundle {plan['bundle_sha256']}", file=sys.stderr)
+    print(f"Intended crates.io owner: {OWNER} ({OWNER_ID}). No token identity API exists.", file=sys.stderr)
+    print("Your confirmation asserts this token was created in that account. Ownership is checked AFTER publication.", file=sys.stderr)
+    require(input(f"Type PUBLISH AS {OWNER}: ") == f"PUBLISH AS {OWNER}", "owner token-account assertion not confirmed")
+    # Prevent an OS core dump retaining terminal credentials. Python strings
+    # cannot promise secure erasure; use a short-lived token and revoke it after use.
+    import resource
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", getpass.GetPassWarning)
+        try:
+            token = getpass.getpass("One-use crates.io publish-new token (hidden): ")
+        except getpass.GetPassWarning:
+            raise Refusal("secure hidden token input unavailable") from None
+    require(0 < len(token) <= 8192 and all(33 <= ord(char) <= 126 for char in token), "invalid token input")
+    try:
+        for row in pending:
+            terminal_boundary()
+            clean_source(plan["revision"])
+            require(release_evidence(plan) == snapshot, "source release changed before upload")
+            public_owner()
+            for dependency in dependencies[row["name"]]:
+                require(registry_state(by_name[dependency]) == "exact-existing", "dependency is not visible with its exact checksum")
+                owned(by_name[dependency])
+            require(registry_state(row) == "absent", "coordinate is no longer absent; stop and re-run preflight")
+            data = files[row["asset"]]
+            require(sha256(data) == row["sha256"], "held archive changed")
+            meta = metadata[row["name"]]
+            meta_bytes = json.dumps(meta, sort_keys=True, separators=(",", ":")).encode()
+            reserve_intent(plan, row, sha256(meta_bytes))
+            # An intent is durable before any possible PUT. A later refusal leaves
+            # it intact; no process/host may adopt or retry that reservation.
+            require(release_evidence(plan) == snapshot, "source release changed after intent; stop")
+            clean_source(plan["revision"])
+            require(registry_state(row) == "absent", "coordinate changed after intent; stop")
+            put_once(data, meta, token)
+            confirm_publication(row)
+            print(f"Confirmed {row['name']}@{row['version']} exact bytes and intended owner.")
+    finally:
+        token = None
+        print("Revoke the one-use token in the owner account. Preserve every upload intent.", file=sys.stderr)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--execute", action="store_true", help="owner terminal only: explicitly publish the verified initial batch")
     parser.add_argument("--decision", required=True, type=Path)
     parser.add_argument("--bundle", required=True, type=Path)
     parser.add_argument("--checksums", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
         plan = decode(bounded_file(args.decision, MAX_JSON))
-        manifest, _, _, states = preflight(plan, args.bundle, args.checksums)
+        if args.execute:
+            terminal_boundary()
+        manifest, files, archives, states = preflight(plan, args.bundle, args.checksums)
+        if args.execute:
+            execute(plan, manifest, files, archives, states)
+            return
         print(json.dumps({"release": plan, "coordinates": [
             {"name": row["name"], "version": row["version"], "sha256": row["sha256"], "state": states[row["name"]]}
             for row in manifest["packages"]], "publication_authorized": False}, indent=2))
+    except (KeyboardInterrupt, EOFError):
+        parser.exit(1, "owner publication: cancelled; preserve any existing upload intents\n")
     except Refusal as error:
         parser.exit(1, f"owner publication: {error}\n")
     except (ValueError, KeyError, TypeError, OSError, tarfile.TarError):
-        parser.exit(1, "owner publication: malformed or unavailable evidence; no publication attempted\n")
+        parser.exit(1, "owner publication: malformed or unavailable evidence; preserve any upload intents\n")
 
 
 if __name__ == "__main__":

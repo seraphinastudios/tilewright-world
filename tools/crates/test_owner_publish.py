@@ -30,7 +30,7 @@ def attestation():
 
 
 def github():
-    return {"": {"id": 1, "full_name": P.REPOSITORY, "default_branch": "main", "archived": False},
+    return {"": {"id": P.REPOSITORY_ID, "full_name": P.REPOSITORY, "default_branch": "main", "archived": False},
             "releases/123": {"id": 123, "tag_name": "v0.4.0", "immutable": True, "draft": False,
                              "prerelease": False, "assets": [
                                  {"id": 11, "name": P.bundle_name(PLAN), "digest": "sha256:" + PLAN["bundle_sha256"], "size": 32, "state": "uploaded"},
@@ -39,7 +39,7 @@ def github():
             f"compare/{REVISION}...main": {"status": "ahead", "base_commit": {"sha": REVISION}},
             "actions/runs/456/attempts/2": {"id": 456, "run_attempt": 2, "head_sha": REVISION,
                                            "head_branch": "main", "path": ".github/workflows/release.yml",
-                                           "repository": {"id": 1}, "event": "push", "status": "completed",
+                                           "repository": {"id": P.REPOSITORY_ID}, "event": "push", "status": "completed",
                                            "conclusion": "success"}}
 
 
@@ -62,7 +62,7 @@ class PreflightTests(unittest.TestCase):
     def test_release_must_bind_tags_main_repository_and_run_attempt(self):
         evidence = github()
         with patch.object(P, "api", side_effect=evidence.__getitem__):
-            self.assertEqual(P.release_evidence(PLAN)[0]["id"], 1)
+            self.assertEqual(P.release_evidence(PLAN)[0]["id"], P.REPOSITORY_ID)
         cases = [("releases/123", "immutable", False), ("releases/123", "prerelease", True),
                  ("commits/go%2Fv0.4.0", "sha", "f" * 40),
                  (f"compare/{REVISION}...main", "status", "diverged"),
@@ -237,6 +237,251 @@ class PreflightTests(unittest.TestCase):
             P.clean_source(REVISION)
         with patch.object(P, "command", side_effect=[REVISION.encode(), b" M file"]), self.assertRaises(P.Refusal):
             P.clean_source(REVISION)
+
+
+class ExecuteTests(unittest.TestCase):
+    TOKEN = "test-only-secret-never-real"
+
+    def setUp(self):
+        self.rows = [dict(name=name, version="0.1.0", asset=f"{name}-0.1.0.crate", sha256=P.sha256(name.encode()))
+                     for name in ("tilewright-jsonc", "tilewright-source")]
+        self.files = {row["asset"]: row["name"].encode() for row in self.rows}
+        self.archives = {row["name"]: {"Cargo.toml": (
+            f'[package]\nname="{row["name"]}"\nversion="0.1.0"\nreadme="README.md"\n'
+            + ('[dependencies]\ntilewright-jsonc="=0.1.0"\n' if row["name"] == "tilewright-source" else '')).encode(),
+            "README.md": b"README"} for row in self.rows}
+        self.states = {row["name"]: "absent" for row in self.rows}
+
+    def batch(self, **overrides):
+        from contextlib import ExitStack
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        names = {"terminal_boundary": None, "public_owner": None, "github_authority": None,
+                 "require_no_intent": None, "clean_source": None, "release_evidence": ({"id": 1}, {}),
+                 "reserve_intent": "f" * 40, "put_once": None, "owned": None,
+                 "confirm_publication": None}
+        names.update(overrides)
+        mocks = {name: stack.enter_context(patch.object(P, name, **(
+            {"side_effect": result} if callable(result) or isinstance(result, Exception) else {"return_value": result})))
+            for name, result in names.items()}
+        # A completed predecessor becomes publicly visible; pending successors stay absent.
+        uploaded = set()
+        mocks["put_once"].side_effect = lambda data, *_: uploaded.add(data.decode())
+        mocks["registry_state"] = stack.enter_context(patch.object(P, "registry_state",
+            side_effect=lambda row: "exact-existing" if row["name"] in uploaded else "absent"))
+        mocks["input"] = stack.enter_context(patch("builtins.input", return_value=f"PUBLISH AS {P.OWNER}"))
+        mocks["getpass"] = stack.enter_context(patch.object(P.getpass, "getpass", return_value=self.TOKEN))
+        import resource
+        stack.enter_context(patch.object(resource, "setrlimit"))
+        mocks["stdout"] = stack.enter_context(patch.object(P.sys, "stdout", new_callable=io.StringIO))
+        mocks["stderr"] = stack.enter_context(patch.object(P.sys, "stderr", new_callable=io.StringIO))
+        return mocks
+
+    def run_batch(self):
+        P.execute(PLAN, {"packages": self.rows}, self.files, self.archives, self.states)
+
+    def test_success_exact_held_bytes_order_single_ceremony_and_ownership(self):
+        mocks = self.batch()
+        self.run_batch()
+        self.assertEqual(mocks["getpass"].call_count, 1)
+        self.assertEqual(mocks["input"].call_count, 1)
+        self.assertEqual([call.args[0] for call in mocks["put_once"].call_args_list], list(self.files.values()))
+        self.assertEqual(mocks["reserve_intent"].call_count, 2)
+        self.assertEqual([call.args[0] for call in mocks["confirm_publication"].call_args_list], self.rows)
+        self.assertNotIn(self.TOKEN, mocks["stdout"].getvalue() + mocks["stderr"].getvalue())
+        mocks["owned"].assert_called_once_with(self.rows[0])
+
+    def test_cancel_or_nonmatching_assertion_precedes_token_intent_and_upload(self):
+        for answer in ("no", "PUBLISH AS someone-else"):
+            with self.subTest(answer=answer):
+                mocks = self.batch()
+                mocks["input"].return_value = answer
+                with self.assertRaises(P.Refusal):
+                    self.run_batch()
+                mocks["getpass"].assert_not_called()
+                mocks["reserve_intent"].assert_not_called()
+                mocks["put_once"].assert_not_called()
+        mocks = self.batch()
+        mocks["getpass"].side_effect = KeyboardInterrupt()
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_batch()
+        mocks["reserve_intent"].assert_not_called()
+
+    def test_existing_intent_blocks_even_public_absence_and_no_credential_prompt(self):
+        mocks = self.batch(require_no_intent=P.Refusal("existing intent"))
+        with self.assertRaises(P.Refusal):
+            self.run_batch()
+        mocks["getpass"].assert_not_called()
+        mocks["reserve_intent"].assert_not_called()
+        mocks["put_once"].assert_not_called()
+
+    def test_ambiguous_first_put_stops_batch_no_retry_or_later_intent(self):
+        mocks = self.batch()
+        mocks["put_once"].side_effect = P.Refusal("ambiguous upload")
+        with self.assertRaises(P.Refusal):
+            self.run_batch()
+        self.assertEqual(mocks["put_once"].call_count, 1)
+        self.assertEqual(mocks["reserve_intent"].call_count, 1)
+        mocks["confirm_publication"].assert_not_called()
+
+    def test_partial_publication_owner_mismatch_stops_following_crate(self):
+        mocks = self.batch(confirm_publication=P.Refusal("owner mismatch"))
+        with self.assertRaises(P.Refusal):
+            self.run_batch()
+        self.assertEqual(mocks["put_once"].call_count, 1)
+        self.assertEqual(mocks["reserve_intent"].call_count, 1)
+
+    def test_dependency_not_visible_prevents_dependent_intent(self):
+        mocks = self.batch()
+        mocks["registry_state"].return_value = "absent"
+        mocks["registry_state"].side_effect = None
+        with self.assertRaisesRegex(P.Refusal, "dependency"):
+            self.run_batch()
+        self.assertEqual(mocks["put_once"].call_count, 1)
+        self.assertEqual(mocks["reserve_intent"].call_count, 1)
+
+    def test_source_drift_after_intent_never_uploads(self):
+        mocks = self.batch()
+        mocks["release_evidence"].side_effect = [(1, {}), (1, {}), (2, {})]
+        with self.assertRaisesRegex(P.Refusal, "changed after intent"):
+            self.run_batch()
+        self.assertEqual(mocks["reserve_intent"].call_count, 1)
+        mocks["put_once"].assert_not_called()
+
+    def test_existing_exact_archives_require_ownership_and_no_token(self):
+        self.states = {row["name"]: "exact-existing" for row in self.rows}
+        mocks = self.batch()
+        self.run_batch()
+        self.assertEqual(mocks["owned"].call_count, 2)
+        mocks["getpass"].assert_not_called()
+        mocks["put_once"].assert_not_called()
+
+    def test_terminal_ci_environment_and_public_owner_refusals(self):
+        with patch.object(P.sys.stdin, "isatty", return_value=False), self.assertRaises(P.Refusal):
+            P.terminal_boundary()
+        with patch.object(P.sys.stdin, "isatty", return_value=True), patch.object(P.sys.stderr, "isatty", return_value=True):
+            for key in ("CI", "GITHUB_ACTIONS", "CRATES_IO_TOKEN", "CARGO_REGISTRY_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_URL"):
+                with patch.dict(os.environ, {key: "secret"}, clear=True), self.assertRaises(P.Refusal) as caught:
+                    P.terminal_boundary()
+                self.assertNotIn("secret", str(caught.exception))
+        with patch.object(P, "request", return_value=(200, b'{"user":{"login":"someone-else","id":437663}}')):
+            with self.assertRaises(P.Refusal):
+                P.public_owner()
+        with patch.object(P, "request", return_value=(200, b'{"users":[{"login":"zoeyrose","id":3865595,"kind":"user"}]}')):
+            with self.assertRaises(P.Refusal):
+                P.owned(self.rows[0])
+
+    def test_exact_wire_framing_and_no_redirect_retry_or_error_echo(self):
+        metadata = P.upload_metadata(self.archives[self.rows[0]["name"]])
+        connection = Mock()
+        connection.getresponse.return_value.status = 200
+        connection.getresponse.return_value.read.return_value = b'{"warnings":{}}'
+        with patch.object(P.http.client, "HTTPSConnection", return_value=connection):
+            P.put_once(b"EXACT", metadata, self.TOKEN)
+        call = connection.request.call_args
+        self.assertEqual(call.args, ("PUT", "/api/v1/crates/new"))
+        body = call.kwargs["body"]
+        length = P.struct.unpack("<I", body[:4])[0]
+        self.assertEqual(json.loads(body[4:4+length]), metadata)
+        self.assertEqual(P.struct.unpack("<I", body[4+length:8+length])[0], 5)
+        self.assertEqual(body[8+length:], b"EXACT")
+        self.assertEqual(call.kwargs["headers"]["Authorization"], self.TOKEN)
+        for status in (301, 302, 307, 308, 400, 403, 429, 500):
+            connection.reset_mock()
+            connection.getresponse.return_value.status = status
+            with patch.object(P.http.client, "HTTPSConnection", return_value=connection), self.assertRaises(P.Refusal):
+                P.put_once(b"EXACT", metadata, self.TOKEN)
+            connection.request.assert_called_once()
+        connection.getresponse.return_value.status = 200
+        connection.getresponse.return_value.read.return_value = json.dumps({"errors": [{"detail": self.TOKEN}]}).encode()
+        with patch.object(P.http.client, "HTTPSConnection", return_value=connection), self.assertRaises(P.Refusal) as caught:
+            P.put_once(b"EXACT", metadata, self.TOKEN)
+        self.assertNotIn(self.TOKEN, str(caught.exception))
+
+    def test_metadata_renames_targets_features_and_kinds(self):
+        files = {"README.md": b"hello", "Cargo.toml": b'''[package]
+name="tilewright-source"
+version="0.1.0"
+readme="README.md"
+license-file="LICENSE"
+rust-version="1.97"
+[features]
+f=["alias/extra"]
+[dependencies.alias]
+package="tilewright-jsonc"
+version="=0.1.0"
+optional=true
+default-features=false
+features=["extra"]
+[target.'cfg(unix)'.build-dependencies]
+build="1"
+[dev-dependencies]
+test="2"
+'''}
+        metadata = P.upload_metadata(files)
+        self.assertEqual(metadata["readme"], "hello")
+        self.assertEqual(metadata["license_file"], "LICENSE")
+        self.assertEqual(metadata["rust_version"], "1.97")
+        dep = metadata["deps"][0]
+        self.assertEqual((dep["name"], dep["explicit_name_in_toml"], dep["optional"], dep["default_features"]),
+                         ("tilewright-jsonc", "alias", True, False))
+        self.assertEqual([(d["kind"], d["target"]) for d in metadata["deps"]],
+                         [("normal", None), ("dev", None), ("build", "cfg(unix)")])
+        self.assertEqual(metadata["features"], {"f": ["alias/extra"]})
+        files["Cargo.toml"] += b'\n[dependencies.bad]\nversion="1"\ngit="https://invalid"\n'
+        with self.assertRaises(P.Refusal):
+            P.upload_metadata(files)
+
+    def test_intent_atomic_create_race_never_adopts_existing_reservation(self):
+        row = self.rows[0]
+        ref = "refs/tags/" + P.intent_name(row)
+        object_value = {"type": "tag", "sha": "f" * 40}
+        created = {"ref": ref, "object": object_value}
+        calls = []
+        reserved = False
+
+        def github(path, body=None):
+            nonlocal reserved
+            calls.append((path, body))
+            if path.endswith("git/tags"):
+                record = json.loads(body["message"])
+                self.assertEqual(record["release"], PLAN)
+                self.assertEqual(record["coordinate"]["sha256"], row["sha256"])
+                return {"sha": "f" * 40}
+            if path.endswith("git/refs"):
+                if reserved:
+                    raise P.Refusal("422 reference already exists")
+                reserved = True
+            return created
+
+        with patch.object(P, "require_no_intent"), patch.object(P, "github_authority"), patch.object(P, "github_call", side_effect=github):
+            self.assertEqual(P.reserve_intent(PLAN, row, "e" * 64), "f" * 40)
+            # Simulate another host seeing a stale absence. The atomic ref write fences it.
+            with self.assertRaises(P.Refusal):
+                P.reserve_intent(PLAN, row, "e" * 64)
+        self.assertEqual(sum(path.endswith("git/refs") for path, _ in calls), 2)
+        self.assertTrue(all("TOKEN" not in json.dumps(body) for _, body in calls))
+
+    def test_github_subprocess_only_receives_public_intent_no_registry_secret(self):
+        response = Mock(returncode=0, stdout=b'{"sha":"abc"}')
+        with patch.object(P.subprocess, "run", return_value=response) as run:
+            P.github_call("repos/seraphinastudios/tilewright-world/git/refs", {"ref": "public-intent"})
+        arguments = run.call_args.args[0]
+        self.assertEqual(arguments[:5], ["gh", "api", "--hostname", "github.com", "--method"])
+        self.assertNotIn(self.TOKEN, repr(run.call_args))
+        self.assertEqual(json.loads(run.call_args.kwargs["input"]), {"ref": "public-intent"})
+
+    def test_confirm_reads_only_bounded_visibility_and_owner(self):
+        with patch.object(P, "registry_state", side_effect=["absent", "exact-existing"]) as state, \
+             patch.object(P, "owned") as owned, patch.object(P.time, "sleep"), patch.object(P, "put_once") as put:
+            P.confirm_publication(self.rows[0])
+            self.assertEqual(state.call_count, 2)
+            owned.assert_called_once_with(self.rows[0])
+            put.assert_not_called()
+        with patch.object(P, "registry_state", return_value="absent") as state, \
+             patch.object(P.time, "sleep"), self.assertRaises(P.Refusal):
+            P.confirm_publication(self.rows[0])
+        self.assertEqual(state.call_count, 12)
 
 
 if __name__ == "__main__":

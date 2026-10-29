@@ -83,3 +83,13 @@ authentication and response contract facts inform the new helper and its
 documentation; no implementation, tests, fixtures or source text are copied
 or adapted. The upload framing reference is the Cargo Book's
 [Registry Web API](https://doc.rust-lang.org/cargo/reference/registry-web-api.html).
+
+The owner ceremony and create-once intent design in `tools/crates/owner_publish.py`
+consult the bootstrap flow in tilewright-renderer's `tools/crate_release.py`,
+revision `322f2828ccc323d2cf5286f7392d1bbfd9c97041`
+(<https://github.com/seraphinastudios/tilewright-renderer>), MIT, Copyright (c)
+2026 Seraphina Studios. Its notice and license are preserved by the root
+`LICENSE`. The World helper is a new, narrowed implementation: one manually
+confirmed first-publication coordinate, fixed public owner, verified candidate
+bundle and global intent fencing, without trusted-publisher automation or
+registry credential discovery. No renderer implementation or tests are copied.
