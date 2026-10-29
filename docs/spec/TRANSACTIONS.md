@@ -363,10 +363,11 @@ carrying it out validated. Not guaranteed:
 
 - the inverse of a transaction that made an invalid tree valid passes the
   check, and is refused, as above;
-- applied after other changes to the files the transaction touched or
-  consulted, an undo or redo is a `tx.conflict`, as any transaction is: an
-  editor that saves each step and keeps its inverse for undo sees this when
-  another program edits those files between the save and the undo;
+- other changes to files recorded in an undo or redo's `base` digests can
+  cause a `tx.conflict`, as for any transaction. An inverse records only
+  files its transaction changed, not files it merely consulted. An editor
+  that saves each step and keeps its inverse for undo can see a conflict
+  when another program edits those recorded files between save and undo;
 - other files changed meanwhile can make the tree an undo or redo leaves
   fail validation;
 - publishing can fail for reasons of its own (section 9).

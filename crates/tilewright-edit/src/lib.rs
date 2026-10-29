@@ -814,9 +814,9 @@ impl Plan {
     /// same [`LoadOptions`] (as a tree an editor loaded, or the one an
     /// earlier plan left, does), and nothing else changes the files, every
     /// undo and redo of this plan, published in turn, plans. Not
-    /// guaranteed: an undo or redo planned after other changes to the
-    /// files this plan touched or consulted is a `tx.conflict`, as any
-    /// transaction is; other files changed meanwhile may make the tree it
+    /// guaranteed: other changes to files recorded in an undo or redo's
+    /// `base` digests can cause a `tx.conflict`, as for any transaction;
+    /// other files changed meanwhile may make the tree it
     /// leaves fail validation; and publishing may fail for reasons of its
     /// own, such as permissions or input and output.
     ///
