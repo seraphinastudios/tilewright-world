@@ -311,10 +311,6 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
-    env:
-      # No restored cache or registry credentials; package/build stay offline
-      # after fetching only the committed dependency graph.
-      CARGO_HOME: ${{ runner.temp }}/candidate-cargo
     steps:
       - name: Check out the release revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -322,12 +318,18 @@ jobs:
           persist-credentials: false
 
       - name: Cache locked dependencies without credentials
+        # runner.temp is available in step env, not job env. No restored
+        # cache or registry credentials enter this Cargo home.
+        env:
+          CARGO_HOME: ${{ runner.temp }}/candidate-cargo
         run: |
           set -euo pipefail
           python3 -c 'import sys; sys.path.insert(0, "tools/crates"); import prepare; prepare.environment()'
           cargo fetch --locked
 
       - name: Prepare twice and build the exact packaged graph
+        env:
+          CARGO_HOME: ${{ runner.temp }}/candidate-cargo
         run: |
           set -euo pipefail
           python3 tools/crates/prepare.py prepare "${RUNNER_TEMP}/crate-candidates"
