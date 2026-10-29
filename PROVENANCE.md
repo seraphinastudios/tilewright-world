@@ -90,6 +90,6 @@ revision `322f2828ccc323d2cf5286f7392d1bbfd9c97041`
 (<https://github.com/seraphinastudios/tilewright-renderer>), MIT, Copyright (c)
 2026 Seraphina Studios. Its notice and license are preserved by the root
 `LICENSE`. The World helper is a new, narrowed implementation: one manually
-confirmed first-publication coordinate, fixed public owner, verified candidate
+confirmed first-publication batch, fixed public owner, verified candidate
 bundle and global intent fencing, without trusted-publisher automation or
 registry credential discovery. No renderer implementation or tests are copied.
