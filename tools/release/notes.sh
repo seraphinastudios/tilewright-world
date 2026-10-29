@@ -22,6 +22,7 @@ describe() {
     *-macos-amd64.tar.gz) echo "tilewright for macOS x86_64" ;;
     *-macos-arm64.tar.gz) echo "tilewright for macOS on Apple silicon" ;;
     *-windows-amd64.zip) echo "tilewright for Windows x86_64" ;;
+    *-crate-candidates.tar.gz) echo "Unpublished Rust crate candidates (owner review required)" ;;
     *-source.tar.gz) echo "Source code" ;;
     *.tgz) echo "npm package of the browser pack reader" ;;
     *) echo "Release asset" ;;
@@ -37,6 +38,8 @@ while read -r digest name; do
 done <"${assets}/SHA256SUMS"
 echo
 echo "\`SHA256SUMS\` lists the same digests."
+echo
+echo "The crate candidate bundle is not a registry publication or a grant of crate-name ownership."
 echo
 echo "The Go pack reader is tagged \`${GO_TAG}\` at the same commit:"
 echo

@@ -168,6 +168,22 @@ class CandidateTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     P.archive(crate(name, extra, **changes), name, "0.1.0", revision)
 
+    def test_nested_archive_metadata_is_bounded_before_parsing(self):
+        name = P.PUBLIC[0]
+        output = io.BytesIO()
+        with tarfile.open(fileobj=io.BytesIO(crate(name)), mode="r:gz") as source:
+            with tarfile.open(fileobj=output, mode="w:gz", format=tarfile.PAX_FORMAT) as target:
+                for item in source:
+                    item.pax_headers = {"comment": "x" * (1024 * 1024)}
+                    target.addfile(item, source.extractfile(item))
+        data = output.getvalue()
+        self.assertLess(len(data), 128 * 1024)
+        with patch.object(P, "MAX_ARCHIVE_BYTES", 128 * 1024), \
+                self.assertRaisesRegex(ValueError, "decompressed archive size limit"):
+            P.archive(data, name, "0.1.0", REVISION)
+        with self.assertRaisesRegex(ValueError, "unsafe"):
+            P.archive(data, name, "0.1.0", REVISION)
+
     def test_archive_rejects_links_and_nonregistry_dependencies(self):
         name = P.PUBLIC[0]
         data = crate(name)

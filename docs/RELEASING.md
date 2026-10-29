@@ -16,6 +16,7 @@ build provenance attestation. `.github/workflows/release.yml` does the work.
 | `tilewright-X.Y.Z-windows-amd64.zip` | The CLI for Windows x86_64, with the C runtime linked in |
 | `tilewright-world-X.Y.Z-source.tar.gz` | `git archive` of the released commit |
 | `seraphinastudios-tilewright-pack-X.Y.Z.tgz` | The npm package `@seraphinastudios/tilewright-pack`, the browser pack reader (`packages/tilewright-pack`), built by `tools/build-wasm.sh` |
+| `tilewright-world-X.Y.Z-crate-candidates.tar.gz` | The five exact `.crate` candidates and `candidate.json`, qualified by source-release version; no registry publication |
 | `SHA256SUMS` | The SHA-256 digest of every other asset |
 
 Each CLI archive holds one directory, `tilewright-X.Y.Z-PLATFORM/`, with
@@ -68,8 +69,10 @@ The public crates inherit both the MIT SPDX identifier and the root `LICENSE`
 file explicitly, so Cargo includes the complete copyright and license notice
 in each archive; the verifier requires those exact notice bytes.
 This is candidate policy, not an activated registry publisher. The GitHub
-release workflow does not attach, attest or upload these candidates as assets.
-Its source revalidation exercises local candidates through `tools/validate.sh`.
+release workflow bundles these exact candidates as a checksummed, attested source
+release asset after building the packaged graph. Its source revalidation also
+exercises local candidates through `tools/validate.sh`. Neither step publishes
+to crates.io or reserves names or versions.
 
 Use a clean committed checkout, the pinned Rust toolchain and a credential-free
 Cargo home with the locked dependencies already cached. In the documented
@@ -114,10 +117,89 @@ that directory on exit, preserving the same credential-free/offline boundary.
 This proves the local packaged graph can build, not that it was downloaded
 from crates.io or that the editor works against registry releases.
 
-Before any future first publication, review the concrete archive bytes and
-metadata, confirm the registry names and versions remain available, and obtain
-publication authorization. Source-release integration, registry ownership,
-publisher credentials and registry publication are separate follow-up work.
+## Owner-run first crate publication
+
+Registry automation remains deferred. No crate upload, token, trusted publisher,
+registry environment or registry permission is added by this pipeline. The first
+publication is a separate owner action after review of one concrete release.
+Do not supply a registry credential to preparation, verification, Cargo builds,
+CI, chat or committed files.
+
+Choose one published, immutable, non-prerelease source release produced by
+`release.yml` on protected `main`. Record its repository, release ID, tag, full
+source revision, producing workflow run/attempt, candidate bundle SHA-256 and
+`candidate.json` SHA-256 in the publication decision. Confirm the exact producing
+run succeeded, both source and Go tags resolve to the recorded revision, and
+that revision is the one being reviewed. PR artifacts and maintenance-branch
+candidates are test evidence, never candidates for the first registry upload.
+
+Download the selected release's `SHA256SUMS` and candidate bundle into a fresh
+directory. In the following read-only verification example, replace `X.Y.Z` and
+`FULL_SOURCE_SHA` with the reviewed values; do not select an unreviewed `latest`:
+
+```sh
+repository=seraphinastudios/tilewright-world
+tag=vX.Y.Z
+revision=FULL_SOURCE_SHA
+bundle=tilewright-world-X.Y.Z-crate-candidates.tar.gz
+gh release view "$tag" --repo "$repository" --json databaseId,tagName,isDraft,isPrerelease,url
+gh api "repos/$repository/releases/tags/$tag" --jq '{id, tag_name, immutable, draft, prerelease, assets: [.assets[] | {name,digest}]}'
+gh release download "$tag" --repo "$repository" --pattern SHA256SUMS --pattern "$bundle"
+gh release verify-asset "$tag" "$bundle" --repo "$repository"
+gh attestation verify "$bundle" --repo "$repository" \
+  --cert-identity "https://github.com/$repository/.github/workflows/release.yml@refs/heads/main" \
+  --source-ref refs/heads/main --source-digest "$revision" --deny-self-hosted-runners
+sha256sum --check --strict --ignore-missing SHA256SUMS
+```
+
+Require exactly one bundle entry in `SHA256SUMS` and equality with both the local
+bundle digest and GitHub's recorded asset digest. Check the attestation result's
+source workflow run and attempt against the successful producing run recorded
+above. A digest alone does not authenticate an origin. From a clean checkout of
+that exact source revision, run the byte-only verifier (no Cargo or upload):
+
+```sh
+python3 tools/release/crate_candidates.py /absolute/downloads/tilewright-world-X.Y.Z-crate-candidates.tar.gz --revision FULL_SOURCE_SHA
+```
+
+It bounds decompression before parsing outer and nested TAR headers, rejects
+PAX/GNU extensions, extra, duplicate, unsafe or nonregular members, excessive sizes,
+wrong source revision, changed archives, metadata or license notices. Only after
+it succeeds, unpack the verified bundle into a new empty directory and retain
+its exact five archives and manifest. Review the manifest's package inventory,
+versions and checksums. The credential-free `verify --build` command above can
+also verify that extracted graph with the pinned toolchain and cached dependencies;
+its local overrides still provide no registry-consumer evidence.
+
+Immediately before a separately authorized first upload, check each exact name
+and version through the public crates.io API and sparse index. All five crate
+names must be unclaimed for this first-publication procedure; a 404 is only a
+point-in-time observation, not a reservation. Any existing name, version, owner,
+conflicting checksum, inconsistent API/index result or unavailable service stops
+that procedure for owner review. Confirm no other person/session is publishing
+these coordinates. Use the manifest order (`jsonc`, `source`, `pack`, `diff`,
+`edit`), waiting for each dependency's registry archive and sparse-index checksum
+to equal the selected archive before proceeding to dependents.
+
+This change supplies verified assets and the review procedure, not an upload
+helper. The separately reviewed owner publication method must upload these exact
+archive bytes without running package/build hooks with credentials. Ordinary
+`cargo publish` repackages source and is not proof that the selected asset bytes
+were uploaded. After each upload, verify the registry archive digest, index
+checksum and owner identity and retain the owning source-release record. An
+ambiguous response requires owner investigation; do not retry or switch to a
+newer source release merely because public reads still show absence.
+
+Later source releases can contain different candidate bytes at the same Cargo
+version (including a new VCS revision). Their qualified bundle names distinguish
+them, but none owns or supersedes a registry coordinate by attachment alone.
+Once a version is published, its originally selected archive/release remains the
+owner of that coordinate forever. Never upload a later candidate for the same
+name/version, even if its code looks unchanged. Changed published content needs
+a reviewed Cargo version bump; unchanged versions retain the original registry
+bytes. Automated ownership/reuse/version checks and registry-consumer acceptance
+remain separate follow-up work. Source/application releases continue independently.
+
 
 ## Versions
 
@@ -170,7 +252,7 @@ counts.
 | Push before any `vX.Y.Z` tag exists | The plan job only, which says the first release has to be started by hand. Merging never cuts the first release. |
 | Run workflow (`workflow_dispatch`) on `main` | The same as a push, except that it can also cut the first release |
 | Run workflow on a maintenance branch `MAJOR.MINOR.x` | The plan job only, which says what it would release; publishing from maintenance branches is off |
-| Pull request that changes the release workflows, `scripts/release/`, `tools/release/`, `tools/build-wasm.sh`, `packages/tilewright-pack/`, `rust-toolchain.toml`, `Cargo.lock` or a `Cargo.toml` | The tests, plan, five builds, npm build and packaging under the version `0.0.0-check.N` (N is the pull request number), as a check. A pull request into another pull request's branch is planned as one into `main`. Nothing is attested or published: the plan job never plans publication for a pull request, and the attest, release and npm jobs refuse to run for one. |
+| Pull request that changes the release workflows, `scripts/release/`, `tools/release/`, `tools/crates/`, `tools/build-wasm.sh`, `packages/tilewright-pack/`, `rust-toolchain.toml`, `Cargo.lock` or a `Cargo.toml` | The tests, plan, five builds, npm build and packaging under the version `0.0.0-check.N` (N is the pull request number), as a check. A pull request into another pull request's branch is planned as one into `main`. Nothing is attested or published: the plan job never plans publication for a pull request, and the attest, release and npm jobs refuse to run for one. |
 
 To cut the first release, run the Release workflow on `main`, either from
 the Actions tab or with:
@@ -207,7 +289,8 @@ its own, so a maintenance release never displaces a release of `main`.
 | Revalidate | ubuntu-24.04 | `contents: read` | Runs `validate.yml`, so `tools/validate.sh`, on the released commit |
 | Build TARGET | one per platform | `contents: read` | `tools/release/build.sh`: builds with the pinned toolchain and `--locked`, then runs the binary to validate, compile and verify `fixtures/basic` |
 | Build the npm package | ubuntu-24.04 | `contents: read` | `tools/build-wasm.sh`, then `npm pack` at the release version. All the outside code it runs is pinned: the Rust toolchain and the crates in `Cargo.lock` (their build scripts and macros run, as in the CLI builds), the Node that `.node-version` names, and wasi-sdk and wasm-bindgen, checked by SHA-256. The job can only read the repository. Its tarball reaches the release only through packaging, which checks the package's name, version and module |
-| Package release assets | ubuntu-24.04 | `contents: read` | `tools/release/package.py assemble`: archives, license bundles, the source archive and `SHA256SUMS`; checks that all five platforms compiled the fixture to the same pack |
+| Prepare crate candidates | ubuntu-24.04 | `contents: read` | Fetches the locked dependencies into a fresh credential-free Cargo home, then runs offline two-pass packaging and builds the exact candidate graph; no registry writes |
+| Package release assets | ubuntu-24.04 | `contents: read` | `tools/release/package.py assemble`: archives, license bundles, the source archive, the revision-checked crate candidate bundle and `SHA256SUMS`; checks that all five platforms compiled the fixture to the same pack |
 | Attest build provenance | ubuntu-24.04 | `contents: read`, `id-token: write`, `attestations: write` | Verifies the assets, then `actions/attest-build-provenance` for every asset and each bare binary |
 | Publish the GitHub release | ubuntu-24.04 | `contents: write` | Creates `vX.Y.Z` and `go/vX.Y.Z` at the commit in one atomic push, which fails if either exists elsewhere. Then it publishes the release on the tag with every asset at once, and checks that the release is immutable, that both tags point at the commit, and that GitHub's asset digests equal `SHA256SUMS`. Last, it has `sum.golang.org` record the new Go version, which only warns if the proxy is slow. |
 | Publish to npm | ubuntu-24.04 | `contents: read`, `attestations: read`, `id-token: write`, environment `npm` | Publishes the release's npm tarball for a release from `main`; skipped unless npm publication is on |
@@ -372,24 +455,14 @@ automatically. Publish one by hand after verifying its tarball as above.
 To turn publishing off again, delete the variable or set it to anything
 else.
 
-## Turning on crates.io publication
+## Future crates.io automation
 
-Crates are not published, and the pipeline contains nothing for it. To
-start, follow the renderer, whose crates go to crates.io from verified
-source releases (its `docs/CRATE-RELEASE.md`):
-
-1. Decide which crates are public, mark the rest `publish = false`, and keep
-   the workspace version independent of release tags. Bump it, and every
-   exact `=X.Y.Z` internal requirement, whenever packaged content changes.
-2. Port the renderer's `tools/crate_prepare.py`, `tools/crate_release.py`,
-   `policy/crate-release.json`, `publish-crate.yml` and
-   `reconcile-crates.yml`. The release then attaches the exact `.crate`
-   archives and a manifest, which the attestation covers, and the publisher
-   uploads those bytes.
-3. Publish each crate once by hand, then configure crates.io trusted
-   publishing for `publish-crate.yml` in an environment
-   `crates-io-release`. The publisher authenticates with
-   `rust-lang/crates-io-auth-action`, which is on the allowlist.
+Use [Owner-run first crate publication](#owner-run-first-crate-publication) for
+the selected first-publication procedure. Registry automation is deferred and
+is not a prerequisite for preparing or reviewing the candidate release assets.
+A future, separately reviewed change may add coordinate ownership/reuse checks,
+exact-byte upload and recovery, and trusted publishing. Do not activate or port
+another repository's publisher as part of the current asset workflow.
 
 ## When a release fails
 

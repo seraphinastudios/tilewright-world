@@ -16,6 +16,7 @@ verify: check that a directory assemble wrote is complete and consistent.
 from __future__ import annotations
 
 import argparse
+import crate_candidates
 import gzip
 import hashlib
 import io
@@ -332,6 +333,7 @@ def assemble(
     npm_tarball: Path | None,
     metadata: Callable[[Path, str], dict] = cargo_metadata,
     toolchain: Callable[[Path, str], tuple[str, bytes]] = rust_library_notices,
+    candidates: Path | None = None,
 ) -> None:
     if not VERSION.fullmatch(version):
         raise ReleaseError(f"invalid release version: {version}")
@@ -375,6 +377,9 @@ def assemble(
         check_npm_tarball(npm_tarball, version)
         shutil.copyfile(npm_tarball, assets / npm_tarball.name)
 
+    if candidates is not None:
+        (assets / crate_candidates.name(version)).write_bytes(crate_candidates.bundle(candidates, revision))
+
     write_checksums(assets)
 
 
@@ -395,7 +400,7 @@ def archive_members(path: Path) -> dict[str, bytes]:
     return members
 
 
-def verify(directory: Path, version: str, npm: bool) -> list[str]:
+def verify(directory: Path, version: str, npm: bool, revision: str | None = None) -> list[str]:
     """Checks a directory that assemble wrote; returns the asset names."""
     if not VERSION.fullmatch(version):
         raise ReleaseError(f"invalid release version: {version}")
@@ -420,8 +425,14 @@ def verify(directory: Path, version: str, npm: bool) -> list[str]:
             raise ReleaseError(f"{name} does not match its SHA-256 in {CHECKSUMS}")
 
     expected = {archive_name(version, platform) for platform in PLATFORMS} | {source_name(version)}
+    if revision is not None:
+        if not REVISION.fullmatch(revision):
+            raise ReleaseError(f"invalid candidate source revision: {revision}")
+        expected.add(crate_candidates.name(version))
     if not expected <= present:
         raise ReleaseError(f"missing assets: {sorted(expected - present)}")
+    if revision is not None:
+        crate_candidates.verify_path(assets / crate_candidates.name(version), revision)
     tarballs = sorted(present - expected)
     if npm:
         if len(tarballs) != 1:
@@ -452,9 +463,11 @@ def main(arguments: list[str]) -> int:
     build.add_argument("--binaries", required=True, type=Path)
     build.add_argument("--output", required=True, type=Path)
     build.add_argument("--npm-tarball", type=Path)
+    build.add_argument("--crate-candidates", type=Path)
     check = commands.add_parser("verify")
     check.add_argument("--version", required=True)
     check.add_argument("--npm", action="store_true", help="require the npm tarball")
+    check.add_argument("--revision", help="require crate candidates from this exact source revision")
     check.add_argument("directory", type=Path)
     options = parser.parse_args(arguments)
     repository = Path(git(Path.cwd(), "rev-parse", "--show-toplevel").decode().strip())
@@ -467,11 +480,13 @@ def main(arguments: list[str]) -> int:
                 options.binaries.resolve(),
                 options.output.resolve(),
                 options.npm_tarball.resolve() if options.npm_tarball else None,
+                candidates=options.crate_candidates.resolve() if options.crate_candidates else None,
             )
-            names = verify(options.output.resolve(), options.version, options.npm_tarball is not None)
+            names = verify(options.output.resolve(), options.version, options.npm_tarball is not None,
+                           options.revision if options.crate_candidates else None)
         else:
-            names = verify(options.directory.resolve(), options.version, options.npm)
-    except ReleaseError as error:
+            names = verify(options.directory.resolve(), options.version, options.npm, options.revision)
+    except (ReleaseError, ValueError, OSError, KeyError, TypeError, tarfile.TarError) as error:
         print(f"release: {error}", file=sys.stderr)
         return 1
     for name in names:
