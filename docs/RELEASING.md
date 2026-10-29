@@ -67,8 +67,9 @@ use the workspace crate version and exact internal dependency versions.
 The public crates inherit both the MIT SPDX identifier and the root `LICENSE`
 file explicitly, so Cargo includes the complete copyright and license notice
 in each archive; the verifier requires those exact notice bytes.
-This is candidate policy, not an activated registry publisher. The existing
-GitHub release workflow does not prepare, attest or upload these candidates.
+This is candidate policy, not an activated registry publisher. The GitHub
+release workflow does not attach, attest or upload these candidates as assets.
+Its source revalidation exercises local candidates through `tools/validate.sh`.
 
 Use a clean committed checkout, the pinned Rust toolchain and a credential-free
 Cargo home with the locked dependencies already cached. In the documented
@@ -106,8 +107,11 @@ a separate consumer of the five exact candidate versions. Temporary Cargo
 `patch.crates-io` arguments connect only that extracted graph; production
 manifests and candidate archives are unchanged. The packaged tests use source
 repository fixtures at runtime, so this check compiles them without running
-them. Run the normal `tools/validate.sh` suite in the owning source checkout as
-well. This proves the local packaged graph can build, not that it was downloaded
+them. The normal `tools/validate.sh` aggregate runs the source fixture suite and,
+after the Go and browser checks, performs actual candidate preparation and
+`verify --build` in a fresh temporary directory outside the checkout. It removes
+that directory on exit, preserving the same credential-free/offline boundary.
+This proves the local packaged graph can build, not that it was downloaded
 from crates.io or that the editor works against registry releases.
 
 Before any future first publication, review the concrete archive bytes and

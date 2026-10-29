@@ -90,4 +90,11 @@ tools/build-wasm.sh --check
   node scripts/licenses.mjs --check
 )
 
+# Exercise the real unpublished crate graph after the source/Go/browser checks.
+# The candidate directory itself must be absent and outside the checkout.
+candidate_parent=$(mktemp -d /tmp/tilewright-world-candidates.XXXXXX)
+trap 'rm -rf -- "${first}" "${second}" "${candidate_parent}"' EXIT
+python3 tools/crates/prepare.py prepare "${candidate_parent}/candidates"
+python3 tools/crates/prepare.py verify "${candidate_parent}/candidates" --build
+
 git diff --check
