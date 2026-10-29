@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 use super::{
-    ChunkData, FieldRecord, ObjectRecord, Pack, PortalRecord, VerifyLimits, compile, decode_chunk,
-    decode_record, encode_chunk, encode_record, write_pack,
+    ChunkData, FieldRecord, ObjectRecord, Pack, Page, PortalRecord, VerifyLimits, compile,
+    decode_chunk, decode_record, encode_chunk, encode_record, write_pack,
 };
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -655,12 +655,16 @@ fn verification_checks_names_profiles_portals_and_encodings() {
     let upper = directory
         .path()
         .join(name.replace(".twpack", "").to_ascii_uppercase() + ".twpack");
-    std::fs::copy(&written.path, &upper).unwrap();
-    let error = Pack::open(&upper).unwrap().verify().unwrap_err();
-    assert!(
-        error.to_string().contains("does not match its name"),
-        "{error}"
-    );
+    // A file system that ignores case, as macOS and Windows do by default,
+    // has the pack under that name already.
+    if !upper.exists() {
+        std::fs::copy(&written.path, &upper).unwrap();
+        let error = Pack::open(&upper).unwrap().verify().unwrap_err();
+        assert!(
+            error.to_string().contains("does not match its name"),
+            "{error}"
+        );
+    }
 
     for (name, sql, problem) in [
         (
@@ -1276,8 +1280,10 @@ fn packs_past_the_size_limit_are_not_opened_or_hashed() {
     let grown = directory.path().join("grown.twpack");
     std::fs::copy(&written.path, &grown).unwrap();
     let pack = Pack::open_with(&grown, &exact).unwrap();
+    // Opened to write, since Windows does not set the length through a
+    // handle that may only append.
     std::fs::OpenOptions::new()
-        .append(true)
+        .write(true)
         .open(&grown)
         .unwrap()
         .set_len(written.bytes + 1)
@@ -1292,8 +1298,10 @@ fn packs_past_the_size_limit_are_not_opened_or_hashed() {
     let copy = named.path().join(written.path.file_name().unwrap());
     std::fs::copy(&written.path, &copy).unwrap();
     let pack = Pack::open_with(&copy, &exact).unwrap();
+    // Opened to write, since Windows does not set the length through a
+    // handle that may only append.
     std::fs::OpenOptions::new()
-        .append(true)
+        .write(true)
         .open(&copy)
         .unwrap()
         .set_len(written.bytes + 1)
@@ -1376,13 +1384,25 @@ fn stairwells_layer_heights_and_list_fields_compile_and_read_back() {
     assert!(pack.stairwell("overworld", "nowhere").unwrap().is_none());
     assert!(pack.stairwell("vault", "cliff.path").unwrap().is_none());
     let mut visited = Vec::new();
-    pack.visit_stairwells("overworld", &mut |stairwell| {
+    pack.visit_stairwells("overworld", Page::all(), &mut |stairwell| {
         visited.push(stairwell.id);
         Ok(())
     })
     .unwrap();
     assert_eq!(visited, ["cave.chute", "cliff.path", "tower.stairs"]);
-    pack.visit_stairwells("vault", &mut |_| panic!("the vault has none"))
+    let mut paged = Vec::new();
+    let page = Page {
+        after: Some("cave.chute"),
+        limit: 1,
+        bytes: usize::MAX,
+    };
+    pack.visit_stairwells("overworld", page, &mut |stairwell| {
+        paged.push(stairwell.id);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(paged, ["cliff.path"]);
+    pack.visit_stairwells("vault", Page::all(), &mut |_| panic!("the vault has none"))
         .unwrap();
 
     assert_eq!(
@@ -1494,6 +1514,24 @@ fn stairwell_rows_steps_and_documents_are_verified() {
 }
 
 #[test]
+fn a_stairwell_document_with_an_escaped_key_is_refused_unbudgeted() {
+    // A document that spells `steps` with an escape is not canonical: it is
+    // refused as such under any step budget, before its steps are counted.
+    let (_directory, copy) = tampered(
+        "read-escaped-key.twpack",
+        r#"UPDATE stairwells SET document = replace(document, '"steps":', '"st\u0065ps":') WHERE id = 'cave.chute'"#,
+    );
+    let pack = Pack::open(&copy).unwrap();
+    for budget in [0, u64::MAX] {
+        let error = pack
+            .stairwell_within("overworld", "cave.chute", budget)
+            .unwrap_err();
+        assert_eq!(error.code(), super::ErrorCode::Stairwell, "{error}");
+        assert!(error.to_string().contains("canonical JSON"), "{error}");
+    }
+}
+
+#[test]
 fn stored_stairwell_documents_have_the_source_shape_and_agree_with_their_rows() {
     let disagrees = "disagrees with its rows";
     for (name, sql, problem) in [
@@ -1554,7 +1592,10 @@ fn stored_stairwell_documents_have_the_source_shape_and_agree_with_their_rows() 
     );
     let pack = Pack::open(&copy).unwrap();
     assert!(pack.stairwell("overworld", "cave.chute").is_err());
-    assert!(pack.visit_stairwells("overworld", &mut |_| Ok(())).is_err());
+    assert!(
+        pack.visit_stairwells("overworld", Page::all(), &mut |_| Ok(()))
+            .is_err()
+    );
     // An ID longer than an identifier is not loaded.
     let (_directory, copy) = tampered(
         "read-long-id.twpack",
@@ -1567,7 +1608,10 @@ fn stored_stairwell_documents_have_the_source_shape_and_agree_with_their_rows() 
         error.to_string().contains("disagrees with its row"),
         "{error}"
     );
-    assert!(pack.visit_stairwells("overworld", &mut |_| Ok(())).is_err());
+    assert!(
+        pack.visit_stairwells("overworld", Page::all(), &mut |_| Ok(()))
+            .is_err()
+    );
     let (_directory, copy) = tampered(
         "read-step.twpack",
         "UPDATE stairwell_steps SET proto = 'Not a proto' WHERE stairwell = 'cave.chute' AND step = 0",

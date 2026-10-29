@@ -65,7 +65,9 @@ The module lives in the `go/` directory of this repository, so its versions
 are tags of the form `go/vX.Y.Z`, such as `go/v0.1.0`. A consumer pins one
 with `go get github.com/seraphinastudios/tilewright-world/go@v0.1.0`. Tags
 follow semantic versioning and stay at `v0` until pack format 1.0 is
-frozen. Releases are cut separately from this module's development.
+frozen. Each tilewright-world release `vX.Y.Z` tags the module `go/vX.Y.Z`
+at the same commit, so a Go version reads the packs that the same release's
+compiler writes ([RELEASING.md](../docs/RELEASING.md)).
 
 ## API
 

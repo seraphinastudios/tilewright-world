@@ -5,6 +5,7 @@ members = [
   "crates/tilewright-edit",
   "crates/tilewright-jsonc",
   "crates/tilewright-pack",
+  "crates/tilewright-pack-wasm",
   "crates/tilewright-source",
 ]
 resolver = "3"
@@ -14,8 +15,10 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.97.1"
 license = "MIT"
+license-file = "LICENSE"
 repository = "https://github.com/seraphinastudios/tilewright-world"
 authors = ["Seraphina Studios"]
+readme = "README.md"
 
 [workspace.dependencies]
 tilewright-diff = { path = "crates/tilewright-diff", version = "=0.1.0" }
@@ -23,11 +26,23 @@ tilewright-edit = { path = "crates/tilewright-edit", version = "=0.1.0" }
 tilewright-jsonc = { path = "crates/tilewright-jsonc", version = "=0.1.0" }
 tilewright-pack = { path = "crates/tilewright-pack", version = "=0.1.0" }
 tilewright-source = { path = "crates/tilewright-source", version = "=0.1.0" }
-rustix = { version = "1.1.5", features = ["fs"] }
+rustix = { version = "1.1.5", features = ["fs", "process"] }
 rusqlite = { version = "0.40.2", default-features = false, features = ["bundled", "serialize"] }
 sha2 = "0.11.0"
 tempfile = "3.27.0"
 zstd = { version = "0.14.3", default-features = false }
+# The WebAssembly reader. `wasm-bindgen` must be the version of the
+# `wasm-bindgen` command that tools/build-wasm.sh installs.
+js-sys = "=0.3.106"
+wasm-bindgen = "=0.2.129"
+
+# The WebAssembly reader's build (tools/build-wasm.sh): small over fast, as a
+# browser downloads it.
+[profile.wasm]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

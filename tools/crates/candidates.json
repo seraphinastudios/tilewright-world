@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "status": "candidate-only",
+  "registry": "crates-io",
+  "crates": [
+    "tilewright-jsonc",
+    "tilewright-source",
+    "tilewright-pack",
+    "tilewright-diff",
+    "tilewright-edit"
+  ],
+  "private": ["tilewright-cli", "tilewright-pack-wasm"]
+}

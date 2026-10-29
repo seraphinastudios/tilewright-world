@@ -5,8 +5,11 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
+readme.workspace = true
+publish = ["crates-io"]
 
 [dependencies]
 rusqlite.workspace = true
@@ -15,6 +18,13 @@ tempfile.workspace = true
 tilewright-jsonc.workspace = true
 tilewright-source.workspace = true
 zstd.workspace = true
+
+# On the web (`wasm32-unknown-unknown`), SQLite comes from `sqlite-wasm-rs`,
+# which compiles its own copy with its own options: SQLite 3.53.0 in
+# sqlite-wasm-rs 0.5.5, where `libsqlite3-sys` bundles 3.53.2. The
+# conformance fixtures, which both builds run, keep their behaviour alike.
+[target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
+rusqlite = { workspace = true, features = ["ffi-sqlite-wasm-rs"] }
 
 [dev-dependencies]
 rusqlite.workspace = true

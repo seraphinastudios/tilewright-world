@@ -23,7 +23,7 @@ const USAGE: &str = "usage:
   tilewright diff [--json] [--allow ALLOWLIST] [--max-ids COUNT] OLD NEW
   tilewright tx preview [--json] TRANSACTION ROOT
   tilewright tx rebase TRANSACTION ROOT OUTPUT
-  tilewright tx apply TRANSACTION ROOT INVERSE
+  tilewright tx apply [--unchecked-access] TRANSACTION ROOT INVERSE
   tilewright --version
 
 inspect verifies the pack. It stops once the chunks decode to more than
@@ -40,7 +40,12 @@ be read.
 
 tx preview validates a transaction's result without writing; tx rebase
 writes it replayed on ROOT as it is now; tx apply writes the inverse to
-INVERSE, then applies it. OUTPUT and INVERSE must not exist.";
+INVERSE, then applies it. OUTPUT and INVERSE must not exist. On macOS and
+Windows, and on Linux on any file system but ext2/3/4, XFS, Btrfs, tmpfs,
+F2FS, ZFS and bcachefs (an overlay root in a container needs it too) or one
+it cannot tell (as without a readable /proc), tx apply does not check
+everything (SECURITY.md), so it refuses unless --unchecked-access accepts
+that.";
 
 fn main() -> ExitCode {
     // Paths need not be UTF-8, so arguments are read as OS strings.
@@ -152,9 +157,7 @@ fn run(arguments: &[&OsStr]) -> Result<String, Failure> {
 
 fn run_command(arguments: &[&OsStr]) -> Result<String, Failure> {
     match arguments {
-        [command] if *command == "--version" => {
-            Ok(format!("tilewright {}\n", env!("CARGO_PKG_VERSION")))
-        }
+        [command] if *command == "--version" => Ok(version()),
         [command, root] if *command == "validate" => validate(Path::new(root), false),
         [command, flag, root] if *command == "validate" && *flag == "--json" => {
             validate(Path::new(root), true)
@@ -168,6 +171,19 @@ fn run_command(arguments: &[&OsStr]) -> Result<String, Failure> {
             inspect(Path::new(pack), limits)
         }
         _ => Err(Failure::message(USAGE)),
+    }
+}
+
+/// The `--version` line: the crate version, which packs record as their
+/// compiler, and the release when the release workflow built this binary
+/// (`TILEWRIGHT_RELEASE`, see docs/RELEASING.md).
+fn version() -> String {
+    match option_env!("TILEWRIGHT_RELEASE") {
+        Some(release) => format!(
+            "tilewright {} (release {release})\n",
+            env!("CARGO_PKG_VERSION")
+        ),
+        None => format!("tilewright {}\n", env!("CARGO_PKG_VERSION")),
     }
 }
 

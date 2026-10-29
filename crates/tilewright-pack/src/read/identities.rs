@@ -6,13 +6,16 @@
 //! addresses of its chunks, and its object uids.
 
 use super::{
-    bounded_identifier, bounded_text, maximum_document_bytes, stored_document, stored_stairwell,
-    text, utf8_column,
+    bounded_identifier, bounded_text, maximum_document_bytes,
+    rows::{
+        anchor_columns, anchor_row, chunk_coordinate, definition_columns, definition_row,
+        disagrees, identifier, integer, layer, plane_columns, plane_row, zone_columns, zone_row,
+    },
+    stored_document, stored_stairwell, utf8_column,
 };
-use crate::{Error, ErrorCode, MAXIMUM_OBJECT_INDEX, Pack, is_identifier};
+use crate::{Error, ErrorCode, MAXIMUM_OBJECT_INDEX, Pack};
 use rusqlite::Row;
-use tilewright_jsonc::{Document, MAX_SAFE_INTEGER, Value};
-use tilewright_source::CHUNK_SIZE;
+use tilewright_jsonc::Value;
 
 /// One identity of a pack, as [`Pack::visit_identities`] lists it.
 /// Documents are the stored canonical JSON: a plane's or definition's
@@ -67,127 +70,6 @@ pub enum Identity<'a> {
         cy: i64,
         index: usize,
     },
-}
-
-/// SQL for `column` when it is an integer, else NULL.
-fn integer(column: &str) -> String {
-    format!("CASE WHEN typeof({column}) = 'integer' THEN {column} END")
-}
-
-/// The identifier in column `index` of a row selected with
-/// [`bounded_identifier`]; `code` is the rule a bad one breaks.
-fn identifier(row: &Row<'_>, index: usize, what: &str, code: ErrorCode) -> Result<String, Error> {
-    utf8_column(row, index, code)?
-        .filter(|value| is_identifier(value))
-        .ok_or_else(|| Error::Rejected(code, format!("a {what} key is not an identifier")))
-}
-
-/// The 32-bit layer in column `index` of a row selected with [`integer`].
-fn layer(row: &Row<'_>, index: usize, what: &str, code: ErrorCode) -> Result<i32, Error> {
-    let value: Option<i64> = row.get(index)?;
-    value
-        .and_then(|layer| i32::try_from(layer).ok())
-        .ok_or_else(|| Error::Rejected(code, format!("a {what} layer is not a 32-bit integer")))
-}
-
-/// The integer in column `index` of a row selected with [`integer`], within
-/// the source format's integer range.
-fn position(row: &Row<'_>, index: usize, what: &str, code: ErrorCode) -> Result<i64, Error> {
-    let value: Option<i64> = row.get(index)?;
-    value
-        .filter(|value| (-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER).contains(value))
-        .ok_or_else(|| {
-            Error::Rejected(
-                code,
-                format!("a {what} position is not an integer within ±{MAX_SAFE_INTEGER}"),
-            )
-        })
-}
-
-/// The chunk coordinate in column `index` of a row selected with
-/// [`integer`]: one whose chunk, `CHUNK_SIZE` tiles across as format 1
-/// requires, keeps every tile within the format's integer range.
-fn chunk_coordinate(row: &Row<'_>, index: usize, code: ErrorCode) -> Result<i64, Error> {
-    let size = i64::from(CHUNK_SIZE);
-    let range = -(MAX_SAFE_INTEGER / size)..=(MAX_SAFE_INTEGER - (size - 1)) / size;
-    let value: Option<i64> = row.get(index)?;
-    value.filter(|value| range.contains(value)).ok_or_else(|| {
-        Error::Rejected(
-            code,
-            format!(
-                "a chunk coordinate is not an integer from {} to {}",
-                range.start(),
-                range.end()
-            ),
-        )
-    })
-}
-
-/// The error for a stored document that disagrees with its row.
-fn disagrees(what: &str, code: ErrorCode) -> Error {
-    Error::Rejected(
-        code,
-        format!("the document of {what} disagrees with its row"),
-    )
-}
-
-/// A row of `planes` selected as `id, kind, chunk_size, document`, and its
-/// stored document. As verification checks, the kind is one format 1
-/// defines, the chunk size is [`CHUNK_SIZE`], and the document agrees with
-/// the row on its format, ID, kind and chunk size.
-fn plane_row(row: &Row<'_>) -> Result<(String, Document), Error> {
-    let id = identifier(row, 0, "plane", ErrorCode::Plane)?;
-    let kind = utf8_column(row, 1, ErrorCode::Plane)?;
-    let chunk_size: Option<i64> = row.get(2)?;
-    let stored = stored_document(
-        utf8_column(row, 3, ErrorCode::Plane)?,
-        "a plane document",
-        ErrorCode::Plane,
-    )?;
-    if !kind
-        .as_deref()
-        .is_some_and(|kind| ["shared", "instanced", "per_player"].contains(&kind))
-        || chunk_size != Some(i64::from(CHUNK_SIZE))
-    {
-        return Err(Error::Rejected(
-            ErrorCode::Plane,
-            format!("plane {id} has an invalid kind or a chunk size other than {CHUNK_SIZE}"),
-        ));
-    }
-    if text(&stored, "format") != Some("tilewright.plane/1")
-        || text(&stored, "id") != Some(&id)
-        || text(&stored, "kind") != kind.as_deref()
-        || stored.root().get("chunk_size").and_then(Value::as_i64) != chunk_size
-    {
-        return Err(disagrees(&format!("plane {id}"), ErrorCode::Plane));
-    }
-    Ok((id, stored))
-}
-
-/// A row of `zones` selected as `plane, id, parent IS NULL, parent,
-/// document`, and its stored document, which agrees with the row on its ID
-/// and parent, as verification checks.
-fn zone_row(row: &Row<'_>) -> Result<(String, String, Document), Error> {
-    let (plane, id) = (
-        identifier(row, 0, "zone", ErrorCode::Zone)?,
-        identifier(row, 1, "zone", ErrorCode::Zone)?,
-    );
-    let parent = if row.get::<_, bool>(2)? {
-        None
-    } else {
-        Some(identifier(row, 3, "zone parent", ErrorCode::Zone)?)
-    };
-    let stored = stored_document(
-        utf8_column(row, 4, ErrorCode::Zone)?,
-        "a zone document",
-        ErrorCode::Zone,
-    )?;
-    if text(&stored, "id") != Some(&id)
-        || stored.root().get("parent").map(Value::as_str) != parent.as_deref().map(Some)
-    {
-        return Err(disagrees(&format!("zone {plane}/{id}"), ErrorCode::Zone));
-    }
-    Ok((plane, id, stored))
 }
 
 impl Pack {
@@ -254,12 +136,7 @@ impl Pack {
         self.visit_render_layers(visit)?;
 
         self.each_row(
-            &format!(
-                "SELECT {}, {}, {}, {document} FROM planes ORDER BY id",
-                key("id"),
-                key("kind"),
-                integer("chunk_size")
-            ),
+            &format!("SELECT {} FROM planes ORDER BY id", plane_columns()),
             &mut |row| {
                 let (id, stored) = plane_row(row)?;
                 visit(Identity::Plane {
@@ -269,12 +146,7 @@ impl Pack {
             },
         )?;
         self.each_row(
-            &format!(
-                "SELECT {}, {}, parent IS NULL, {}, {document} FROM zones ORDER BY plane, id",
-                key("plane"),
-                key("id"),
-                key("parent")
-            ),
+            &format!("SELECT {} FROM zones ORDER BY plane, id", zone_columns()),
             &mut |row| {
                 let (plane, id, stored) = zone_row(row)?;
                 visit(Identity::Zone {
@@ -315,29 +187,11 @@ impl Pack {
         )?;
         self.each_row(
             &format!(
-                "SELECT {}, {}, {document} FROM definitions ORDER BY type, id",
-                key("type"),
-                key("id")
+                "SELECT {} FROM definitions ORDER BY type, id",
+                definition_columns()
             ),
             &mut |row| {
-                let (kind, id) = (
-                    identifier(row, 0, "definition", ErrorCode::Definition)?,
-                    identifier(row, 1, "definition", ErrorCode::Definition)?,
-                );
-                let stored = stored_document(
-                    utf8_column(row, 2, ErrorCode::Definition)?,
-                    "a definition document",
-                    ErrorCode::Definition,
-                )?;
-                if text(&stored, "format") != Some("tilewright.def/1")
-                    || text(&stored, "type") != Some(&kind)
-                    || text(&stored, "id") != Some(&id)
-                {
-                    return Err(disagrees(
-                        &format!("definition {kind}/{id}"),
-                        ErrorCode::Definition,
-                    ));
-                }
+                let (kind, id, stored) = definition_row(row)?;
                 visit(Identity::Definition {
                     kind: &kind,
                     id: &id,
@@ -388,23 +242,16 @@ impl Pack {
         let key = bounded_identifier;
         self.each_row(
             &format!(
-                "SELECT {}, {}, {}, {}, {} FROM anchors ORDER BY plane, id",
-                key("plane"),
-                key("id"),
-                integer("layer"),
-                integer("x"),
-                integer("y")
+                "SELECT {} FROM anchors ORDER BY plane, id",
+                anchor_columns()
             ),
             &mut |row| {
-                let code = ErrorCode::Anchor;
+                let anchor = anchor_row(row)?;
                 visit(Identity::Anchor {
-                    plane: &identifier(row, 0, "anchor", code)?,
-                    id: &identifier(row, 1, "anchor", code)?,
-                    layer: layer(row, 2, "anchor", code)?,
-                    at: [
-                        position(row, 3, "anchor", code)?,
-                        position(row, 4, "anchor", code)?,
-                    ],
+                    plane: &anchor.plane,
+                    id: &anchor.id,
+                    layer: anchor.layer,
+                    at: [anchor.x, anchor.y],
                 })
             },
         )?;

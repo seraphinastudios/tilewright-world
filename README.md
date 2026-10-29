@@ -38,6 +38,7 @@ All are drafts until format 1.0 is frozen.
 | `tilewright-diff` | Compares the IDs of two worlds, source trees or packs, and reports removals, additions and renames |
 | `tilewright-edit` | Transactions: lossless structural edits, preview, rebase, staged apply with rollback, and inverses |
 | `tilewright-cli` | The `tilewright` command |
+| `tilewright-pack-wasm` | The pack reader for WebAssembly, behind the browser package |
 
 ## Go pack reader
 
@@ -46,6 +47,14 @@ All are drafts until format 1.0 is frozen.
 reads and verifies packs for Go servers and tools. Its versions are tags of
 the form `go/vX.Y.Z`. It and the Rust reader run the same conformance
 fixtures, [`fixtures/packs`](fixtures/packs/README.md).
+
+## Browser pack reader
+
+[`packages/tilewright-pack`](packages/tilewright-pack/README.md) is the npm
+package `@seraphinastudios/tilewright-pack`: the Rust reader compiled to
+WebAssembly (`crates/tilewright-pack-wasm`) with a TypeScript-typed ESM API,
+for games that read packs in the browser. It runs the same conformance
+fixtures. `tools/build-wasm.sh` builds it.
 
 ## Command line
 
@@ -68,18 +77,44 @@ between two worlds, each a source root or a pack, and exits 1 when one was
 removed or renamed without the allowlist accepting it. `tx preview` carries
 out a transaction in memory and lists the files it would change; `tx
 rebase` replays it on the tree as it is and records the new base; `tx
-apply` writes its inverse, then applies it (on Linux only; see
-docs/spec/TRANSACTIONS.md section 9). `fixtures/basic` is a small
-synthetic world that uses every feature of the format except terrain
-transitions, which `fixtures/terrain` shows.
+apply` writes its inverse, then applies it: with every guarantee on Linux,
+and as a best effort on macOS and Windows, where it is supported only in
+trees no one else can change and without access control lists of their
+own, and runs only with `--unchecked-access`, which accepts that those
+are not checked, as it does on Linux for trees on any file system but
+ext2/3/4, XFS, Btrfs, tmpfs, F2FS, ZFS and bcachefs, a container's overlay
+root included (keep the tree on a bind-mounted local volume there), and
+where it cannot tell the file system, as without a readable `/proc` (see
+SECURITY.md and docs/spec/TRANSACTIONS.md section 9).
+`fixtures/basic` is a small synthetic world that uses every feature of the
+format except terrain transitions, which `fixtures/terrain` shows.
+
+## Releases
+
+Each merge to `main` is released once the first release exists, as in
+the renderer and the editor. A release is an immutable GitHub release
+`vX.Y.Z`. It holds the `tilewright` CLI for Linux (x86_64 and ARM64,
+static), macOS (Intel and Apple silicon) and Windows x86_64, a source
+archive and the browser pack reader's npm tarball, with
+`SHA256SUMS` and build provenance attestations. It also tags the Go module
+`go/vX.Y.Z`. Versions stay at 0.x until format 1.0. See
+[docs/RELEASING.md](docs/RELEASING.md) for what is released, how to verify
+it, and how to turn on npm and crates.io publication.
 
 ## Development
 
-Rust 1.97.1 and Go 1.27.2 are pinned.
+Rust 1.97.1, Go 1.27.2 and, for the browser package's tests, Node.js
+26.10.0 are pinned. `tools/validate.sh` also builds the browser package with
+the wasm tools that `tools/build-wasm.sh` pins and downloads once.
 
 ```sh
 tools/validate.sh
 ```
+
+Where the temporary directory is on a file system publishing does not
+check, such as a container's overlay root, `tools/validate.sh` runs its
+transaction round trip with `--unchecked-access` and says so; with `CI`
+set it does not, so CI shows that an apply needs no consent there.
 
 Development is primarily agent-driven, under maintainer direction, review,
 tests and repository validation. Direct human-written code contributions are

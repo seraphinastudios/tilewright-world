@@ -12,7 +12,61 @@ contribute.
 | [Zstandard](https://github.com/facebook/zstd) | `zstd` (`zstd-sys`) | BSD-3-Clause (upstream offers BSD-3-Clause or GPL-2.0; used under BSD-3-Clause) |
 
 Rust crate dependencies keep their own licenses as recorded in `Cargo.lock`
-and their crate metadata. No outside source is copied into this repository.
+and their crate metadata. No outside source code is copied into this
+repository except the release planner's commit parsing (see "Release
+tooling" below); `PROVENANCE.md` records that and the outside license
+notices it keeps.
+Each release archive of the CLI carries `THIRD_PARTY_LICENSES.txt`, which
+`tools/release/package.py` assembles from the license files of every crate
+that binary compiles in.
+
+## Linked into the CLI binaries
+
+The toolchain links these into the released `tilewright` binaries besides
+the crates. Each release archive carries their notices.
+
+| Component | Platforms | License | Notice in the archive |
+| --- | --- | --- | --- |
+| The Rust standard library | All | Apache-2.0 OR MIT, with some parts under other permissive licenses | `RUST_LIBRARY_COPYRIGHT.html`, the pinned toolchain's `COPYRIGHT-library.html` |
+| [musl](https://musl.libc.org/), the C library | Linux (static) | MIT | In `THIRD_PARTY_LICENSES.txt`, from `tools/release/licenses/musl-COPYRIGHT` (see `PROVENANCE.md`) |
+
+The Windows binaries link Microsoft's C runtime statically, under the
+license terms of Microsoft's build tools. The macOS binaries link the
+system libraries dynamically.
+
+## WebAssembly reader (`packages/tilewright-pack`)
+
+The npm package `@seraphinastudios/tilewright-pack` ships the Rust pack
+reader compiled to WebAssembly by `crates/tilewright-pack-wasm`. On that
+target `rusqlite` takes SQLite from `sqlite-wasm-rs` instead of
+`libsqlite3-sys`, and these are compiled in besides the crates above:
+
+| Component | Pulled in by | License |
+| --- | --- | --- |
+| [SQLite](https://sqlite.org/) 3.53.0 | [`sqlite-wasm-rs`](https://github.com/Spxg/sqlite-wasm-rs) 0.5.5 (MIT), through `rusqlite`'s `ffi-sqlite-wasm-rs` feature | Public domain |
+| Parts of [musl](https://musl.libc.org/) libc (string, stdlib, math and stdio functions) | `sqlite-wasm-rs` | MIT |
+| [printf](https://github.com/eyalroz/printf) | `sqlite-wasm-rs` | MIT |
+| `rsqlite-vfs` 0.1.1, SQLite's in-memory file system | `sqlite-wasm-rs` | MIT |
+| `hashbrown` 0.16.1, and through it `foldhash` 0.2.0, and `thiserror` 2.0.21 | `rsqlite-vfs` | MIT OR Apache-2.0 (`foldhash`: Zlib) |
+| `wasm-bindgen` 0.2.129, `wasm-bindgen-shared` 0.2.129 and `js-sys` 0.3.106; through `wasm-bindgen-shared` `unicode-ident` 1.0.27; and through `js-sys` `futures-core`, `futures-task`, `futures-util`, `pin-project-lite` and `slab` | `tilewright-pack-wasm` | MIT OR Apache-2.0 (`slab`: MIT; `unicode-ident`: (MIT OR Apache-2.0) AND Unicode-3.0) |
+
+The package carries `THIRD_PARTY_LICENSES.md`, the license text of every
+crate and C library compiled into the module. Its
+`scripts/licenses.mjs` writes it from the crates `Cargo.lock` resolves for
+the module, and `tools/validate.sh` checks that it is current.
+
+Building the module also uses these tools, whose release archives
+`tools/build-wasm.sh` downloads once and checks by SHA-256 every time it
+unpacks them. Nothing of them is compiled in, except the
+JavaScript glue `wasm-bindgen` generates, which the package ships:
+
+| Tool | Version | License |
+| --- | --- | --- |
+| [wasi-sdk](https://github.com/WebAssembly/wasi-sdk) (clang and `llvm-ar`, for SQLite and zstd) | 34.0 | Apache-2.0 WITH LLVM-exception |
+| [wasm-bindgen](https://github.com/wasm-bindgen/wasm-bindgen) command | 0.2.129 | MIT OR Apache-2.0 |
+
+Node.js runs the package's tests only; the package has no npm
+dependencies.
 
 ## Go module (`go/`)
 
@@ -45,6 +99,17 @@ them is compiled into the reader:
 | golang.org/x/mod, golang.org/x/sync, golang.org/x/tools | v0.41.0, v0.23.0, v0.50.0 | BSD-3-Clause |
 | modernc.org/cc/v4, ccgo/v4, fileutil, gc/v2, gc/v3, goabi0, opt, sortutil, strutil, token | v4.29.7, v4.36.1, v1.4.0, v2.6.5, v3.1.5, v0.2.0, v0.2.0, v1.2.1, v1.2.1, v1.1.0 | BSD-3-Clause |
 
-No dependency is GPL or AGPL licensed. To list what a build compiles in, run
+No dependency is GPL or AGPL licensed. Zstandard is also offered under
+GPL-2.0 and is used under BSD-3-Clause. To list what a build compiles in, run
 `go list -deps -f '{{with .Module}}{{.Path}} {{.Version}}{{end}}' ./...` in
 `go/`, with `GOOS` set for other platforms.
+
+## Release tooling (`scripts/release/`)
+
+The release planner has no dependencies. `scripts/release/commits.cjs`
+adapts commit-parsing logic from conventional-commits-parser,
+conventional-commits-filter and @semantic-release/commit-analyzer (MIT)
+and conventional-changelog-conventionalcommits (ISC), as `PROVENANCE.md`
+records; `scripts/release/THIRD_PARTY_LICENSES.md` holds their notices.
+It is not in the CLI binaries or the npm package; the release's source
+archive carries it together with those notices.

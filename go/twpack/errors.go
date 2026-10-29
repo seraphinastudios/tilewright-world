@@ -29,7 +29,7 @@ const (
 	// CodeSchema: the schema is not exactly the format's.
 	CodeSchema Code = "pack.schema"
 	// CodeIdentity: the application ID, user version or page size is not
-	// the format's.
+	// the format's, or the SQLite header's file format versions are not 1.
 	CodeIdentity Code = "pack.identity"
 	// CodeFreePages: the pack has free pages.
 	CodeFreePages Code = "pack.free_pages"
