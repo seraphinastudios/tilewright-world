@@ -15,7 +15,10 @@ already verified candidate: it packages again and can execute build hooks.
 ## Select and review a concrete source release
 
 After the candidate release support and this helper have passed review and
-merged to `main`, select a successful `release.yml` source release. Do not use
+merged to `main`, select a successful `release.yml` source release. The first
+source release requires a separate owner-authorized manual dispatch of the
+Release workflow on `main`; ordinary pushes deliberately skip that initial
+publication. This helper does not dispatch workflows or create releases. Do not use
 PR artifacts, maintenance branches or an unreviewed `latest` selection. Record
 these exact fields in an owner-local decision JSON file outside the checkout:
 
