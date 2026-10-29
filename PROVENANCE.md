@@ -71,3 +71,15 @@ never copied, adapted or used as a dependency.
   Second, a breaking-change note that runs into a trailing field line
   counts; the parser threw on it.
   `scripts/release/THIRD_PARTY_LICENSES.md` holds their notices.
+
+## Owner publication API contract research
+
+The owner-first-publication work consults the primary crates.io OpenAPI
+contracts and `src/controllers/user/me.rs` at revision
+`8ba796b818baaee0bbd6a813b0524949ce511ca7` of
+<https://github.com/rust-lang/crates.io>. This source is available under MIT
+(`LICENSE-MIT`, Copyright (c) 2014 The Rust Project Developers). Only endpoint
+authentication and response contract facts inform the new helper and its
+documentation; no implementation, tests, fixtures or source text are copied
+or adapted. The upload framing reference is the Cargo Book's
+[Registry Web API](https://doc.rust-lang.org/cargo/reference/registry-web-api.html).
