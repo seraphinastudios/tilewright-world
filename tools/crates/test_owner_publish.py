@@ -54,6 +54,11 @@ class PreflightTests(unittest.TestCase):
         with self.assertRaises(P.Refusal):
             P.decode('{"attempt":1,"attempt":2}')
 
+    def test_github_repository_endpoint_has_no_trailing_slash(self):
+        with patch.object(P, "request", return_value=(200, b'{"id":1}')) as request:
+            self.assertEqual(P.api(""), {"id": 1})
+            request.assert_called_once_with("api.github.com", f"/repos/{P.REPOSITORY}")
+
     def test_release_must_bind_tags_main_repository_and_run_attempt(self):
         evidence = github()
         with patch.object(P, "api", side_effect=evidence.__getitem__):

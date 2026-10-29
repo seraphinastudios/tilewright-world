@@ -72,7 +72,7 @@ def request(host, path, *, limit=MAX_JSON):
 
 
 def api(path):
-    status, data = request("api.github.com", f"/repos/{REPOSITORY}/{path}")
+    status, data = request("api.github.com", f"/repos/{REPOSITORY}" + (f"/{path}" if path else ""))
     require(status == 200, "required GitHub evidence is unavailable")
     return decode(data)
 
