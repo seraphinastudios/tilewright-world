@@ -157,9 +157,7 @@ fn run(arguments: &[&OsStr]) -> Result<String, Failure> {
 
 fn run_command(arguments: &[&OsStr]) -> Result<String, Failure> {
     match arguments {
-        [command] if *command == "--version" => {
-            Ok(format!("tilewright {}\n", env!("CARGO_PKG_VERSION")))
-        }
+        [command] if *command == "--version" => Ok(version()),
         [command, root] if *command == "validate" => validate(Path::new(root), false),
         [command, flag, root] if *command == "validate" && *flag == "--json" => {
             validate(Path::new(root), true)
@@ -173,6 +171,19 @@ fn run_command(arguments: &[&OsStr]) -> Result<String, Failure> {
             inspect(Path::new(pack), limits)
         }
         _ => Err(Failure::message(USAGE)),
+    }
+}
+
+/// The `--version` line: the crate version, which packs record as their
+/// compiler, and the release when the release workflow built this binary
+/// (`TILEWRIGHT_RELEASE`, see docs/RELEASING.md).
+fn version() -> String {
+    match option_env!("TILEWRIGHT_RELEASE") {
+        Some(release) => format!(
+            "tilewright {} (release {release})\n",
+            env!("CARGO_PKG_VERSION")
+        ),
+        None => format!("tilewright {}\n", env!("CARGO_PKG_VERSION")),
     }
 }
 

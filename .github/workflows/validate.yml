@@ -5,12 +5,16 @@ on:
   push:
     branches:
       - main
+  # The release workflow revalidates the revision it releases.
+  workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  group: world-validation-${{ github.event.pull_request.number || github.ref }}
+  # A called workflow sees its caller's github.workflow, so a release's
+  # validation does not cancel, or get cancelled by, the push's own run.
+  group: world-validation-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
