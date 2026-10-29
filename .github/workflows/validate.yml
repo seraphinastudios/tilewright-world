@@ -25,6 +25,8 @@ jobs:
     steps:
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # The toolchain go/go.mod names, for the Go pack reader. No cache, so
       # nothing a run writes is restored into another.
