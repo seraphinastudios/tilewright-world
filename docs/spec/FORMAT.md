@@ -53,7 +53,10 @@ integer range of section 3.
 
 Only the files above are read. `planes/` and `defs/` are optional, but if
 present they must be directories. Under them, any other file or directory is
-an error, and so is a symbolic link anywhere in a path that is read. Other files at the root, such as assets, scripts or a README, are
+an error, and so is a symbolic link anywhere in a path that is read (on
+Windows, any reparse point, junctions included, so a tree in a OneDrive
+folder, whose files are cloud placeholders even when kept on the device,
+cannot be loaded there). Other files at the root, such as assets, scripts or a README, are
 ignored. Assets such as images and sounds stay ordinary files referenced by
 path or by an ID the profile defines.
 

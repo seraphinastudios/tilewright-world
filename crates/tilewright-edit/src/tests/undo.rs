@@ -30,7 +30,7 @@ fn reparsed(name: &str, text: &str) -> Transaction {
 }
 
 fn published(plan: &Plan) {
-    if let Err(error) = plan.publish() {
+    if let Err(error) = publish(plan) {
         panic!("{error:#?}");
     }
 }

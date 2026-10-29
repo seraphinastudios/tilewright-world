@@ -4,6 +4,8 @@ set -euo pipefail
 repository=$(git rev-parse --show-toplevel)
 cd "${repository}"
 
+python3 -m unittest discover -s tools/crates -p 'test_*.py'
+
 cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace --all-targets
@@ -36,9 +38,26 @@ for output in "${first}/sealed.jsonc" "${second}/sealed.jsonc"; do
   cargo run --locked --quiet --package tilewright-cli -- tx rebase fixtures/transactions/orchard.jsonc "${first}/source" "${output}"
 done
 cmp "${first}/sealed.jsonc" "${second}/sealed.jsonc"
-cargo run --locked --quiet --package tilewright-cli -- tx apply "${first}/sealed.jsonc" "${first}/source" "${first}/undo.jsonc"
+# Applying is refused, with nothing written, where publishing does not check
+# everything (docs/spec/TRANSACTIONS.md section 9), as where the scratch
+# tree is on a container's overlay root: then the round trip runs with
+# --unchecked-access, and says so. On CI, whose scratch tree is on a local
+# file system, it must apply without it.
+apply() {
+  local refusal
+  if refusal=$(cargo run --locked --quiet --package tilewright-cli -- tx apply "$@" 2>&1); then
+    printf '%s\n' "${refusal}"
+  elif [[ -z ${CI:-} && ${refusal} == *"pass --unchecked-access to accept that"* ]]; then
+    echo "tools/validate.sh: the scratch tree's file system is not checked here, so the round trip runs with --unchecked-access" >&2
+    cargo run --locked --quiet --package tilewright-cli -- tx apply --unchecked-access "$@"
+  else
+    printf '%s\n' "${refusal}" >&2
+    return 1
+  fi
+}
+apply "${first}/sealed.jsonc" "${first}/source" "${first}/undo.jsonc"
 cargo run --locked --quiet --package tilewright-cli -- validate "${first}/source"
-cargo run --locked --quiet --package tilewright-cli -- tx apply "${first}/undo.jsonc" "${first}/source" "${first}/redo.jsonc"
+apply "${first}/undo.jsonc" "${first}/source" "${first}/redo.jsonc"
 diff -r fixtures/basic "${first}/source"
 
 # The Go pack reader, whose tests run the shared fixtures in fixtures/packs.
@@ -70,5 +89,14 @@ tools/build-wasm.sh --check
   node --test "test/*.test.js"
   node scripts/licenses.mjs --check
 )
+
+# Exercise the real unpublished crate graph after the source/Go/browser checks.
+# The candidate directory itself must be absent and outside the checkout.
+candidate_parent=$(mktemp -d /tmp/tilewright-world-candidates.XXXXXX)
+trap 'rm -rf -- "${first}" "${second}" "${candidate_parent}"' EXIT
+# macOS exposes /tmp through /private/tmp; retain the original cleanup path.
+candidate_output_parent=$(cd -- "${candidate_parent}" && pwd -P)
+python3 tools/crates/prepare.py prepare "${candidate_output_parent}/candidates"
+python3 tools/crates/prepare.py verify "${candidate_output_parent}/candidates" --build
 
 git diff --check

@@ -194,7 +194,8 @@ lacks is added in the same way. After the operations, every chunk that tile
 operations touched and that holds no content (no objects, and every terrain
 grid empty: no cell set, every height 0) is deleted. Applying a transaction
 creates the directories new files need and removes those that deleting files
-left empty, below `planes/`, `defs/` and `profile/`.
+left empty, below `planes/`, `defs/` and `profile/`, unless one's mode or
+group is not that of the directory above it (section 9).
 
 ## 5. Terrain
 
@@ -372,25 +373,79 @@ carrying it out validated. Not guaranteed:
 
 ## 9. Applying
 
-Publishing is supported on Linux only. Elsewhere it is refused, with
-`tx.io`, and nothing is written: some platforms cannot reach files through
-directory handles, so a process changing the tree could redirect a write
-outside it, and the others cannot be checked for access control lists in
-the same way. Previewing and rebasing work everywhere.
+Publishing is supported on Linux, macOS and Windows, with these
+guarantees:
+
+| | Linux | macOS | Windows |
+| --- | --- | --- | --- |
+| Reaches files | Through directory handles | Through directory handles | By path, each component checked first |
+| A link swapped in by another process during the apply | Never followed | Never followed | Can redirect a write, rename or removal |
+| Access control lists | Refused on the local file systems below; on any other neither checked nor kept | Neither checked nor kept | Neither checked nor kept |
+| Labels (SELinux, Smack) | Compared, never set | None | None |
+| The lock | `flock` of the root | `flock` of the root | The file `.tilewright.lock` in the root |
+| Directory syncs | Yes | Yes, with `F_FULLFSYNC` where the file system has it | No: renames may not be durable yet |
+| Publishes by default | On the local file systems below; on any other only with unchecked access | No: only with unchecked access | No: only with unchecked access |
+
+Only on Linux does publishing keep every guarantee of this section, and
+there only on the local file systems that keep their access control lists
+as the extended attributes it reads (below): ext2, ext3, ext4, XFS, Btrfs,
+tmpfs, F2FS, ZFS and bcachefs. On macOS and Windows it is a best effort:
+it is supported only in trees that no one else can change, and in which no
+file or directory has an access control list of its own (on Windows, a
+file has the list its directory gives it), since a replaced file, or one
+an inverse makes again, takes the access its directory gives a new file,
+and nothing can check that from safe code. The same holds on Linux for a
+tree, or a directory above a file the transaction changes, on any other
+file system: network, host-shared (WSL's mounts of Windows drives, a
+virtual machine's shared folders), FUSE, NTFS and stacked ones among them,
+whose lists Linux may not show at all. Publishing tells a directory's file
+system by both the type the kernel names its mount with, found by mount
+ID (from `statx`, or before Linux 5.8 from the descriptor's
+`/proc/self/fdinfo` entry) in `/proc/self/mountinfo`, and the magic number
+`statfs` gives, which must be that type's: a 9p share passes on its host's
+magic number, but its mount's type is `9p`. `/proc/self/mountinfo` is read
+a line at a time, each on its own, so a line that is malformed or longer
+than 64 KiB, as anyone who mounts a FUSE file system can make one, leaves
+only its own mount untold. Where a directory's file system cannot be told,
+because `/proc` cannot be read (as in some hardened containers or a plain
+chroot), the kernel gives no mount ID (before Linux 3.15), or its mount's
+line is not there or cannot be read, it counts as unchecked too, and the
+refusal says why rather than naming a file system. overlayfs is not
+checked either, since its upper layer may be remote, so a tree on a
+container's overlay root needs unchecked access; a local volume
+bind-mounted into the container does not. So in each of these cases
+publishing is refused by default, with `tx.io`, and nothing is written: it
+goes ahead only when the caller accepts what is not checked, with
+unchecked access (the library's `PublishOptions::unchecked_access`, the
+command line's `--unchecked-access`), and the command line then warns,
+naming it, and on Linux the file system, or why it could not be told.
+Elsewhere unchecked access changes nothing. On other systems, the BSDs
+included, publishing is refused, with `tx.io`, and nothing is written:
+they are untested. Previewing and rebasing work everywhere.
 
 Publishing a carried-out transaction works on the root it was carried out
-on: the directory opened then, whatever its path names later. It:
+on: through directory handles, the directory opened then, whatever its
+path names later; on Windows, the absolute path it was opened at. It:
 
 1. takes the source root's exclusive lock (an advisory `flock` of the root
-   directory), so two applies cannot interleave, and reads the permissions
-   of the files it changes and of the directories above them (below);
+   directory; on Windows the file `.tilewright.lock` in the root, created
+   afresh, shared with no one and deleted when released, even by a process
+   that stops, so a file by that name that no apply holds is an error), so
+   two applies cannot interleave, and reads
+   the permissions of the files it changes and of the directories above
+   them (below);
 2. writes each new file beside its target as `.<name>.tilewright-tmp`,
    created fresh (whatever was at that name is removed first, so a link or
-   hard link there is never written through), only its owner's until it is
-   written, then with the mode and group given below and without an access
-   control list its directory would give it, and synced; a failure removes
-   every staging file it wrote and the directories it created, and reports
-   one it created that is no longer empty;
+   hard link there is never written through); checks, before a byte is
+   written, the labels the system gave it (on Linux, below); writes it,
+   only its owner's on Unix until then; gives it the mode and group given
+   below, without an access control list its directory would give it on
+   Linux; and syncs it. Beside each file it deletes it stages an empty file the same
+   way, with the access a file made there again gets, as the inverse would
+   make it, so that a file is deleted only if its inverse can make it again
+   (below); that file goes with the deleted one. A failure removes every
+   staging file it wrote and the directories it created, and reports one it
+   created that is no longer empty;
 3. reads every file the transaction touched or consulted again and compares
    it with the files it was carried out on, then validates the tree with
    the transaction's files again, and its terrain addresses against that
@@ -407,34 +462,88 @@ on: the directory opened then, whatever its path names later. It:
    beside it goes, so that a failure there leaves the file;
 5. removes the staging files left beside any file the transaction touched or
    consulted, removes the directories deleting files emptied, and syncs
-   every directory whose entries changed. A staging entry or an emptied
-   directory that cannot be removed is reported, the former since the tree
-   does not validate while it is there.
+   every directory whose entries changed. An emptied directory whose mode
+   or group is not that of the directory above it is left, empty: an
+   inverse makes a directory again with the access of the nearest one
+   that is there, so it would make it, and the file in it, otherwise. A
+   staging entry or an emptied directory that cannot be removed is
+   reported, once, the former since the tree does not validate while it is
+   there.
 
 A transaction moves content between files: a renamed file's, a moved
 object's, a deleted file's that its inverse creates again. So the files it
 changes and every directory above them, up to the root, must be reachable
 by the same users, which publishing checks before it writes anything and
 again just before it renames: the classes that may read each file, and
-search each directory, must be the same, and where the group may and
-others may not, the group must be the same; and none may have an access
-control list (POSIX, NFS version 4
-or rich, or a default one a directory gives new files), whose entries the
-mode bits do not show. Otherwise publishing is refused with `tx.io`, naming
-two that differ, and nothing is written. A file written where a file is
-keeps that file's mode and group. A new file takes the mode of the
-directory above it without the execute bits, and its group, and a new
-directory the mode and group of the directory above it. A group the user
-may not give is an error, since the group bits would otherwise apply to
-another group. A mandatory access control label (SELinux or Smack) on a
-changed file, a directory above it, a staged file or a restored one is
-refused like an access control list: who may read under one is up to a
-policy that may label a replacement, or a file created again, otherwise.
-So publishing is refused on systems that label every file. The owner of
-every file written is the user applying, who could read them all. A file
-whose bytes end as they began is not written. Restoring after a failure
-gives every file back the mode and group it had. Other extended
-attributes are not kept.
+search each directory, must be the same, where the group may and others
+may not, the group must be the same, and where not everyone may, the
+owner must be the same. Otherwise publishing is
+refused with `tx.io`, naming two that differ, and nothing is written. So
+is a mode whose classes do not nest, one that lets others read, or
+search, what it denies the group, or the group what it denies the owner
+(such as `0604`): who may read under it depends on who owns the entry and
+which group it has, and a file publishing writes is owned by the user
+applying. A
+file written where a file is keeps that file's mode and group. A new file
+takes the mode of the directory above it without the execute bits, and its
+group, and a new directory the mode and group of the directory above it;
+every file staged, the empty one beside a deleted file and a new file
+included, every file restored and every directory made must then be
+reachable by the same users as the files and directories compared, its
+owner, the user applying, counting where not everyone may read: so another
+user's restricted file is not replaced, a file is deleted only if its
+inverse makes it again for the users who could read it, and a file is made
+only if a later transaction, its inverse among them, could change it. A group the user may not give is an
+error, since the group bits would otherwise apply to another group. The
+owner of every file written is the user applying, who could read them all.
+Where there are no modes (Windows), only the read-only attribute is
+compared, and a read-only file is refused, as is an encrypted (EFS) file
+or directory, since a file written in its place would not be encrypted.
+
+On Linux, a file or directory with an access control list (POSIX, NFS
+version 4, also as ZFS shows it, or rich, or a default one a directory
+gives new files), whose entries the mode bits do not show, is refused like
+one that differs. The
+mandatory access control labels (SELinux and Smack) of the files and
+directories compared must be the same too, or all absent: who may read
+under a label is up to the system's policy. Publishing never sets a label.
+Every file it stages or restores, and every directory it creates, must be
+given that same label by the policy, which is checked before a byte is
+written or the directory used; otherwise publishing fails and nothing is
+published. A tree whose files and directories carry one label, as a user's
+files commonly do under SELinux, can be published. A new file is staged
+under another name, and renaming does not relabel it, so for a new file,
+and for the empty file staged beside a deleted one, publishing first asks
+SELinux (through `/sys/fs/selinux/create`) which labels the policy gives a
+new file of the final name and one of the staging name, which may differ
+by a rule keyed on the name, and refuses, before anything is staged,
+unless they are the same, or if the policy cannot be asked; a process that
+sets the label of what it makes (`setfscreatecon`) gives both that label. Smack's execution, mapping and transmuting labels
+(`SMACK64EXEC`, `SMACK64MMAP`, `SMACK64TRANSMUTE`) are refused, since a
+replacement, or a directory made again, would not get them.
+
+A file whose bytes end as they began is not written. Restoring after a
+failure gives every file back the mode and group it had. Other extended
+attributes are not kept, nor on Windows other streams and attributes, nor
+on macOS and Windows access control lists. Nothing beneath the root that
+is a reparse point on Windows is used: a symbolic link, junction or mount
+point, and also a cloud placeholder, a deduplicated file or one compressed
+by the Windows overlay filter, is refused as a link when it is checked.
+Loading refuses them too, so a tree in a OneDrive folder, whose files and
+directories are cloud placeholders even when they are kept on the device,
+cannot be loaded, previewed or applied on Windows. (A file NTFS compresses
+is not a reparse point; its compression, an attribute, is not kept.) A
+transaction that touches or consults two paths, or two directories on
+their way, that differ only in case is refused with `tx.path`, since macOS and Windows, and some other file
+systems, take them for one file; so is one with a path a component of
+which ends in a dot or a space, which Windows drops from a name; on
+Windows, one with a component that names a device (`CON`, `PRN`, `AUX`,
+`NUL`, `COM0` to `COM9`, `LPT0` to `LPT9`, whatever its case and
+extension); and so is
+one that names a file, or a directory on its way, that the file system
+finds by that name although it is named otherwise on disk (`TREE.jsonc`
+for `tree.jsonc` where case is not told apart), which validation would
+take for another file.
 
 Each rename and removal is atomic, but there is no atomic publication of
 several files. If a step of 4 fails, the files already published are
@@ -445,7 +554,10 @@ not be restored. Whenever nothing is published, the cleanup is synced too.
 An error always says three things: whether every file was published,
 whether every directory it changed was synced, and whether the cleanup
 finished, naming any staging file or directory it could not remove, to be
-removed by hand. If the process stops during step 4 (a crash or power
+removed by hand; one whose removal took effect but waits for another
+program that has it open to close it, as on Windows on file systems without
+POSIX removal (FAT, exFAT, some SMB shares), is named as going by itself,
+with nothing to do. If the process stops during step 4 (a crash or power
 loss), some files have the new bytes and the others the old ones, and
 staging files may remain; the loader rejects a staging file below `planes/`
 or `defs/`, so the tree fails validation until it is repaired. To repair
@@ -461,11 +573,16 @@ source tree's version control is the other way back.
 Carrying out ignores whatever is at the staging name beside every file a
 transaction touches or consults, a link or special file included.
 
-Staging names, `.<name>.tilewright-tmp`, are reserved beside source files.
+Staging names, `.<name>.tilewright-tmp`, are reserved beside source files,
+and `.tilewright.lock` in the root: on Windows it is the lock, and
+publishing there refuses to take a lock file that no apply holds rather
+than remove it.
 A program other than the toolkit changing the tree at the same moment can
-race a publish: the lock only orders applies. Where a directory cannot be
-synced, the command line's writes of its outputs say that their names may
-not be durable yet.
+race a publish: the lock only orders applies, and on Windows such a
+program can also redirect one by swapping a link in. Windows cannot sync a
+directory, so a publish there reports that it was not made durable, and
+the command line's writes of its outputs say that their names may not be
+durable yet.
 
 ## 10. Canonical layout
 
@@ -532,25 +649,37 @@ edited files.
 | `tx.shape` | The document's shape: an unknown key or operation, a missing or mistyped value. |
 | `tx.conflict` | A precondition failed (section 7), or the files changed while applying. |
 | `tx.result` | Replaying the transaction gave other bytes than its `result`. |
-| `tx.path` | A path no transaction may touch, or a symbolic link in the way. |
+| `tx.path` | A path no transaction may touch, a symbolic link in the way, or, when publishing, a path a file system could take for another's (section 9). |
 | `tx.limit` | A limit of section 11. |
-| `tx.io` | Reading or writing failed. |
+| `tx.io` | Reading or writing failed, or publishing is refused on this platform or for the access of the files (section 9). |
 
 ## 13. Command line
 
 ```sh
 tilewright tx preview [--json] TRANSACTION ROOT
 tilewright tx rebase TRANSACTION ROOT OUTPUT
-tilewright tx apply TRANSACTION ROOT INVERSE
+tilewright tx apply [--unchecked-access] TRANSACTION ROOT INVERSE
 ```
 
 `preview` carries the transaction out and prints the files it would create
 (`A`), modify (`M`) and delete (`D`), or with `--json` an object with each
 file's change and digests. `rebase` writes the transaction replayed on the
 tree as it is to `OUTPUT`. `apply` writes the inverse to `INVERSE`, then
-publishes. Neither replaces an existing file, and neither writes into the
-source tree's `world.jsonc`, `profile/`, `planes/` or `defs/`, or at
-`.world.jsonc.tilewright-tmp`, where publishing stages `world.jsonc`.
+publishes. Neither replaces an existing file. Inside the source tree,
+neither writes:
+
+- into `world.jsonc`, `profile/`, `planes/` or `defs/`;
+- at `.world.jsonc.tilewright-tmp`, where publishing stages `world.jsonc`,
+  or at `.tilewright.lock`, the lock on Windows;
+- at a name that a file system could take for one of those: names are
+  compared without case and without trailing dots and spaces, and a path
+  with a component that is not ASCII, which a file system may fold by
+  rules of its own, or that holds a colon, which on Windows names a stream
+  of a file, is refused anywhere in the tree.
+
+Where publishing does not check everything (section 9), `apply` refuses
+before writing anything, the inverse included, unless `--unchecked-access`
+accepts that; it then warns on standard error, naming what is not checked.
 
 Each command runs the undo check of section 8.1 after carrying the
 transaction out, and refuses a transaction that fails it, writing nothing:

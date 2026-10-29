@@ -19,8 +19,26 @@ pub(super) fn run(arguments: &[&OsStr]) -> Result<String, Failure> {
         [command, transaction, root, output] if *command == "rebase" => {
             rebase(Path::new(transaction), Path::new(root), Path::new(output))
         }
-        [command, transaction, root, inverse] if *command == "apply" => {
-            apply(Path::new(transaction), Path::new(root), Path::new(inverse))
+        // The flag with an argument missing is a usage error, not a path.
+        [command, transaction, root, inverse]
+            if *command == "apply" && *transaction != "--unchecked-access" =>
+        {
+            apply(
+                Path::new(transaction),
+                Path::new(root),
+                Path::new(inverse),
+                false,
+            )
+        }
+        [command, flag, transaction, root, inverse]
+            if *command == "apply" && *flag == "--unchecked-access" =>
+        {
+            apply(
+                Path::new(transaction),
+                Path::new(root),
+                Path::new(inverse),
+                true,
+            )
         }
         _ => Err(Failure::message(USAGE)),
     }
@@ -132,8 +150,11 @@ fn preview(transaction: &Path, root: &Path, json: bool) -> Result<String, Failur
 }
 
 /// Refuses an output inside the source tree's documents, where it would
-/// itself become a stray source file, or at the name `world.jsonc` is
-/// staged in, which publishing replaces.
+/// itself become a stray source file; at `world.jsonc`, the name it is
+/// staged in, which publishing replaces, or the lock file; at a name that
+/// a file system could take for one of those, without case or trailing
+/// dots and spaces; and anywhere in the tree at a path with a component
+/// that is not ASCII or holds a colon.
 fn outside(root: &Path, path: &Path) -> Result<(), Failure> {
     let parent = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
@@ -144,19 +165,42 @@ fn outside(root: &Path, path: &Path) -> Result<(), Failure> {
     else {
         return Ok(());
     };
-    let documents = ["planes", "defs", "profile"].map(std::ffi::OsStr::new);
-    let staging = tilewright_edit::staging_name("world.jsonc");
-    let inside = parent.join(name).strip_prefix(&root).is_ok_and(|relative| {
-        relative == Path::new("world.jsonc")
-            || relative == Path::new(&staging)
-            || relative
-                .components()
-                .next()
-                .is_some_and(|first| documents.contains(&first.as_os_str()))
-    });
+    // Compared as macOS and Windows compare names by default: without
+    // case, and, on Windows, without trailing dots and spaces.
+    let folded = |path: &Path| -> Vec<String> {
+        path.components()
+            .map(|component| {
+                component
+                    .as_os_str()
+                    .to_string_lossy()
+                    .trim_end_matches(['.', ' '])
+                    .to_lowercase()
+            })
+            .collect()
+    };
+    let (root, target) = (folded(&root), folded(&parent.join(name)));
+    let reserved = [
+        "world.jsonc".to_owned(),
+        tilewright_edit::staging_name("world.jsonc"),
+        tilewright_source::LOCK_NAME.to_owned(),
+    ];
+    // Within the tree, a name that is not ASCII is refused too: a file
+    // system may fold it into a reserved one by rules of its own.
+    let inside = target
+        .strip_prefix(root.as_slice())
+        .is_some_and(|relative| {
+            matches!(relative, [only] if reserved.contains(only))
+                || relative
+                    .first()
+                    .is_some_and(|first| ["planes", "defs", "profile"].contains(&first.as_str()))
+                || relative.iter().any(|component| !component.is_ascii())
+                // On Windows a colon names a stream of a file, which goes
+                // with the file when publishing replaces it.
+                || relative.iter().any(|component| component.contains(':'))
+        });
     if inside {
         return Err(Failure::message(format!(
-            "{} is inside the source tree's documents; write it elsewhere",
+            "{} is inside the source tree where publishing writes, or may be taken for such a name; write it elsewhere",
             shown(path)
         )));
     }
@@ -192,14 +236,41 @@ fn rebase(transaction: &Path, root: &Path, output: &Path) -> Result<String, Fail
     ))
 }
 
-fn apply(transaction: &Path, root: &Path, inverse: &Path) -> Result<String, Failure> {
+/// Whether `tx apply` may publish `plan`: where publishing does not check
+/// everything (on macOS and Windows, and on Linux on some file systems),
+/// only with `--unchecked-access`. Returns the warning to give when it was
+/// accepted.
+fn consent(plan: &Plan, unchecked_access: bool) -> Result<Option<String>, Failure> {
+    let unchecked = plan.unchecked_access().map_err(|problems| Failure {
+        output: diagnostics_text(&problems, false),
+        message: format!("{} problem(s); nothing was written", problems.len()),
+    })?;
+    match unchecked {
+        Some(unchecked) if !unchecked_access => Err(Failure::message(format!(
+            "tx apply here does not check everything: {unchecked}; pass --unchecked-access to accept that (SECURITY.md says what it guarantees on each platform); nothing was written"
+        ))),
+        Some(unchecked) => Ok(Some(format!(
+            "warning: with --unchecked-access, tx apply does not check everything here: {unchecked}"
+        ))),
+        None => Ok(None),
+    }
+}
+
+fn apply(
+    transaction: &Path,
+    root: &Path,
+    inverse: &Path,
+    unchecked_access: bool,
+) -> Result<String, Failure> {
     if !tilewright_edit::PUBLISH_SUPPORTED {
         return Err(Failure::message(
-            "tx apply is supported only on Linux, where files are reached through directory handles and checked for access control lists; tx preview and tx rebase work here",
+            "tx apply is supported only on Linux, macOS and Windows (SECURITY.md says what it guarantees on each); tx preview and tx rebase work here",
         ));
     }
     outside(root, inverse)?;
     let plan = plan(&read(transaction, false)?, root, false, false)?;
+    // Refused before anything is written, the inverse included.
+    let warning = consent(&plan, unchecked_access)?;
     // The inverse is durable before any file changes, so an interrupted
     // apply can be undone with it, where the platform can make it so.
     let inverse_durable = write(inverse, plan.inverse())?;
@@ -208,7 +279,11 @@ fn apply(transaction: &Path, root: &Path, inverse: &Path) -> Result<String, Fail
     } else {
         "; the inverse's name could not be synced, so it may not be durable yet"
     };
-    let published = plan.publish().map_err(|error| Failure {
+    if let Some(warning) = warning {
+        eprintln!("tilewright: {}", super::terminal_safe(&warning));
+    }
+    let options = tilewright_edit::PublishOptions { unchecked_access };
+    let published = plan.publish_with(&options).map_err(|error| Failure {
         output: diagnostics_text(&error.problems, false),
         message: format!(
             "{}; {} problem(s){unsynced_inverse}",
@@ -343,6 +418,8 @@ mod tests {
             &["tx"][..],
             &["tx", "preview"],
             &["tx", "apply", "a", "b"],
+            &["tx", "apply", "--unchecked-access", "a", "b"],
+            &["tx", "apply", "--unchecked", "a", "b", "c"],
             &["tx", "frob", "a", "b"],
         ] {
             assert!(run(arguments).unwrap_err().message.starts_with("usage:"));
@@ -407,8 +484,8 @@ mod tests {
             );
         };
         refused(run(&["tx", "preview", &path("stroke.jsonc"), &root]).unwrap_err());
-        // Publishing is supported on Linux only.
-        #[cfg(target_os = "linux")]
+        // Publishing is supported on Linux, macOS and Windows.
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         {
             refused(
                 run(&[
@@ -425,8 +502,67 @@ mod tests {
         assert_eq!(fs::read(&chunk).unwrap(), before);
     }
 
-    // Publishing is supported on Linux only.
-    #[cfg(target_os = "linux")]
+    // Publishing is supported on Linux, macOS and Windows.
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn apply_needs_consent_where_access_is_unchecked() {
+        let (directory, root) = setup();
+        let path = |name: &str| directory.path().join(name).display().to_string();
+        let chunk = Path::new(&root).join("planes/overworld/layers/0/1_0.jsonc");
+        let planned = super::plan(
+            &super::read(Path::new(&path("tx.jsonc")), false).unwrap(),
+            Path::new(&root),
+            false,
+            false,
+        )
+        .unwrap();
+        let applied = run(&["tx", "apply", &path("tx.jsonc"), &root, &path("undo.jsonc")]);
+        // Only Linux checks everything, on the local file systems a test's
+        // directory is on, and needs no consent.
+        let unchecked = planned.unchecked_access().unwrap();
+        // On Linux the file system may go untold only where /proc cannot
+        // be read.
+        if tilewright_edit::UNCHECKED_ACCESS.is_none()
+            && let Some(unchecked) = &unchecked
+            && unchecked.contains("could not be told")
+        {
+            assert!(
+                fs::File::open("/proc/self/mountinfo").is_err(),
+                "{unchecked}"
+            );
+        }
+        let Some(unchecked) = unchecked else {
+            assert!(super::consent(&planned, false).unwrap().is_none());
+            assert!(super::consent(&planned, true).unwrap().is_none());
+            assert!(applied.unwrap().contains("applied; the inverse is in"));
+            assert!(chunk.exists());
+            return;
+        };
+        let refused = applied.unwrap_err();
+        assert!(
+            refused.message.contains(&unchecked) && refused.message.contains("--unchecked-access"),
+            "{}",
+            refused.message
+        );
+        // Neither the inverse nor the tree was written.
+        assert!(!Path::new(&path("undo.jsonc")).exists());
+        assert!(!chunk.exists());
+        let warning = super::consent(&planned, true).unwrap().unwrap();
+        assert!(warning.starts_with("warning: ") && warning.contains(&unchecked));
+        run(&[
+            "tx",
+            "apply",
+            "--unchecked-access",
+            &path("tx.jsonc"),
+            &root,
+            &path("undo.jsonc"),
+        ])
+        .unwrap();
+        assert!(chunk.exists());
+    }
+
+    // Publishing is supported on Linux, macOS and Windows.
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     #[test]
     fn apply_writes_the_inverse_and_the_inverse_undoes_it() {
         let (directory, root) = setup();
@@ -443,6 +579,7 @@ mod tests {
         let applied = run(&[
             "tx",
             "apply",
+            "--unchecked-access",
             &path("sealed.jsonc"),
             &root,
             &path("undo.jsonc"),
@@ -456,6 +593,7 @@ mod tests {
         let conflict = run(&[
             "tx",
             "apply",
+            "--unchecked-access",
             &path("sealed.jsonc"),
             &root,
             &path("undo2.jsonc"),
@@ -469,11 +607,26 @@ mod tests {
         assert!(!Path::new(&path("undo2.jsonc")).exists());
 
         // Neither inside the documents nor where world.jsonc is staged.
-        for inside in ["planes/overworld/undo.jsonc", ".world.jsonc.tilewright-tmp"] {
+        for inside in [
+            "planes/overworld/undo.jsonc",
+            ".world.jsonc.tilewright-tmp",
+            ".WORLD.JSONC.tilewright-tmp",
+            ".world.jsonc.tilewright-tmp.",
+            ".world.j\u{17f}onc.tilewright-tmp",
+            "world.jsonc:undo",
+            ".tilewright.lock",
+        ] {
             let inside = Path::new(&root).join(inside);
             let inside_text = inside.display().to_string();
-            let refused =
-                run(&["tx", "apply", &path("undo.jsonc"), &root, &inside_text]).unwrap_err();
+            let refused = run(&[
+                "tx",
+                "apply",
+                "--unchecked-access",
+                &path("undo.jsonc"),
+                &root,
+                &inside_text,
+            ])
+            .unwrap_err();
             assert!(
                 refused.message.contains("inside the source tree"),
                 "{}",
@@ -485,6 +638,7 @@ mod tests {
         run(&[
             "tx",
             "apply",
+            "--unchecked-access",
             &path("undo.jsonc"),
             &root,
             &path("redo.jsonc"),

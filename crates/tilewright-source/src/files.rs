@@ -5,10 +5,12 @@
 //! `/`-separated and validated; symbolic links are never followed. On Unix
 //! every component is opened through its parent's directory handle without
 //! following links (`beneath`); elsewhere components are checked by path
-//! before use (`portable`).
+//! before use (`portable`), on Windows for any reparse point.
 
 #[cfg(unix)]
 pub(crate) mod beneath;
+#[cfg(target_os = "linux")]
+pub(crate) mod mounts;
 #[cfg(any(not(unix), test))]
 pub(crate) mod portable;
 
@@ -808,6 +810,268 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn labels_are_compared_and_never_given() {
+        use std::os::unix::fs::MetadataExt as _;
+        let label = |path: &std::path::Path, value: &[u8]| {
+            let metadata = fs::metadata(path).unwrap();
+            super::beneath::GIVEN_LABELS.with(|labels| {
+                labels
+                    .borrow_mut()
+                    .insert((metadata.dev(), metadata.ino()), value.to_vec())
+            });
+        };
+        let directory = tree();
+        let root = super::beneath::Root::new(directory.path());
+        let dir = root.directory(&["dir"], false).unwrap();
+        let unlabelled = dir.access("file.jsonc").unwrap().unwrap();
+        label(
+            &directory.path().join("dir/file.jsonc"),
+            b"system_u:object_r:secret_t:s0\0",
+        );
+        let labelled = dir.access("file.jsonc").unwrap().unwrap();
+        assert_eq!(labelled.mode, unlabelled.mode);
+        assert_ne!(labelled.control, unlabelled.control);
+        assert_ne!(labelled.audience(false), unlabelled.audience(false));
+        assert_eq!(labelled.new_file().control, labelled.control);
+        assert_eq!(
+            labelled.new_file().user,
+            rustix::process::geteuid().as_raw()
+        );
+        // A new file the system labels otherwise is refused before anything
+        // is written, and none is left.
+        assert!(dir.write("new", Some(&labelled), b"secret").is_err());
+        assert!(!directory.path().join("dir/new").exists());
+        dir.write("new", Some(&unlabelled), b"x").unwrap();
+        // So is a directory.
+        label(
+            &directory.path().join("dir"),
+            b"system_u:object_r:secret_t:s0\0",
+        );
+        let own = dir.own_access().unwrap();
+        assert_ne!(own.control, [0; 32]);
+        let made = root.directory(&["made"], true).unwrap();
+        assert!(made.set_own_access(&own).is_err());
+        made.set_own_access(&made.own_access().unwrap()).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn only_local_file_systems_that_show_their_access_control_lists_are_checked() {
+        let directory = tree();
+        let root = super::beneath::Root::new(directory.path());
+        let dir = root.directory(&["dir"], false).unwrap();
+        // A test's own directory is found by its mount among this process's
+        // mounts, and told as its type and magic number say: checked on a
+        // local file system, not on a container's overlay root.
+        let mounts = super::beneath::Mounts::read();
+        let told = dir.unchecked_file_system(&mounts).unwrap();
+        if fs::File::open("/proc/self/mountinfo").is_err() {
+            // Only without a readable /proc may it not be told; in a chroot
+            // whose root is not a mount point, where the tree's mount is not
+            // listed, this test fails, as publishing there needs consent.
+            assert!(told.unwrap().starts_with("one that could not be told: "));
+        } else {
+            let id = dir.mount_id().unwrap().unwrap();
+            let found = mounts.type_of(id).unwrap();
+            let expected = super::beneath::unchecked_file_system(found, dir.magic().unwrap());
+            assert_eq!(told, expected);
+            // On a local file system, as CI's ext4 or a tmpfs, it is checked.
+            if matches!(found, b"ext4" | b"tmpfs" | b"xfs" | b"btrfs") {
+                assert_eq!(told, None);
+            }
+        }
+        // Both the type of the mount and the magic number must be a
+        // checked file system's: a 9p share passes on its host's magic
+        // number, and an overlay's upper layer may be remote.
+        for (found, magic, name) in [
+            ("ext4", 0xEF53, None),
+            ("xfs", 0x5846_5342, None),
+            ("btrfs", 0x9123_683E, None),
+            ("tmpfs", 0x0102_1994, None),
+            ("zfs", 0x2FC1_2FC1, None),
+            ("9p", 0xEF53, Some("9p")),
+            ("overlay", 0x794C_7630, Some("overlay")),
+            ("cifs", 0xFF53_4D42, Some("cifs")),
+            ("vboxsf", 0x786F_4256, Some("vboxsf")),
+            ("fuse.a\tb", 0x6573_5546, Some("fuse.a\\tb")),
+            (
+                "ext4",
+                0x0102_1997,
+                Some("ext4, though statfs gives type 0x1021997"),
+            ),
+        ] {
+            super::beneath::GIVEN_FILE_SYSTEM.with(|given| given.set(Some((found, magic))));
+            let told = dir.unchecked_file_system(&mounts).unwrap();
+            super::beneath::GIVEN_FILE_SYSTEM.with(|given| given.set(None));
+            assert_eq!(told.as_deref(), name, "{found} {magic:x}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_file_system_that_cannot_be_told_is_not_checked() {
+        use super::mounts::Mounts;
+        let directory = tree();
+        let root = super::beneath::Root::new(directory.path());
+        let dir = root.directory(&["dir"], false).unwrap();
+        let told = |mounts: &Mounts| dir.unchecked_file_system(mounts).unwrap();
+        let real = Mounts::read();
+        // Only without a readable /proc may the mount not be known; in a
+        // chroot whose root is not a mount point, where the tree's mount is
+        // not listed, this test fails, as publishing there needs consent.
+        if fs::File::open("/proc/self/mountinfo").is_err() {
+            assert!(
+                told(&real)
+                    .unwrap()
+                    .starts_with("one that could not be told: ")
+            );
+            return;
+        }
+        let id = dir.mount_id().unwrap().unwrap();
+        let line = |id: u64, rest: &str| format!("{id} 1 8:1 / /mnt rw - {rest}\n");
+        // Mounts that could not be read, a table without the mount, and a
+        // line for it that is malformed or too long each leave its file
+        // system untold, and so not checked.
+        for (mounts, reason) in [
+            (
+                Mounts::failed("it is not there"),
+                "it is not there".to_owned(),
+            ),
+            (
+                Mounts::parsed(b""),
+                format!("its mount, {id}, is not in /proc/self/mountinfo"),
+            ),
+            (
+                Mounts::parsed(line(id, "ext\\9 /dev/sda1 rw").as_bytes()),
+                "its line in /proc/self/mountinfo is malformed".to_owned(),
+            ),
+            (
+                Mounts::parsed(
+                    format!("{id} 1 8:1 / /{} rw - ext4 x rw\n", "a".repeat(70_000)).as_bytes(),
+                ),
+                "its line in /proc/self/mountinfo is longer than 65536 bytes".to_owned(),
+            ),
+            (
+                Mounts::parsed((line(id, "ext4 a rw") + &line(id, "ext4 b rw")).as_bytes()),
+                format!("its mount, {id}, is listed twice in /proc/self/mountinfo"),
+            ),
+        ] {
+            assert_eq!(
+                told(&mounts),
+                Some(format!("one that could not be told: {reason}"))
+            );
+        }
+        // Without /proc, mounts that could not be read are named as the
+        // cause, before a mount ID that fdinfo, in /proc too, cannot give;
+        // and where only fdinfo cannot be read, that is.
+        super::beneath::NO_STATX_MOUNT_ID.with(|no| no.set(Some("/nonexistent/fdinfo")));
+        let without_proc = told(&Mounts::failed("it is not there"));
+        let without_fdinfo = told(&real);
+        super::beneath::NO_STATX_MOUNT_ID.with(|no| no.set(None));
+        assert_eq!(
+            without_proc.as_deref(),
+            Some("one that could not be told: it is not there")
+        );
+        let without_fdinfo = without_fdinfo.unwrap();
+        assert!(
+            without_fdinfo.starts_with(
+                "one that could not be told: statx gives no mount ID, and /proc/self/fdinfo could not be read ("
+            ),
+            "{without_fdinfo}"
+        );
+        // A hostile line for another mount changes nothing for this one.
+        let found = real.type_of(id).unwrap().escape_ascii().to_string();
+        let mut table = line(id + 1, "fuse.\u{7f} x rw").into_bytes();
+        table.extend(format!("{} 1 8:1 / /mnt rw - fuse.", id + 2).as_bytes());
+        table.extend([0xFF, b' ', b'x', b'\n']);
+        table.extend(line(id, &format!("{found} x rw")).as_bytes());
+        table.extend(line(id + 3, &"\\040".repeat(400)).as_bytes());
+        assert_eq!(told(&Mounts::parsed(&table)), told(&real));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn mountinfo_is_read_a_line_at_a_time() {
+        use super::mounts::scan;
+        let text = b"22 1 8:1 / / rw,relatime shared:1 - ext4 /dev/sda1 rw\n\
+36 22 0:32 / /mnt/with\\040space rw - 9p host rw,trans=virtio\n\
+37 22 0:33 / /mnt/\xff\xfe rw master:2 shared:3 - fuse.s\\134sh\xff host rw\n\
+38 22 8:1 / / rw ext4 /dev/sda1 rw\n\
+x 1 8:1 / / rw - ext4 /dev/sda1 rw\n\
+39 22 8:1 / / rw -\n\
+40 22 8:1 / / rw - ext\\9 /dev/sda1 rw\n\
+41 22 8:1 / / rw - xfs a rw";
+        // A small buffer, so lines are read across its edges.
+        let mounts = scan(std::io::BufReader::with_capacity(7, &text[..])).unwrap();
+        assert_eq!(mounts[&22].as_deref(), Ok(&b"ext4"[..]));
+        assert_eq!(mounts[&36].as_deref(), Ok(&b"9p"[..]));
+        assert_eq!(mounts[&37].as_deref(), Ok(&b"fuse.s\\sh\xff"[..]));
+        assert_eq!(mounts[&41].as_deref(), Ok(&b"xfs"[..]));
+        for id in [38, 39, 40] {
+            assert!(mounts[&id].is_err(), "{id}");
+        }
+        // A line without a mount ID is left out.
+        assert_eq!(mounts.len(), 7);
+        // What follows the first 64 KiB of a long line is skipped to its
+        // newline, even where it reads as a line of its own, right at the
+        // cut or a buffer later, wherever the reader's buffer ends:
+        // Mounts::read reads through an 8 KiB one (BufReader::new).
+        for gap in [0, 8 << 10] {
+            let mut long = b"22 1 8:1 / /".to_vec();
+            long.resize((64 << 10) + gap, b'a');
+            long.extend(b"99 1 8:1 / / rw - ext4 x rw\n23 1 8:1 / / rw - xfs a rw\n");
+            for capacity in [4 << 10, 8 << 10, 64 << 10, 1 << 20] {
+                let reader = std::io::BufReader::with_capacity(capacity, &long[..]);
+                let mounts = scan(reader).unwrap();
+                let at = format!("gap {gap}, buffer {capacity}");
+                assert!(
+                    mounts[&22].as_ref().unwrap_err().contains("longer than"),
+                    "{at}"
+                );
+                assert_eq!(mounts[&23].as_deref(), Ok(&b"xfs"[..]), "{at}");
+                assert_eq!(mounts.keys().copied().collect::<Vec<_>>(), [22, 23], "{at}");
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fdinfo_gives_the_mount_statx_does() {
+        use rustix::fs::{AtFlags, StatxFlags, statx};
+        use std::os::fd::AsRawFd as _;
+        if !std::path::Path::new("/proc/self/fdinfo").is_dir() {
+            return;
+        }
+        let directory = tree();
+        let file = fs::File::open(directory.path().join("dir")).unwrap();
+        // Before Linux 4.11, or where seccomp blocks it, there is no statx,
+        // and fdinfo is the only source.
+        let from_statx = match statx(&file, "", AtFlags::EMPTY_PATH, StatxFlags::MNT_ID) {
+            Ok(found) if found.stx_mask & StatxFlags::MNT_ID.bits() != 0 => Some(found.stx_mnt_id),
+            Ok(_) | Err(rustix::io::Errno::NOSYS) => None,
+            Err(errno) => panic!("{errno}"),
+        };
+        let fdinfo = super::mounts::fdinfo_mount_id("/proc/self/fdinfo", file.as_raw_fd()).unwrap();
+        assert!(fdinfo.is_some());
+        if from_statx.is_some() {
+            assert_eq!(fdinfo, from_statx);
+        }
+        // A directory's mount ID comes from fdinfo where statx gives none,
+        // as before Linux 5.8.
+        let root = super::beneath::Root::new(directory.path());
+        let dir = root.directory(&["dir"], false).unwrap();
+        super::beneath::NO_STATX_MOUNT_ID.with(|no| no.set(Some("/proc/self/fdinfo")));
+        let fallback = dir.mount_id();
+        super::beneath::NO_STATX_MOUNT_ID.with(|no| no.set(None));
+        let fallback = fallback.unwrap().unwrap();
+        assert_eq!(Some(fallback), fdinfo);
+        if let Some(id) = from_statx {
+            assert_eq!(fallback, id);
+        }
+    }
+
     #[test]
     fn the_lock_excludes_a_second_holder() {
         let directory = tree();
@@ -818,5 +1082,167 @@ mod tests {
         assert!(other.lock().unwrap().is_none());
         drop(held);
         assert!(other.lock().unwrap().is_some());
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod selinux_tests {
+    use super::beneath::selinux::{request, trimmed};
+
+    #[test]
+    fn label_questions_are_one_line_with_the_name_encoded() {
+        let query = request(
+            b"unconfined_u:unconfined_r:unconfined_t:s0-s0:c0.c1023\0",
+            b"unconfined_u:object_r:user_home_t:s0\0",
+            7,
+            "0_0.jsonc",
+        )
+        .unwrap();
+        assert_eq!(
+            query,
+            b"unconfined_u:unconfined_r:unconfined_t:s0-s0:c0.c1023 unconfined_u:object_r:user_home_t:s0 7 0_0.jsonc"
+        );
+        let odd = request(b"a", b"b", 1, "x y%+\u{e9}").unwrap();
+        assert_eq!(odd, b"a b 1 x%20y%25%2b%c3%a9");
+        assert!(request(b"a b", b"c", 1, "x").is_err());
+        assert!(request(b"", b"c", 1, "x").is_err());
+        assert_eq!(trimmed(b"label\0\n"), b"label");
+        assert_eq!(trimmed(b"\0"), b"");
+    }
+}
+
+/// On Windows the path-based implementation refuses every reparse point,
+/// junctions included, at the component where it occurs, removes one
+/// without touching what it names, and holds its lock in a file.
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::{Found, RawKind, Refused, portable::Root};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        process::{Command, Stdio},
+    };
+
+    /// Makes `link` a junction to the directory `target`.
+    fn junction(link: &Path, target: &Path) {
+        // `mklink` takes `/` for an option, so the paths use `\\`.
+        let native = |path: &Path| path.components().collect::<PathBuf>();
+        let status = Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(native(link))
+            .arg(native(target))
+            .stdout(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    fn link<T>(result: Result<T, Refused>) -> String {
+        match result {
+            Err(Refused::Link(prefix)) => prefix,
+            Err(other) => panic!("expected a link, got {other:?}"),
+            Ok(_) => panic!("expected a link, got success"),
+        }
+    }
+
+    #[test]
+    fn junctions_are_links() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir(directory.path().join("dir")).unwrap();
+        fs::write(directory.path().join("dir/file.jsonc"), "{}").unwrap();
+        junction(
+            &directory.path().join("link"),
+            &directory.path().join("dir"),
+        );
+        let root = Root::new(directory.path());
+        assert_eq!(root.file(&["dir", "file.jsonc"]).unwrap().1, 2);
+        assert_eq!(link(root.file(&["link", "file.jsonc"])), "link");
+        assert_eq!(link(root.kind(&["link"])), "link");
+        assert_eq!(link(root.directory(&["link"], false)), "link");
+        assert_eq!(link(root.directory(&["link", "inside"], true)), "link");
+        assert!(!directory.path().join("dir/inside").exists());
+        let kinds: Vec<(Option<String>, RawKind)> = root
+            .list(&[])
+            .unwrap()
+            .map(|entry| entry.map(|entry| (entry.name, entry.kind)))
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(kinds.contains(&(Some("link".to_owned()), RawKind::Link)));
+        assert!(kinds.contains(&(Some("dir".to_owned()), RawKind::Directory)));
+
+        // A write over a junction replaces it, not what it names.
+        let base = root.directory(&[], false).unwrap();
+        base.write("link", None, b"x").unwrap();
+        assert!(directory.path().join("dir/file.jsonc").exists());
+        assert_eq!(root.kind(&["link"]).unwrap(), Found::File);
+    }
+
+    #[test]
+    fn read_only_files_are_refused() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("file.jsonc");
+        fs::write(&file, "{}").unwrap();
+        let base = Root::new(directory.path()).directory(&[], false).unwrap();
+        assert!(base.access("file.jsonc").unwrap().is_some());
+        let mut permissions = fs::metadata(&file).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&file, permissions).unwrap();
+        assert!(matches!(base.access("file.jsonc"), Err(Refused::Io(_))));
+    }
+
+    #[test]
+    fn encrypted_files_and_directories_are_refused() {
+        let directory = tempfile::tempdir().unwrap();
+        let inside = directory.path().join("inside");
+        fs::create_dir(&inside).unwrap();
+        fs::write(inside.join("file.jsonc"), "{}").unwrap();
+        // EFS is not on every volume; where it is not, there is nothing to
+        // refuse.
+        let encrypted = Command::new("cipher")
+            .arg("/e")
+            .arg("/s:".to_owned() + &inside.display().to_string())
+            .stdout(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        let root = Root::new(directory.path());
+        let dir = root.directory(&["inside"], false).unwrap();
+        // The hosted runners have it, so there the test must not pass
+        // without it.
+        assert!(
+            encrypted || std::env::var_os("CI").is_none(),
+            "cipher /e failed on CI"
+        );
+        if encrypted {
+            assert!(matches!(dir.access("file.jsonc"), Err(Refused::Io(_))));
+            assert!(matches!(dir.own_access(), Err(Refused::Io(_))));
+        } else {
+            assert!(dir.access("file.jsonc").unwrap().is_some());
+        }
+    }
+
+    #[test]
+    fn the_lock_is_a_file_held_alone() {
+        let directory = tempfile::tempdir().unwrap();
+        let lock_file = directory.path().join(crate::access::LOCK_NAME);
+        let root = Root::new(directory.path());
+        let other = Root::new(directory.path());
+        let held = root.lock().unwrap();
+        assert!(held.is_some());
+        assert!(other.lock().unwrap().is_none());
+        // A file renamed into the root may replace another meanwhile.
+        let base = root.directory(&[], false).unwrap();
+        base.write(".world.jsonc.tilewright-tmp", None, b"{}")
+            .unwrap();
+        base.write("world.jsonc", None, b"old").unwrap();
+        base.rename(".world.jsonc.tilewright-tmp", "world.jsonc")
+            .unwrap();
+        // The lock file goes with the lock.
+        drop(held);
+        assert!(!lock_file.exists());
+        assert!(other.lock().unwrap().is_some());
+        // One that no edit holds is not taken over.
+        fs::write(&lock_file, "someone's").unwrap();
+        assert!(matches!(root.lock(), Err(Refused::Io(_))));
+        assert_eq!(fs::read_to_string(&lock_file).unwrap(), "someone's");
     }
 }
