@@ -71,3 +71,31 @@ never copied, adapted or used as a dependency.
   Second, a breaking-change note that runs into a trailing field line
   counts; the parser threw on it.
   `scripts/release/THIRD_PARTY_LICENSES.md` holds their notices.
+
+## Owner publication API contract research
+
+The owner-first-publication work consults the primary crates.io OpenAPI
+contracts and `src/controllers/user/me.rs` at revision
+`8ba796b818baaee0bbd6a813b0524949ce511ca7` of
+<https://github.com/rust-lang/crates.io>. This source is available under MIT
+(`LICENSE-MIT`, Copyright (c) 2014 The Rust Project Developers). Only endpoint
+authentication and response contract facts inform the new helper and its
+documentation; no implementation, tests, fixtures or source text are copied
+or adapted. The upload framing reference is the Cargo Book's
+[Registry Web API](https://doc.rust-lang.org/cargo/reference/registry-web-api.html).
+
+The owner ceremony and create-once intent design in `tools/crates/owner_publish.py`
+consult the bootstrap flow in tilewright-renderer's `tools/crate_release.py`,
+revision `322f2828ccc323d2cf5286f7392d1bbfd9c97041`
+(<https://github.com/seraphinastudios/tilewright-renderer>), MIT, Copyright (c)
+2026 Seraphina Studios. Its notice and license are preserved by the root
+`LICENSE`. The World helper is a new, narrowed implementation: one manually
+confirmed first-publication batch, fixed public owner, verified candidate
+bundle and global intent fencing, without trusted-publisher automation or
+registry credential discovery. No renderer implementation or tests are copied.
+
+New-crate pacing also consults the renderer's bootstrap pacing at revision
+`5855fd2ab824eecbbae47ea2ceb1da9b9fb8b44c` (same repository, license and notice),
+and the crates.io rate-limit configuration contract at the crates.io revision
+above. Only policy/ordering facts inform the new World pacing and mocked-clock
+tests; no implementation or tests are copied.
