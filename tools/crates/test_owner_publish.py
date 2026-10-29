@@ -33,8 +33,8 @@ def github():
     return {"": {"id": 1, "full_name": P.REPOSITORY, "default_branch": "main", "archived": False},
             "releases/123": {"id": 123, "tag_name": "v0.4.0", "immutable": True, "draft": False,
                              "prerelease": False, "assets": [
-                                 {"name": P.bundle_name(PLAN), "digest": "sha256:" + PLAN["bundle_sha256"]},
-                                 {"name": "SHA256SUMS", "digest": "sha256:" + "d" * 64}]},
+                                 {"id": 11, "name": P.bundle_name(PLAN), "digest": "sha256:" + PLAN["bundle_sha256"], "size": 32, "state": "uploaded"},
+                                 {"id": 12, "name": "SHA256SUMS", "digest": "sha256:" + "d" * 64, "size": 128, "state": "uploaded"}]},
             "commits/v0.4.0": {"sha": REVISION}, "commits/go%2Fv0.4.0": {"sha": REVISION},
             f"compare/{REVISION}...main": {"status": "ahead", "base_commit": {"sha": REVISION}},
             "actions/runs/456/attempts/2": {"id": 456, "run_attempt": 2, "head_sha": REVISION,
@@ -72,6 +72,77 @@ class PreflightTests(unittest.TestCase):
             with self.subTest(endpoint=endpoint, field=field), patch.object(P, "api", side_effect=changed.__getitem__):
                 with self.assertRaises(P.Refusal):
                     P.release_evidence(PLAN)
+
+    def test_drift_checks_ignore_counters_but_bind_asset_identity(self):
+        evidence = github()
+        with patch.object(P, "api", side_effect=evidence.__getitem__):
+            first = P.release_evidence(PLAN)
+            evidence[""]["stargazers_count"] = 12
+            evidence["releases/123"]["assets"][0]["download_count"] = 99
+            self.assertEqual(P.release_evidence(PLAN), first)
+            evidence["releases/123"]["assets"][0]["id"] = 999
+            self.assertNotEqual(P.release_evidence(PLAN), first)
+
+    def test_real_candidate_bundle_uses_canonical_verifier_without_cargo(self):
+        fixture_spec = importlib.util.spec_from_file_location("owner_candidate_fixture", Path(__file__).with_name("test_prepare.py"))
+        fixture = importlib.util.module_from_spec(fixture_spec)
+        fixture_spec.loader.exec_module(fixture)
+        bundle_spec = importlib.util.spec_from_file_location("owner_bundle_fixture", P.ROOT / "tools/release/crate_candidates.py")
+        bundler = importlib.util.module_from_spec(bundle_spec)
+        bundle_spec.loader.exec_module(bundler)
+        with tempfile.TemporaryDirectory() as directory, patch.object(P.subprocess, "run") as command:
+            root = Path(directory)
+            fixture.write_candidate(root)
+            data = bundler.bundle(root, REVISION)
+            plan = dict(PLAN, bundle_sha256=P.sha256(data),
+                        manifest_sha256=P.sha256((root / "candidate.json").read_bytes()))
+            manifest, files, archives = P.verify_bundle(data, plan)
+            self.assertEqual(len(manifest["packages"]), 5)
+            self.assertEqual(len(archives), 5)
+            self.assertEqual(files["tilewright-jsonc-0.1.0.crate"], (root / "tilewright-jsonc-0.1.0.crate").read_bytes())
+            command.assert_not_called()
+            with self.assertRaisesRegex(P.Refusal, "manifest differs"):
+                P.verify_bundle(data, dict(plan, manifest_sha256="f" * 64))
+
+    def test_full_preflight_retains_snapshot_and_detects_late_drift(self):
+        data = b"verified bundle bytes"
+        plan = dict(PLAN, bundle_sha256=P.sha256(data))
+        sums = f"{plan['bundle_sha256']}  {P.bundle_name(plan)}\n".encode()
+        assets = {"SHA256SUMS": {"digest": "sha256:" + P.sha256(sums)}}
+        evidence = ({"id": 1}, assets)
+        result = attestation()
+        result[0]["verificationResult"]["statement"]["subject"][0]["digest"]["sha256"] = plan["bundle_sha256"]
+        row = {"name": "tilewright-jsonc", "version": "0.1.0", "sha256": "c" * 64}
+        checked = ({"packages": [row]}, {"archive.crate": b"exact archive"}, {})
+        with tempfile.TemporaryDirectory() as directory:
+            bundle, checksum_file = Path(directory) / "bundle", Path(directory) / "SHA256SUMS"
+            bundle.write_bytes(data)
+            checksum_file.write_bytes(sums)
+            commands = []
+
+            def verifier(arguments):
+                commands.append(arguments)
+                self.assertEqual(Path(arguments[4] if arguments[1] == "release" else arguments[3]).read_bytes(), data)
+                bundle.write_bytes(b"owner input changed after snapshot")
+                return json.dumps(result).encode() if arguments[1] == "attestation" else b""
+
+            with patch.dict(os.environ, {}, clear=True), patch.object(P, "clean_source"), \
+                 patch.object(P, "release_evidence", return_value=evidence), \
+                 patch.object(P, "command", side_effect=verifier), \
+                 patch.object(P, "verify_bundle", return_value=checked) as verify, \
+                 patch.object(P, "registry_state", return_value="absent"):
+                self.assertEqual(P.preflight(plan, bundle, checksum_file)[1], checked[1])
+                verify.assert_called_once_with(data, plan)
+                self.assertEqual([command[:3] for command in commands],
+                                 [["gh", "release", "verify-asset"], ["gh", "attestation", "verify"]])
+            bundle.write_bytes(data)
+            with patch.dict(os.environ, {}, clear=True), patch.object(P, "clean_source"), \
+                 patch.object(P, "release_evidence", side_effect=[evidence, ({"id": 2}, assets)]), \
+                 patch.object(P, "command", side_effect=verifier), \
+                 patch.object(P, "verify_bundle", return_value=checked), \
+                 patch.object(P, "registry_state", return_value="absent"):
+                with self.assertRaisesRegex(P.Refusal, "changed during"):
+                    P.preflight(plan, bundle, checksum_file)
 
     def test_certificate_binds_exact_run_not_user_controlled_predicate(self):
         P.verify_attestation(attestation(), PLAN, 1)

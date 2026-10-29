@@ -148,7 +148,13 @@ def release_evidence(plan):
     require(bundle_name(plan) in assets and "SHA256SUMS" in assets, "release lacks crate bundle/checksums")
     require(assets[bundle_name(plan)]["digest"] == "sha256:" + plan["bundle_sha256"],
             "GitHub asset digest differs from reviewed decision")
-    return repository, assets
+    # Compare only trust-relevant fields. Public counters and other mutable
+    # repository/asset metadata can change while verification runs.
+    identity = {key: repository[key] for key in ("id", "full_name", "default_branch", "archived")}
+    selected = {name: {key: assets[name][key] for key in ("id", "name", "digest", "size", "state")}
+                for name in (bundle_name(plan), "SHA256SUMS")}
+    require(all(asset["state"] == "uploaded" for asset in selected.values()), "release asset is incomplete")
+    return identity, selected
 
 
 def verify_attestation(result, plan, repository_id):
