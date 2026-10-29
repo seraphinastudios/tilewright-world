@@ -280,11 +280,12 @@ the transaction changed, in path order:
 - `document.delete` for a file it created;
 - `document.create` with the exact `text` for a file it deleted, in pieces
   of at most 128 KiB, one a line;
-- otherwise the exact inverse of each edit, last first: `set` with the old
-  value's text, `insert` with the old item, key, colon and regions, `remove`
-  with the old region. An old value or key, and each step of a pointer, is
-  written on a line of its own, so no line of the inverse is longer than a
-  line of the file.
+- otherwise the exact inverse of each edit since the file was last as it
+  began, between operations, last first: `set` with the old value's text,
+  `insert` with the old item, key, colon and regions, `remove` with the old
+  region. An old value or key, and each step of a pointer, is written on a
+  line of its own, so no line of the inverse is longer than a line of the
+  file.
 
 An inverse names files by path and values by pointer, never objects by
 place or uid, whatever addresses the transaction used: it restores bytes,
@@ -303,6 +304,73 @@ applying it twice does nothing the second time. An inverse is applied like
 any transaction, so its result must validate: the inverse of a transaction
 that made an invalid tree valid recreates the invalid tree, is refused, and
 such a tree is restored from version control instead.
+
+### 8.1 Undo check
+
+That an inverse is a valid transaction does not mean that it can be carried
+out, even on the very tree the transaction leaves. Carrying it out reads
+every file the transaction changed as the transaction left it, a file it
+created or grew included, so it can read more than the transaction did; it
+has an operation for each edit, which reads its whole document again, where
+the transaction may have made many edits with one operation that read the
+document once; and it records an inverse of its own, which holds every
+value the transaction wrote in full: an insertion with its key, colon and
+regions for each entry the transaction added to a palette, which the
+inverse removes in a few lines, and the whole text of each file the
+transaction created, which the inverse deletes in one. Any of these can pass
+a limit of section 11 that the transaction was within.
+
+So a carried-out transaction can be checked, before anything is written,
+for whether it can be undone, the undo redone, and so on. The check works
+in rounds: the first carries out the inverse, the undo, on the tree as the
+transaction leaves it; the second, the undo's own inverse, the redo, on the
+tree the undo leaves; each later one the inverse of the round before, on
+the tree that round leaves. Each round is carried out with every check
+carrying it out then would make (sections 6, 7 and 11) except validating
+its result: its `base`, every operation and its preconditions, the read and
+work budgets, the counts of files and operations, its `result`, and that
+its sealed form and its own inverse are transactions within the limits.
+
+Since an inverse holds only the edits since each file was last as it began,
+a round can be shorter than the one two before it, when the transaction or
+a round passes through a state it ends or began in: setting a value to 1,
+then 2, then 1 again, or placing an object and then moving it, which
+passes through the chunk as it was within one operation. The check stops
+at the first round whose inverse is, byte for byte, the transaction of the
+round before it. Carrying out is deterministic, and every other round meets
+the same tree, so from there undo and redo alternate between two
+transactions the check carried out, each on the tree it would meet. That
+happens by the fourth round, since the third round never passes through a
+state it ends or begins in, and so neither do those after it. The check
+carries out at most four rounds, and should the fourth not give the third
+back, which does not happen, it refuses the transaction with `tx.result`.
+
+The check reads nothing from disk: an inverse names only files the
+transaction changed, whose text the carried-out transaction holds. It is
+deterministic, and bounded as carrying out is, once for each of at most
+four rounds. A transaction that fails it is refused with diagnostics on the
+transaction, without a position, that say which round would fail and why,
+each with the code of what would fail: `tx.limit` for a limit.
+
+When a transaction passes, every undo and redo of it can be carried out in
+turn, each after the one before is published, provided that the tree the
+transaction was carried out on validates under the same load options and
+nothing else changes the files. That tree is not validated by the check:
+the undos restore it, byte for byte, in every file the transaction touched
+or consulted, and it is the tree an editor loaded, or the one an earlier
+transaction left. The redos leave the tree the transaction did, which
+carrying it out validated. Not guaranteed:
+
+- the inverse of a transaction that made an invalid tree valid passes the
+  check, and is refused, as above;
+- other changes to files recorded in an undo or redo's `base` digests can
+  cause a `tx.conflict`, as for any transaction. An inverse records only
+  files its transaction changed, not files it merely consulted. An editor
+  that saves each step and keeps its inverse for undo can see a conflict
+  when another program edits those recorded files between save and undo;
+- other files changed meanwhile can make the tree an undo or redo leaves
+  fail validation;
+- publishing can fail for reasons of its own (section 9).
 
 ## 9. Applying
 
@@ -565,13 +633,16 @@ stops there. A file a transaction deletes must be valid JSONC, so that its
 inverse can create it again.
 The sealed transaction and the inverse must themselves be valid transactions
 under these limits; a transaction whose inverse would not be is rejected
-before anything is written, and should be split.
+before anything is written, and should be split. Whether the inverse can
+also be carried out within them is the undo check of section 8.1.
 
 ## 12. Diagnostics
 
-Problems of a transaction are reported at byte spans of its document, with
-these codes; problems of the edited world use the loader's codes (FORMAT.md
-section 14) at the edited files.
+Problems of a transaction are reported at byte spans of its document, or
+without a position when they concern it as a whole, such as an inverse past
+the limits or the undo check (section 8.1), with these codes; problems of
+the edited world use the loader's codes (FORMAT.md section 14) at the
+edited files.
 
 | Code | Meaning |
 | --- | --- |
@@ -610,3 +681,13 @@ neither writes:
 Where publishing does not check everything (section 9), `apply` refuses
 before writing anything, the inverse included, unless `--unchecked-access`
 accepts that; it then warns on standard error, naming what is not checked.
+
+Each command runs the undo check of section 8.1 after carrying the
+transaction out, and refuses a transaction that fails it, writing nothing:
+the inverse `apply` writes is the way back and must be one that can be
+applied, and `preview` and `rebase` refuse what `apply` would. An inverse is
+checked like any transaction, so applying one is refused when it carries
+out but its own undo and redo could not be; an inverse `apply` wrote passes,
+since the check of its transaction carried out every round its own check
+does. An inverse written otherwise, or a repair, that is refused for this
+is split, as any transaction would be.

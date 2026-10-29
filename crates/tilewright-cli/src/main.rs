@@ -45,7 +45,8 @@ Windows, and on Linux on any file system but ext2/3/4, XFS, Btrfs, tmpfs,
 F2FS, ZFS and bcachefs (an overlay root in a container needs it too) or one
 it cannot tell (as without a readable /proc), tx apply does not check
 everything (SECURITY.md), so it refuses unless --unchecked-access accepts
-that.";
+that. Each command refuses a transaction that could not be undone and
+redone within the limits of a transaction (TRANSACTIONS.md section 8.1).";
 
 fn main() -> ExitCode {
     // Paths need not be UTF-8, so arguments are read as OS strings.
