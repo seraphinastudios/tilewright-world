@@ -53,8 +53,64 @@ it changes only when the crates' version is bumped. The second number is
 the release. A build from source prints only the first number, unless
 `TILEWRIGHT_RELEASE` was set when it was compiled.
 
-Not released: no crate goes to crates.io, and the npm package is not
-published to the npm registry until the owner turns that on (see below).
+No crate currently goes to crates.io. The local candidate preparation below
+does not enable publication. The npm package is not published to the npm
+registry until the owner turns that on (see below).
+
+## Preparing Rust crate candidates locally
+
+`tools/crates/candidates.json` lists five intended public crates:
+`tilewright-jsonc`, `tilewright-source`, `tilewright-pack`, `tilewright-diff`
+and `tilewright-edit`. Their Cargo metadata limits publication to crates.io;
+`tilewright-cli` and `tilewright-pack-wasm` have `publish = false`. All five
+use the workspace crate version and exact internal dependency versions.
+This is candidate policy, not an activated registry publisher. The existing
+GitHub release workflow does not prepare, attest or upload these candidates.
+
+Use a clean committed checkout, the pinned Rust toolchain and a credential-free
+Cargo home with the locked dependencies already cached. In the documented
+isolated CPU build environment, with the checkout and cache mounted, run:
+
+```sh
+python3 -m unittest discover -s tools/crates -p 'test_*.py'
+python3 tools/crates/prepare.py prepare /absolute/fresh/world-candidates
+python3 tools/crates/prepare.py verify /absolute/fresh/world-candidates --build
+```
+
+The output parent must already exist. The output directory must be absent,
+outside the checkout, and have no symlink components. Existing outputs are
+never reused or overwritten; a failed run can leave an incomplete directory
+without `candidate.json`. Use another fresh path after investigating a failure.
+Credential environment variables and Cargo credential files are refused. Cargo
+uses `--offline` throughout; a missing dependency cache is a failure, not a
+reason to request credentials or contact the registry.
+
+Preparation passes all five crates to Cargo's multi-package `package` command
+twice with separate target directories (`--locked --offline --no-verify
+--registry crates-io`). Cargo's package graph supplies the unpublished internal
+dependencies while producing registry manifests. The two sets of `.crate`
+bytes must match. The output contains exactly those five archives and
+`candidate.json`, which records the clean source revision, toolchain, package
+versions, archive SHA-256 digests and per-file inventory with sizes and digests.
+The verifier checks archive identity, internal dependency versions, notices,
+source revision and safe file paths before using the files. The manifest is
+local candidate evidence; it is neither a release nor a provenance attestation,
+and its checksums alone do not authenticate a download's origin.
+
+`verify --build` extracts only checked regular files into a fresh temporary
+directory. It compiles each packaged crate's tests with all features and builds
+a separate consumer of the five exact candidate versions. Temporary Cargo
+`patch.crates-io` arguments connect only that extracted graph; production
+manifests and candidate archives are unchanged. The packaged tests use source
+repository fixtures at runtime, so this check compiles them without running
+them. Run the normal `tools/validate.sh` suite in the owning source checkout as
+well. This proves the local packaged graph can build, not that it was downloaded
+from crates.io or that the editor works against registry releases.
+
+Before any future first publication, review the concrete archive bytes and
+metadata, confirm the registry names and versions remain available, and obtain
+publication authorization. Source-release integration, registry ownership,
+publisher credentials and registry publication are separate follow-up work.
 
 ## Versions
 

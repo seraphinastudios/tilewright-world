@@ -17,6 +17,7 @@ rust-version = "1.97.1"
 license = "MIT"
 repository = "https://github.com/seraphinastudios/tilewright-world"
 authors = ["Seraphina Studios"]
+readme = "README.md"
 
 [workspace.dependencies]
 tilewright-diff = { path = "crates/tilewright-diff", version = "=0.1.0" }

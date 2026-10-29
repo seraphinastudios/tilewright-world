@@ -11,6 +11,20 @@ never copied, adapted or used as a dependency.
 
 ## Records
 
+- **Local crate candidate preparation and verification.**
+  `tools/crates/prepare.py` adapts the two-pass Cargo multi-package packaging
+  approach in `tools/crate_prepare.py` (`package_twice`) and the isolated
+  extraction/local graph override approach in `tools/verify-packages.sh`
+  from tilewright-renderer, revision
+  `cd8dc43578119b4e44772fadaac07d85053d4d6b`
+  (<https://github.com/seraphinastudios/tilewright-renderer>). Both are MIT,
+  Copyright (c) 2026 Seraphina Studios; the root `LICENSE` preserves that
+  notice and the full license. The implementation here is narrowed to
+  credential-free offline local candidates, adds archive/manifest checks,
+  excludes all registry, release, upload and attestation logic, and uses
+  Python extraction and a standalone consumer instead of the shell verifier.
+  Tests in `tools/crates/test_prepare.py` and candidate policy are new MIT work.
+
 - **Variant hash constants.** The mixing function of the terrain-transition
   variant hash (`docs/spec/FORMAT.md` section 13,
   `crates/tilewright-source/src/transitions/resolve.rs`) is the output
