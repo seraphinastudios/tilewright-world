@@ -93,3 +93,9 @@ revision `322f2828ccc323d2cf5286f7392d1bbfd9c97041`
 confirmed first-publication batch, fixed public owner, verified candidate
 bundle and global intent fencing, without trusted-publisher automation or
 registry credential discovery. No renderer implementation or tests are copied.
+
+New-crate pacing also consults the renderer's bootstrap pacing at revision
+`5855fd2ab824eecbbae47ea2ceb1da9b9fb8b44c` (same repository, license and notice),
+and the crates.io rate-limit configuration contract at the crates.io revision
+above. Only policy/ordering facts inform the new World pacing and mocked-clock
+tests; no implementation or tests are copied.

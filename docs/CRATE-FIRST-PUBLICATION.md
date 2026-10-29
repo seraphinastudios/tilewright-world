@@ -128,6 +128,44 @@ unauthenticated hourly quota during a five-crate batch; default preflight still
 uses public repository evidence reads.
 This helper does not configure credentials or retrieve GitHub tokens.
 
+### Account-wide new-name pacing
+
+The registry's current primary implementation defaults to a five-name burst and
+one new-name slot every 600 seconds per uploading account; operators can override
+those limits. There is no supported remaining-quota lookup. See the pinned
+[rate limiter](https://github.com/rust-lang/crates.io/blob/8ba796b818baaee0bbd6a813b0524949ce511ca7/src/rate_limiter.rs)
+and [configuration contract](https://github.com/rust-lang/crates.io/blob/8ba796b818baaee0bbd6a813b0524949ce511ca7/src/config/rate_limits.rs).
+World therefore defaults to `--burst 0`: wait 610 seconds before **every** pending
+new name, including the first. Waiting happens before that crate's fresh source,
+dependency and registry checks and before its durable intent. Cancelling a wait
+leaves no new intent for that crate. Progress uses a monotonic clock and prints
+at most once per minute.
+
+Only if the owner knows the account's recent publication history may they supply
+`--burst N` (0–5), their estimate of still-unused immediate slots. This is not a
+quota probe or a guarantee. The helper reduces that estimate for already
+published World names created in the preceding 50 minutes plus margin. Missing,
+invalid or unavailable creation history selects zero immediate slots. World
+cannot infer recent renderer or other crate publication from its own manifest;
+keep zero when uncertain, after the renderer batch, or when resuming a recent
+partial batch. Never assume each repository receives a separate five-name burst.
+
+Run all publication batches for this account sequentially, with no other
+publishers consuming its quota during the waits. Five pending World crates at
+the default take at least 50 minutes 50 seconds of pacing, plus verification and
+network time. For a combined thirteen-name rollout with a known unused initial
+five-slot burst, eight refill waits total at least 81 minutes 20 seconds across
+the sequential batches. Keep each batch's one-use token valid beyond its displayed
+estimate, with ample margin for network/verification delays (for example, at
+least 90 minutes for a default five-name World batch), then revoke it immediately
+after the batch stops. This helper neither creates nor extends token lifetime.
+
+A provider policy change, other account activity or exhausted quota can still
+cause HTTP 429. The helper reports that status, stops without retrying, and keeps
+the already-created intent. It never treats 429 or a subsequent 404 as permission
+to remove an intent or repeat an attempted PUT; use the separate recovery process
+below.
+
 The allowlisted batch runs in dependency order. Before each upload, the helper
 checks the source release and clean checkout again, verifies the crate is still
 absent, and requires every internal dependency's exact published checksum and

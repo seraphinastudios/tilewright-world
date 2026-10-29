@@ -259,10 +259,10 @@ class ExecuteTests(unittest.TestCase):
         names = {"terminal_boundary": None, "public_owner": None, "github_authority": None,
                  "require_no_intent": None, "clean_source": None, "release_evidence": ({"id": 1}, {}),
                  "reserve_intent": "f" * 40, "put_once": None, "owned": None,
-                 "confirm_publication": None}
+                 "confirm_publication": None, "wait_new_name": None}
         names.update(overrides)
         mocks = {name: stack.enter_context(patch.object(P, name, **(
-            {"side_effect": result} if callable(result) or isinstance(result, Exception) else {"return_value": result})))
+            {"side_effect": result} if callable(result) or isinstance(result, BaseException) else {"return_value": result})))
             for name, result in names.items()}
         # A completed predecessor becomes publicly visible; pending successors stay absent.
         uploaded = set()
@@ -277,8 +277,8 @@ class ExecuteTests(unittest.TestCase):
         mocks["stderr"] = stack.enter_context(patch.object(P.sys, "stderr", new_callable=io.StringIO))
         return mocks
 
-    def run_batch(self):
-        P.execute(PLAN, {"packages": self.rows}, self.files, self.archives, self.states)
+    def run_batch(self, **kwargs):
+        P.execute(PLAN, {"packages": self.rows}, self.files, self.archives, self.states, **kwargs)
 
     def test_success_exact_held_bytes_order_single_ceremony_and_ownership(self):
         mocks = self.batch()
@@ -529,6 +529,74 @@ test="2"
         self.assertEqual(arguments[:5], ["gh", "api", "--hostname", "github.com", "--method"])
         self.assertNotIn(self.TOKEN, repr(run.call_args))
         self.assertEqual(json.loads(run.call_args.kwargs["input"]), {"ref": "public-intent"})
+
+    def test_pacing_default_zero_and_explicit_burst_wait_before_intent(self):
+        for burst, expected in ((0, ["wait", "intent", "wait", "intent"]),
+                                (1, ["intent", "wait", "intent"]), (2, ["intent", "intent"])):
+            mocks = self.batch()
+            events = []
+            mocks["wait_new_name"].side_effect = lambda *_: events.append("wait")
+            mocks["reserve_intent"].side_effect = lambda *_: events.append("intent")
+            self.run_batch(burst=burst)
+            self.assertEqual(events, expected)
+        self.assertEqual(P.burst_limit("0"), 0)
+        for value in ("6", "-1", "0.1", "true"):
+            with self.assertRaises(P.argparse.ArgumentTypeError):
+                P.burst_limit(value)
+
+    def test_recent_history_reduces_burst_and_uncertainty_uses_zero(self):
+        states = {row["name"]: "exact-existing" for row in self.rows}
+        recent = P.datetime.datetime.now(P.datetime.timezone.utc).isoformat()
+        old = (P.datetime.datetime.now(P.datetime.timezone.utc) - P.datetime.timedelta(hours=2)).isoformat()
+        def history(value):
+            return 200, json.dumps({"crate": {"created_at": value}}).encode()
+        with patch.object(P, "request", return_value=history(recent)):
+            self.assertEqual(P.remaining_burst(5, self.rows, states), 3)
+            self.assertEqual(P.remaining_burst(1, self.rows, states), 0)
+        with patch.object(P, "request", return_value=history(old)):
+            self.assertEqual(P.remaining_burst(5, self.rows, states), 5)
+        for response in ((404, b""), (200, b'{}'), history("bad"), history("2026-01-01T00:00:00")):
+            with patch.object(P, "request", return_value=response):
+                self.assertEqual(P.remaining_burst(5, self.rows, states), 0)
+        with patch.object(P, "request", side_effect=P.Refusal("quota unknown")):
+            self.assertEqual(P.remaining_burst(5, self.rows, states), 0)
+        with patch.object(P, "request") as request:
+            self.assertEqual(P.remaining_burst(0, self.rows, states), 0)
+            request.assert_not_called()
+
+    def test_wait_uses_monotonic_clock_bounded_sleeps_and_cancel_leaves_no_intent(self):
+        clock = [100.0]
+        sleeps = []
+        def sleep(seconds):
+            sleeps.append(seconds)
+            clock[0] += seconds
+        with patch.object(P.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(P.time, "sleep", side_effect=sleep), patch.object(P.sys, "stderr", new_callable=io.StringIO):
+            P.wait_new_name(self.rows[0], 1, 2)
+        self.assertEqual(sum(sleeps), 610)
+        self.assertLessEqual(max(sleeps), 60)
+        mocks = self.batch(wait_new_name=KeyboardInterrupt())
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_batch()
+        self.assertEqual(mocks["release_evidence"].call_count, 1)  # only initial snapshot, no per-crate checks
+        mocks["reserve_intent"].assert_not_called()
+        mocks["put_once"].assert_not_called()
+
+    def test_rate_limited_put_stops_batch_and_retains_created_intent(self):
+        actual_put = P.put_once
+        mocks = self.batch()
+        mocks["put_once"].side_effect = P.Refusal("registry HTTP 429 account rate limit; preserve intent")
+        with self.assertRaisesRegex(P.Refusal, "429"):
+            self.run_batch()
+        self.assertEqual(mocks["reserve_intent"].call_count, 1)
+        self.assertEqual(mocks["put_once"].call_count, 1)
+        self.assertEqual(mocks["wait_new_name"].call_count, 1)
+        mocks["confirm_publication"].assert_not_called()
+        connection = Mock()
+        connection.getresponse.return_value.status = 429
+        with patch.object(P.http.client, "HTTPSConnection", return_value=connection), self.assertRaisesRegex(P.Refusal, "429"):
+            actual_put(b"archive", {}, self.TOKEN)
+        connection.request.assert_called_once()
 
     def test_confirm_reads_only_bounded_visibility_and_owner(self):
         with patch.object(P, "registry_state", side_effect=["absent", "exact-existing"]) as state, \

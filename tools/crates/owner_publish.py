@@ -6,6 +6,7 @@ No registry credentials are read by preflight. No Cargo commands are executed.
 from __future__ import annotations
 
 import argparse
+import datetime
 import hashlib
 import getpass
 import http.client
@@ -33,6 +34,9 @@ OWNER_ID = 437663
 GITHUB_OWNER_ID = 3865595
 REPO_URL = f"https://github.com/{REPOSITORY}"
 WORKFLOW = f"{REPO_URL}/.github/workflows/release.yml@refs/heads/main"
+NEW_NAME_BURST = 5
+NEW_NAME_INTERVAL = 610  # crates.io default 600-second refill plus clock/network margin
+NEW_NAME_RECENT_WINDOW = 5 * 600 + 10
 MAX_JSON = 4 * 1024 * 1024
 MAX_BUNDLE = 256 * 1024 * 1024
 
@@ -412,6 +416,7 @@ def put_once(data, metadata, token):
             "Authorization": token, "Content-Type": "application/octet-stream", "Accept": "application/json",
             "User-Agent": "tilewright-world-owner-publication/1 (github.com/seraphinastudios/tilewright-world)"})
         response = connection.getresponse()
+        require(response.status != 429, "registry HTTP 429 account rate limit; preserve intent, no automatic retry")
         require(response.status == 200, "upload outcome unresolved; preserve intent and do not retry")
         reply = response.read(MAX_JSON + 1)
         require(len(reply) <= MAX_JSON, "upload response exceeds limit; preserve intent")
@@ -422,6 +427,46 @@ def put_once(data, metadata, token):
         raise Refusal("upload outcome unresolved; preserve intent and do not retry") from None
     finally:
         connection.close()
+
+
+def burst_limit(value):
+    if not re.fullmatch(r"[0-5]", value):
+        raise argparse.ArgumentTypeError("burst must be an integer from 0 to 5; use 0 when unsure")
+    return int(value)
+
+
+def remaining_burst(requested, ordered, states):
+    """Owner estimate, reduced for recent World names; no claim of live quota."""
+    require(type(requested) is int and 0 <= requested <= NEW_NAME_BURST, "invalid new-name burst estimate")
+    if requested == 0:
+        return 0
+    recent = 0
+    now = datetime.datetime.now(datetime.timezone.utc)
+    for row in ordered:
+        if states[row["name"]] != "exact-existing":
+            continue
+        try:
+            status, data = request("crates.io", f"/api/v1/crates/{row['name']}")
+            require(status == 200, "creation history unavailable")
+            created = datetime.datetime.fromisoformat(decode(data)["crate"]["created_at"])
+            require(created.tzinfo is not None, "creation history lacks timezone")
+            recent += (now - created).total_seconds() < NEW_NAME_RECENT_WINDOW
+        except (Refusal, ValueError, TypeError, KeyError, OverflowError):
+            # Unavailable/malformed history cannot establish spare account quota.
+            return 0
+    return max(0, requested - recent)
+
+
+def wait_new_name(row, position, total):
+    """Wait BEFORE source checks and intent; cancellation creates no reservation."""
+    deadline = time.monotonic() + NEW_NAME_INTERVAL
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        print(f"New-name pacing: {remaining:.0f}s before checking {row['name']} ({position}/{total}); "
+              "no intent for this crate has been created.", file=sys.stderr)
+        time.sleep(min(60, remaining))
 
 
 def confirm_publication(row):
@@ -435,7 +480,7 @@ def confirm_publication(row):
     raise Refusal("publication is not yet visible; preserve intent and use read-only preflight later")
 
 
-def execute(plan, manifest, files, archives, states):
+def execute(plan, manifest, files, archives, states, *, burst=0):
     terminal_boundary()
     public_owner()
     github_authority()
@@ -451,6 +496,11 @@ def execute(plan, manifest, files, archives, states):
     if not pending:
         print("All five exact archives and intended public ownership are already confirmed; no upload needed.")
         return
+    burst = remaining_burst(burst, ordered, states)
+    paced = max(0, len(pending) - burst)
+    print(f"Account-wide pacing: {burst} estimated immediate slots, then {NEW_NAME_INTERVAL}s before each "
+          f"remaining name; at least {paced * NEW_NAME_INTERVAL // 60} minutes of waits. "
+          "Run account batches sequentially and keep the one-use token valid beyond this estimate.", file=sys.stderr)
     snapshot = release_evidence(plan, read=owner_api)
     print("First publication: " + ", ".join(f"{row['name']}@{row['version']}" for row in pending), file=sys.stderr)
     print(f"Release {plan['tag']} ({plan['release_id']}), source {plan['revision']}, bundle {plan['bundle_sha256']}", file=sys.stderr)
@@ -469,7 +519,9 @@ def execute(plan, manifest, files, archives, states):
             raise Refusal("secure hidden token input unavailable") from None
     require(0 < len(token) <= 8192 and all(33 <= ord(char) <= 126 for char in token), "invalid token input")
     try:
-        for row in pending:
+        for position, row in enumerate(pending, 1):
+            if position > burst:
+                wait_new_name(row, position, len(pending))
             terminal_boundary()
             clean_source(plan["revision"])
             require(release_evidence(plan, read=owner_api) == snapshot, "source release changed before upload")
@@ -498,6 +550,7 @@ def execute(plan, manifest, files, archives, states):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--burst", type=burst_limit, default=0, help="execute only: known remaining new-name burst slots (0-5), default 0 when history is unknown")
     parser.add_argument("--execute", action="store_true", help="owner terminal only: explicitly publish the verified initial batch")
     parser.add_argument("--decision", required=True, type=Path)
     parser.add_argument("--bundle", required=True, type=Path)
@@ -509,7 +562,7 @@ def main(argv=None):
             terminal_boundary()
         manifest, files, archives, states = preflight(plan, args.bundle, args.checksums)
         if args.execute:
-            execute(plan, manifest, files, archives, states)
+            execute(plan, manifest, files, archives, states, burst=args.burst)
             return
         print(json.dumps({"release": plan, "coordinates": [
             {"name": row["name"], "version": row["version"], "sha256": row["sha256"], "state": states[row["name"]]}
