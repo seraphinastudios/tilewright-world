@@ -94,7 +94,9 @@ tools/build-wasm.sh --check
 # The candidate directory itself must be absent and outside the checkout.
 candidate_parent=$(mktemp -d /tmp/tilewright-world-candidates.XXXXXX)
 trap 'rm -rf -- "${first}" "${second}" "${candidate_parent}"' EXIT
-python3 tools/crates/prepare.py prepare "${candidate_parent}/candidates"
-python3 tools/crates/prepare.py verify "${candidate_parent}/candidates" --build
+# macOS exposes /tmp through /private/tmp; retain the original cleanup path.
+candidate_output_parent=$(cd -- "${candidate_parent}" && pwd -P)
+python3 tools/crates/prepare.py prepare "${candidate_output_parent}/candidates"
+python3 tools/crates/prepare.py verify "${candidate_output_parent}/candidates" --build
 
 git diff --check
