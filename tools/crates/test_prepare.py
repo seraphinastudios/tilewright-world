@@ -21,13 +21,13 @@ REVISION = "a" * 40
 def crate(crate_name, extra=(), **package_changes):
     name = crate_name
     package = {"name": name, "version": "0.1.0", "publish": ["crates-io"],
-               "license": "MIT", "repository": P.REPOSITORY}
+               "license": "MIT", "license-file": "LICENSE", "repository": P.REPOSITORY}
     package.update(package_changes)
     manifest = "[package]\n" + "".join(f"{key} = {json.dumps(value)}\n" for key, value in package.items())
     files = [("Cargo.toml", manifest.encode()), ("Cargo.toml.orig", b"original"),
              (".cargo_vcs_info.json", json.dumps({"git": {"sha1": REVISION},
                                                 "path_in_vcs": f"crates/{name}"}).encode()),
-             ("LICENSE", b"MIT"), ("README.md", b"candidate")]
+             ("LICENSE", (P.ROOT / "LICENSE").read_bytes()), ("README.md", b"candidate")]
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as stream:
         for path, data in [*files, *extra]:
@@ -100,6 +100,7 @@ class CandidateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as scratch:
             root = Path(scratch)
             shutil.copy(P.ROOT / "Cargo.toml", root)
+            shutil.copy(P.ROOT / "LICENSE", root)
             shutil.copy(P.ROOT / "rust-toolchain.toml", root)
             shutil.copytree(P.ROOT / "crates", root / "crates", ignore=shutil.ignore_patterns("src", "tests"))
             (root / "tools/crates").mkdir(parents=True)
@@ -114,6 +115,24 @@ class CandidateTests(unittest.TestCase):
             package = root / "crates/tilewright-cli/Cargo.toml"
             package.write_text(package.read_text().replace("publish = false", 'publish = ["crates-io"]'))
             with self.assertRaisesRegex(ValueError, "publication"):
+                P.policy(root)
+
+    def test_policy_requires_explicit_license_file_packaging(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            shutil.copy(P.ROOT / "Cargo.toml", root)
+            shutil.copy(P.ROOT / "LICENSE", root)
+            shutil.copytree(P.ROOT / "crates", root / "crates", ignore=shutil.ignore_patterns("src", "tests"))
+            (root / "tools/crates").mkdir(parents=True)
+            shutil.copy(P.ROOT / "tools/crates/candidates.json", root / "tools/crates")
+            package = root / "crates/tilewright-source/Cargo.toml"
+            package.write_text(package.read_text().replace("license-file.workspace = true\n", ""))
+            with self.assertRaisesRegex(ValueError, "inherit the root MIT license file"):
+                P.policy(root)
+            shutil.copy(P.ROOT / "crates/tilewright-source/Cargo.toml", package)
+            manifest = root / "Cargo.toml"
+            manifest.write_text(manifest.read_text().replace('license-file = "LICENSE"\n', ""))
+            with self.assertRaisesRegex(ValueError, "provide the root MIT license file"):
                 P.policy(root)
 
     def test_output_is_fresh_outside_checkout_and_without_symlinks(self):
@@ -171,6 +190,23 @@ class CandidateTests(unittest.TestCase):
             target.addfile(info)
         with self.assertRaisesRegex(ValueError, "unsafe"):
             P.archive(buffer.getvalue(), name, "0.1.0", REVISION)
+
+    def test_archive_requires_exact_root_license_notice(self):
+        name = P.PUBLIC[0]
+        for notice in (None, b"MIT"):
+            buffer = io.BytesIO()
+            with tarfile.open(fileobj=io.BytesIO(crate(name)), mode="r:gz") as source:
+                with tarfile.open(fileobj=buffer, mode="w:gz") as target:
+                    for info in source:
+                        content = source.extractfile(info).read()
+                        if info.name.endswith("/LICENSE"):
+                            if notice is None:
+                                continue
+                            content = notice
+                            info.size = len(content)
+                        target.addfile(info, io.BytesIO(content))
+            with self.subTest(notice=notice), self.assertRaises(ValueError):
+                P.archive(buffer.getvalue(), name, "0.1.0", REVISION)
 
     @patch.object(P, "environment", return_value={})
     def test_candidate_manifest_rejects_mutation_and_extra_files(self, _):

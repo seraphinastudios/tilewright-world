@@ -36,6 +36,9 @@ def policy(root=ROOT):
     require(config == {"schema": 1, "status": "candidate-only", "registry": "crates-io",
                        "crates": list(PUBLIC), "private": list(PRIVATE)}, "candidate allowlist changed")
     workspace = load_toml(root / "Cargo.toml")["workspace"]
+    require(workspace["package"].get("license") == "MIT" and
+            workspace["package"].get("license-file") == "LICENSE" and (root / "LICENSE").is_file(),
+            "workspace must provide the root MIT license file")
     require(set(workspace["members"]) == {f"crates/{name}" for name in PUBLIC + PRIVATE},
             "workspace membership differs from candidate policy")
     version = workspace["package"]["version"]
@@ -48,6 +51,10 @@ def policy(root=ROOT):
                 "candidate package identity differs")
         require(package.get("publish") == (["crates-io"] if name in PUBLIC else False),
                 "candidate/private publication metadata differs")
+        if name in PUBLIC:
+            require(package.get("license") == {"workspace": True} and
+                    package.get("license-file") == {"workspace": True},
+                    "public candidate must inherit the root MIT license file")
     for name in PUBLIC:
         dependency = workspace["dependencies"][name]
         require(dependency["version"] == f"={version}" and dependency["path"] == f"crates/{name}",
@@ -109,7 +116,10 @@ def archive(data, name, version, revision):
     package = tomllib.loads(relative["Cargo.toml"].decode())["package"]
     require(package["name"] == name and package["version"] == version and
             package["publish"] == ["crates-io"] and package["license"] == "MIT" and
+            package.get("license-file") == "LICENSE" and
             package["repository"] == REPOSITORY, "archive package identity differs")
+    require(relative["LICENSE"] == (ROOT / "LICENSE").read_bytes(),
+            "archive must contain the exact root MIT license notice")
     require(json.loads(relative[".cargo_vcs_info.json"]) ==
             {"git": {"sha1": revision}, "path_in_vcs": f"crates/{name}"},
             "archive does not identify the clean candidate revision")

@@ -64,6 +64,9 @@ registry until the owner turns that on (see below).
 and `tilewright-edit`. Their Cargo metadata limits publication to crates.io;
 `tilewright-cli` and `tilewright-pack-wasm` have `publish = false`. All five
 use the workspace crate version and exact internal dependency versions.
+The public crates inherit both the MIT SPDX identifier and the root `LICENSE`
+file explicitly, so Cargo includes the complete copyright and license notice
+in each archive; the verifier requires those exact notice bytes.
 This is candidate policy, not an activated registry publisher. The existing
 GitHub release workflow does not prepare, attest or upload these candidates.
 
