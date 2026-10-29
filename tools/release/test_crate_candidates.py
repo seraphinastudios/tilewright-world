@@ -95,6 +95,27 @@ class CandidateBundleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "regular file"):
             C.bundle(self.root, F.REVISION)
 
+    def test_hidden_tar_metadata_is_bounded_before_parsing_and_rejected(self):
+        for format in (tarfile.PAX_FORMAT, tarfile.GNU_FORMAT):
+            output = io.BytesIO()
+            with tarfile.open(fileobj=output, mode="w:gz", format=format) as stream:
+                for name, data, _ in self.entries():
+                    item = tarfile.TarInfo(name)
+                    item.size = len(data)
+                    if format == tarfile.PAX_FORMAT:
+                        item.pax_headers = {"comment": "x" * (1024 * 1024)}
+                    else:
+                        item.uname = "x" * 1024  # GNU truncates uname; force a longname below.
+                        item.name = "x" * 1024
+                    stream.addfile(item, io.BytesIO(data))
+            data = output.getvalue()
+            if format == tarfile.PAX_FORMAT:
+                with mock.patch.object(C, "MAX_BUNDLE_BYTES", 128 * 1024), \
+                        self.assertRaisesRegex(ValueError, "decompressed archive size limit"):
+                    C.verify(data, F.REVISION)
+            with self.assertRaisesRegex(ValueError, "unsafe"):
+                C.verify(data, F.REVISION)
+
     def test_release_assembly_checksums_and_requires_exact_revision(self):
         fixture = Fixture()
         self.addCleanup(fixture.close)

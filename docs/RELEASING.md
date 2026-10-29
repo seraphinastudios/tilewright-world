@@ -162,7 +162,8 @@ that exact source revision, run the byte-only verifier (no Cargo or upload):
 python3 tools/release/crate_candidates.py /absolute/downloads/tilewright-world-X.Y.Z-crate-candidates.tar.gz --revision FULL_SOURCE_SHA
 ```
 
-It rejects extra, duplicate, unsafe or nonregular members, excessive sizes,
+It bounds decompression before parsing outer and nested TAR headers, rejects
+PAX/GNU extensions, extra, duplicate, unsafe or nonregular members, excessive sizes,
 wrong source revision, changed archives, metadata or license notices. Only after
 it succeeds, unpack the verified bundle into a new empty directory and retain
 its exact five archives and manifest. Review the manifest's package inventory,
@@ -454,24 +455,14 @@ automatically. Publish one by hand after verifying its tarball as above.
 To turn publishing off again, delete the variable or set it to anything
 else.
 
-## Turning on crates.io publication
+## Future crates.io automation
 
-Crates are not published, and the pipeline contains nothing for it. To
-start, follow the renderer, whose crates go to crates.io from verified
-source releases (its `docs/CRATE-RELEASE.md`):
-
-1. Decide which crates are public, mark the rest `publish = false`, and keep
-   the workspace version independent of release tags. Bump it, and every
-   exact `=X.Y.Z` internal requirement, whenever packaged content changes.
-2. Port the renderer's `tools/crate_prepare.py`, `tools/crate_release.py`,
-   `policy/crate-release.json`, `publish-crate.yml` and
-   `reconcile-crates.yml`. The release then attaches the exact `.crate`
-   archives and a manifest, which the attestation covers, and the publisher
-   uploads those bytes.
-3. Publish each crate once by hand, then configure crates.io trusted
-   publishing for `publish-crate.yml` in an environment
-   `crates-io-release`. The publisher authenticates with
-   `rust-lang/crates-io-auth-action`, which is on the allowlist.
+Use [Owner-run first crate publication](#owner-run-first-crate-publication) for
+the selected first-publication procedure. Registry automation is deferred and
+is not a prerequisite for preparing or reviewing the candidate release assets.
+A future, separately reviewed change may add coordinate ownership/reuse checks,
+exact-byte upload and recovery, and trusted publishing. Do not activate or port
+another repository's publisher as part of the current asset workflow.
 
 ## When a release fails
 

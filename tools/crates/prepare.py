@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import io
 import json
@@ -20,6 +21,7 @@ PUBLIC = ("tilewright-jsonc", "tilewright-source", "tilewright-pack",
           "tilewright-diff", "tilewright-edit")
 PRIVATE = ("tilewright-cli", "tilewright-pack-wasm")
 REPOSITORY = "https://github.com/seraphinastudios/tilewright-world"
+MAX_ARCHIVE_BYTES = 128 * 1024 * 1024
 
 
 def require(condition, message):
@@ -95,13 +97,30 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def bounded_tar(data, limit):
+    # tarfile consumes PAX/GNU extension headers before yielding a member.
+    # Bound the whole decompressed stream first, including hidden metadata.
+    require(len(data) <= limit, "compressed archive size limit exceeded")
+    with gzip.GzipFile(fileobj=io.BytesIO(data)) as compressed:
+        unpacked = compressed.read(limit + 1)
+    require(len(unpacked) <= limit, "decompressed archive size limit exceeded")
+    return tarfile.open(fileobj=io.BytesIO(unpacked), mode="r:")
+
+
+def regular_tar_member(stream, item):
+    # Producers use regular USTAR members, never PAX, GNU long names or sparse
+    # encodings. Reject their hidden extensions even within the size bound.
+    return (item.type == tarfile.REGTYPE and not stream.pax_headers and not item.pax_headers and
+            item.offset_data - item.offset == tarfile.BLOCKSIZE)
+
+
 def archive(data, name, version, revision):
     files = {}
     prefix = f"{name}-{version}"
-    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as stream:
+    with bounded_tar(data, MAX_ARCHIVE_BYTES) as stream:
         for item in stream:
             path = PurePosixPath(item.name)
-            require(item.isfile() and len(path.parts) > 1 and path.parts[0] == prefix and
+            require(regular_tar_member(stream, item) and len(path.parts) > 1 and path.parts[0] == prefix and
                     not path.is_absolute() and ".." not in path.parts and
                     path.as_posix() == item.name and item.name not in files,
                     "unsafe or duplicate archive entry")
@@ -181,12 +200,14 @@ def verify(output, build=False):
     output = Path(output)
     require(output.is_dir() and not output.is_symlink(), "candidate directory must be a real directory")
     require(not (output / "candidate.json").is_symlink(), "candidate manifest must not be a symlink")
+    version, toolchain = policy()
+    expected = {"candidate.json", *(f"{name}-{version}.crate" for name in PUBLIC)}
+    require({path.name for path in output.iterdir()} == expected, "candidate directory inventory differs")
     files = {}
     for path in output.iterdir():
         require(path.is_file() and not path.is_symlink(), "candidate asset must be a regular file")
         files[path.name] = path.read_bytes()
     manifest, archives = verify_files(files)
-    version, toolchain = policy()
     if build:
         build_graph(archives, version, toolchain, env)
     print(f"Verified {len(archives)} local candidate archives" + (" and compiled isolated graph" if build else ""))

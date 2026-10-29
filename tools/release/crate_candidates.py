@@ -62,10 +62,10 @@ def verify(data, revision):
     total = 0
     version, _ = CANDIDATES.policy()
     expected = {"candidate.json", *(f"{name}-{version}.crate" for name in CANDIDATES.PUBLIC)}
-    CANDIDATES.require(len(data) <= MAX_BUNDLE_BYTES, "candidate bundle size limit exceeded")
-    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+    with CANDIDATES.bounded_tar(data, MAX_BUNDLE_BYTES) as archive:
         for item in archive:
-            CANDIDATES.require(item.isfile() and item.name in expected and item.name not in files,
+            CANDIDATES.require(CANDIDATES.regular_tar_member(archive, item) and
+                               item.name in expected and item.name not in files,
                                "unsafe or duplicate candidate bundle entry")
             total += item.size
             CANDIDATES.require(item.size <= MAX_FILE_BYTES and total <= MAX_BUNDLE_BYTES,
