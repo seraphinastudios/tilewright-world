@@ -4,6 +4,8 @@ set -euo pipefail
 repository=$(git rev-parse --show-toplevel)
 cd "${repository}"
 
+python3 -m unittest discover -s tools/crates -p 'test_*.py'
+
 cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace --all-targets
@@ -87,5 +89,14 @@ tools/build-wasm.sh --check
   node --test "test/*.test.js"
   node scripts/licenses.mjs --check
 )
+
+# Exercise the real unpublished crate graph after the source/Go/browser checks.
+# The candidate directory itself must be absent and outside the checkout.
+candidate_parent=$(mktemp -d /tmp/tilewright-world-candidates.XXXXXX)
+trap 'rm -rf -- "${first}" "${second}" "${candidate_parent}"' EXIT
+# macOS exposes /tmp through /private/tmp; retain the original cleanup path.
+candidate_output_parent=$(cd -- "${candidate_parent}" && pwd -P)
+python3 tools/crates/prepare.py prepare "${candidate_output_parent}/candidates"
+python3 tools/crates/prepare.py verify "${candidate_output_parent}/candidates" --build
 
 git diff --check
