@@ -18,6 +18,12 @@
 //! renames the staged files into place, restoring what it published if a
 //! later step fails. Each file changes atomically; the set of files does
 //! not, so the inverse is also the way to repair an interrupted apply.
+//! Where publishing does not check everything, as [`Plan::unchecked_access`]
+//! says (on macOS and Windows, and on Linux on any file system but the
+//! local ones whose access control lists it reads, overlayfs and file
+//! systems it cannot tell included), it is refused unless
+//! the caller accepts that with [`Plan::publish_with`] and
+//! [`PublishOptions::unchecked_access`]. Ask before writing the inverse.
 //!
 //! ```no_run
 //! use std::path::Path;
@@ -27,6 +33,12 @@
 //! let transaction = Transaction::parse("place-tree.jsonc", text).map_err(|problems| problems.len())?;
 //! let plan = plan(Path::new("content"), &transaction, &Options::default())
 //!     .map_err(|problems| problems.len())?;
+//! // Publishing that does not check everything is refused by default, so
+//! // ask first, before writing anything.
+//! if let Some(unchecked) = plan.unchecked_access().map_err(|problems| problems.len())? {
+//!     eprintln!("not applied: publishing here does not check everything: {unchecked}");
+//!     return Ok(());
+//! }
 //! // The inverse is the recovery record: written atomically and synced,
 //! // before anything is published.
 //! let durable = tilewright_edit::write_new(Path::new("undo.jsonc"), plan.inverse()).unwrap();
@@ -47,7 +59,9 @@ mod terrain;
 mod transaction;
 mod uids;
 
-pub use publish::{PUBLISH_SUPPORTED, PublishError, Published};
+pub use publish::{
+    PUBLISH_CONFINED, PUBLISH_SUPPORTED, PublishError, PublishOptions, Published, UNCHECKED_ACCESS,
+};
 pub use transaction::{Digests, FORMAT, Transaction};
 
 use engine::{Failure, Primitive, Workspace};
@@ -100,7 +114,8 @@ pub enum Code {
     Path,
     /// A bound of [`limits`] was exceeded.
     Limit,
-    /// Reading or writing failed.
+    /// Reading or writing failed, or publishing is refused on this
+    /// platform or for the access of the files.
     Io,
 }
 
@@ -948,6 +963,6 @@ fn inverse(workspace: &Workspace<'_>) -> Result<String, TooLarge> {
     Ok(output.text)
 }
 
-// Most tests publish, which is supported on Linux only.
-#[cfg(all(test, target_os = "linux"))]
+// Most tests publish, which is supported on Linux, macOS and Windows.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos", windows)))]
 mod tests;

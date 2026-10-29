@@ -6,12 +6,13 @@
 //! This is the loader's own path confinement: paths are root-relative and
 //! `/`-separated, with no empty, `.` or `..` component and no `\`, `:` or
 //! NUL in any component, and nothing beneath the root is followed if it is
-//! a symbolic link. On Unix every
-//! component is opened through its parent's directory handle without
-//! following links, and writes, renames and removals act on names inside a
-//! directory opened that way, so a link swapped in at any moment is never
-//! followed. Elsewhere components are checked by path before use, a best
-//! effort that a local process changing the tree at the same time can race.
+//! a symbolic link. On Unix every component is opened through its parent's
+//! directory handle without following links, and writes, renames and
+//! removals act on names inside a directory opened that way, so a link
+//! swapped in at any moment is never followed. Elsewhere components are
+//! checked by path before use, on Windows for any reparse point (symbolic
+//! links, junctions and mount points among them), a best effort that a
+//! local process changing the tree at the same time can race.
 
 use crate::files::{Refused, components, platform};
 use std::{fmt, io::Read as _, path::Path};
@@ -50,6 +51,42 @@ impl fmt::Display for AccessError {
 
 impl std::error::Error for AccessError {}
 
+impl AccessError {
+    /// A removal of `path` that took effect but is not finished, as
+    /// [`removal_pending`](Self::removal_pending) says, for tests of what
+    /// is made of one; only Windows makes them otherwise.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn pending_removal(path: &str) -> Self {
+        Self::Io(
+            path.to_owned(),
+            std::io::Error::new(std::io::ErrorKind::ResourceBusy, RemovalPending),
+        )
+    }
+
+    /// Whether this is a removal that took effect but is not finished: on
+    /// Windows a removed entry stays, on some file systems, until another
+    /// program closes it, and goes then.
+    #[must_use]
+    pub fn removal_pending(&self) -> bool {
+        type Inner = dyn std::error::Error + Send + Sync;
+        matches!(self, Self::Io(_, error) if error.get_ref().is_some_and(Inner::is::<RemovalPending>))
+    }
+}
+
+/// A removal that took effect but stays until another program closes the
+/// entry; see [`AccessError::removal_pending`].
+#[derive(Debug)]
+pub(crate) struct RemovalPending;
+
+impl fmt::Display for RemovalPending {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("it is removed, but stays until another program closes it")
+    }
+}
+
+impl std::error::Error for RemovalPending {}
+
 fn refused(path: &str, refused: Refused) -> AccessError {
     match refused {
         Refused::Link(prefix) => AccessError::Link(prefix),
@@ -57,6 +94,10 @@ fn refused(path: &str, refused: Refused) -> AccessError {
         Refused::Io(error) => AccessError::Io(path.to_owned(), error),
     }
 }
+
+/// The name of the file in the root that is its lock on Windows. The
+/// command line writes no output there on any platform.
+pub const LOCK_NAME: &str = ".tilewright.lock";
 
 /// The checked components of a root-relative path; the empty path is the
 /// root.
@@ -88,6 +129,13 @@ fn checked_name(name: &str) -> Result<&str, AccessError> {
 
 /// Who may use a file or directory, as publishing keeps it: where there are
 /// no modes, a read-only file has none of the write bits.
+///
+/// On Unix: the permission bits, the owner and the group, and on Linux the
+/// mandatory access control labels (`SELinux`, Smack), which publishing
+/// requires to be the same on every entry it compares. Access control that
+/// publishing could not keep is refused when the access is read: on Linux
+/// an access control list. On macOS and Windows access control lists are
+/// neither read nor kept.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Access {
     /// The permission bits, with the set-user, set-group and sticky bits.
@@ -96,6 +144,24 @@ pub struct Access {
     pub user: u32,
     /// The owning group.
     pub group: u32,
+    /// A digest of the mandatory access control labels (Linux), all zero
+    /// where there are none.
+    pub control: [u8; 32],
+}
+
+/// Who may reach content through a file or directory: for a file who may
+/// read it, for a directory who may search it. Publishing requires the
+/// entries it compares to have one audience.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Audience {
+    /// The classes that may reach, as read bits.
+    reach: u32,
+    /// The owner, where not everyone may reach.
+    user: Option<u32>,
+    /// The group, where only it may reach.
+    group: Option<u32>,
+    /// The labels.
+    control: [u8; 32],
 }
 
 impl Access {
@@ -104,6 +170,57 @@ impl Access {
     #[must_use]
     pub const fn group_reads_alone(&self) -> bool {
         self.mode & 0o040 != 0 && self.mode & 0o004 == 0
+    }
+
+    /// Whether the classes that may reach content through an entry with
+    /// this access, a directory if `directory`, nest: its owner may
+    /// whenever its group may, and its group whenever others may. Where
+    /// they do not, as for mode `0604`, which denies the group what it
+    /// lets others read, who may reach depends on who the owner and group
+    /// are, which [`audience`](Self::audience) does not say.
+    #[must_use]
+    pub const fn nested(&self, directory: bool) -> bool {
+        let bits = if directory {
+            self.mode & 0o111
+        } else {
+            (self.mode & 0o444) >> 2
+        };
+        let (owner, group, other) = (bits & 0o100 != 0, bits & 0o010 != 0, bits & 0o001 != 0);
+        (owner || !group) && (group || !other)
+    }
+
+    /// Who may reach content through an entry with this access, a
+    /// directory if `directory`.
+    #[must_use]
+    pub fn audience(&self, directory: bool) -> Audience {
+        let reach = if directory {
+            (self.mode & 0o111) << 2
+        } else {
+            self.mode & 0o444
+        };
+        Audience {
+            reach,
+            user: (reach != 0o444).then_some(self.user),
+            group: (reach & 0o040 != 0 && reach & 0o004 == 0).then_some(self.group),
+            control: self.control,
+        }
+    }
+
+    /// The access a new file in a directory with this access is given: the
+    /// directory's mode without the execute bits, its group and its labels,
+    /// and as its owner the user that makes it, this process's effective
+    /// user (0 where there are no users).
+    #[must_use]
+    pub fn new_file(&self) -> Self {
+        #[cfg(unix)]
+        let user = rustix::process::geteuid().as_raw();
+        #[cfg(not(unix))]
+        let user = 0;
+        Self {
+            mode: self.mode & 0o666,
+            user,
+            ..*self
+        }
     }
 }
 
@@ -135,6 +252,26 @@ impl SourceRoot {
 
     pub(crate) fn platform(&self) -> platform::Root {
         self.root.try_clone()
+    }
+
+    /// What is at `path`, not following it, if anything: as the file
+    /// system finds it by that name, which on one that ignores case, or as
+    /// on Windows drops trailing dots, can be an entry named otherwise.
+    /// A path through a file names nothing; a link on the way is an error.
+    pub fn exists(&self, path: &str) -> Result<bool, AccessError> {
+        // The empty path is the root.
+        if path.is_empty() {
+            return self.directory(path, false).map(|root| root.is_some());
+        }
+        match self.root.kind(&checked(path)?) {
+            Ok(crate::files::Found::Missing) | Err(Refused::Missing | Refused::Unexpected) => {
+                Ok(false)
+            }
+            Ok(_) => Ok(true),
+            // The entry itself is a link.
+            Err(Refused::Link(prefix)) if prefix == path => Ok(true),
+            Err(other) => Err(refused(path, other)),
+        }
     }
 
     /// Reads a regular file of at most `limit` bytes. `Ok(None)` means the
@@ -190,16 +327,61 @@ impl SourceRoot {
             .map_err(|error| refused(path, error))
     }
 
-    /// Takes the root's exclusive advisory lock, held until the returned
-    /// value is dropped. It fails at once with [`AccessError::Locked`] if
-    /// another holder, in this process or another, has it. Only Unix has
-    /// the lock; elsewhere this always succeeds.
+    /// The UTF-8 names of the entries of the directory `path`, links
+    /// included, and how many entries it has, those whose names are not
+    /// UTF-8 included; `None` when it is missing. A directory with more
+    /// than `limit` entries is an error, [`AccessError::TooLarge`].
+    pub fn names(
+        &self,
+        path: &str,
+        limit: usize,
+    ) -> Result<Option<(std::collections::BTreeSet<String>, usize)>, AccessError> {
+        let listing = match self.root.list(&checked(path)?) {
+            Ok(listing) => listing,
+            Err(Refused::Missing) => return Ok(None),
+            Err(other) => return Err(refused(path, other)),
+        };
+        let mut names = std::collections::BTreeSet::new();
+        let mut count = 0;
+        for entry in listing {
+            if count >= limit {
+                return Err(AccessError::TooLarge(path.to_owned()));
+            }
+            count += 1;
+            let entry = entry.map_err(|error| AccessError::Io(path.to_owned(), error))?;
+            names.extend(entry.name);
+        }
+        Ok(Some((names, count)))
+    }
+
+    /// Takes the root's exclusive lock, held until the returned value is
+    /// dropped. It fails at once with [`AccessError::Locked`] if another
+    /// holder, in this process or another, has it. On Unix it is an
+    /// advisory `flock` of the root directory; on Windows the file
+    /// [`LOCK_NAME`] in the root, created afresh, shared with no one and
+    /// deleted when the lock is released or its process stops, so a file by
+    /// that name that no one holds is an error. Elsewhere there is no lock
+    /// and this always succeeds.
     pub fn lock(&self) -> Result<SourceLock, AccessError> {
         match self.root.lock() {
             Ok(Some(lock)) => Ok(SourceLock(lock)),
             Ok(None) => Err(AccessError::Locked),
             Err(other) => Err(refused(".", other)),
         }
+    }
+}
+
+/// The mounts of this process, read once to tell the file systems of
+/// several directories ([`SourceDirectory::unchecked_file_system`]): on
+/// Linux from `/proc/self/mountinfo`, bounded; elsewhere nothing.
+pub struct Mounts(platform::Mounts);
+
+impl Mounts {
+    /// Reads the mounts. Where they cannot be read, every directory's file
+    /// system is one that cannot be told.
+    #[must_use]
+    pub fn read() -> Self {
+        Self(platform::Mounts::read())
     }
 }
 
@@ -221,8 +403,10 @@ impl SourceDirectory {
     /// `name` is removed first, so a link or hard link there is never
     /// written through. With `access`, the file is its owner's alone until
     /// written, then takes that mode and group, and on Linux no access
-    /// control list it would get from the directory; without, it has the
-    /// platform's default.
+    /// control list it would get from the directory; it must have the
+    /// labels of `access`, which is checked before anything is written.
+    /// Where there are no modes, it is read-only if `access` has no write
+    /// bits. Without `access`, it has the platform's default.
     pub fn write(
         &self,
         name: &str,
@@ -235,10 +419,10 @@ impl SourceDirectory {
     }
 
     /// Who may use the regular file `name`; `None` when there is no regular
-    /// file there. On Linux, a file with an access control list or a
-    /// mandatory access control label (`SELinux`, Smack) is refused, since its
-    /// mode bits do not say who may read it and a file replacing it could
-    /// not keep them.
+    /// file there. A file whose access publishing could not keep is
+    /// refused: on Linux one with an access control list, and on Windows a
+    /// read-only or encrypted one. macOS and
+    /// Windows access control lists are neither read nor kept.
     pub fn access(&self, name: &str) -> Result<Option<Access>, AccessError> {
         self.directory
             .access(checked_name(name)?)
@@ -246,19 +430,30 @@ impl SourceDirectory {
     }
 
     /// Who may use this directory. On Linux, a directory with an access
-    /// control list, its own or one it gives new files, or a mandatory
-    /// access control label is refused.
+    /// control list, its own or one it gives new files, is refused.
     pub fn own_access(&self) -> Result<Access, AccessError> {
         self.directory
             .own_access()
             .map_err(|error| refused(&self.path, error))
     }
 
-    /// Gives this directory the mode and group of `access`.
+    /// Gives this directory the mode and group of `access`, and checks that
+    /// it has the labels of `access`.
     pub fn set_own_access(&self, access: &Access) -> Result<(), AccessError> {
         self.directory
             .set_own_access(access)
             .map_err(|error| refused(&self.path, error))
+    }
+
+    /// Checks, before either is made, that a file made here as `name` would
+    /// get the access control beside the mode bits that one made as
+    /// `staged` would: on Linux with `SELinux`, the label its policy gives a
+    /// new file of that name, which may depend on the name and is not given
+    /// again on renaming. Elsewhere there is nothing to check.
+    pub fn check_final_name(&self, staged: &str, name: &str) -> Result<(), AccessError> {
+        self.directory
+            .check_final_name(checked_name(staged)?, checked_name(name)?)
+            .map_err(|error| refused(&self.entry(name), error))
     }
 
     /// Renames `from` to `to`, replacing `to`, atomically.
@@ -281,6 +476,25 @@ impl SourceDirectory {
         self.directory
             .remove_directory(checked_name(name)?)
             .map_err(|error| refused(&self.entry(name), error))
+    }
+
+    /// The file system this directory is on, in words, where publishing
+    /// does not read the access control lists of what is in it: on Linux
+    /// any but the local ones that keep them as the attributes publishing
+    /// reads (ext2, ext3, ext4, XFS, Btrfs, tmpfs, F2FS, ZFS and bcachefs),
+    /// so network, host-shared (such as WSL's Windows drives or a virtual
+    /// machine's shared folders), FUSE, NTFS and stacked ones (overlayfs)
+    /// among them. The directory's mount is found by its ID in `mounts`,
+    /// and both the type the kernel names it with and the magic number
+    /// `statfs` gives must be such a file system's; one that cannot be
+    /// told, as where `/proc` cannot be read or the mount's line is
+    /// malformed, is not checked
+    /// either, and says why. `None` where it is checked, and on other
+    /// platforms, which do not read access control lists at all.
+    pub fn unchecked_file_system(&self, mounts: &Mounts) -> Result<Option<String>, AccessError> {
+        self.directory
+            .unchecked_file_system(&mounts.0)
+            .map_err(|error| refused(&self.path, error))
     }
 
     /// Syncs the directory, making renames and removals in it durable.
