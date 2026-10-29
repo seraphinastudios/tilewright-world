@@ -122,8 +122,11 @@ input. Cancellation before intent creation produces no upload reservation. The
 registry token stays in the Python process: it is never supplied to Cargo, a
 subprocess, environment, command arguments, files or logs. OS core dumps are
 disabled before token input; Python does not guarantee secure memory erasure.
-The GitHub CLI uses its existing owner-managed authentication for intent writes;
-this helper does not configure credentials or retrieve GitHub tokens.
+The GitHub CLI uses its existing owner-managed authentication for intent writes
+and the repeated execution-phase release checks. This avoids exhausting GitHub's
+unauthenticated hourly quota during a five-crate batch; default preflight still
+uses public repository evidence reads.
+This helper does not configure credentials or retrieve GitHub tokens.
 
 The allowlisted batch runs in dependency order. Before each upload, the helper
 checks the source release and clean checkout again, verifies the crate is still

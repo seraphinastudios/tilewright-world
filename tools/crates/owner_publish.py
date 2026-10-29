@@ -129,20 +129,21 @@ def bounded_file(path, limit):
     return data
 
 
-def release_evidence(plan):
-    repository = api("")
+def release_evidence(plan, *, read=None):
+    read = read or api
+    repository = read("")
     require(repository["full_name"] == REPOSITORY and repository["default_branch"] == "main" and
             repository["archived"] is False and repository["id"] == REPOSITORY_ID, "repository identity or default branch changed")
-    release = api(f"releases/{plan['release_id']}")
+    release = read(f"releases/{plan['release_id']}")
     require(release["id"] == plan["release_id"] and release["tag_name"] == plan["tag"] and
             release["immutable"] is True and release["draft"] is False and
             release["prerelease"] is False, "release must be the pinned immutable stable publication")
     for tag in (plan["tag"], "go/" + plan["tag"]):
-        require(api("commits/" + quote(tag, safe=""))["sha"] == plan["revision"], "source or Go tag moved")
-    comparison = api(f"compare/{plan['revision']}...main")
+        require(read("commits/" + quote(tag, safe=""))["sha"] == plan["revision"], "source or Go tag moved")
+    comparison = read(f"compare/{plan['revision']}...main")
     require(comparison["status"] in {"ahead", "identical"} and
             comparison["base_commit"]["sha"] == plan["revision"], "source revision is not on main")
-    run = api(f"actions/runs/{plan['run_id']}/attempts/{plan['attempt']}")
+    run = read(f"actions/runs/{plan['run_id']}/attempts/{plan['attempt']}")
     require(run["id"] == plan["run_id"] and run["run_attempt"] == plan["attempt"] and
             run["head_sha"] == plan["revision"] and run["head_branch"] == "main" and
             run["path"] == ".github/workflows/release.yml" and
@@ -300,6 +301,11 @@ def github_call(path, body=None):
     return decode(result.stdout)
 
 
+def owner_api(path):
+    """Execution-only authenticated evidence reads avoid the public hourly quota."""
+    return github_call(f"repos/{REPOSITORY}" + (f"/{path}" if path else ""))
+
+
 def github_authority():
     actor = github_call("user")
     require(actor["login"] == OWNER and actor["id"] == GITHUB_OWNER_ID, "wrong GitHub owner identity")
@@ -445,7 +451,7 @@ def execute(plan, manifest, files, archives, states):
     if not pending:
         print("All five exact archives and intended public ownership are already confirmed; no upload needed.")
         return
-    snapshot = release_evidence(plan)
+    snapshot = release_evidence(plan, read=owner_api)
     print("First publication: " + ", ".join(f"{row['name']}@{row['version']}" for row in pending), file=sys.stderr)
     print(f"Release {plan['tag']} ({plan['release_id']}), source {plan['revision']}, bundle {plan['bundle_sha256']}", file=sys.stderr)
     print(f"Intended crates.io owner: {OWNER} ({OWNER_ID}). No token identity API exists.", file=sys.stderr)
@@ -466,7 +472,7 @@ def execute(plan, manifest, files, archives, states):
         for row in pending:
             terminal_boundary()
             clean_source(plan["revision"])
-            require(release_evidence(plan) == snapshot, "source release changed before upload")
+            require(release_evidence(plan, read=owner_api) == snapshot, "source release changed before upload")
             public_owner()
             for dependency in dependencies[row["name"]]:
                 require(registry_state(by_name[dependency]) == "exact-existing", "dependency is not visible with its exact checksum")
@@ -479,7 +485,7 @@ def execute(plan, manifest, files, archives, states):
             reserve_intent(plan, row, sha256(meta_bytes))
             # An intent is durable before any possible PUT. A later refusal leaves
             # it intact; no process/host may adopt or retry that reservation.
-            require(release_evidence(plan) == snapshot, "source release changed after intent; stop")
+            require(release_evidence(plan, read=owner_api) == snapshot, "source release changed after intent; stop")
             clean_source(plan["revision"])
             require(registry_state(row) == "absent", "coordinate changed after intent; stop")
             put_once(data, meta, token)

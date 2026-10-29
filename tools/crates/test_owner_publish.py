@@ -291,6 +291,55 @@ class ExecuteTests(unittest.TestCase):
         self.assertNotIn(self.TOKEN, mocks["stdout"].getvalue() + mocks["stderr"].getvalue())
         mocks["owned"].assert_called_once_with(self.rows[0])
 
+    def test_five_crate_batch_routes_repeated_evidence_to_authenticated_reader(self):
+        names = ("tilewright-jsonc", "tilewright-source", "tilewright-pack", "tilewright-diff", "tilewright-edit")
+        self.rows = [dict(name=name, version="0.1.0", asset=f"{name}-0.1.0.crate", sha256=P.sha256(name.encode()))
+                     for name in names]
+        self.files = {row["asset"]: row["name"].encode() for row in self.rows}
+        self.archives = {name: {"Cargo.toml": f'[package]\nname="{name}"\nversion="0.1.0"\n'.encode()} for name in names}
+        self.states = dict.fromkeys(names, "absent")
+        evidence = github()
+        prefix = f"/repos/{P.REPOSITORY}"
+        refs = {}
+        public_reads = []
+        authenticated_reads = []
+
+        def public_request(host, path, **_):
+            self.assertEqual(host, "api.github.com")
+            public_reads.append(path)
+            if "/git/ref/tags/" in path:
+                return 404, b""
+            return 200, json.dumps(evidence[path[len(prefix):].lstrip("/")]).encode()
+
+        def github_call(path, body=None):
+            suffix = path[len(prefix)-1:].lstrip("/")
+            if suffix == "git/tags":
+                return {"sha": "f" * 40}
+            if suffix == "git/refs":
+                ref = body["ref"]
+                self.assertNotIn(ref, refs)
+                refs[ref] = {"ref": ref, "object": {"type": "tag", "sha": body["sha"]}}
+                return refs[ref]
+            if suffix.startswith("git/ref/tags/"):
+                return refs["refs/" + suffix[len("git/ref/"):]]
+            authenticated_reads.append(suffix)
+            return evidence[suffix]
+
+        release_reader = P.release_evidence
+        mocks = self.batch(release_evidence=release_reader, reserve_intent=P.reserve_intent,
+                           require_no_intent=P.require_no_intent)
+        with patch.object(P, "request", side_effect=public_request), patch.object(P, "github_call", side_effect=github_call) as gh:
+            # The two credential-free preflight evidence snapshots remain public.
+            release_reader(PLAN)
+            release_reader(PLAN)
+            self.run_batch()
+            self.assertNotIn(self.TOKEN, repr(gh.call_args_list))
+        self.assertEqual(len(public_reads), 22)  # 12 preflight + 10 intent absence checks
+        self.assertEqual(len(authenticated_reads), 66)  # 11 execution snapshots, six reads each
+        self.assertEqual(len(refs), 5)
+        self.assertEqual(mocks["put_once"].call_count, 5)
+        self.assertEqual(mocks["getpass"].call_count, 1)
+
     def test_cancel_or_nonmatching_assertion_precedes_token_intent_and_upload(self):
         for answer in ("no", "PUBLISH AS someone-else"):
             with self.subTest(answer=answer):
@@ -339,6 +388,16 @@ class ExecuteTests(unittest.TestCase):
             self.run_batch()
         self.assertEqual(mocks["put_once"].call_count, 1)
         self.assertEqual(mocks["reserve_intent"].call_count, 1)
+
+    def test_mid_batch_authenticated_budget_error_stops_before_next_intent(self):
+        mocks = self.batch()
+        snapshot = ({"id": 1}, {})
+        mocks["release_evidence"].side_effect = [snapshot, snapshot, snapshot, P.Refusal("GitHub budget unavailable")]
+        with self.assertRaisesRegex(P.Refusal, "budget"):
+            self.run_batch()
+        self.assertEqual(mocks["put_once"].call_count, 1)
+        self.assertEqual(mocks["reserve_intent"].call_count, 1)
+        self.assertEqual(mocks["confirm_publication"].call_count, 1)
 
     def test_source_drift_after_intent_never_uploads(self):
         mocks = self.batch()
