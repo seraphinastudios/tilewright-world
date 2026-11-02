@@ -1084,6 +1084,7 @@ impl Bounded {
 fn write_operation(
     output: &mut Bounded,
     path: &str,
+    base: &str,
     primitive: &Primitive,
 ) -> Result<(), TooLarge> {
     output.push("{\"op\": ")?;
@@ -1091,7 +1092,7 @@ fn write_operation(
         Primitive::Set { .. } => "set",
         Primitive::Insert { .. } => "insert",
         Primitive::Remove { .. } => "remove",
-        Primitive::Create { .. } => "document.create",
+        Primitive::Create { .. } | Primitive::CreateBase => "document.create",
         Primitive::Delete => "document.delete",
     };
     output.push_json(kind)?;
@@ -1138,6 +1139,10 @@ fn write_operation(
             output.push(", \"text\": ")?;
             output.push_text(text)?;
         }
+        Primitive::CreateBase => {
+            output.push(", \"text\": ")?;
+            output.push_text(base)?;
+        }
         Primitive::Delete => {}
     }
     output.push("}")
@@ -1181,20 +1186,12 @@ fn inverse(workspace: &Workspace<'_>) -> Result<String, TooLarge> {
         let mut write = |primitive: &Primitive| -> Result<(), TooLarge> {
             output.push(if first { "\n    " } else { ",\n    " })?;
             first = false;
-            write_operation(&mut output, path, primitive)
+            let base = entry.base.as_deref().unwrap_or_default();
+            write_operation(&mut output, path, base, primitive)
         };
         match (&entry.base, entry.current.text()) {
             (None, _) => write(&Primitive::Delete)?,
-            (Some(text), None) => {
-                // The text is written straight from the entry, not copied.
-                output.push(if first { "\n    " } else { ",\n    " })?;
-                first = false;
-                output.push("{\"op\": \"document.create\", \"path\": ")?;
-                output.push_json(path)?;
-                output.push(", \"text\": ")?;
-                output.push_text(text)?;
-                output.push("}")?;
-            }
+            (Some(_), None) => write(&Primitive::CreateBase)?,
             (Some(_), Some(_)) => {
                 for primitive in entry.inverse.iter().rev() {
                     write(primitive)?;

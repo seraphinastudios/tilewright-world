@@ -96,6 +96,9 @@ pub(crate) enum Primitive {
     Create {
         text: String,
     },
+    /// Creates the file with the text it began with, which its entry holds,
+    /// so that dropping the steps before it copies nothing.
+    CreateBase,
     Delete,
 }
 
@@ -152,7 +155,7 @@ impl Primitive {
                 separator,
             } => pointer(steps).saturating_add(separator.len()),
             Self::Create { text } => text.len(),
-            Self::Delete => 0,
+            Self::CreateBase | Self::Delete => 0,
         }
     }
 }
@@ -194,16 +197,16 @@ impl Entry {
     /// Drops the inverse steps the inverse will not hold: all of them for a
     /// file back as it began, and all but one creation of its text for a
     /// file deleted. Should the file be created again, undoing that and
-    /// then creating the text restores it as well.
+    /// then creating the text restores it as well. It runs once for each
+    /// operation, which is not charged for this, so it must cost next to
+    /// nothing whatever the file's size: the text is not copied.
     fn compact(&mut self) {
         if !self.is_changed() {
             self.inverse.clear();
             self.recorded = (0, 0);
-        } else if let (Some(base), Current::Absent) = (&self.base, &self.current)
-            && self.inverse.len() != 1
-        {
-            self.inverse = vec![Primitive::Create { text: base.clone() }];
-            self.recorded = size_of(&self.inverse);
+        } else if let (Some(base), Current::Absent) = (&self.base, &self.current) {
+            self.inverse = vec![Primitive::CreateBase];
+            self.recorded = (u64::try_from(base.len()).unwrap_or(u64::MAX), 1);
         }
     }
 }

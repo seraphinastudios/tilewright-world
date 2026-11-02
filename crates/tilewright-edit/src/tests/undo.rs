@@ -935,3 +935,53 @@ fn a_directory_an_undo_would_leave_is_validated_as_there() {
     assert!(fs::read_dir(&layer).unwrap().next().is_none());
     assert!(tilewright_source::load(root).is_ok());
 }
+
+#[test]
+fn deleting_a_large_file_and_making_it_again_copies_it_no_more() {
+    const PAD: &str = "defs/proto/pad.jsonc";
+    let tree = copy();
+    let root = tree.path();
+    let text = format!(
+        "{{\"format\": \"tilewright.def/1\", \"type\": \"proto\", \"id\": \"pad\", \"fields\": {{\"face\": \"p.png\", \"layer\": \"item\"}}, \"custom\": {{\"example.org/pad\": \"{}\"}}}}\n",
+        "x".repeat(256 << 10)
+    );
+    fs::write(root.join(PAD), &text).unwrap();
+    let delete = format!(r#"{{"op": "document.delete", "path": "{PAD}"}}"#);
+    let create = format!(
+        r#"{{"op": "document.create", "path": "{PAD}", "text": "{{\"format\": \"tilewright.def/1\", \"type\": \"proto\", \"id\": \"pad\", \"fields\": {{\"face\": \"q.png\", \"layer\": \"item\"}}}}"}}"#
+    );
+    let mut operations = vec![delete.clone()];
+    for _ in 0..1_000 {
+        operations.push(create.clone());
+        operations.push(delete.clone());
+    }
+    operations.push(create.clone());
+    let tx = transaction(&operations.join(",\n    "));
+    // Each pair is charged its own small size and nothing for the file.
+    let size = u64::try_from(text.len()).unwrap();
+    let _lowered = Lowered::to(limits::READ_BYTES, size + (1 << 20));
+
+    // No step of the inverse holds a copy of the file, though each
+    // deletion dropped the steps before it, down to one creation of it.
+    let source = SourceRoot::new(root);
+    let on_disk = Overlay::new();
+    let workspace = carry_out(&source, &on_disk, Names::OWN, &tx, &Options::default()).unwrap();
+    let steps = &workspace.entries[PAD].inverse;
+    assert!(matches!(steps[0], Primitive::CreateBase), "{steps:?}");
+    assert!(
+        steps
+            .iter()
+            .all(|step| !matches!(step, Primitive::Create { text } if text.len() > 1 << 10)),
+        "{}",
+        steps.len()
+    );
+    drop(workspace);
+
+    // Its inverse still deletes the file and creates the text it began
+    // with, and writing it copied that once.
+    let plan = planned(root, &tx);
+    plan.check_undo().unwrap();
+    published(&plan);
+    apply(root, &reparsed("undo.jsonc", plan.inverse()));
+    assert_eq!(read(root, PAD), text);
+}
