@@ -43,12 +43,12 @@ target `rusqlite` takes SQLite from `sqlite-wasm-rs` instead of
 
 | Component | Pulled in by | License |
 | --- | --- | --- |
-| [SQLite](https://sqlite.org/) 3.53.0 | [`sqlite-wasm-rs`](https://github.com/Spxg/sqlite-wasm-rs) 0.5.5 (MIT), through `rusqlite`'s `ffi-sqlite-wasm-rs` feature | Public domain |
+| [SQLite](https://sqlite.org/) 3.53.4 | [`sqlite-wasm-rs`](https://github.com/Spxg/sqlite-wasm-rs) 0.6.2 (MIT), through `rusqlite`'s `ffi-sqlite-wasm-rs` feature | Public domain |
 | Parts of [musl](https://musl.libc.org/) libc (string, stdlib, math and stdio functions) | `sqlite-wasm-rs` | MIT |
 | [printf](https://github.com/eyalroz/printf) | `sqlite-wasm-rs` | MIT |
-| `rsqlite-vfs` 0.1.1, SQLite's in-memory file system | `sqlite-wasm-rs` | MIT |
-| `hashbrown` 0.16.1, and through it `foldhash` 0.2.0, and `thiserror` 2.0.21 | `rsqlite-vfs` | MIT OR Apache-2.0 (`foldhash`: Zlib) |
-| `wasm-bindgen` 0.2.129, `wasm-bindgen-shared` 0.2.129 and `js-sys` 0.3.106; through `wasm-bindgen-shared` `unicode-ident` 1.0.27; and through `js-sys` `futures-core`, `futures-task`, `futures-util`, `pin-project-lite` and `slab` | `tilewright-pack-wasm` | MIT OR Apache-2.0 (`slab`: MIT; `unicode-ident`: (MIT OR Apache-2.0) AND Unicode-3.0) |
+| `rsqlite-vfs` 0.2.0, SQLite's in-memory file system | `sqlite-wasm-rs` | MIT |
+| `thiserror` 2.0.21 | `rsqlite-vfs` | MIT OR Apache-2.0 |
+| `wasm-bindgen` 0.2.129, `wasm-bindgen-shared` 0.2.129 and `js-sys` 0.3.106; through `wasm-bindgen-shared` `unicode-ident` 1.0.27; and through `js-sys` `futures-core`, `futures-task`, `futures-util`, `pin-project-lite` and `slab` | `tilewright-pack-wasm` and `sqlite-wasm-rs` | MIT OR Apache-2.0 (`slab`: MIT; `unicode-ident`: (MIT OR Apache-2.0) AND Unicode-3.0) |
 
 The package carries `THIRD_PARTY_LICENSES.md`, the license text of every
 crate and C library compiled into the module. Its
@@ -76,7 +76,7 @@ that imports the reader.
 
 | Module | Version | License | Compiled in |
 | --- | --- | --- | --- |
-| [modernc.org/sqlite](https://gitlab.com/cznic/sqlite) | v1.60.1 | BSD-3-Clause; SQLite 3.53.4, transpiled to Go, is public domain | Yes, without its `vec` package (sqlite-vec, MIT), which the reader does not import |
+| [modernc.org/sqlite](https://gitlab.com/cznic/sqlite) | v1.61.0 | BSD-3-Clause; SQLite 3.54.1, transpiled to Go, is public domain | Yes, without its `vec` package (sqlite-vec, MIT), which the reader does not import |
 | [modernc.org/libc](https://gitlab.com/cznic/libc) | v1.77.1 | BSD-3-Clause; carries code from musl libc (MIT), Go (BSD-3-Clause), go-netdb (MIT) and NixOS/nixpkgs (MIT), as its `LICENSE-3RD-PARTY.md` records | Yes |
 | [modernc.org/mathutil](https://gitlab.com/cznic/mathutil) | v1.7.1 | BSD-3-Clause | Yes |
 | [modernc.org/memory](https://gitlab.com/cznic/memory) | v1.12.1 | BSD-3-Clause; carries code from Go and mmap-go (both BSD-3-Clause) | Yes |
