@@ -283,13 +283,13 @@ the transaction changed, in path order:
 - otherwise the exact inverse of each edit since the file was last, between
   operations, as it began or absent, last first: `set` with the old value's
   text, `insert` with the old item, key, colon and regions, `remove` with
-  the old region, and `document.delete` for the edit that created it. When
-  it was last absent, those are followed by `document.create` with the
-  exact `text` it began with, as for a file it deleted: once the file is
-  deleted, the inverses of the edits before are dropped, since creating
-  its text restores it whatever they did. An old value or key, and each
-  step of a pointer, is written on a line of its own, so no line of the
-  inverse is longer than a line of the file.
+  the old region, and `document.delete` for the edit that created it. If
+  that last state is absence, those are followed by `document.create` with
+  the exact `text` it began with, as for a file it deleted: once the file
+  is deleted, the inverses of the edits before are dropped, since creating
+  its text restores it whatever they did. An old value or key is written
+  on lines of its own, so none of its lines is longer than a line of the
+  file, and each step of a pointer is written on a line of its own.
 
 An inverse names files by path and values by pointer, never objects by
 place or uid, whatever addresses the transaction used: it restores bytes,
@@ -335,16 +335,17 @@ its result: its `base`, every operation and its preconditions, the read and
 work budgets, the counts of files and operations, its `result`, and that
 its sealed form and its own inverse are transactions within the limits.
 
-Since an inverse holds only the edits since each file was last as it began
-or absent, a round can be shorter than the one two before it, in three
-ways. The transaction or a round can pass through the state it ends in:
-setting a value to 1, then 2, then 1 again. It can pass through the state
-it began in: placing an object and then moving it, which passes through the
-chunk as it was within one operation. Or it can delete a file and make it
-again, without the file being as it began after that. Its inverse then
-holds nothing of what it did to the file before the deletion, and the
-inverse of that nothing of what it did after: only a `document.delete` and
-a `document.create` with the whole text.
+Since an inverse holds only the edits since each file was last, between
+operations, as it began or absent, a round can be shorter than the one two
+before it, in three ways. The transaction or a round can pass through the
+state it ends in: setting a value to 1, then 2, then 1 again. It can pass
+through the state it began in: placing an object and then moving it, which
+passes through the chunk as it was within one operation, and so between
+operations of the redo. Or it can delete a file and make it again, without
+the file being as it began after that. Its inverse then holds nothing of
+what it did to the file before the deletion. The inverse of that inverse
+holds none of its edits: only a `document.delete` and a `document.create`
+with the whole text.
 
 The check stops at the first round whose inverse is, byte for byte, the
 transaction of the round before it. Carrying out is deterministic, and
