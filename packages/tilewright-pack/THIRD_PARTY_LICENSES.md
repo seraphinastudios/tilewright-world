@@ -927,9 +927,9 @@ License: MIT. Source: https://crates.io/crates/rsqlite-vfs/0.1.1
 
 The crate has no license file; its metadata gives the license above, the authors (none listed) and the repository (none listed).
 
-### rusqlite 0.40.2
+### rusqlite 0.41.1
 
-License: MIT. Source: https://crates.io/crates/rusqlite/0.40.2
+License: MIT. Source: https://crates.io/crates/rusqlite/0.41.1
 
 LICENSE:
 

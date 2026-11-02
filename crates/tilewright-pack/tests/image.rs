@@ -9,7 +9,7 @@
 use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use tilewright_pack::{ErrorCode, Pack, VerifyLimits};
+use tilewright_pack::{ErrorCode, Pack, Page, VerifyLimits};
 
 fn valid() -> (PathBuf, Vec<u8>) {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/packs");
@@ -69,9 +69,24 @@ fn verification_compares_the_expected_digest() {
     let (_, bytes) = valid();
     let mut digest: [u8; 32] = Sha256::digest(&bytes).into();
     digest[31] ^= 1;
-    // Opening does not hash the image; verification does.
+    // Opening does not compare the digests; verification does.
     let pack = Pack::open_bytes(&bytes, Some(digest), &VerifyLimits::default()).unwrap();
     assert_eq!(code(pack.verify()), ErrorCode::Digest);
+}
+
+#[test]
+fn a_listing_can_ask_for_the_digest() {
+    let (_, bytes) = valid();
+    let digest: [u8; 32] = Sha256::digest(&bytes).into();
+    let pack = Pack::open_bytes(&bytes, Some(digest), &VerifyLimits::default()).unwrap();
+    let mut planes = 0;
+    pack.visit_planes(Page::all(), &mut |_| {
+        planes += 1;
+        assert_eq!(pack.file_digest()?, digest);
+        pack.verify().map(drop)
+    })
+    .unwrap();
+    assert!(planes > 0);
 }
 
 #[test]
