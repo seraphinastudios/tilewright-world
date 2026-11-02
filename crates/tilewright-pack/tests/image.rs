@@ -235,20 +235,27 @@ impl Read for Trickle<'_> {
 }
 
 #[test]
-fn the_header_is_checked_however_few_bytes_each_read_yields() {
+fn the_header_and_digest_are_checked_however_few_bytes_each_read_yields() {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/packs");
     let (_, valid) = valid();
-    let open = |bytes: &[u8], chunk| {
+    let open = |bytes: &[u8], chunk, digest| {
         let length = u64::try_from(bytes.len()).unwrap();
         Pack::open_from(
             Trickle { bytes, chunk },
             length,
-            None,
+            digest,
             &VerifyLimits::default(),
         )
     };
-    for chunk in [1, 7, 19, 20, 21] {
-        open(&valid, chunk).unwrap();
+    let digest: [u8; 32] = Sha256::digest(&valid).into();
+    for chunk in [1, 7, 19, 20, 21, 4096] {
+        let pack = open(&valid, chunk, Some(digest)).unwrap();
+        assert_eq!(
+            pack.file_digest().unwrap(),
+            digest,
+            "reads of {chunk} bytes"
+        );
+        pack.verify().unwrap();
         for name in [
             "open-header-wal",
             "open-header-write-version",
@@ -256,7 +263,7 @@ fn the_header_is_checked_however_few_bytes_each_read_yields() {
         ] {
             let bytes = std::fs::read(directory.join(format!("{name}.twpack"))).unwrap();
             assert_eq!(
-                code(open(&bytes, chunk)),
+                code(open(&bytes, chunk, None)),
                 ErrorCode::Identity,
                 "{name} in reads of {chunk} bytes"
             );
