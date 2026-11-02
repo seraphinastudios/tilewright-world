@@ -1130,3 +1130,26 @@ fn files_at_their_base_have_the_budget_whether_or_not_it_can_resume() {
     };
     assert!(has(&problems(root, &sealed), "tx.limit", "hold more than"));
 }
+
+#[test]
+fn a_repair_of_an_invalid_tree_passes_the_check_and_its_undo_is_refused() {
+    const TREE: &str = "defs/proto/tree.jsonc";
+    let tree = copy();
+    let root = tree.path();
+    // A field its schema does not have, so the tree does not validate.
+    let broken = read(root, TREE).replace("\"blocks_view\": true", "\"nonsense\": true");
+    fs::write(root.join(TREE), broken).unwrap();
+    assert!(tilewright_source::load(root).is_err());
+    let tx = transaction(
+        r#"{"op": "remove", "path": "defs/proto/tree.jsonc", "pointer": ["fields", "nonsense"]}"#,
+    );
+    let plan = planned(root, &tx);
+    // The check does not validate the tree an undo leaves, so that a
+    // transaction can repair a tree: it would refuse every repair.
+    plan.check_undo().unwrap();
+    published(&plan);
+    assert!(tilewright_source::load(root).is_ok());
+    // The undo recreates the invalid tree, and planning it does validate.
+    let found = problems(root, &reparsed("undo.jsonc", plan.inverse()));
+    assert!(has(&found, "shape.unknown_key", "nonsense"), "{found:#?}");
+}
