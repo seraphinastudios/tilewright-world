@@ -2278,7 +2278,7 @@ mod tests {
             "../../fixtures/packs/5830e26e449a1f0d0c786b32801b7ed68e351777db5f586532478cb4384844b2.twpack",
         );
         let bytes = std::fs::read(path).unwrap();
-        let pack = Pack::open_bytes(&bytes, None, &super::VerifyLimits::default()).unwrap();
+        let mut pack = Pack::open_bytes(&bytes, None, &super::VerifyLimits::default()).unwrap();
         // Even with query_only turned off, the image cannot be written.
         pack.connection
             .execute_batch("PRAGMA query_only = OFF")
@@ -2291,10 +2291,10 @@ mod tests {
             assert!(pack.connection.execute_batch(write).is_err(), "{write}");
         }
         pack.verify().unwrap();
-        assert_eq!(
-            pack.file_digest().unwrap(),
-            <[u8; 32]>::from(sha2::Sha256::digest(&bytes))
-        );
+        // The digest was taken at open, so only the buffer itself can show
+        // that it still holds the bytes.
+        let image = pack.connection.serialize(rusqlite::MAIN_DB).unwrap();
+        assert_eq!(&*image, bytes.as_slice());
     }
 
     /// Objects at any depth and their fields.
