@@ -1720,7 +1720,8 @@ impl Pack {
 /// A pack image being read into SQLite's copy. Reading it never fails:
 /// once the image fails or ends, the rest of the copy is zeros, and whether
 /// it ended early or the error it failed with is kept for the caller.
-/// `rusqlite` frees its copy only once the copy is read in full.
+/// `rusqlite` would report either as an SQLite error, not as the I/O error
+/// it is.
 struct Filled<R> {
     inner: R,
     missing: bool,
