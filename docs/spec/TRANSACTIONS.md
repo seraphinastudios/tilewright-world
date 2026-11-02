@@ -651,7 +651,12 @@ the work it is charged, so no lookup is metered on its own. A transaction
 with uid addresses also loads the tree once, within the load's own bounds
 as validating does; a uid lookup reads the chunk that holds the object and
 each chunk changed since the last lookup, as documents the operation reads. A file is read
-only as far as the read allowance left; the inverse's text and operations
+only as far as the read allowance left, and a transaction that can resume
+(section 8) has an allowance as large again for the files it finds already
+at their `result`, which it reads but does not edit: an interrupted apply
+can leave any mix of the trees before and after it, which can hold more
+than either, and that is how much it takes to read any such mix when each
+tree alone is within the limit. The inverse's text and operations
 are counted as operations run and must fit a transaction; one terrain operation names at
 most 10,000 chunks; and carrying out stops as soon as a budget is spent or
 the diagnostic limit is reached. Messages describe a value over 4 KiB by its kind and size

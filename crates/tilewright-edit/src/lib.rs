@@ -99,7 +99,9 @@ pub mod limits {
     pub const CELLS: usize = 1_000_000;
     /// Largest index in a pointer or address.
     pub const INDEX: usize = 250_000;
-    /// Most bytes read from the files a transaction touches.
+    /// Most bytes read from the files a transaction touches. A transaction
+    /// that can resume has as much again for those it finds already at
+    /// their result.
     pub const READ_BYTES: u64 = 256 << 20;
     /// Most work, in bytes: each operation costs its own size, the size of
     /// each document it reads, once per operation, and the size of each
@@ -381,6 +383,7 @@ fn check_base(
         return done;
     };
     let resumable = transaction.documents_only();
+    workspace.set_resuming(resumable && transaction.result.is_some());
     for (path, expected) in base {
         if workspace.exhausted() || problems.full() {
             break;
@@ -395,24 +398,27 @@ fn check_base(
                 .get(path)
                 .and_then(|entry| entry.current.text()),
         );
-        if found == *expected {
-            continue;
-        }
         let result = transaction
             .result
             .as_ref()
             .and_then(|result| result.get(path));
-        if resumable && result == Some(&found) {
-            done.insert(path.clone());
+        let is_done = found != *expected && resumable && result == Some(&found);
+        if let Err(failure) = workspace.settle(path, is_done) {
+            problems.report(*span, failure);
             continue;
         }
-        problems.report(
-            *span,
-            Failure::conflict(format!(
-                "{path} has changed since the transaction's base; rebase the transaction"
-            )),
-        );
+        if is_done {
+            done.insert(path.clone());
+        } else if found != *expected {
+            problems.report(
+                *span,
+                Failure::conflict(format!(
+                    "{path} has changed since the transaction's base; rebase the transaction"
+                )),
+            );
+        }
     }
+    workspace.set_resuming(false);
     done
 }
 

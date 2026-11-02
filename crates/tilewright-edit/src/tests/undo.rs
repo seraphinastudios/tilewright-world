@@ -985,3 +985,148 @@ fn deleting_a_large_file_and_making_it_again_copies_it_no_more() {
     apply(root, &reparsed("undo.jsonc", plan.inverse()));
     assert_eq!(read(root, PAD), text);
 }
+
+/// The text of the definition `id`, with `pad` bytes of custom data.
+fn padded(id: &str, pad: usize) -> String {
+    format!(
+        "{{\"format\": \"tilewright.def/1\", \"type\": \"proto\", \"id\": \"{id}\", \"fields\": {{\"face\": \"p.png\", \"layer\": \"item\"}}, \"custom\": {{\"example.org/pad\": \"{}\"}}}}\n",
+        "x".repeat(pad)
+    )
+}
+
+/// An operation that gives the definition `id` `pad` bytes of custom data.
+fn set_pad(id: &str, pad: usize) -> String {
+    format!(
+        r#"{{"op": "set", "path": "defs/proto/{id}.jsonc", "pointer": ["custom", "example.org/pad"], "value": "{}"}}"#,
+        "x".repeat(pad)
+    )
+}
+
+/// The fixture with `aa` small and `zz` large, and the step that swaps
+/// their sizes, so that each whole tree holds as much, but the first file
+/// after it and the last before it hold more than that together. With
+/// the bytes each tree holds in the two files.
+fn swapping_sizes() -> (tempfile::TempDir, Transaction, u64) {
+    let (small, large) = (1 << 10, 9 << 10);
+    let tree = copy();
+    fs::write(tree.path().join("defs/proto/aa.jsonc"), padded("aa", small)).unwrap();
+    fs::write(tree.path().join("defs/proto/zz.jsonc"), padded("zz", large)).unwrap();
+    let tx = transaction(&format!(
+        "{},\n    {}",
+        set_pad("aa", large),
+        set_pad("zz", small)
+    ));
+    let whole = u64::try_from(padded("aa", small).len() + padded("zz", large).len()).unwrap();
+    (tree, tx, whole)
+}
+
+#[test]
+fn a_repair_reads_a_mix_of_the_trees_when_each_tree_is_within_the_budget() {
+    const LAST: &str = "defs/proto/zz.jsonc";
+    let (tree, tx, whole) = swapping_sizes();
+    let root = tree.path();
+    let (before, folders) = (snapshot(root), directories(root));
+    let _lowered = Lowered::to(whole, limits::WORK);
+    let plan = planned(root, &tx);
+    plan.check_undo().unwrap();
+    published(&plan);
+    // It stopped after the first rename, so the last file, read last, is
+    // as it was. Only by reading it can the repair tell that it is done.
+    fs::write(root.join(LAST), as_it_was(&plan, LAST)).unwrap();
+    let held: u64 = ["defs/proto/aa.jsonc", LAST]
+        .iter()
+        .map(|path| fs::metadata(root.join(path)).unwrap().len())
+        .sum();
+    assert!(held > whole && held <= 2 * whole, "{held} {whole}");
+    repaired(root, &plan, &before, &folders);
+}
+
+#[test]
+fn applying_again_reads_a_mix_of_the_trees_too() {
+    const LAST: &str = "defs/proto/zz.jsonc";
+    let (tree, tx, whole) = swapping_sizes();
+    let root = tree.path();
+    let _lowered = Lowered::to(whole, limits::WORK);
+    let plan = planned(root, &tx);
+    let done = {
+        published(&plan);
+        snapshot(root)
+    };
+    fs::write(root.join(LAST), as_it_was(&plan, LAST)).unwrap();
+    // The first file is at its result, and read first; the last is edited.
+    apply(root, &reparsed("sealed.jsonc", plan.sealed()));
+    assert_eq!(snapshot(root), done);
+}
+
+/// A transaction with no operations that finds the definitions `ids`
+/// already at their result.
+fn all_done(root: &Path, ids: &[&str]) -> Transaction {
+    let entries = |digest: &dyn Fn(&str) -> String| -> String {
+        ids.iter()
+            .map(|id| {
+                format!(
+                    "{{\"path\": \"defs/proto/{id}.jsonc\", \"sha256\": \"{}\"}}",
+                    digest(id)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let other = transaction::hex(&[0; 32]);
+    let text = format!(
+        "{{\"format\": \"tilewright.transaction/1\", \"base\": [{}], \"result\": [{}], \"operations\": []}}\n",
+        entries(&|_| other.clone()),
+        entries(&|id| {
+            let text = read(root, &format!("defs/proto/{id}.jsonc"));
+            transaction::hex(&digest(Some(&text)).unwrap())
+        })
+    );
+    reparsed("tx.jsonc", &text)
+}
+
+#[test]
+fn files_at_their_result_have_an_allowance_of_the_budget_and_no_more() {
+    let tree = copy();
+    let root = tree.path();
+    let ids = ["a1", "a2", "a3", "a4"];
+    for id in ids {
+        fs::write(
+            root.join(format!("defs/proto/{id}.jsonc")),
+            padded(id, 1 << 10),
+        )
+        .unwrap();
+    }
+    let size = u64::try_from(padded("a1", 1 << 10).len()).unwrap();
+    // Each file is read before it is known to be done, so these are all
+    // read, and within the allowance.
+    {
+        let _lowered = Lowered::to(2 * size, limits::WORK);
+        planned(root, &all_done(root, &ids[..2]));
+    }
+    // A transaction may claim that of every file, so that allowance has
+    // to end too: this one stops at the third.
+    let _lowered = Lowered::to(2 * size, limits::WORK);
+    let found = problems(root, &all_done(root, &ids));
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(has(&found, "tx.limit", "hold more than"), "{found:#?}");
+}
+
+#[test]
+fn files_at_their_base_have_the_budget_whether_or_not_it_can_resume() {
+    let (tree, tx, whole) = swapping_sizes();
+    let root = tree.path();
+    let sealed = reparsed("sealed.jsonc", planned(root, &tx).sealed());
+    let _lowered = Lowered::to(whole - 1, limits::WORK);
+    // It can resume, so it reads past the budget to see, and is refused.
+    assert!(has(&problems(root, &sealed), "tx.limit", "hold more than"));
+    // It cannot: reading stops at the budget, as it always did.
+    let tests = transaction(
+        r#"{"op": "test", "path": "defs/proto/aa.jsonc", "pointer": ["id"], "value": "aa"},
+    {"op": "test", "path": "defs/proto/zz.jsonc", "pointer": ["id"], "value": "zz"}"#,
+    );
+    let sealed = {
+        let _raised = Lowered::to(limits::READ_BYTES, limits::WORK);
+        reparsed("sealed.jsonc", planned(root, &tests).sealed())
+    };
+    assert!(has(&problems(root, &sealed), "tx.limit", "hold more than"));
+}

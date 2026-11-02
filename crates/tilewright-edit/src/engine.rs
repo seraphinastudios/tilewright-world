@@ -298,6 +298,13 @@ pub(crate) struct Workspace<'r> {
     names: Names,
     pub entries: BTreeMap<String, Entry>,
     read_bytes: u64,
+    /// Bytes read of files found already at their result, which have an
+    /// allowance of their own, and no operation edits.
+    done_bytes: u64,
+    /// The base of a transaction that can resume is being checked: a file
+    /// may turn out to count against either allowance, so reading goes on
+    /// up to both, and [`Self::settle`] says which it was.
+    resuming: bool,
     work: u64,
     /// The documents the current operation has been charged for.
     charged: BTreeSet<String>,
@@ -354,6 +361,8 @@ impl<'r> Workspace<'r> {
             names,
             entries: BTreeMap::new(),
             read_bytes: 0,
+            done_bytes: 0,
+            resuming: false,
             work: 0,
             charged: BTreeSet::new(),
             inverse_bytes: 0,
@@ -434,7 +443,13 @@ impl<'r> Workspace<'r> {
                 let spent =
                     || Failure::limit(format!("the touched files hold more than {budget} bytes"));
                 let file_limit = u64::try_from(limits().max_input_bytes).unwrap_or(u64::MAX);
-                let left = budget.saturating_sub(self.read_bytes);
+                let left = if self.resuming {
+                    budget
+                        .saturating_mul(2)
+                        .saturating_sub(self.read_bytes.saturating_add(self.done_bytes))
+                } else {
+                    budget.saturating_sub(self.read_bytes)
+                };
                 let bytes = match read(root, self.under, path, file_limit.min(left)) {
                     Ok(bytes) => bytes,
                     // A file past either bound rejects the transaction, so
@@ -478,6 +493,42 @@ impl<'r> Workspace<'r> {
                 }))
             }
         }
+    }
+
+    /// Starts or ends checking the base of a transaction that can resume.
+    /// Whether a file is at its result is known only once it is read, so
+    /// each file is read and then settled.
+    pub fn set_resuming(&mut self, resuming: bool) {
+        self.resuming = resuming;
+    }
+
+    /// Counts the file `path`, read for such a base, against the allowance
+    /// of files carried out, or that of files `done`, already at their
+    /// result. Each allowance is the read budget, so a mix of a tree before
+    /// a transaction and after it is read when each tree alone is within
+    /// the budget, whatever it holds, and no more than twice the budget is
+    /// ever read.
+    pub fn settle(&mut self, path: &str, done: bool) -> Outcome<()> {
+        if !self.resuming {
+            return Ok(());
+        }
+        if done {
+            let bytes = self
+                .entries
+                .get(path)
+                .and_then(|entry| entry.base.as_ref())
+                .map_or(0, |text| u64::try_from(text.len()).unwrap_or(u64::MAX));
+            self.read_bytes = self.read_bytes.saturating_sub(bytes);
+            self.done_bytes = self.done_bytes.saturating_add(bytes);
+        }
+        let budget = self.budgets.read_bytes;
+        if self.read_bytes.max(self.done_bytes) > budget {
+            self.spent = true;
+            return Err(Failure::limit(format!(
+                "the touched files hold more than {budget} bytes"
+            )));
+        }
+        Ok(())
     }
 
     /// Whether a budget was exceeded, which was reported as the failure of
