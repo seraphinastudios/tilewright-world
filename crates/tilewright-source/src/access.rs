@@ -169,6 +169,14 @@ pub struct Audience {
 }
 
 impl Access {
+    /// Whether `other` has this mode and group, as a directory must have
+    /// those of the one above it for publishing to remove it: an inverse
+    /// makes a directory again with those of the nearest one that is there.
+    #[must_use]
+    pub const fn same_mode_and_group(&self, other: &Self) -> bool {
+        self.mode == other.mode && self.group == other.group
+    }
+
     /// Whether the group may read and others may not, so that the group
     /// says who may.
     #[must_use]

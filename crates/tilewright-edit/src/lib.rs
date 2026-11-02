@@ -844,8 +844,10 @@ impl Plan {
     /// undo and redo of this plan, published in turn, plans. Not
     /// guaranteed: other changes to files recorded in an undo or redo's
     /// `base` digests can cause a `tx.conflict`, as for any transaction;
-    /// other files changed meanwhile may make the tree it
-    /// leaves fail validation; and publishing may fail for reasons of its
+    /// other files changed meanwhile may make the tree it leaves fail
+    /// validation, as may a directory this plan makes whose mode or group
+    /// is changed so that it is no longer that of the directory above it,
+    /// which an undo leaves; and publishing may fail for reasons of its
     /// own, such as permissions or input and output.
     ///
     /// It is bounded as carrying out is, once for each of at most four

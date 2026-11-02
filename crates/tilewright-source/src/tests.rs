@@ -1852,6 +1852,143 @@ fn a_failed_load_says_why_even_with_no_room_for_diagnostics() {
     assert!(!found.is_empty());
 }
 
+/// A copy of the fixture with a plane on disk that `world.jsonc` does not
+/// list, which is a stray directory, with `chunks` chunks on layer 2. Also
+/// returns the overlay that removes its files.
+fn with_stray_plane(chunks: i64) -> (tempfile::TempDir, Overlay) {
+    let root = workspace();
+    let layer = root.path().join("planes/attic/layers/2");
+    fs::create_dir_all(&layer).unwrap();
+    fs::write(
+        root.path().join("planes/attic/plane.jsonc"),
+        "{\"format\": \"tilewright.plane/1\", \"id\": \"attic\", \"kind\": \"shared\", \"chunk_size\": 32}\n",
+    )
+    .unwrap();
+    let mut overlay = Overlay::new();
+    overlay.insert("planes/attic/plane.jsonc".to_owned(), None);
+    for cx in 0..chunks {
+        fs::write(layer.join(format!("{cx}_0.jsonc")), "{}\n").unwrap();
+        overlay.insert(format!("planes/attic/layers/2/{cx}_0.jsonc"), None);
+    }
+    (root, overlay)
+}
+
+fn stray(root: &Path, overlay: &Overlay) -> bool {
+    load_edited(root, &LoadOptions::default(), overlay).is_err_and(|found| {
+        found.iter().any(|problem| {
+            problem.code == "source.unexpected_file" && problem.path == "planes/attic"
+        })
+    })
+}
+
+#[test]
+fn a_directory_the_overlay_empties_is_gone() {
+    let (root, overlay) = with_stray_plane(3);
+    assert!(stray(root.path(), &Overlay::new()));
+    let world = load_edited(root.path(), &LoadOptions::default(), &overlay).unwrap();
+    assert_eq!(
+        world.source_digest(),
+        load(&fixture()).unwrap().source_digest()
+    );
+    // Nothing was written.
+    assert!(root.path().join("planes/attic/plane.jsonc").exists());
+    // Staging files beside the removed files are removed with them.
+    let mut staged = overlay.clone();
+    fs::write(
+        root.path().join("planes/attic/.plane.jsonc.tilewright-tmp"),
+        "",
+    )
+    .unwrap();
+    staged.insert("planes/attic/.plane.jsonc.tilewright-tmp".to_owned(), None);
+    assert!(load_edited(root.path(), &LoadOptions::default(), &staged).is_ok());
+}
+
+#[test]
+fn a_directory_the_overlay_does_not_empty_stays() {
+    let (root, overlay) = with_stray_plane(3);
+    // A file the overlay does not remove keeps every directory above it.
+    let mut one_left = overlay.clone();
+    one_left.remove("planes/attic/layers/2/1_0.jsonc");
+    assert!(stray(root.path(), &one_left));
+    // So does one it makes.
+    let mut added = overlay.clone();
+    added.insert(
+        "planes/attic/layers/2/1_0.jsonc".to_owned(),
+        Some("{}\n".to_owned()),
+    );
+    assert!(stray(root.path(), &added));
+    // A directory is not removed for being empty, only for being emptied:
+    // publishing would leave this one, and so the directories above it.
+    fs::create_dir(root.path().join("planes/attic/layers/3")).unwrap();
+    assert!(stray(root.path(), &overlay));
+    fs::remove_dir(root.path().join("planes/attic/layers/3")).unwrap();
+    // A file of a name no overlay entry has stays too.
+    fs::write(root.path().join("planes/attic/notes.txt"), "").unwrap();
+    assert!(stray(root.path(), &overlay));
+    fs::remove_file(root.path().join("planes/attic/notes.txt")).unwrap();
+    assert!(!stray(root.path(), &overlay));
+    // Removing a name that is not there empties nothing.
+    let empty = root.path().join("planes/bare");
+    fs::create_dir(&empty).unwrap();
+    let mut bare = overlay.clone();
+    bare.insert("planes/bare/x.jsonc".to_owned(), None);
+    let found = load_edited(root.path(), &LoadOptions::default(), &bare).unwrap_err();
+    assert!(
+        found.iter().any(
+            |problem| problem.code == "source.unexpected_file" && problem.path == "planes/bare"
+        ),
+        "{found:#?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_directory_of_another_mode_stays_as_publishing_leaves_it() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let (root, overlay) = with_stray_plane(1);
+    let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+    let plane = root.path().join("planes/attic");
+    let parent = mode(&root.path().join("planes"));
+    assert_eq!(mode(&plane), parent);
+    assert!(!stray(root.path(), &overlay));
+    fs::set_permissions(&plane, fs::Permissions::from_mode(parent ^ 0o020)).unwrap();
+    assert!(stray(root.path(), &overlay));
+    fs::set_permissions(&plane, fs::Permissions::from_mode(parent)).unwrap();
+    // One deeper keeps the directories above it.
+    let layer = plane.join("layers/2");
+    fs::set_permissions(&layer, fs::Permissions::from_mode(parent ^ 0o020)).unwrap();
+    assert!(stray(root.path(), &overlay));
+}
+
+#[test]
+fn directories_found_empty_count_against_the_entry_budget() {
+    let least = |root: &Path, overlay: &Overlay| {
+        let passes = |maximum_entries| {
+            let options = LoadOptions {
+                maximum_entries,
+                ..LoadOptions::default()
+            };
+            load_edited(root, &options, overlay).is_ok()
+        };
+        let (mut low, mut high) = (0, 4_096);
+        assert!(passes(high) && !passes(low));
+        while high - low > 1 {
+            let middle = low + (high - low) / 2;
+            if passes(middle) {
+                high = middle;
+            } else {
+                low = middle;
+            }
+        }
+        high
+    };
+    let plain = least(&fixture(), &Overlay::new());
+    let (root, overlay) = with_stray_plane(40);
+    // The 40 chunks, plane.jsonc, `layers` and layer 2 were looked at; the
+    // plane's own entry was listed and left out.
+    assert_eq!(least(root.path(), &overlay), plain + 43);
+}
+
 #[test]
 fn overlay_keys_must_be_paths() {
     let root = workspace();

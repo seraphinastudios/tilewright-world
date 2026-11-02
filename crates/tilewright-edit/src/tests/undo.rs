@@ -483,7 +483,9 @@ fn a_document_deleted_and_made_again_settles_on_a_shorter_undo() {
 /// set back and forth, one of them large, which its redo holds; terrain
 /// painted and cleared in a few cells, creating and deleting a chunk;
 /// objects placed and then moved, or placed and removed again; anchors
-/// added and removed; a definition deleted and made again.
+/// added and removed; a definition deleted and made again. Others make
+/// directories, which their undos must remove: a plane, with chunks or
+/// without; a definition type; a layer.
 fn revisiting_transaction(random: &mut Random) -> String {
     let coin = {
         let mut text = String::new();
@@ -493,7 +495,7 @@ fn revisiting_transaction(random: &mut Random) -> String {
     let pad = "p".repeat(4_000);
     let mut operations = Vec::new();
     for step in 0..random.between(1, 6) {
-        let operation = match random.below(10) {
+        let operation = match random.below(14) {
             0 | 1 => {
                 let value = random.pick(&["1", "2", "pad"]);
                 let value = if value == "pad" { format!("\"{pad}\"") } else { value.to_owned() };
@@ -529,6 +531,18 @@ fn revisiting_transaction(random: &mut Random) -> String {
                 r#"{{"op": "set", "path": "defs/proto/coin.jsonc", "pointer": ["fields", "weight"], "value": {}}}"#,
                 random.below(3)
             ),
+            10 => add_plane(&format!("attic{step}")),
+            11 => format!(
+                r#"{},
+    {{"op": "object.insert", "plane": "attic{step}", "layer": {}, "at": [1, 1], "object": {{"proto": "tree"}}}}"#,
+                add_plane(&format!("attic{step}")),
+                random.between(0, 3)
+            ),
+            12 => add_definition_type(&format!("quest{step}")),
+            13 => format!(
+                r#"{{"op": "object.insert", "plane": "overworld", "layer": {}, "at": [1, 1], "object": {{"proto": "tree"}}}}"#,
+                random.between(5, 8)
+            ),
             _ => format!(
                 r#"{{"op": "document.delete", "path": "defs/proto/coin.jsonc"}},
     {{"op": "document.create", "path": "defs/proto/coin.jsonc", "text": {coin}}}"#
@@ -540,12 +554,14 @@ fn revisiting_transaction(random: &mut Random) -> String {
 }
 
 /// Plans six rounds after publishing `plan`, each the inverse of the one
-/// before, publishing each that plans. Returns the transactions of the
-/// rounds that planned, and the round that did not with its problems.
+/// before, publishing each that plans: each undo restores every file and
+/// directory, and each redo gives every one the plan did. Returns the
+/// transactions of the rounds that planned, and the round that did not
+/// with its problems.
 fn rounds(root: &Path, plan: &Plan) -> (Vec<String>, Option<(usize, Vec<Diagnostic>)>) {
-    let before = snapshot(root);
+    let before = (snapshot(root), directories(root));
     published(plan);
-    let after = snapshot(root);
+    let after = (snapshot(root), directories(root));
     let mut text = plan.inverse().to_owned();
     let mut done = Vec::new();
     for round in 0..6 {
@@ -553,7 +569,10 @@ fn rounds(root: &Path, plan: &Plan) -> (Vec<String>, Option<(usize, Vec<Diagnost
             Ok(planned) => {
                 published(&planned);
                 let expected = if round % 2 == 0 { &before } else { &after };
-                assert!(snapshot(root) == *expected, "round {round}");
+                assert!(
+                    (snapshot(root), directories(root)) == *expected,
+                    "round {round}"
+                );
                 done.push(std::mem::replace(&mut text, planned.inverse().to_owned()));
             }
             Err(problems) => return (done, Some((round, problems))),
@@ -613,7 +632,7 @@ fn the_check_passes_exactly_when_every_undo_and_redo_plans() {
     // Each kind of outcome happens. Refusals by the check are few here;
     // the next test finds them at the boundary.
     assert!(
-        outcomes[0] > 10 && outcomes[1] > 40 && outcomes[2] > 4 && outcomes[3] > 10,
+        outcomes[0] > 10 && outcomes[1] > 40 && outcomes[2] > 0 && outcomes[3] > 10,
         "{outcomes:?}"
     );
 }
@@ -711,4 +730,208 @@ fn the_note_that_there_may_be_more_stays_last_and_as_it_is() {
             "the transaction could not be undone: a limit; split the transaction",
         ]
     );
+}
+
+/// Operations that add the plane `id`.
+fn add_plane(id: &str) -> String {
+    format!(
+        r#"{{"op": "insert", "path": "world.jsonc", "pointer": ["planes", 2], "value": "{id}"}},
+    {{"op": "document.create", "path": "planes/{id}/plane.jsonc", "document": {{"format": "tilewright.plane/1", "id": "{id}", "title": "A plane", "kind": "shared", "chunk_size": 32}}}}"#
+    )
+}
+
+/// Operations that add the definition type `id`, with a definition.
+fn add_definition_type(id: &str) -> String {
+    format!(
+        r#"{{"op": "document.create", "path": "profile/schema/{id}.jsonc", "document": {{"format": "tilewright.schema/1", "fields": {{"title": {{"type": "string"}}}}}}}},
+    {{"op": "insert", "path": "profile/profile.jsonc", "pointer": ["definition_types", 3], "key": "{id}", "value": {{"schema": "schema/{id}.jsonc"}}}},
+    {{"op": "document.create", "path": "defs/{id}/hello.jsonc", "document": {{"format": "tilewright.def/1", "type": "{id}", "id": "hello", "fields": {{"title": "Hello"}}}}}}"#
+    )
+}
+
+/// Applies `operations`, which pass the check, then undoes and redoes them:
+/// the files are as they were, and so are the directories, and the source
+/// digest of the tree undone is the one it had.
+fn undone_with_its_directories(operations: &str) {
+    let tree = copy();
+    let root = tree.path();
+    let digest = tilewright_source::load(root).unwrap().source_digest();
+    let folders = directories(root);
+    let tx = transaction(operations);
+    let plan = planned(root, &tx);
+    plan.check_undo().unwrap();
+    let undo = {
+        published(&plan);
+        apply(root, &reparsed("undo.jsonc", plan.inverse()))
+    };
+    assert_eq!(directories(root), folders);
+    assert_eq!(
+        tilewright_source::load(root).unwrap().source_digest(),
+        digest
+    );
+    let redo = apply(root, &reparsed("redo.jsonc", undo.inverse()));
+    apply(root, &reparsed("undo.jsonc", redo.inverse()));
+    assert_eq!(directories(root), folders);
+}
+
+#[test]
+fn a_step_that_adds_a_plane_is_undone() {
+    undone_with_its_directories(&add_plane("attic"));
+}
+
+#[test]
+fn a_step_that_adds_a_plane_with_chunks_is_undone() {
+    undone_with_its_directories(&format!(
+        r#"{},
+    {{"op": "object.insert", "plane": "attic", "layer": 0, "at": [1, 1], "object": {{"proto": "tree"}}}},
+    {{"op": "object.insert", "plane": "attic", "layer": 3, "at": [70, 1], "object": {{"proto": "tree"}}}}"#,
+        add_plane("attic")
+    ));
+}
+
+#[test]
+fn a_step_that_adds_a_definition_type_is_undone() {
+    undone_with_its_directories(&add_definition_type("quest"));
+}
+
+#[test]
+fn a_step_that_adds_a_layer_is_undone() {
+    undone_with_its_directories(
+        r#"{"op": "object.insert", "plane": "overworld", "layer": 9, "at": [1, 1], "object": {"proto": "tree"}}"#,
+    );
+}
+
+/// A file of the tree as `plan` found it.
+fn as_it_was<'a>(plan: &'a Plan, path: &str) -> &'a str {
+    plan.files()
+        .iter()
+        .find(|file| file.path == path)
+        .and_then(|file| file.before.as_deref())
+        .unwrap()
+}
+
+/// Repairs the tree at `root` with `plan`'s inverse, and checks that it is
+/// as it was: the undo passes the check and plans, as the inverse an
+/// interrupted apply left must, and every file and directory is back.
+fn repaired(root: &Path, plan: &Plan, before: &BTreeMap<String, Vec<u8>>, folders: &[String]) {
+    let undo = planned(root, &reparsed("undo.jsonc", plan.inverse()));
+    undo.check_undo().unwrap();
+    published(&undo);
+    assert_eq!(snapshot(root), *before);
+    assert_eq!(directories(root), folders);
+}
+
+#[test]
+fn an_apply_of_a_new_plane_stopped_after_a_rename_is_repaired() {
+    let tree = copy();
+    let root = tree.path();
+    let (before, folders) = (snapshot(root), directories(root));
+    let plan = planned(root, &transaction(&add_plane("attic")));
+    published(&plan);
+    // The plane's file came first; `world.jsonc` was staged, not published.
+    fs::write(root.join("world.jsonc"), as_it_was(&plan, "world.jsonc")).unwrap();
+    fs::write(root.join(staging_path("world.jsonc")), "staged").unwrap();
+    assert!(tilewright_source::load(root).is_err());
+    repaired(root, &plan, &before, &folders);
+}
+
+#[test]
+fn an_apply_of_a_new_plane_stopped_before_a_rename_is_repaired() {
+    let tree = copy();
+    let root = tree.path();
+    let (before, folders) = (snapshot(root), directories(root));
+    let plan = planned(root, &transaction(&add_plane("attic")));
+    published(&plan);
+    // Nothing was published: all there is of the plane is its staged file,
+    // in the directory staging made.
+    fs::write(root.join("world.jsonc"), as_it_was(&plan, "world.jsonc")).unwrap();
+    fs::remove_file(root.join("planes/attic/plane.jsonc")).unwrap();
+    fs::write(
+        root.join(staging_path("planes/attic/plane.jsonc")),
+        "staged",
+    )
+    .unwrap();
+    assert!(tilewright_source::load(root).is_err());
+    repaired(root, &plan, &before, &folders);
+}
+
+#[test]
+fn an_apply_of_a_new_definition_type_stopped_after_a_rename_is_repaired() {
+    let tree = copy();
+    let root = tree.path();
+    let (before, folders) = (snapshot(root), directories(root));
+    let plan = planned(root, &transaction(&add_definition_type("quest")));
+    published(&plan);
+    // The definition came first in path order.
+    let profile = "profile/profile.jsonc";
+    fs::write(root.join(profile), as_it_was(&plan, profile)).unwrap();
+    fs::remove_file(root.join("profile/schema/quest.jsonc")).unwrap();
+    assert!(tilewright_source::load(root).is_err());
+    repaired(root, &plan, &before, &folders);
+}
+
+#[test]
+fn a_plane_can_be_removed_and_made_again() {
+    let tree = copy();
+    let root = tree.path();
+    apply(root, &transaction(&add_plane("attic")));
+    apply(
+        root,
+        &transaction(
+            r#"{"op": "object.insert", "plane": "attic", "layer": 2, "at": [1, 1], "object": {"proto": "tree"}}"#,
+        ),
+    );
+    let tx = transaction(
+        r#"{"op": "remove", "path": "world.jsonc", "pointer": ["planes", 2]},
+    {"op": "document.delete", "path": "planes/attic/plane.jsonc"},
+    {"op": "document.delete", "path": "planes/attic/layers/2/0_0.jsonc"}"#,
+    );
+    round_trip(root, &tx);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_directory_an_undo_would_leave_is_validated_as_there() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+
+    // Below `planes/` the loader rejects it, so the undo is refused while
+    // it is there, with nothing written, and not published only to leave
+    // a tree that does not validate.
+    let tree = copy();
+    let root = tree.path();
+    let plan = planned(root, &transaction(&add_plane("attic")));
+    plan.check_undo().unwrap();
+    published(&plan);
+    let parent = mode(&root.join("planes"));
+    assert_eq!(mode(&root.join("planes/attic")), parent);
+    let set = |bits| {
+        fs::set_permissions(root.join("planes/attic"), fs::Permissions::from_mode(bits)).unwrap();
+    };
+    set(parent ^ 0o020);
+    let undo = reparsed("undo.jsonc", plan.inverse());
+    let applied = snapshot(root);
+    assert!(has(
+        &problems(root, &undo),
+        "source.unexpected_file",
+        "not a plane listed in world.jsonc"
+    ));
+    assert_eq!(snapshot(root), applied);
+    // With the mode of the directory above it back, it goes.
+    set(parent);
+    apply(root, &undo);
+    assert!(!root.join("planes/attic").exists());
+
+    // Where the loader accepts an empty directory, the deletion goes
+    // through, and the directory is left, as it was validated.
+    let tree = copy();
+    let root = tree.path();
+    let chunk = r#"{"op": "object.insert", "plane": "overworld", "layer": 9, "at": [1, 1], "object": {"proto": "tree"}}"#;
+    let plan = apply(root, &transaction(chunk));
+    let layer = root.join("planes/overworld/layers/9");
+    let parent = mode(&layer);
+    fs::set_permissions(&layer, fs::Permissions::from_mode(parent ^ 0o020)).unwrap();
+    apply(root, &reparsed("undo.jsonc", plan.inverse()));
+    assert!(fs::read_dir(&layer).unwrap().next().is_none());
+    assert!(tilewright_source::load(root).is_ok());
 }
