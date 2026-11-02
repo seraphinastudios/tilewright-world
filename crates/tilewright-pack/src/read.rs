@@ -1133,7 +1133,9 @@ impl Pack {
     /// `limits.maximum_pack_bytes` and the one the pack was opened with, so
     /// verifying never reads more than opening allowed. The file name check
     /// hashes the file at the pack's path, so it binds to the path; see
-    /// [`Pack::file_digest`].
+    /// [`Pack::file_digest`]. An image's digest is compared before the
+    /// integrity check instead, so that SQLite's checks do not run on an
+    /// image that is not the one the caller expects.
     ///
     /// # Errors
     /// Returns the first problem found, including an exceeded limit.
@@ -1149,6 +1151,12 @@ impl Pack {
         {
             return Err(too_long(maximum_bytes));
         }
+        // An image's digest is already known. A file is hashed only once
+        // the integrity check has read its pages, as PACK.md explains.
+        let hashed = matches!(self.source, Source::Image { .. });
+        if hashed {
+            self.check_digest(maximum_bytes)?;
+        }
         let integrity: String = self
             .connection
             .query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
@@ -1158,20 +1166,30 @@ impl Pack {
                 format!("integrity check failed: {integrity}"),
             ));
         }
-        if let Some(expected) = self.expected_digest() {
-            // A name must be the lowercase digest; other cases do not match.
-            let digest = crate::compile::hex(&self.digest_within(maximum_bytes)?);
-            if digest != expected {
-                return Err(Error::Rejected(
-                    ErrorCode::Digest,
-                    match self.source {
-                        Source::File(_) => format!("file digest {digest} does not match its name"),
-                        _ => format!("pack digest {digest} is not {expected}, the expected digest"),
-                    },
-                ));
-            }
+        if !hashed {
+            self.check_digest(maximum_bytes)?;
         }
         self.verify_contents(limits.maximum_decoded_bytes)
+    }
+
+    /// Compares the pack's digest, reading at most `maximum_bytes`, with
+    /// the one verification expects, if any.
+    fn check_digest(&self, maximum_bytes: u64) -> Result<(), Error> {
+        let Some(expected) = self.expected_digest() else {
+            return Ok(());
+        };
+        // A name must be the lowercase digest; other cases do not match.
+        let digest = crate::compile::hex(&self.digest_within(maximum_bytes)?);
+        if digest != expected {
+            return Err(Error::Rejected(
+                ErrorCode::Digest,
+                match self.source {
+                    Source::File(_) => format!("file digest {digest} does not match its name"),
+                    _ => format!("pack digest {digest} is not {expected}, the expected digest"),
+                },
+            ));
+        }
+        Ok(())
     }
 
     /// The digest verification expects, in hex: a file's name when it is 64

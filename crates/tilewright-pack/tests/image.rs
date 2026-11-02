@@ -75,6 +75,18 @@ fn verification_compares_the_expected_digest() {
 }
 
 #[test]
+fn a_wrong_digest_is_found_before_the_integrity_check() {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/packs");
+    let bytes = std::fs::read(directory.join("verify-integrity.twpack")).unwrap();
+    let mut digest: [u8; 32] = Sha256::digest(&bytes).into();
+    let right = Pack::open_bytes(&bytes, Some(digest), &VerifyLimits::default()).unwrap();
+    assert_eq!(code(right.verify()), ErrorCode::Integrity);
+    digest[31] ^= 1;
+    let wrong = Pack::open_bytes(&bytes, Some(digest), &VerifyLimits::default()).unwrap();
+    assert_eq!(code(wrong.verify()), ErrorCode::Digest);
+}
+
+#[test]
 fn a_listing_can_ask_for_the_digest() {
     let (_, bytes) = valid();
     let digest: [u8; 32] = Sha256::digest(&bytes).into();
