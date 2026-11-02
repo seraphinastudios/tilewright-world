@@ -522,6 +522,54 @@ fn open_cases(base: &mut Base<'_>, length: u64) {
         .verify(ErrorCode::Integrity),
         corrupt_string_index,
     );
+    base.add(
+        Case::new(
+            "verify-free-blocks.twpack",
+            "a page holds free blocks of no size, and more cells and free blocks than a page can",
+        )
+        .verify(ErrorCode::Integrity),
+        overfill_uid_page,
+    );
+}
+
+/// Replaces the root page of `object_uids`, an index leaf, with 681 cell
+/// pointers to one cell and a chain of 680 free blocks of no size. SQLite's
+/// integrity check keeps a heap of what a page's cells and free blocks
+/// cover, with room for 1,023 entries, and these make 1,361. SQLite before
+/// 3.53.4 wrote past the heap's end; it now reports a free block of under 4
+/// bytes as free space corruption before it fills the heap. Every reader
+/// must report that, and opening, which reads no such page, must not.
+fn overfill_uid_page(path: &Path) {
+    const CELLS: u16 = 681;
+    const CELL: u16 = 4092;
+    let first_free_block = 2 * (CELLS + 5);
+    let page: i64 = Connection::open(path)
+        .unwrap()
+        .query_row(
+            "SELECT rootpage FROM sqlite_schema WHERE name = 'object_uids'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    bytes(path, |data| {
+        let start = usize::try_from((page - 1) * 4096).unwrap();
+        let contents = &mut data[start..start + 4096];
+        contents.fill(0);
+        contents[0] = 0x0a;
+        contents[1..3].copy_from_slice(&first_free_block.to_be_bytes());
+        contents[3..5].copy_from_slice(&CELLS.to_be_bytes());
+        contents[5..7].copy_from_slice(&(first_free_block - 2).to_be_bytes());
+        for pointer in contents[8..].chunks_exact_mut(2).take(CELLS.into()) {
+            pointer.copy_from_slice(&CELL.to_be_bytes());
+        }
+        for offset in (first_free_block..CELL).step_by(4) {
+            let next = offset + 4;
+            let next = if next < CELL { next } else { 0 };
+            contents[usize::from(offset)..usize::from(offset) + 2]
+                .copy_from_slice(&next.to_be_bytes());
+        }
+        contents[usize::from(CELL)] = 1;
+    });
 }
 
 /// Changes a byte of a key in the unique index of `strings.value`, so the
