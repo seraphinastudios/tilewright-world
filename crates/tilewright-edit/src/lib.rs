@@ -821,10 +821,14 @@ impl Plan {
     /// byte for byte. From then on, undo and redo alternate between two
     /// transactions it carried out, each on the tree it would then meet.
     /// That happens by the fourth round. (An inverse holds, for each file,
-    /// only the edits since the file was last as it began, so a later
-    /// round can be shorter than the one two before it: when this plan
-    /// passes through the state it ends in, or through the one it began
-    /// in, as placing an object and then moving it does.)
+    /// only the edits since the file was last as it began or absent, and
+    /// when it was last absent, the creation of the text it began with. So
+    /// a later round can be shorter than the one two before it: when this
+    /// plan passes through the state it ends in, or through the one it
+    /// began in, as placing an object and then moving it does, or when it
+    /// deletes a file and makes it again, without the file being as it
+    /// began after that, which leaves the rounds only deleting and
+    /// creating the file.)
     ///
     /// Each round is carried out as [`plan`] would carry it out then, with
     /// every check it makes except validating its result: the `base`

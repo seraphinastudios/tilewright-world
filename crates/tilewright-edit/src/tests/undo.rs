@@ -418,9 +418,10 @@ impl Random {
 }
 
 // An inverse holds, for each file, only the edits since the file was last
-// as it began, so undoing a step that passes through a state it ends or
-// begins in gives a shorter inverse than the step's. The check goes on
-// until the rounds settle.
+// as it began or absent, so undoing a step that passes through a state it
+// ends or begins in, or one that deletes a file and makes it again, gives
+// a shorter inverse than the step's. The check goes on until the rounds
+// settle.
 
 #[test]
 fn a_step_that_passes_through_its_final_state_settles_on_a_shorter_undo() {
@@ -474,6 +475,11 @@ fn a_document_deleted_and_made_again_settles_on_a_shorter_undo() {
     );
     let plan = planned(root, &tx);
     plan.check_undo().unwrap();
+    // The undo removes the weight, deletes the file and creates it as it
+    // began, passing through no state it ends or begins in. The file is
+    // absent in it, though, so its inverse, the redo, holds only what the
+    // undo did after that, and the rounds settle on deleting the file and
+    // creating it.
     let rounds = cycled(root, &plan);
     assert_ne!(rounds[2], rounds[0]);
 }
