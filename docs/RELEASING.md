@@ -54,9 +54,12 @@ it changes only when the crates' version is bumped. The second number is
 the release. A build from source prints only the first number, unless
 `TILEWRIGHT_RELEASE` was set when it was compiled.
 
-No crate currently goes to crates.io. The local candidate preparation below
-does not enable publication. The npm package is not published to the npm
-registry until the owner turns that on (see below).
+The five public crates are on crates.io, but no release publishes them: the
+owner uploads them by hand (see
+[Owner-run first crate publication](#owner-run-first-crate-publication)), and
+registry automation is deferred. The local candidate preparation below does
+not enable publication. The npm package is not published to the npm registry
+until the owner turns that on (see below).
 
 ## Preparing Rust crate candidates locally
 
