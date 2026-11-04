@@ -2157,6 +2157,9 @@ fn a_directory_at_a_staging_name_is_not_ignored() {
         "planes/overworld/layers/0/.0_0.jsonc.tilewright-tmp",
         "defs/proto/.tree.jsonc.tilewright-tmp",
         "planes/.attic.tilewright-tmp",
+        // In any case.
+        "planes/.attic.TILEWRIGHT-TMP",
+        "defs/.proto.Tilewright-Tmp",
     ] {
         let copy = workspace();
         let root = copy.path();
@@ -2167,10 +2170,17 @@ fn a_directory_at_a_staging_name_is_not_ignored() {
         );
     }
     // A name that ends so but does not start with `.` is no staging name:
-    // a plane or a type may have it.
-    let copy = workspace();
-    fs::create_dir(copy.path().join("planes/attic.tilewright-tmp")).unwrap();
-    assert!(load(copy.path()).is_ok());
+    // a plane or a type may have it. Nor is the rule applied below the
+    // directories the layout lists, in a directory that holds no file.
+    for path in [
+        "planes/attic.tilewright-tmp",
+        "planes/attic/.plane.jsonc.tilewright-tmp",
+        "planes/overworld/notes/.zones.jsonc.tilewright-tmp",
+    ] {
+        let copy = workspace();
+        fs::create_dir_all(copy.path().join(path)).unwrap();
+        assert!(load(copy.path()).is_ok(), "{path}");
+    }
 }
 
 #[test]

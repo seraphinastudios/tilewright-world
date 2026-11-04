@@ -723,11 +723,11 @@ fn overlay_beneath<'a>(
 /// a plane, a layer or a definition type, a directory named like one,
 /// ending in `.jsonc` in any case, is not ignored: it is where the layout
 /// has a file, or one a file system that ignores case takes for it. Nor,
-/// at any level, is one at a name reserved for staging, the form
-/// `.<name>.tilewright-tmp` that publishing removes as a file: no
-/// identifier starts with `.`, so no plane's or type's directory has such a
-/// name. When it is not ignored, `Err` holds what to add to the problem's
-/// message: why, when what it holds is not a file.
+/// at any level the layout lists, is one at a name reserved for staging,
+/// the form `.<name>.tilewright-tmp` in any case, that publishing removes
+/// as a file: no identifier starts with `.`, so no plane's or type's
+/// directory has such a name. When it is not ignored, `Err` holds what to
+/// add to the problem's message: why, when what it holds is not a file.
 pub(crate) fn ignored(
     tree: &mut Tree<'_>,
     path: &str,
