@@ -942,25 +942,33 @@ impl Plan {
     /// `TREE.jsonc` for `tree.jsonc`, which validation, keyed by name, would
     /// take for another file. Where no entry has the exact name, the file
     /// system is asked whether it finds one by it, by its own rules of case
-    /// and spelling. Each directory is listed once, and all of them within
-    /// the load's entry budget.
+    /// and spelling. Each directory is listed once, and its entries counted
+    /// as a load counts them: below `planes/` and `defs/`, which a load
+    /// lists, against the load's entry budget and without the entries the
+    /// plan's own files take the place of, so that a plan whose load fitted
+    /// fits here too; the root and the directories a load reads files from
+    /// without listing them, such as `profile/`, against a budget of their
+    /// own as large, and one more for the lock file publishing made in the
+    /// root on Windows.
     fn named_exactly(&self, root: &SourceRoot) -> Result<(), Vec<Diagnostic>> {
+        let overlay = self.overlay();
         let mut listed: BTreeMap<String, Option<BTreeSet<String>>> = BTreeMap::new();
-        let mut remaining = self.load.maximum_entries;
+        let mut loaded = self.load.maximum_entries;
+        let mut elsewhere = self.load.maximum_entries.saturating_add(1);
         for file in &self.files {
             let mut directory = String::new();
             for component in file.path.split('/') {
                 if !listed.contains_key(&directory) {
-                    // A load does not list the root, so it has a budget of
-                    // its own, one more than a load's for the lock file
-                    // publishing made there on Windows.
-                    let limit = if directory.is_empty() {
-                        self.load.maximum_entries.saturating_add(1)
+                    let listed_by_load = ["planes", "defs"]
+                        .iter()
+                        .any(|top| directory == *top || directory.starts_with(&format!("{top}/")));
+                    let budget = if listed_by_load {
+                        &mut loaded
                     } else {
-                        remaining
+                        &mut elsewhere
                     };
-                    let names = root.names(&directory, limit).map_err(|error| match error {
-                        AccessError::TooLarge(_) => problem(
+                    let too_many = || {
+                        problem(
                             shown(&directory),
                             Code::Limit,
                             if directory.is_empty() {
@@ -968,15 +976,39 @@ impl Plan {
                             } else {
                                 "the directories on the way to the files have more entries than a load reads"
                             },
-                        ),
-                        other => io(shown(&directory), &other),
-                    })?;
-                    let names = names.map(|(names, count)| {
-                        if !directory.is_empty() {
-                            remaining -= count;
+                        )
+                    };
+                    // The plan's own entries here, which take the place of
+                    // whatever is on disk at their names.
+                    let prefix = if directory.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{directory}/")
+                    };
+                    let own = |name: &str| overlay.contains_key(&format!("{prefix}{name}"));
+                    let owned = overlay
+                        .range(prefix.clone()..)
+                        .map_while(|(key, _)| key.strip_prefix(prefix.as_str()))
+                        .filter(|rest| !rest.contains('/'))
+                        .count();
+                    let names = root
+                        .names(&directory, budget.saturating_add(owned))
+                        .map_err(|error| match error {
+                            AccessError::TooLarge(_) => too_many(),
+                            other => io(shown(&directory), &other),
+                        })?;
+                    let names = match names {
+                        Some((names, count)) => {
+                            let counted =
+                                count - names.iter().filter(|name| own(name.as_str())).count();
+                            if counted > *budget {
+                                return Err(too_many());
+                            }
+                            *budget -= counted;
+                            Some(names)
                         }
-                        names
-                    });
+                        None => None,
+                    };
                     listed.insert(directory.clone(), names);
                 }
                 // Nothing is on disk from a missing directory on.

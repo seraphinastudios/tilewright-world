@@ -1365,3 +1365,59 @@ fn reading_goes_past_the_budget_only_for_a_base_that_can_resume() {
     // one budget left, which is spent.
     assert!(workspace.exists("defs/proto/tree.jsonc").is_err());
 }
+
+#[test]
+fn publishing_counts_the_entries_a_load_counts() {
+    // A plan that deletes files fits the entry budget of the tree it
+    // leaves, which a load counts without them: so does publishing, which
+    // lists the directory they are in to check names. The definitions it
+    // keeps make the budget large enough for the files the plan touches.
+    let tree = copy();
+    let root = tree.path();
+    let definition = |id: String| {
+        fs::write(
+            root.join(format!("defs/proto/{id}.jsonc")),
+            format!(
+                r#"{{"format": "tilewright.def/1", "type": "proto", "id": "{id}", "fields": {{"face": "x.png", "layer": "item"}}}}"#
+            ),
+        )
+        .unwrap();
+    };
+    for index in 0..100 {
+        definition(format!("kept{index}"));
+    }
+    let least = least_entries(root);
+    for index in 0..30 {
+        definition(format!("x{index}"));
+    }
+    let at = |maximum_entries| Options {
+        load: LoadOptions {
+            maximum_entries,
+            ..LoadOptions::default()
+        },
+        ..Options::default()
+    };
+    let deletions: Vec<String> = (0..30)
+        .map(|index| format!(r#"{{"op": "document.delete", "path": "defs/proto/x{index}.jsonc"}}"#))
+        .collect();
+    let plan = crate::plan(root, &transaction(&deletions.join(",\n    ")), &at(least)).unwrap();
+    published(&plan);
+    assert!(!root.join("defs/proto/x0.jsonc").exists());
+
+    // Directories that hold no file beside a file it edits are counted
+    // there as a load counts them.
+    let tree = copy();
+    let root = tree.path();
+    for index in 0..100 {
+        fs::create_dir(root.join(format!("planes/overworld/layers/0/n{index}"))).unwrap();
+    }
+    let plan = crate::plan(
+        root,
+        &transaction(
+            r#"{"op": "object.insert", "plane": "overworld", "layer": 0, "at": [1, 1], "object": {"proto": "tree"}}"#,
+        ),
+        &at(least_entries(root)),
+    )
+    .unwrap();
+    published(&plan);
+}
