@@ -1966,7 +1966,8 @@ fn a_link_a_special_file_a_name_not_utf8_or_a_listing_that_fails_count_as_a_file
 fn a_directory_named_like_a_document_among_documents_is_not_ignored() {
     for path in [
         "planes/overworld/notes.jsonc",
-        "planes/overworld/Zones.JSONC",
+        // Not Zones.JSONC: where names ignore case, that is zones.jsonc.
+        "planes/overworld/Notes.JSONC",
         "planes/overworld/layers/0/5_5.jsonc",
         "planes/overworld/layers/0/notes.JSONC",
         "defs/proto/rock.jsonc",
@@ -2083,6 +2084,37 @@ fn an_entry_the_overlay_removes_is_not_counted_wherever_it_is_listed() {
     }
 }
 
+/// Makes the directories of `relative` beneath `root`, and with `file` an
+/// empty file at its end. On Unix each is made through its parent's handle,
+/// so that a path longer than the platform allows from the root, 1,024
+/// bytes on macOS, can be made, as the loader reads it.
+fn make_beneath(root: &Path, relative: &str, file: Option<&str>) {
+    #[cfg(unix)]
+    {
+        use rustix::fs::{CWD, Mode, OFlags, mkdirat, openat};
+        let flags = OFlags::DIRECTORY | OFlags::RDONLY;
+        let mut directory = openat(CWD, root, flags, Mode::empty()).unwrap();
+        for name in relative.split('/') {
+            match mkdirat(&directory, name, Mode::from_raw_mode(0o755)) {
+                Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+                Err(error) => panic!("{relative}: {error}"),
+            }
+            directory = openat(&directory, name, flags, Mode::empty()).unwrap();
+        }
+        if let Some(file) = file {
+            let flags = OFlags::CREATE | OFlags::WRONLY;
+            openat(&directory, file, flags, Mode::from_raw_mode(0o644)).unwrap();
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(root.join(relative)).unwrap();
+        if let Some(file) = file {
+            fs::write(root.join(relative).join(file), "").unwrap();
+        }
+    }
+}
+
 #[test]
 fn a_directory_deeper_than_a_document_path_counts_as_a_file() {
     // As deep as a document's path may be, 32 components, or as long, it
@@ -2099,7 +2131,7 @@ fn a_directory_deeper_than_a_document_path_counts_as_a_file() {
         while path.split('/').count() < components {
             path = format!("{path}/{name}");
         }
-        fs::create_dir_all(root.join(&path)).unwrap();
+        make_beneath(root, &path, None);
         if ignored {
             assert!(load(root).is_ok(), "{components} {}", path.len());
         } else {
@@ -2119,8 +2151,7 @@ fn a_deep_or_wide_stray_directory_is_looked_into_in_bounded_time() {
     let root = copy.path();
     // Far deeper than a path may be: it is not looked into past that.
     let deep = vec!["a"; 1_500].join("/");
-    fs::create_dir_all(root.join("planes/attic").join(&deep)).unwrap();
-    fs::write(root.join("planes/attic").join(&deep).join("x.txt"), "x").unwrap();
+    make_beneath(root, &format!("planes/attic/{deep}"), Some("x.txt"));
     // Wide: each directory is listed once, from a path no longer than a
     // document's.
     for index in 0..4_000 {
