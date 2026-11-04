@@ -821,10 +821,14 @@ impl Plan {
     /// byte for byte. From then on, undo and redo alternate between two
     /// transactions it carried out, each on the tree it would then meet.
     /// That happens by the fourth round. (An inverse holds, for each file,
-    /// only the edits since the file was last as it began, so a later
-    /// round can be shorter than the one two before it: when this plan
-    /// passes through the state it ends in, or through the one it began
-    /// in, as placing an object and then moving it does.)
+    /// only the edits since the file was last, between operations, as it
+    /// began or absent, and if that last state is absence, the creation of
+    /// the text it began with. So a later round can be shorter than the
+    /// one two before it: when this plan passes through the state it ends
+    /// in, or through the one it began in, as placing an object and then
+    /// moving it does within the move, or when it deletes a file and makes
+    /// it again, without the file being as it began after that, which
+    /// leaves the rounds only deleting and creating the file.)
     ///
     /// Each round is carried out as [`plan`] would carry it out then, with
     /// every check it makes except validating its result: the `base`
@@ -1141,10 +1145,13 @@ fn write_operation(
     output.push("}")
 }
 
-/// The exact inverse of the workspace's edits: per changed file, in path
-/// order, its edits undone last to first. A file the transaction created is
-/// deleted, and one it deleted is created again with its text. Building it
-/// stops as soon as it would be larger than a transaction may be.
+/// The exact inverse of what the workspace kept: per changed file, in path
+/// order, the inverse steps of its entry, last first, which are the edits
+/// since it was last, between operations, as it began or absent, and if
+/// that last state is absence, the creation of the text it began with. A
+/// file the transaction created is deleted, and one it deleted is created
+/// again with its text. Building it stops as soon as it would be larger
+/// than a transaction may be.
 fn inverse(workspace: &Workspace<'_>) -> Result<String, TooLarge> {
     let changed: Vec<(&String, &engine::Entry)> = workspace
         .entries
