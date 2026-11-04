@@ -1409,17 +1409,19 @@ fn a_repair_at_the_entry_budget_can_need_the_directories_its_step_made() {
 fn publishing_an_undo_can_need_an_entry_for_a_directory_its_step_made_under_profile() {
     // Publishing counts the entries of the root and of profile/, which a
     // load does not list, against a budget of their own, as large as the
-    // load's and one more. With the root filled with assets up to it, a
-    // step that makes profile/notes publishes, and its undo, which finds
-    // notes there, needs one more entry: the limit section 8.1 states.
+    // load's and one more for the lock file it makes in the root on
+    // Windows. With the root filled with assets up to it, a step that makes
+    // profile/notes publishes, and its undo, which finds notes there, needs
+    // one more entry: the limit section 8.1 states.
     let step =
         r#"{"op": "document.create", "path": "profile/notes/a.jsonc", "document": {"note": 1}}"#;
+    let lock = usize::from(cfg!(windows));
     for spare in [0, 1] {
         let tree = copy();
         let root = tree.path();
         let least = least_entries(root);
         let count = |path: &Path| fs::read_dir(path).unwrap().count();
-        let filled = least + spare + 1 - count(root) - count(&root.join("profile"));
+        let filled = least + spare + 1 - lock - count(root) - count(&root.join("profile"));
         for index in 0..filled {
             fs::write(root.join(format!("asset{index}.txt")), "x").unwrap();
         }
