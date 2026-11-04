@@ -417,8 +417,8 @@ does not list (section 9). The check does not reserve those entries, so at
 the entry budget an undo can need one more for each directory the
 transaction made, under `profile/` too, and be refused with
 `source.budget` when it is planned, or with `tx.limit` when it is
-published, writing nothing. Everywhere else every undo and redo of a transaction that passes
-plans. Not guaranteed:
+published, writing nothing. Everywhere else every undo and redo of a
+transaction that passes plans. Not guaranteed:
 
 - at the load's entry budget, an undo can be refused for the directories
   the transaction made, as above, and so can the repair of an interrupted
@@ -656,9 +656,10 @@ are removed. At the load's entry budget the repair can be refused with
 names one file by path, none is a `test` or has an `expect`, and it has a
 `result`) is then applied again instead, which completes the apply; any
 other is repaired by applying the inverse with a load that allows more
-entries (`LoadOptions::maximum_entries`), since the command line loads
-with the default, 1,000,000. There is no journal: the inverse, written before anything is
-published, is the recovery record, and applying it is a manual step. If
+entries (`LoadOptions::maximum_entries`), which the command line, loading
+with the default of 1,000,000, does not offer. There is no journal: the
+inverse, written before anything is published, is the recovery record,
+and applying it is a manual step. If
 the recovery is interrupted in turn, apply the inverse again; a directory
 the interrupted cleanup emptied may be left, holding no file, which
 validation ignores, to remove by hand if it is not wanted. The source
