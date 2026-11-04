@@ -2137,6 +2137,24 @@ fn a_deep_or_wide_stray_directory_is_looked_into_in_bounded_time() {
 }
 
 #[test]
+fn a_directory_at_a_staging_name_is_not_ignored() {
+    for path in [
+        "planes/overworld/.plane.jsonc.tilewright-tmp",
+        "planes/overworld/layers/0/.0_0.jsonc.tilewright-tmp",
+        "defs/proto/.tree.jsonc.tilewright-tmp",
+        "planes/.attic.tilewright-tmp",
+    ] {
+        let copy = workspace();
+        let root = copy.path();
+        fs::create_dir(root.join(path)).unwrap();
+        assert!(
+            has(&problems(root), "source.unexpected_file", path),
+            "{path}"
+        );
+    }
+}
+
+#[test]
 fn overlay_keys_must_be_paths() {
     let root = workspace();
     for key in [

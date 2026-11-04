@@ -791,8 +791,10 @@ fn overlay_beneath<'a>(
 /// `documents`, those of a plane, a layer or a definition type, a
 /// directory named like one, ending in `.jsonc` in any case, is not
 /// ignored: it is where the layout has a file, or one a file system that
-/// ignores case takes for it. When it is not ignored, `Err` holds what to
-/// add to the problem's message: why, when what it holds is not a file.
+/// ignores case takes for it. Nor is one at a name reserved for staging,
+/// ending in `.tilewright-tmp`, which publishing removes as a file. When it
+/// is not ignored, `Err` holds what to add to the problem's message: why,
+/// when what it holds is not a file.
 pub(crate) fn ignored(
     tree: &mut Tree<'_>,
     path: &str,
@@ -806,7 +808,7 @@ pub(crate) fn ignored(
     if entry.kind != EntryKind::Directory {
         return Err(String::new());
     }
-    let holding = if documents && ends(".jsonc") {
+    let holding = if (documents && ends(".jsonc")) || ends(".tilewright-tmp") {
         Err(None)
     } else {
         tree.holds_no_file(path)
