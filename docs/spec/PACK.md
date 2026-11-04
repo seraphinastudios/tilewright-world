@@ -216,7 +216,9 @@ A full verification also:
   are content-addressed files opened from directories the caller controls.
   A pack opened from bytes has no name: its caller may give the expected
   digest instead, which verification compares with the SHA-256 of the copy
-  the database reads;
+  the database reads. It does so before the integrity check, as bytes in
+  memory have no holes to read, so that SQLite's checks do not run on bytes
+  other than the ones the caller expects;
 - checks that string IDs are exactly `1..=count` in byte order of their
   values, and every string is UTF-8 text of at most 1 MiB without NUL;
 - checks that plane, zone, anchor, stairwell and definition keys are

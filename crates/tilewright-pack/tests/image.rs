@@ -9,7 +9,7 @@
 use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use tilewright_pack::{ErrorCode, Pack, VerifyLimits};
+use tilewright_pack::{ErrorCode, Pack, Page, VerifyLimits};
 
 fn valid() -> (PathBuf, Vec<u8>) {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/packs");
@@ -69,9 +69,36 @@ fn verification_compares_the_expected_digest() {
     let (_, bytes) = valid();
     let mut digest: [u8; 32] = Sha256::digest(&bytes).into();
     digest[31] ^= 1;
-    // Opening does not hash the image; verification does.
+    // Opening does not compare the digests; verification does.
     let pack = Pack::open_bytes(&bytes, Some(digest), &VerifyLimits::default()).unwrap();
     assert_eq!(code(pack.verify()), ErrorCode::Digest);
+}
+
+#[test]
+fn a_wrong_digest_is_found_before_the_integrity_check() {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/packs");
+    let bytes = std::fs::read(directory.join("verify-integrity.twpack")).unwrap();
+    let mut digest: [u8; 32] = Sha256::digest(&bytes).into();
+    let right = Pack::open_bytes(&bytes, Some(digest), &VerifyLimits::default()).unwrap();
+    assert_eq!(code(right.verify()), ErrorCode::Integrity);
+    digest[31] ^= 1;
+    let wrong = Pack::open_bytes(&bytes, Some(digest), &VerifyLimits::default()).unwrap();
+    assert_eq!(code(wrong.verify()), ErrorCode::Digest);
+}
+
+#[test]
+fn a_listing_can_ask_for_the_digest() {
+    let (_, bytes) = valid();
+    let digest: [u8; 32] = Sha256::digest(&bytes).into();
+    let pack = Pack::open_bytes(&bytes, Some(digest), &VerifyLimits::default()).unwrap();
+    let mut planes = 0;
+    pack.visit_planes(Page::all(), &mut |_| {
+        planes += 1;
+        assert_eq!(pack.file_digest()?, digest);
+        pack.verify().map(drop)
+    })
+    .unwrap();
+    assert!(planes > 0);
 }
 
 #[test]
@@ -208,20 +235,27 @@ impl Read for Trickle<'_> {
 }
 
 #[test]
-fn the_header_is_checked_however_few_bytes_each_read_yields() {
+fn the_header_and_digest_are_checked_however_few_bytes_each_read_yields() {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/packs");
     let (_, valid) = valid();
-    let open = |bytes: &[u8], chunk| {
+    let open = |bytes: &[u8], chunk, digest| {
         let length = u64::try_from(bytes.len()).unwrap();
         Pack::open_from(
             Trickle { bytes, chunk },
             length,
-            None,
+            digest,
             &VerifyLimits::default(),
         )
     };
-    for chunk in [1, 7, 19, 20, 21] {
-        open(&valid, chunk).unwrap();
+    let digest: [u8; 32] = Sha256::digest(&valid).into();
+    for chunk in [1, 7, 19, 20, 21, 4096] {
+        let pack = open(&valid, chunk, Some(digest)).unwrap();
+        assert_eq!(
+            pack.file_digest().unwrap(),
+            digest,
+            "reads of {chunk} bytes"
+        );
+        pack.verify().unwrap();
         for name in [
             "open-header-wal",
             "open-header-write-version",
@@ -229,7 +263,7 @@ fn the_header_is_checked_however_few_bytes_each_read_yields() {
         ] {
             let bytes = std::fs::read(directory.join(format!("{name}.twpack"))).unwrap();
             assert_eq!(
-                code(open(&bytes, chunk)),
+                code(open(&bytes, chunk, None)),
                 ErrorCode::Identity,
                 "{name} in reads of {chunk} bytes"
             );

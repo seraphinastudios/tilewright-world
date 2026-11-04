@@ -27,7 +27,7 @@ tilewright-jsonc = { path = "crates/tilewright-jsonc", version = "=0.1.0" }
 tilewright-pack = { path = "crates/tilewright-pack", version = "=0.1.0" }
 tilewright-source = { path = "crates/tilewright-source", version = "=0.1.0" }
 rustix = { version = "1.1.5", features = ["fs", "process"] }
-rusqlite = { version = "0.40.2", default-features = false, features = ["bundled", "serialize"] }
+rusqlite = { version = "0.41.1", default-features = false, features = ["bundled", "serialize"] }
 sha2 = "0.11.0"
 tempfile = "3.27.0"
 zstd = { version = "0.14.3", default-features = false }
@@ -35,6 +35,8 @@ zstd = { version = "0.14.3", default-features = false }
 # `wasm-bindgen` command that tools/build-wasm.sh installs.
 js-sys = "=0.3.106"
 wasm-bindgen = "=0.2.129"
+# SQLite for the WebAssembly reader; see crates/tilewright-pack/Cargo.toml.
+sqlite-wasm-rs = { version = "0.6.2", default-features = false, features = ["wasm-bindgen"] }
 
 # The WebAssembly reader's build (tools/build-wasm.sh): small over fast, as a
 # browser downloads it.

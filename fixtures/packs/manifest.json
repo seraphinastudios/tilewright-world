@@ -478,6 +478,11 @@
       "verify": "pack.integrity"
     },
     {
+      "file": "verify-free-blocks.twpack",
+      "rule": "a page holds free blocks of no size, and more cells and free blocks than a page can",
+      "verify": "pack.integrity"
+    },
+    {
       "file": "string-blob.twpack",
       "rule": "a string is a blob",
       "reads": [
