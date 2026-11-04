@@ -1120,7 +1120,8 @@ fn files_at_their_base_have_the_budget_whether_or_not_it_can_resume() {
     let _lowered = Lowered::to(whole - 1, limits::WORK);
     // It can resume, so it reads past the budget to see, and is refused.
     assert!(has(&problems(root, &sealed), "tx.limit", "hold more than"));
-    // It cannot: reading stops at the budget, as it always did.
+    // It cannot: it is refused too. How much each reads is the next
+    // test's.
     let tests = transaction(
         r#"{"op": "test", "path": "defs/proto/aa.jsonc", "pointer": ["id"], "value": "aa"},
     {"op": "test", "path": "defs/proto/zz.jsonc", "pointer": ["id"], "value": "zz"}"#,
@@ -1269,4 +1270,36 @@ fn an_undo_plans_within_the_entry_budget_its_step_did() {
     let undo = crate::plan(root, &reparsed("undo.jsonc", plan.inverse()), &options).unwrap();
     published(&undo);
     crate::plan(root, &reparsed("redo.jsonc", undo.inverse()), &options).unwrap();
+}
+
+#[test]
+fn reading_goes_past_the_budget_only_for_a_base_that_can_resume() {
+    let (tree, tx, whole) = swapping_sizes();
+    let root = tree.path();
+    let tests = transaction(
+        r#"{"op": "test", "path": "defs/proto/aa.jsonc", "pointer": ["id"], "value": "aa"},
+    {"op": "test", "path": "defs/proto/zz.jsonc", "pointer": ["id"], "value": "zz"}"#,
+    );
+    let cannot = reparsed("tests.jsonc", planned(root, &tests).sealed());
+    let can = reparsed("sealed.jsonc", planned(root, &tx).sealed());
+    let budget = whole - 1;
+    let _lowered = Lowered::to(budget, limits::WORK);
+    let source = SourceRoot::new(root);
+    let on_disk = Overlay::new();
+    let checked = |transaction: &Transaction| {
+        let mut workspace = Workspace::new(&source, &on_disk, Names::OWN);
+        let mut problems = Problems::new(transaction);
+        check_base(&mut workspace, transaction, &mut problems);
+        assert!(!problems.is_empty());
+        workspace
+    };
+    // One that cannot resume stops reading at the budget.
+    assert!(checked(&cannot).bytes_read() <= budget);
+    // One that can reads on, to see which files are done, up to twice
+    // the budget...
+    let mut workspace = checked(&can);
+    assert!(workspace.bytes_read() > budget && workspace.bytes_read() <= 2 * budget);
+    // ...but only while its base is checked: what it reads next has the
+    // one budget left, which is spent.
+    assert!(workspace.exists("defs/proto/tree.jsonc").is_err());
 }

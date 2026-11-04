@@ -496,6 +496,13 @@ impl<'r> Workspace<'r> {
         }
     }
 
+    /// The bytes read from the files touched so far, against either
+    /// allowance.
+    #[cfg(test)]
+    pub(crate) fn bytes_read(&self) -> u64 {
+        self.read_bytes.saturating_add(self.done_bytes)
+    }
+
     /// Starts or ends checking the base of a transaction that can resume.
     /// Whether a file is at its result is known only once it is read, so
     /// each file is read and then settled.
