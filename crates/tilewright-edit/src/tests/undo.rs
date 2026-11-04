@@ -1231,9 +1231,9 @@ fn an_interrupted_deletion_of_a_plane_can_be_applied_again() {
     assert!(tilewright_source::load(root).is_ok());
 }
 
-#[test]
-fn an_undo_plans_within_the_entry_budget_its_step_did() {
-    let fits = |root: &Path, maximum_entries| {
+/// The least `maximum_entries` the tree at `root` loads with.
+fn least_entries(root: &Path) -> usize {
+    let fits = |maximum_entries| {
         let options = LoadOptions {
             maximum_entries,
             ..LoadOptions::default()
@@ -1241,35 +1241,61 @@ fn an_undo_plans_within_the_entry_budget_its_step_did() {
         tilewright_source::load_with(root, &options).is_ok()
     };
     let (mut low, mut high) = (0, 4_096);
+    assert!(fits(high) && !fits(low));
     while high - low > 1 {
         let middle = low + (high - low) / 2;
-        if fits(&fixture(), middle) {
+        if fits(middle) {
             high = middle;
         } else {
             low = middle;
         }
     }
-    // The least entry budget the tree loads with, for the step, its undo
-    // and its redo alike.
-    let options = Options {
-        load: LoadOptions {
-            maximum_entries: high,
-            ..LoadOptions::default()
-        },
-        ..Options::default()
-    };
-    let tree = copy();
-    let root = tree.path();
-    let tx = transaction(
+    high
+}
+
+#[test]
+fn an_undo_plans_within_the_entry_budget_its_step_did() {
+    // Each step makes a directory, one the loader lists or not; those that
+    // also delete two definitions leave the tree as large as it was, so
+    // that the step plans at the least budget the tree loads with.
+    let deleting = r#"{"op": "document.delete", "path": "defs/proto/x1.jsonc"},
+    {"op": "document.delete", "path": "defs/proto/x2.jsonc"}"#;
+    for step in [
         r#"{"op": "document.create", "path": "profile/notes/a.jsonc", "document": {"note": 1}},
-    {"op": "document.create", "path": "profile/notes/b.jsonc", "document": {"note": 2}}"#,
-    );
-    let plan = crate::plan(root, &tx, &options).unwrap();
-    plan.check_undo().unwrap();
-    published(&plan);
-    let undo = crate::plan(root, &reparsed("undo.jsonc", plan.inverse()), &options).unwrap();
-    published(&undo);
-    crate::plan(root, &reparsed("redo.jsonc", undo.inverse()), &options).unwrap();
+    {"op": "document.create", "path": "profile/notes/b.jsonc", "document": {"note": 2}}"#
+            .to_owned(),
+        format!("{deleting},\n    {}", add_plane("attic")),
+        format!(
+            r#"{deleting},
+    {{"op": "object.insert", "plane": "overworld", "layer": 9, "at": [1, 1], "object": {{"proto": "tree"}}}}"#
+        ),
+    ] {
+        let tree = copy();
+        let root = tree.path();
+        for id in ["x1", "x2"] {
+            fs::write(
+                root.join(format!("defs/proto/{id}.jsonc")),
+                format!(
+                    r#"{{"format": "tilewright.def/1", "type": "proto", "id": "{id}", "fields": {{"face": "x.png", "layer": "item"}}}}"#
+                ),
+            )
+            .unwrap();
+        }
+        let options = Options {
+            load: LoadOptions {
+                maximum_entries: least_entries(root),
+                ..LoadOptions::default()
+            },
+            ..Options::default()
+        };
+        let plan = crate::plan(root, &transaction(&step), &options).unwrap();
+        plan.check_undo().unwrap();
+        published(&plan);
+        let undo = crate::plan(root, &reparsed("undo.jsonc", plan.inverse()), &options)
+            .unwrap_or_else(|problems| panic!("{step}\n{problems:#?}"));
+        published(&undo);
+        crate::plan(root, &reparsed("redo.jsonc", undo.inverse()), &options).unwrap();
+    }
 }
 
 #[test]

@@ -2034,37 +2034,26 @@ fn least_entries(root: &Path, overlay: &Overlay) -> usize {
 }
 
 #[test]
-fn directories_that_hold_no_file_count_against_the_entry_budget() {
-    let least = |root: &Path| {
-        let passes = |maximum_entries| {
-            let options = LoadOptions {
-                maximum_entries,
-                ..LoadOptions::default()
-            };
-            load_with(root, &options).is_ok()
-        };
-        let (mut low, mut high) = (0, 4_096);
-        assert!(passes(high) && !passes(low));
-        while high - low > 1 {
-            let middle = low + (high - low) / 2;
-            if passes(middle) {
-                high = middle;
-            } else {
-                low = middle;
-            }
-        }
-        high
-    };
-    let plain = least(&fixture());
+fn directories_that_hold_no_file_are_counted_apart() {
+    let plain = least_entries(&fixture(), &Overlay::new());
     let copy = workspace();
     let root = copy.path();
-    for index in 0..40 {
+    // A layer's directory and one in it, which hold no file, and a stray
+    // one with five, each holding one more.
+    fs::create_dir_all(root.join("planes/vault/layers/7/notes")).unwrap();
+    for index in 0..5 {
         fs::create_dir_all(root.join(format!("planes/attic/d{index}/e"))).unwrap();
     }
-    // Every entry looked at is counted, the attic's own as it is listed,
-    // and each of the 40 and the one in it as the attic is looked into in
-    // full, whatever order the file system lists them in.
-    assert_eq!(least(root), plain + 81);
+    // The others are counted as they are without them, and these fit an
+    // allowance of their own as large.
+    assert_eq!(least_entries(root, &Overlay::new()), plain);
+    // So the allowance is what bounds a load of many of them: the stray
+    // one, its 40 and theirs, the layer's and the one in it.
+    for index in 5..40 {
+        fs::create_dir_all(root.join(format!("planes/attic/d{index}/e"))).unwrap();
+    }
+    assert!(plain < 83);
+    assert_eq!(least_entries(root, &Overlay::new()), 83);
 }
 
 #[test]

@@ -75,7 +75,10 @@ pub struct LoadOptions {
     /// Most files read in one load.
     pub maximum_files: usize,
     /// Most directory entries listed in one load, counted before they are
-    /// examined.
+    /// examined. Those of a directory that holds no file, which the layout
+    /// ignores, and those listed to find it holds none, count apart,
+    /// against as many again, so that such a directory makes a load no
+    /// larger; so, meanwhile, do those of directories not yet known to.
     pub maximum_entries: usize,
     /// Most bytes read in one load.
     pub maximum_total_bytes: u64,
@@ -603,10 +606,15 @@ pub fn load_edited_in(
     let world = load_tree(&mut tree, &mut diagnostics);
     diagnostics.append(tree.take_diagnostics());
     match world {
-        Some(world) if diagnostics.is_empty() => Ok(World {
-            source_digest: tree.digest(),
-            ..world
-        }),
+        Some(world) if diagnostics.is_empty() => {
+            // Each directory the layout listed was counted with the others
+            // or apart.
+            debug_assert_eq!(tree.pending(), 0);
+            Ok(World {
+                source_digest: tree.digest(),
+                ..world
+            })
+        }
         _ => Err(diagnostics.finish()),
     }
 }

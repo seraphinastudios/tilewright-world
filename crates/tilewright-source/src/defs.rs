@@ -42,7 +42,11 @@ pub(crate) fn read_definitions(
             }
             continue;
         };
-        for entry in tree.list(&directory) {
+        // A type's directory that holds no file is counted apart, as one
+        // the profile does not declare is (`Tree::set_aside`).
+        let (entries, other) = tree.listing(&directory, true);
+        let mut held = other.is_some();
+        for entry in entries {
             let path = join(&directory, &entry.name);
             let Some(id) = entry
                 .name
@@ -50,6 +54,7 @@ pub(crate) fn read_definitions(
                 .filter(|id| is_identifier(id) && entry.kind == EntryKind::File)
             else {
                 if let Err(why) = ignored(tree, &path, &entry, true) {
+                    held = true;
                     diagnostics.push(Diagnostic::file(
                         &path,
                         Code::UnexpectedFile,
@@ -58,7 +63,13 @@ pub(crate) fn read_definitions(
                 }
                 continue;
             };
+            held = true;
             files.push((type_entry.name.clone(), id.to_owned(), path, schema));
+        }
+        if held {
+            tree.hold(&directory);
+        } else {
+            tree.set_aside(&directory);
         }
     }
     references.definitions_listed(

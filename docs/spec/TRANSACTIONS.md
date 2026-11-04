@@ -397,14 +397,19 @@ transaction left. The redos leave the tree the transaction did, which
 carrying it out validated.
 
 Validating does not depend on a directory that holds no file: the loader
-ignores one (FORMAT.md section 2). An undone tree has the bytes of the
-original in every file the transaction touched or consulted, and the same
-other files, so it can differ from the original only in such directories:
-one the transaction made, which publishing the undo leaves when it cannot
-remove it or its mode or group is no longer that of the directory above it
-(section 9, step 5), and an empty one the transaction wrote into, which it
-removes on the same terms. So it validates as the original does, and loads
-the same world.
+ignores one (FORMAT.md section 2), and counts its entries, and those it
+lists to find it holds none, apart from the rest of the tree's, against an
+allowance of their own as large as the load's, so it does not make a load
+any larger either. An undone tree has the bytes of the original in every
+file the transaction touched or consulted, and the same other files, so it
+can differ from the original only in such directories: one the transaction
+made, which publishing the undo leaves when it cannot remove it, when its
+mode or group is no longer that of the directory above it, or when it is
+`planes/` or `defs/`, which publishing never removes (section 9, step 5);
+and an empty one the transaction wrote into, which it removes on the same
+terms. So under the same load options it validates as the original does,
+and loads the same world. Those directories held the transaction's files,
+so the allowance apart holds them whenever the transaction's own load did.
 Not guaranteed:
 
 - the inverse of a transaction that made an invalid tree valid passes the

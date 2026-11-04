@@ -105,6 +105,18 @@ pub(crate) struct Tree<'o> {
     digests: BTreeMap<String, (u64, [u8; 32])>,
     diagnostics: Diagnostics,
     exhausted: bool,
+    /// Entries of directories that hold no file, and of what is listed to
+    /// find that, counted apart from the others, against an allowance as
+    /// large, so that a load counts as many of the others as the tree
+    /// without those directories would: one an edit or an undo leaves
+    /// costs nothing on its own.
+    set_aside: usize,
+    /// Entries of directories listed that are not yet known to hold a file
+    /// or not, which are then counted with the others ([`Self::hold`]) or
+    /// apart ([`Self::set_aside`]), against an allowance as large meanwhile.
+    pending: usize,
+    /// Entries listed now are counted apart.
+    aside: bool,
 }
 
 /// The most components, and bytes, of a path a document may have
@@ -178,6 +190,9 @@ impl<'o> Tree<'o> {
             digests: BTreeMap::new(),
             diagnostics: Diagnostics::sharing(options.maximum_diagnostics, total),
             exhausted: false,
+            set_aside: 0,
+            pending: 0,
+            aside: false,
         }
     }
 
@@ -285,6 +300,51 @@ impl<'o> Tree<'o> {
         self.listing(path, true).0
     }
 
+    /// Counts one entry listed, against the allowance of those counted
+    /// apart while `aside`, and otherwise, if it is a `directory`, as one
+    /// not yet known to hold a file; `false`, with the budget reported,
+    /// past it.
+    fn charge(&mut self, path: &str, directory: bool) -> bool {
+        let count = if self.aside {
+            &mut self.set_aside
+        } else if directory {
+            &mut self.pending
+        } else {
+            &mut self.entries
+        };
+        *count += 1;
+        if *count > self.options.maximum_entries {
+            self.exhaust(path);
+            return false;
+        }
+        true
+    }
+
+    /// Counts with the others a directory listed, at `path`, that holds a
+    /// file, or is read as part of the layout.
+    pub fn hold(&mut self, path: &str) {
+        self.pending = self.pending.saturating_sub(1);
+        self.entries += 1;
+        if self.entries > self.options.maximum_entries {
+            self.exhaust(path);
+        }
+    }
+
+    /// Counts apart a directory listed, at `path`, that holds no file, as
+    /// what was listed to find that is.
+    pub fn set_aside(&mut self, path: &str) {
+        self.pending = self.pending.saturating_sub(1);
+        self.set_aside += 1;
+        if self.set_aside > self.options.maximum_entries {
+            self.exhaust(path);
+        }
+    }
+
+    /// Directories listed and not yet counted either way.
+    pub fn pending(&self) -> usize {
+        self.pending
+    }
+
     /// Whether the directory `path` holds no file at any depth, with the
     /// overlay applied: nothing, or only directories that hold none, which
     /// the layout ignores (`docs/spec/FORMAT.md` section 2). A symbolic
@@ -292,11 +352,18 @@ impl<'o> Tree<'o> {
     /// cannot be listed, and a directory deeper than a document's path may
     /// be, count as files; for those, what was found, and where. Nothing is
     /// reported. Directories are looked into depth first and in name order,
-    /// each listed in full and counted against the budget as any listing
-    /// is, so neither the answer nor what it costs depends on the order a
-    /// file system lists entries in, and the walk goes no deeper than a
-    /// path may: what it holds at once is the names left at each level.
+    /// each listed in full and counted apart (see [`Self::set_aside`]), so
+    /// neither the answer nor what it costs depends on the order a file
+    /// system lists entries in, and the walk goes no deeper than a path
+    /// may: what it holds at once is the names left at each level.
     pub fn holds_no_file(&mut self, path: &str) -> Holding {
+        let aside = std::mem::replace(&mut self.aside, true);
+        let holding = self.look_into(path);
+        self.aside = aside;
+        holding
+    }
+
+    fn look_into(&mut self, path: &str) -> Holding {
         let mut current = path.to_owned();
         // For each directory on the way down: the names of those in it left
         // to look into, the last first, and the length of its path.
@@ -341,7 +408,7 @@ impl<'o> Tree<'o> {
     /// full, as a description with its path: of all there were, the first
     /// by that description, so that it does not depend on listing order.
     /// That is reported as well only when `report`.
-    fn listing(&mut self, path: &str, report: bool) -> (Vec<Entry>, Option<String>) {
+    pub(crate) fn listing(&mut self, path: &str, report: bool) -> (Vec<Entry>, Option<String>) {
         let cut_short = || Some(format!("a directory not listed in full, at {path}"));
         if self.stopped() {
             if report {
@@ -353,7 +420,12 @@ impl<'o> Tree<'o> {
         // holds an overlay file is listed. Names are looked up in sets, so
         // merging costs a logarithm per entry.
         let mut added: BTreeMap<&str, EntryKind> = BTreeMap::new();
-        let remaining = self.options.maximum_entries.saturating_sub(self.entries);
+        let counted = if self.aside {
+            self.set_aside
+        } else {
+            self.entries
+        };
+        let remaining = self.options.maximum_entries.saturating_sub(counted);
         for (rest, value) in overlay_beneath(self.overlay, path) {
             match (rest.split_once('/'), value) {
                 (None, Some(_)) => {
@@ -378,9 +450,7 @@ impl<'o> Tree<'o> {
         let present: BTreeSet<String> = entries.iter().map(|entry| entry.name.clone()).collect();
         for (name, kind) in added {
             if !present.contains(name) {
-                self.entries += 1;
-                if self.entries > self.options.maximum_entries {
-                    self.exhaust(path);
+                if !self.charge(path, kind == EntryKind::Directory) {
                     other = cut_short();
                     break;
                 }
@@ -482,9 +552,7 @@ impl<'o> Tree<'o> {
             {
                 continue;
             }
-            self.entries += 1;
-            if self.entries > self.options.maximum_entries {
-                self.exhaust(path);
+            if !self.charge(path, entry.kind == RawKind::Directory) {
                 first(
                     &mut other,
                     format!("a directory not listed in full, at {path}"),
@@ -719,12 +787,12 @@ fn overlay_beneath<'a>(
 
 /// Whether an entry at `path`, which the layout has no place for, is
 /// ignored rather than an error (`docs/spec/FORMAT.md` section 2): a
-/// directory that holds no file at any depth. Among `documents`, those of
-/// a plane, a layer or a definition type, a directory named like one,
-/// ending in `.jsonc` in any case, is not ignored: it is where the layout
-/// has a file, or one a file system that ignores case takes for it. When it
-/// is not ignored, `Err` holds what to add to the problem's message: why,
-/// when what it holds is not a file.
+/// directory that holds no file at any depth, counted apart then. Among
+/// `documents`, those of a plane, a layer or a definition type, a
+/// directory named like one, ending in `.jsonc` in any case, is not
+/// ignored: it is where the layout has a file, or one a file system that
+/// ignores case takes for it. When it is not ignored, `Err` holds what to
+/// add to the problem's message: why, when what it holds is not a file.
 pub(crate) fn ignored(
     tree: &mut Tree<'_>,
     path: &str,
@@ -735,14 +803,26 @@ pub(crate) fn ignored(
         let (name, suffix) = (entry.name.as_bytes(), suffix.as_bytes());
         name.len() >= suffix.len() && name[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
     };
-    if entry.kind != EntryKind::Directory || (documents && ends(".jsonc")) {
+    if entry.kind != EntryKind::Directory {
         return Err(String::new());
     }
-    tree.holds_no_file(path).map_err(|found| {
-        found.map_or_else(String::new, |found| {
-            format!("; it is not ignored as a directory without files, since it holds {found}")
-        })
-    })
+    let holding = if documents && ends(".jsonc") {
+        Err(None)
+    } else {
+        tree.holds_no_file(path)
+    };
+    match holding {
+        Ok(()) => {
+            tree.set_aside(path);
+            Ok(())
+        }
+        Err(found) => {
+            tree.hold(path);
+            Err(found.map_or_else(String::new, |found| {
+                format!("; it is not ignored as a directory without files, since it holds {found}")
+            }))
+        }
+    }
 }
 
 pub(crate) fn join(directory: &str, name: &str) -> String {
