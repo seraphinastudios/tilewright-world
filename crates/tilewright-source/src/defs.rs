@@ -6,7 +6,7 @@
 use crate::diagnostic::Diagnostics;
 use crate::{
     Code, Definition, Diagnostic, Profile,
-    files::{EntryKind, Tree, join},
+    files::{EntryKind, Tree, ignored, join},
     read::{Reader, is_identifier},
     schema::{References, read_fields},
 };
@@ -33,11 +33,13 @@ pub(crate) fn read_definitions(
             .get(&type_entry.name)
             .filter(|_| type_entry.kind == EntryKind::Directory)
         else {
-            diagnostics.push(Diagnostic::file(
-                &directory,
-                Code::UnexpectedFile,
-                "not a definition type declared by the profile",
-            ));
+            if !ignored(tree, &directory, &type_entry, false) {
+                diagnostics.push(Diagnostic::file(
+                    &directory,
+                    Code::UnexpectedFile,
+                    "not a definition type declared by the profile",
+                ));
+            }
             continue;
         };
         for entry in tree.list(&directory) {
@@ -47,11 +49,13 @@ pub(crate) fn read_definitions(
                 .strip_suffix(".jsonc")
                 .filter(|id| is_identifier(id) && entry.kind == EntryKind::File)
             else {
-                diagnostics.push(Diagnostic::file(
-                    &path,
-                    Code::UnexpectedFile,
-                    "definition files are named <id>.jsonc",
-                ));
+                if !ignored(tree, &path, &entry, true) {
+                    diagnostics.push(Diagnostic::file(
+                        &path,
+                        Code::UnexpectedFile,
+                        "definition files are named <id>.jsonc",
+                    ));
+                }
                 continue;
             };
             files.push((type_entry.name.clone(), id.to_owned(), path, schema));

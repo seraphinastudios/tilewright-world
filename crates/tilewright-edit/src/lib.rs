@@ -848,17 +848,17 @@ impl Plan {
     ///
     /// Validating is left out. The redos leave the tree this plan
     /// validated; the undos restore the tree this plan was carried out on,
-    /// which was not validated. So when that tree validated under the
-    /// same [`LoadOptions`] (as a tree an editor loaded, or the one an
-    /// earlier plan left, does), and nothing else changes the files, every
-    /// undo and redo of this plan, published in turn, plans. Not
+    /// which was not validated, file for file: a directory may be left
+    /// that holds no file, which the loader ignores. So when that tree
+    /// validated under the same [`LoadOptions`] (as a tree an editor
+    /// loaded, or the one an earlier plan left, does), and nothing else
+    /// changes the files, every undo and redo of this plan, published in
+    /// turn, plans. Not
     /// guaranteed: other changes to files recorded in an undo or redo's
     /// `base` digests can cause a `tx.conflict`, as for any transaction;
     /// other files changed meanwhile may make the tree it leaves fail
-    /// validation, as may a directory this plan makes whose mode or group
-    /// is changed so that it is no longer that of the directory above it,
-    /// which an undo leaves; and publishing may fail for reasons of its
-    /// own, such as permissions or input and output.
+    /// validation; and publishing may fail for reasons of its own, such as
+    /// permissions or input and output.
     ///
     /// It is bounded as carrying out is, once for each of at most four
     /// rounds, and costs nothing when it is not called.

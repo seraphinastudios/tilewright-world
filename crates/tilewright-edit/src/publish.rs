@@ -381,7 +381,7 @@ impl<'r> Directories<'r> {
         };
         let own = read(path);
         let parent = read(split(path).0);
-        matches!((own, parent), (Some(own), Some(parent)) if own.same_mode_and_group(&parent))
+        matches!((own, parent), (Some(own), Some(parent)) if own.mode == parent.mode && own.group == parent.group)
     }
 
     /// The outcome: success when every file was published and nothing went
@@ -1063,7 +1063,7 @@ impl Plan {
     /// the plan did not touch may have changed since it was made. A
     /// directory deleting files emptied is removed, unless its mode or group
     /// is not that of the directory above it, which an inverse would give
-    /// it: then it is left, empty, as planning validated the tree with it.
+    /// it: then it is left, empty.
     ///
     /// # Errors
     /// Returns a [`PublishError`]. With nothing written: a `tx.conflict`

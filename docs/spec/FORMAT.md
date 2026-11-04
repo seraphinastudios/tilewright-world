@@ -52,12 +52,19 @@ coordinates are limited so that every tile coordinate stays within the
 integer range of section 3.
 
 Only the files above are read. `planes/` and `defs/` are optional, but if
-present they must be directories. Under them, any other file or directory is
-an error, and so is a symbolic link anywhere in a path that is read (on
-Windows, any reparse point, junctions included, so a tree in a OneDrive
-folder, whose files are cloud placeholders even when kept on the device,
-cannot be loaded there). Other files at the root, such as assets, scripts or a README, are
-ignored. Assets such as images and sounds stay ordinary files referenced by
+present they must be directories. Under them, any other file is an error, and
+so is any other directory that holds a file at any depth, and a symbolic link
+anywhere in a path that is read (on Windows, any reparse point, junctions
+included, so a tree in a OneDrive folder, whose files are cloud placeholders
+even when kept on the device, cannot be loaded there). A directory there that
+holds no file at any depth, nothing or only such directories, is ignored:
+version control keeps no such directory, and one is left behind when files
+are moved or deleted, so what a tree means does not depend on it. A
+symbolic link, a special file and an entry whose name is not UTF-8 count as
+files. Among the documents of a plane, a layer or a definition type, a
+directory named like a document, ending in `.jsonc` in any case, is not
+ignored, since it stands where the layout has a file. Other files at the
+root, such as assets, scripts or a README, are ignored. Assets such as images and sounds stay ordinary files referenced by
 path or by an ID the profile defines.
 
 Paths written inside documents (the profile path, schema paths, the

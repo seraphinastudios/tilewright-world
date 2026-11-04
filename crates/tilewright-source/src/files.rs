@@ -105,9 +105,6 @@ pub(crate) struct Tree<'o> {
     digests: BTreeMap<String, (u64, [u8; 32])>,
     diagnostics: Diagnostics,
     exhausted: bool,
-    /// The directories the overlay leaves empty and publishing would
-    /// remove: they are not there.
-    vacated: BTreeSet<String>,
 }
 
 /// Whether `path` is a safe relative path ending in `.jsonc`: at most 1,024
@@ -153,17 +150,15 @@ impl<'o> Tree<'o> {
     /// A tree over an opened root whose files are those on disk with
     /// `overlay` applied: an entry's text replaces or creates the file at
     /// its path, and an entry of `None` removes it. Directories that hold
-    /// an overlay file exist, and those it leaves empty are gone, as
-    /// publishing leaves them ([`Self::find_vacated`]). `total` is the
-    /// load's shared diagnostic count; once it reaches the maximum, nothing
-    /// more is read.
+    /// an overlay file exist. `total` is the load's shared diagnostic
+    /// count; once it reaches the maximum, nothing more is read.
     pub fn in_root(
         root: platform::Root,
         options: &'o LoadOptions,
         overlay: &'o Overlay,
         total: Rc<Cell<usize>>,
     ) -> Self {
-        let mut tree = Self {
+        Self {
             root,
             options,
             overlay,
@@ -173,87 +168,7 @@ impl<'o> Tree<'o> {
             digests: BTreeMap::new(),
             diagnostics: Diagnostics::sharing(options.maximum_diagnostics, total),
             exhausted: false,
-            vacated: BTreeSet::new(),
-        };
-        tree.find_vacated();
-        tree
-    }
-
-    /// Finds the directories publishing would remove once the overlay's
-    /// removals are made (`docs/spec/TRANSACTIONS.md` section 9): a
-    /// directory above a removed file, not at the top of the tree, with
-    /// nothing left in it and the mode and group of the one above it. One
-    /// that publishing would leave stays here too, so that what is
-    /// validated is what it leaves.
-    fn find_vacated(&mut self) {
-        let overlay = self.overlay;
-        let mut directories = BTreeSet::new();
-        for (path, _) in overlay.iter().filter(|(_, value)| value.is_none()) {
-            let mut current = path.as_str();
-            while let Some((parent, _)) = current.rsplit_once('/') {
-                // Its parents are there already if it is.
-                if !parent.contains('/') || !directories.insert(parent) {
-                    break;
-                }
-                current = parent;
-            }
         }
-        // A path sorts before those beneath it, so in reverse a directory
-        // comes after every directory it holds.
-        for directory in directories.into_iter().rev() {
-            if self.emptied(directory) && self.like_parent(directory) {
-                self.vacated.insert(directory.to_owned());
-            }
-        }
-    }
-
-    /// Whether the overlay removes all that is in the directory `path`,
-    /// which held something. Looking stops at the first entry that stays,
-    /// and each entry passed is one the listings then skip, so each is
-    /// counted against the budget once: an overlay can make a load cost no
-    /// more than listing the tree as it is on disk.
-    fn emptied(&mut self, path: &str) -> bool {
-        if self.exhausted || self.holds_overlay_files(path) {
-            return false;
-        }
-        let Ok(listing) = self.root.list(&components(path)) else {
-            return false;
-        };
-        let mut held = false;
-        for entry in listing {
-            let Ok(RawEntry {
-                name: Some(name), ..
-            }) = entry
-            else {
-                return false;
-            };
-            let child = join(path, &name);
-            if !self.overlay.contains_key(&child) && !self.vacated.contains(&child) {
-                return false;
-            }
-            held = true;
-            self.entries += 1;
-            if self.entries > self.options.maximum_entries {
-                self.exhaust(path);
-                return false;
-            }
-        }
-        held
-    }
-
-    /// Whether the directory `path` has the mode and group of the one
-    /// above it, without which publishing leaves it; `false` when either
-    /// cannot be read, as publishing takes it.
-    fn like_parent(&self, path: &str) -> bool {
-        let access = |path: &str| {
-            let directory = self.root.directory(&components(path), false).ok()?;
-            directory.own_access().ok()
-        };
-        let parent = path.rsplit_once('/').map_or("", |(parent, _)| parent);
-        matches!(
-            (access(path), access(parent)),
-            (Some(own), Some(parent)) if own.same_mode_and_group(&parent)
-        )
     }
 
     /// Reports the exhausted budget once.
@@ -357,14 +272,51 @@ impl<'o> Tree<'o> {
     /// Lists a directory, sorted by name. Symbolic links, special files and
     /// non-UTF-8 names are reported and skipped.
     pub fn list(&mut self, path: &str) -> Vec<Entry> {
+        self.listing(path, true).0
+    }
+
+    /// Whether the directory `path` holds no file at any depth, with the
+    /// overlay applied: nothing, or only directories that hold none, which
+    /// the layout ignores (`docs/spec/FORMAT.md` section 2). A symbolic
+    /// link, a special file, a name that is not UTF-8, or a directory that
+    /// cannot be listed counts as a file, and nothing is reported. Each
+    /// directory is listed in full and counted against the budget as any
+    /// listing is, and those beneath it are looked into in name order, so
+    /// neither the answer nor what it costs depends on the order a file
+    /// system lists entries in.
+    pub fn holds_no_file(&mut self, path: &str) -> bool {
+        let mut pending = vec![path.to_owned()];
+        while let Some(directory) = pending.pop() {
+            let (entries, other) = self.listing(&directory, false);
+            if other || self.exhausted {
+                return false;
+            }
+            let mut directories = Vec::with_capacity(entries.len());
+            for entry in entries {
+                if entry.kind != EntryKind::Directory {
+                    return false;
+                }
+                directories.push(join(&directory, &entry.name));
+            }
+            // Taken from the end, so the first name goes in last.
+            pending.extend(directories.into_iter().rev());
+        }
+        true
+    }
+
+    /// Lists a directory, sorted by name, and says whether it held anything
+    /// that is neither a file nor a directory, or could not be listed in
+    /// full. That is reported only when `report`.
+    fn listing(&mut self, path: &str, report: bool) -> (Vec<Entry>, bool) {
         if self.stopped() {
-            self.diagnostics.skip();
-            return Vec::new();
+            if report {
+                self.diagnostics.skip();
+            }
+            return (Vec::new(), true);
         }
         // Overlay files replace, add or remove entries; a directory that
-        // holds an overlay file is listed, and one the overlay leaves empty
-        // is not. Names are looked up in sets, so merging costs a logarithm
-        // per entry.
+        // holds an overlay file is listed. Names are looked up in sets, so
+        // merging costs a logarithm per entry.
         let mut added: BTreeMap<&str, EntryKind> = BTreeMap::new();
         let remaining = self.options.maximum_entries.saturating_sub(self.entries);
         for (rest, value) in overlay_beneath(self.overlay, path) {
@@ -381,13 +333,13 @@ impl<'o> Tree<'o> {
             // names than the budget has left exhaust it whatever is there.
             if added.len() > remaining {
                 self.exhaust(path);
-                return Vec::new();
+                return (Vec::new(), true);
             }
         }
-        // An entry the overlay replaces or removes, or leaves empty, is not
-        // looked at at all, so what is there on disk, a link, a special
-        // file or a directory, is not reported.
-        let mut entries = self.list_disk(path);
+        // An entry the overlay replaces or removes is not looked at at
+        // all, so what is there on disk, a link, a special file or a
+        // directory, is not reported.
+        let (mut entries, other) = self.list_disk(path, report);
         let present: BTreeSet<String> = entries.iter().map(|entry| entry.name.clone()).collect();
         for (name, kind) in added {
             if !present.contains(name) {
@@ -403,72 +355,91 @@ impl<'o> Tree<'o> {
             }
         }
         entries.sort_by(|left, right| left.name.cmp(&right.name));
-        entries
+        (entries, other)
     }
 
-    /// Lists a directory on disk. A directory that is missing on disk but
-    /// holds overlay files is empty there.
-    fn list_disk(&mut self, path: &str) -> Vec<Entry> {
+    /// Lists a directory on disk, and says whether it held anything that is
+    /// neither a file nor a directory, or could not be listed in full,
+    /// which is reported when `report`. A directory that is missing on disk
+    /// but holds overlay files is empty there.
+    fn list_disk(&mut self, path: &str, report: bool) -> (Vec<Entry>, bool) {
         let overlay = self.overlay;
         let directory = match self.root.list(&components(path)) {
             Ok(directory) => directory,
             Err(Refused::Link(link)) => {
-                self.link(&link);
-                return Vec::new();
+                if report {
+                    self.link(&link);
+                }
+                return (Vec::new(), true);
             }
-            Err(Refused::Missing) if self.holds_overlay_files(path) => return Vec::new(),
+            Err(Refused::Missing) if self.holds_overlay_files(path) => return (Vec::new(), false),
             Err(refused) => {
                 let reason = match refused {
                     Refused::Io(error) => error.to_string(),
                     Refused::Missing => "it is missing".to_owned(),
                     Refused::Unexpected | Refused::Link(_) => "not a directory".to_owned(),
                 };
-                self.diagnostics.push(Diagnostic::file(
-                    path,
-                    Code::Io,
-                    format!("cannot list directory: {reason}"),
-                ));
-                return Vec::new();
+                if report {
+                    self.diagnostics.push(Diagnostic::file(
+                        path,
+                        Code::Io,
+                        format!("cannot list directory: {reason}"),
+                    ));
+                }
+                return (Vec::new(), true);
             }
         };
         let mut entries = Vec::new();
+        let mut other = false;
         for entry in directory {
             if self.exhausted {
+                other = true;
                 break;
             }
             self.entries += 1;
             if self.entries > self.options.maximum_entries {
                 self.exhaust(path);
+                other = true;
                 break;
             }
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(error) => {
-                    self.diagnostics.push(Diagnostic::file(
-                        path,
-                        Code::Io,
-                        format!("cannot list directory: {error}"),
-                    ));
+                    other = true;
+                    if report {
+                        self.diagnostics.push(Diagnostic::file(
+                            path,
+                            Code::Io,
+                            format!("cannot list directory: {error}"),
+                        ));
+                    }
                     continue;
                 }
             };
             let Some(name) = entry.name else {
-                self.diagnostics.push(Diagnostic::file(
-                    path,
-                    Code::UnexpectedFile,
-                    "file name is not UTF-8",
-                ));
+                other = true;
+                if report {
+                    self.diagnostics.push(Diagnostic::file(
+                        path,
+                        Code::UnexpectedFile,
+                        "file name is not UTF-8",
+                    ));
+                }
                 continue;
             };
-            let child = join(path, &name);
-            if overlay.contains_key(&child) || self.vacated.contains(&child) {
-                // The overlay's entry takes its place, and is counted then,
-                // or it was counted when it was found empty.
+            if overlay.contains_key(&join(path, &name)) {
+                // The overlay's entry takes its place, and is counted then.
                 self.entries -= 1;
                 continue;
             }
+            let child = join(path, &name);
             match entry.kind {
-                RawKind::Link => self.link(&child),
+                RawKind::Link => {
+                    other = true;
+                    if report {
+                        self.link(&child);
+                    }
+                }
                 RawKind::Directory => entries.push(Entry {
                     name,
                     kind: EntryKind::Directory,
@@ -477,14 +448,19 @@ impl<'o> Tree<'o> {
                     name,
                     kind: EntryKind::File,
                 }),
-                RawKind::Other => self.diagnostics.push(Diagnostic::file(
-                    &child,
-                    Code::UnexpectedFile,
-                    "not a regular file or directory",
-                )),
+                RawKind::Other => {
+                    other = true;
+                    if report {
+                        self.diagnostics.push(Diagnostic::file(
+                            &child,
+                            Code::UnexpectedFile,
+                            "not a regular file or directory",
+                        ));
+                    }
+                }
             }
         }
-        entries
+        (entries, other)
     }
 
     /// Reads and parses a JSONC document. Every problem is reported.
@@ -666,6 +642,20 @@ fn overlay_beneath<'a>(
     overlay
         .range(prefix.clone()..)
         .map_while(move |(key, value)| key.strip_prefix(prefix.as_str()).map(|rest| (rest, value)))
+}
+
+/// Whether an entry at `path`, which the layout has no place for, is
+/// ignored rather than an error: a directory that holds no file at any
+/// depth (`docs/spec/FORMAT.md` section 2). Among `documents`, those of a
+/// plane, a layer or a definition type, a directory named like one, ending
+/// in `.jsonc` in any case, is not ignored: it is where the layout has a
+/// file, or one a file system that ignores case takes for it.
+pub(crate) fn ignored(tree: &mut Tree<'_>, path: &str, entry: &Entry, documents: bool) -> bool {
+    let name = entry.name.as_bytes();
+    let like_a_document = name.len() >= 6 && name[name.len() - 6..].eq_ignore_ascii_case(b".jsonc");
+    entry.kind == EntryKind::Directory
+        && !(documents && like_a_document)
+        && tree.holds_no_file(path)
 }
 
 pub(crate) fn join(directory: &str, name: &str) -> String {

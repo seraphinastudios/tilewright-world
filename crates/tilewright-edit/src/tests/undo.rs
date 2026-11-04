@@ -895,51 +895,46 @@ fn a_plane_can_be_removed_and_made_again() {
     round_trip(root, &tx);
 }
 
+/// Whether every directory under `root` that `before` does not have holds
+/// nothing but such directories, as an undo may leave them.
+fn only_empty_directories_added(root: &Path, before: &[String]) -> bool {
+    directories(root)
+        .iter()
+        .filter(|directory| !before.contains(directory))
+        .all(|directory| {
+            fs::read_dir(root.join(directory))
+                .unwrap()
+                .all(|entry| entry.unwrap().file_type().unwrap().is_dir())
+        })
+}
+
 #[cfg(unix)]
 #[test]
-fn a_directory_an_undo_would_leave_is_validated_as_there() {
+fn a_directory_an_undo_leaves_is_ignored() {
     use std::os::unix::fs::PermissionsExt as _;
     let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o7777;
-
-    // Below `planes/` the loader rejects it, so the undo is refused while
-    // it is there, with nothing written, and not published only to leave
-    // a tree that does not validate.
-    let tree = copy();
-    let root = tree.path();
-    let plan = planned(root, &transaction(&add_plane("attic")));
-    plan.check_undo().unwrap();
-    published(&plan);
-    let parent = mode(&root.join("planes"));
-    assert_eq!(mode(&root.join("planes/attic")), parent);
-    let set = |bits| {
-        fs::set_permissions(root.join("planes/attic"), fs::Permissions::from_mode(bits)).unwrap();
-    };
-    set(parent ^ 0o020);
-    let undo = reparsed("undo.jsonc", plan.inverse());
-    let applied = snapshot(root);
-    assert!(has(
-        &problems(root, &undo),
-        "source.unexpected_file",
-        "not a plane listed in world.jsonc"
-    ));
-    assert_eq!(snapshot(root), applied);
-    // With the mode of the directory above it back, it goes.
-    set(parent);
-    apply(root, &undo);
-    assert!(!root.join("planes/attic").exists());
-
-    // Where the loader accepts an empty directory, the deletion goes
-    // through, and the directory is left, as it was validated.
-    let tree = copy();
-    let root = tree.path();
-    let chunk = r#"{"op": "object.insert", "plane": "overworld", "layer": 9, "at": [1, 1], "object": {"proto": "tree"}}"#;
-    let plan = apply(root, &transaction(chunk));
-    let layer = root.join("planes/overworld/layers/9");
-    let parent = mode(&layer);
-    fs::set_permissions(&layer, fs::Permissions::from_mode(parent ^ 0o020)).unwrap();
-    apply(root, &reparsed("undo.jsonc", plan.inverse()));
-    assert!(fs::read_dir(&layer).unwrap().next().is_none());
-    assert!(tilewright_source::load(root).is_ok());
+    // Publishing leaves a directory whose mode or group is not that of the
+    // one above it, whichever changed. It holds no file, so the tree is the
+    // one the step was made on, and the undo plans and publishes.
+    for changed in ["planes/attic", "planes"] {
+        let tree = copy();
+        let root = tree.path();
+        let (before, folders) = (snapshot(root), directories(root));
+        let digest = tilewright_source::load(root).unwrap().source_digest();
+        let plan = planned(root, &transaction(&add_plane("attic")));
+        plan.check_undo().unwrap();
+        published(&plan);
+        let bits = mode(&root.join(changed));
+        fs::set_permissions(root.join(changed), fs::Permissions::from_mode(bits ^ 0o020)).unwrap();
+        apply(root, &reparsed("undo.jsonc", plan.inverse()));
+        assert!(root.join("planes/attic").is_dir(), "{changed}");
+        assert_eq!(snapshot(root), before);
+        assert!(only_empty_directories_added(root, &folders));
+        assert_eq!(
+            tilewright_source::load(root).unwrap().source_digest(),
+            digest
+        );
+    }
 }
 
 #[test]
@@ -1158,4 +1153,120 @@ fn a_repair_of_an_invalid_tree_passes_the_check_and_its_undo_is_refused() {
     // The undo recreates the invalid tree, and planning it does validate.
     let found = problems(root, &reparsed("undo.jsonc", plan.inverse()));
     assert!(has(&found, "shape.unknown_key", "nonsense"), "{found:#?}");
+}
+
+#[test]
+fn an_interrupted_undo_of_a_new_plane_can_be_applied_again() {
+    let tree = copy();
+    let root = tree.path();
+    let (before, folders) = (snapshot(root), directories(root));
+    let plan = apply(
+        root,
+        &transaction(&format!(
+            r#"{},
+    {{"op": "object.insert", "plane": "attic", "layer": 0, "at": [1, 1], "object": {{"proto": "tree"}}}},
+    {{"op": "object.insert", "plane": "attic", "layer": 3, "at": [70, 1], "object": {{"proto": "tree"}}}}"#,
+            add_plane("attic")
+        )),
+    );
+    let undo = reparsed("undo.jsonc", plan.inverse());
+    let undoing = planned(root, &undo);
+    // It stopped in step 4: `world.jsonc` was published, and the first
+    // file in path order deleted, which left its layer's directory empty.
+    let world = undoing
+        .files()
+        .iter()
+        .find(|file| file.path == "world.jsonc");
+    fs::write(
+        root.join("world.jsonc"),
+        world.unwrap().after.as_ref().unwrap(),
+    )
+    .unwrap();
+    fs::remove_file(root.join("planes/attic/layers/0/0_0.jsonc")).unwrap();
+    // Applied again, it finds those files done and does the rest.
+    let again = planned(root, &undo);
+    again.check_undo().unwrap();
+    published(&again);
+    assert_eq!(snapshot(root), before);
+    assert!(only_empty_directories_added(root, &folders));
+    assert!(tilewright_source::load(root).is_ok());
+}
+
+#[test]
+fn an_interrupted_deletion_of_a_plane_can_be_applied_again() {
+    let tree = copy();
+    let root = tree.path();
+    let (before, folders) = (snapshot(root), directories(root));
+    apply(root, &transaction(&add_plane("attic")));
+    apply(
+        root,
+        &transaction(
+            r#"{"op": "object.insert", "plane": "attic", "layer": 2, "at": [1, 1], "object": {"proto": "tree"}}"#,
+        ),
+    );
+    let plan = planned(
+        root,
+        &transaction(
+            r#"{"op": "remove", "path": "world.jsonc", "pointer": ["planes", 2]},
+    {"op": "document.delete", "path": "planes/attic/plane.jsonc"},
+    {"op": "document.delete", "path": "planes/attic/layers/2/0_0.jsonc"}"#,
+        ),
+    );
+    let sealed = reparsed("sealed.jsonc", plan.sealed());
+    // It stopped in step 4, after `world.jsonc` and the chunk, the first
+    // file deleted in path order.
+    let world = plan.files().iter().find(|file| file.path == "world.jsonc");
+    fs::write(
+        root.join("world.jsonc"),
+        world.unwrap().after.as_ref().unwrap(),
+    )
+    .unwrap();
+    fs::remove_file(root.join("planes/attic/layers/2/0_0.jsonc")).unwrap();
+    let again = planned(root, &sealed);
+    again.check_undo().unwrap();
+    published(&again);
+    assert_eq!(snapshot(root), before);
+    assert!(only_empty_directories_added(root, &folders));
+    assert!(tilewright_source::load(root).is_ok());
+}
+
+#[test]
+fn an_undo_plans_within_the_entry_budget_its_step_did() {
+    let fits = |root: &Path, maximum_entries| {
+        let options = LoadOptions {
+            maximum_entries,
+            ..LoadOptions::default()
+        };
+        tilewright_source::load_with(root, &options).is_ok()
+    };
+    let (mut low, mut high) = (0, 4_096);
+    while high - low > 1 {
+        let middle = low + (high - low) / 2;
+        if fits(&fixture(), middle) {
+            high = middle;
+        } else {
+            low = middle;
+        }
+    }
+    // The least entry budget the tree loads with, for the step, its undo
+    // and its redo alike.
+    let options = Options {
+        load: LoadOptions {
+            maximum_entries: high,
+            ..LoadOptions::default()
+        },
+        ..Options::default()
+    };
+    let tree = copy();
+    let root = tree.path();
+    let tx = transaction(
+        r#"{"op": "document.create", "path": "profile/notes/a.jsonc", "document": {"note": 1}},
+    {"op": "document.create", "path": "profile/notes/b.jsonc", "document": {"note": 2}}"#,
+    );
+    let plan = crate::plan(root, &tx, &options).unwrap();
+    plan.check_undo().unwrap();
+    published(&plan);
+    let undo = crate::plan(root, &reparsed("undo.jsonc", plan.inverse()), &options).unwrap();
+    published(&undo);
+    crate::plan(root, &reparsed("redo.jsonc", undo.inverse()), &options).unwrap();
 }

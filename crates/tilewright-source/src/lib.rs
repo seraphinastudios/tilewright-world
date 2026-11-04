@@ -537,12 +537,10 @@ pub type Overlay = BTreeMap<String, Option<String>>;
 
 /// Loads a source tree as it would be with `overlay` applied, without
 /// writing anything. Overlay files are read under the same limits and
-/// budget as files on disk, and a directory that holds one exists. A
-/// directory the overlay leaves empty is gone, as publishing the same
-/// edits removes it, unless it is at the top of the tree or its mode or
-/// group is not that of the directory above it, when it is left as it
-/// would be. An overlay of more entries than `maximum_entries` is refused
-/// before anything is read.
+/// budget as files on disk, and a directory that holds one exists. One
+/// that the overlay leaves without a file holds none, and is ignored where
+/// the layout ignores such a directory (FORMAT.md section 2). An overlay of
+/// more entries than `maximum_entries` is refused before anything is read.
 ///
 /// # Errors
 /// Returns every diagnostic found, sorted by path and position.

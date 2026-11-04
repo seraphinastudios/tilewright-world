@@ -235,12 +235,10 @@ the root is followed, and on Unix every component is opened through its
 parent's handle. Every edit is a span edit of the file's JSONC, which is
 parsed again after each edit, so untouched bytes, comments and ordering stay.
 The edited tree is then validated by the normal loader, with the edited files
-in memory over the files on disk, as publishing would leave it: a directory
-publishing would remove (section 9, step 5) is gone, and one it would leave
-is there. Previewing stops there and writes nothing; it returns the edited
-files, the validated world, the sealed transaction and the inverse. A
-transaction whose result does not validate is rejected with the loader's
-diagnostics.
+in memory over the files on disk. Previewing stops there and writes nothing;
+it returns the edited files, the validated world, the sealed transaction and
+the inverse. A transaction whose result does not validate is rejected with
+the loader's diagnostics.
 
 The sealed transaction is the transaction's own text, with `base` and
 `result` set to every file it touched or consulted, before and after; every
@@ -398,22 +396,19 @@ or consulted, and it is the tree an editor loaded, or the one an earlier
 transaction left. The redos leave the tree the transaction did, which
 carrying it out validated.
 
-Validating depends on the bytes of the files and on which directories there
-are, and an undone tree can differ from the original only in directories
-the loader takes no notice of. Publishing an undo removes the directories
-the transaction made, so none is left where the loader rejects it, such as
-a plane's or a definition type's. What can differ is that `planes/`, `defs/`
-or `profile/`, if the transaction made it, stays, empty, since publishing
-never removes those, and that an empty directory the transaction wrote into
-is gone; the loader accepts both. Not guaranteed:
+Validating does not depend on a directory that holds no file: the loader
+ignores one (FORMAT.md section 2). An undone tree has the bytes of the
+original in every file the transaction touched or consulted, and the same
+other files, so it can differ from the original only in such directories:
+one the transaction made, which publishing the undo leaves when it cannot
+remove it or its mode or group is no longer that of the directory above it
+(section 9, step 5), and an empty one the transaction wrote into, which it
+removes on the same terms. So it validates as the original does, and loads
+the same world.
+Not guaranteed:
 
 - the inverse of a transaction that made an invalid tree valid passes the
   check, and is refused, as above;
-- a directory the transaction made whose mode or group has been changed
-  since, so that it is no longer that of the directory above it, is not
-  removed (section 9, step 5). Where the loader rejects it, the undo is
-  refused, with nothing written, until the directory has them back or is
-  removed by hand;
 - other changes to files recorded in an undo or redo's `base` digests can
   cause a `tx.conflict`, as for any transaction. An inverse records only
   files its transaction changed, not files it merely consulted. An editor
@@ -529,14 +524,12 @@ Publishing:
    every directory whose entries changed. An emptied directory whose mode
    or group is not that of the directory above it is left, empty: an
    inverse makes a directory again with the access of the nearest one
-   that is there, so it would make it, and the file in it, otherwise.
-   Validating counts it as there (section 6), so a transaction that would
-   leave one where the loader rejects it, as the last files of a plane or
-   a definition type that is no longer declared, is refused before
-   anything is written, and publishing never leaves a tree that does not
-   validate for this reason. A staging entry or an emptied directory that
-   cannot be removed is reported, once, the former since the tree does not
-   validate while it is there.
+   that is there, so it would make it, and the file in it, otherwise. A
+   staging entry or an emptied directory that cannot be removed is
+   reported, once, the former since the tree does not validate while it is
+   there. Removing stops at a directory that cannot go, so those above it
+   are left too; every directory left holds no file, which validation
+   ignores (FORMAT.md section 2).
 
 A transaction moves content between files: a renamed file's, a moved
 object's, a deleted file's that its inverse creates again. So the files it
@@ -635,9 +628,9 @@ match and are left alone, and the staging files beside every file it names
 are removed. There is no journal: the inverse, written before anything is
 published, is the recovery record, and applying it is a manual step. If
 the recovery is interrupted in turn, apply the inverse again; a directory
-the interrupted cleanup emptied may be left, which validation names where
-it matters, to remove by hand. The
-source tree's version control is the other way back.
+the interrupted cleanup emptied may be left, holding no file, which
+validation ignores, to remove by hand if it is not wanted. The source
+tree's version control is the other way back.
 Carrying out ignores whatever is at the staging name beside every file a
 transaction touches or consults, a link or special file included.
 
