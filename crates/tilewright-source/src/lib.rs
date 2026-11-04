@@ -76,7 +76,10 @@ pub struct LoadOptions {
     pub maximum_files: usize,
     /// Most directory entries listed in one load, counted before they are
     /// examined, a directory that holds no file, which the layout ignores,
-    /// as much as any.
+    /// as much as any. Publishing a transaction lists the directories on
+    /// the way to its files against as large a budget, `profile/` included,
+    /// so planning or publishing its undo can need one more entry for each
+    /// directory it made (`docs/spec/TRANSACTIONS.md` section 8.1).
     pub maximum_entries: usize,
     /// Most bytes read in one load.
     pub maximum_total_bytes: u64,

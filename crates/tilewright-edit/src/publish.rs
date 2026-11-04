@@ -973,8 +973,10 @@ impl Plan {
                             Code::Limit,
                             if directory.is_empty() {
                                 "the root has more entries than a load may read"
-                            } else {
+                            } else if listed_by_load {
                                 "the directories on the way to the files have more entries than a load reads"
+                            } else {
+                                "with the root, the directories on the way to the files that a load does not list have more entries than a load may read"
                             },
                         )
                     };

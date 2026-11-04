@@ -1317,15 +1317,8 @@ fn making_directories() -> [(usize, String); 3] {
 
 #[test]
 fn an_undo_plans_with_room_for_the_directories_its_step_made() {
-    // Under profile/, which the loader does not list, a step's directories
-    // cost an undo nothing.
-    let profile = r#"{"op": "document.create", "path": "profile/notes/a.jsonc", "document": {"note": 1}},
-    {"op": "document.create", "path": "profile/notes/b.jsonc", "document": {"note": 2}}"#;
-    // Elsewhere each costs it an entry, as long as it is on disk.
-    for (spare, step) in [(0, profile.to_owned())]
-        .into_iter()
-        .chain(making_directories())
-    {
+    // Each costs it an entry, as long as it is on disk.
+    for (spare, step) in making_directories() {
         let (tree, options) = at_the_least_budget(spare);
         let root = tree.path();
         let plan = crate::plan(root, &transaction(&step), &options).unwrap();
@@ -1355,6 +1348,64 @@ fn an_undo_without_room_for_the_directories_its_step_made_is_refused() {
             has(&found, "source.budget", "directory entries"),
             "{step}\n{found:#?}"
         );
+    }
+}
+
+#[test]
+fn publishing_an_undo_can_need_an_entry_for_a_directory_its_step_made_under_profile() {
+    // Publishing counts the entries of the root and of profile/, which a
+    // load does not list, against a budget of their own, as large as the
+    // load's and one more. With the root filled with assets up to it, a
+    // step that makes profile/notes publishes, and its undo, which finds
+    // notes there, needs one more entry: the limit section 8.1 states.
+    let step =
+        r#"{"op": "document.create", "path": "profile/notes/a.jsonc", "document": {"note": 1}}"#;
+    for spare in [0, 1] {
+        let tree = copy();
+        let root = tree.path();
+        let least = least_entries(root);
+        let count = |path: &Path| fs::read_dir(path).unwrap().count();
+        let filled = least + spare + 1 - count(root) - count(&root.join("profile"));
+        for index in 0..filled {
+            fs::write(root.join(format!("asset{index}.txt")), "x").unwrap();
+        }
+        assert_eq!(least_entries(root), least);
+        let options = Options {
+            load: LoadOptions {
+                maximum_entries: least + spare,
+                ..LoadOptions::default()
+            },
+            ..Options::default()
+        };
+        let plan = crate::plan(root, &transaction(step), &options).unwrap();
+        plan.check_undo().unwrap();
+        published(&plan);
+        let undo = crate::plan(root, &reparsed("undo.jsonc", plan.inverse()), &options)
+            .unwrap_or_else(|problems| panic!("{problems:#?}"));
+        let before = snapshot(root);
+        let error = publish(&undo).expect_err("the undo should need one more entry");
+        assert!(!error.applied, "{error:#?}");
+        assert!(
+            error
+                .problems
+                .iter()
+                .any(|problem| problem.path == "profile"
+                    && problem.code == "tx.limit"
+                    && problem.message.contains("that a load does not list")),
+            "{error:#?}"
+        );
+        assert_eq!(snapshot(root), before);
+        // With one more entry for notes, it publishes.
+        let options = Options {
+            load: LoadOptions {
+                maximum_entries: least + spare + 1,
+                ..LoadOptions::default()
+            },
+            ..Options::default()
+        };
+        let undo = crate::plan(root, &reparsed("undo.jsonc", plan.inverse()), &options).unwrap();
+        published(&undo);
+        assert!(!root.join("profile/notes/a.jsonc").exists());
     }
 }
 

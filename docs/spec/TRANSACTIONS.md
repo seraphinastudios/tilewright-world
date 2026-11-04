@@ -410,14 +410,18 @@ original does, and loads the same world, with one limit. A load's entry
 budget counts every entry it lists, a directory that holds no file
 included, and planning an undo meets the directories the transaction made
 still there, with the files the undo removes from them gone, as does a load
-of a tree publishing left one in. The check does not reserve those
-entries, so at the entry budget an undo can need one more for each, and be
-refused with `source.budget`. Everywhere else every undo and redo of a
-transaction that passes plans. Not guaranteed:
+of a tree publishing left one in. Publishing the undo counts them too: it
+lists the directories on the way to its files against a budget as large,
+outside `planes/` and `defs/` as well, such as `profile/`, which a load
+does not list (section 9). The check does not reserve those entries, so at
+the entry budget an undo can need one more for each directory the
+transaction made, under `profile/` too, and be refused with
+`source.budget` when it is planned, or with `tx.limit` when it is
+published, writing nothing. Everywhere else every undo and redo of a transaction that passes
+plans. Not guaranteed:
 
 - at the load's entry budget, an undo can be refused for the directories
   the transaction made, as above;
-
 - the inverse of a transaction that made an invalid tree valid passes the
   check, and is refused, as above;
 - other changes to files recorded in an undo or redo's `base` digests can
@@ -618,7 +622,13 @@ extension); and so is
 one that names a file, or a directory on its way, that the file system
 finds by that name although it is named otherwise on disk (`TREE.jsonc`
 for `tree.jsonc` where case is not told apart), which validation would
-take for another file.
+take for another file. To check names it lists each directory on the way
+to the files once and counts its entries: below `planes/` and `defs/` as a
+load does, against the load's entry budget, so that a plan whose load
+fitted fits here too; in the root and the directories a load does not
+list, such as `profile/`, against a budget of their own as large, and one
+more for the lock file on Windows. Past either it refuses with `tx.limit`
+and writes nothing.
 
 Each rename and removal is atomic, but there is no atomic publication of
 several files. If a step of 4 fails, the files already published are
