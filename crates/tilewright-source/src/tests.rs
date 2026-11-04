@@ -1965,7 +1965,8 @@ fn a_link_a_special_file_a_name_not_utf8_or_a_listing_that_fails_count_as_a_file
 #[test]
 fn a_directory_named_like_a_document_among_documents_is_not_ignored() {
     for path in [
-        "planes/vault/zones.jsonc",
+        "planes/overworld/notes.jsonc",
+        "planes/overworld/Zones.JSONC",
         "planes/overworld/layers/0/5_5.jsonc",
         "planes/overworld/layers/0/notes.JSONC",
         "defs/proto/rock.jsonc",
@@ -1973,7 +1974,10 @@ fn a_directory_named_like_a_document_among_documents_is_not_ignored() {
         let copy = workspace();
         let root = copy.path();
         fs::create_dir(root.join(path)).unwrap();
-        assert!(load(root).is_err(), "{path}");
+        assert!(
+            has(&problems(root), "source.unexpected_file", path),
+            "{path}"
+        );
     }
     // Where the layout has only directories, it is one.
     let copy = workspace();
