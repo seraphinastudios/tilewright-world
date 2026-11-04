@@ -536,7 +536,7 @@ fn open_cases(base: &mut Base<'_>, length: u64) {
 /// pointers to one cell and a chain of 680 free blocks of no size. SQLite's
 /// integrity check keeps a heap of what a page's cells and free blocks
 /// cover, with room for 1,023 entries, and these make 1,361. SQLite before
-/// 3.53.4 wrote past the heap's end; it now reports a free block of under 4
+/// 3.53.3 wrote past the heap's end; it now reports a free block of under 4
 /// bytes as free space corruption before it fills the heap. Every reader
 /// must report that, and opening, which reads no such page, must not.
 fn overfill_uid_page(path: &Path) {
