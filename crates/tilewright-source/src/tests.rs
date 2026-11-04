@@ -2039,6 +2039,20 @@ fn least_entries(root: &Path, overlay: &Overlay) -> usize {
 }
 
 #[test]
+fn a_directory_that_holds_no_file_costs_every_entry_listed_in_it() {
+    // The load lists planes/attic and every directory in it to see that it
+    // holds no file, and counts each entry once: attic, 40 d's and 40 e's.
+    let plain = least_entries(&fixture(), &Overlay::new());
+    let copy = workspace();
+    let root = copy.path();
+    for index in 0..40 {
+        fs::create_dir_all(root.join(format!("planes/attic/d{index}/e"))).unwrap();
+    }
+    assert!(load(root).is_ok());
+    assert_eq!(least_entries(root, &Overlay::new()), plain + 81);
+}
+
+#[test]
 fn an_entry_the_overlay_removes_is_not_counted_wherever_it_is_listed() {
     let plain = least_entries(&fixture(), &Overlay::new());
     // Listed before the directory's other entry or after it, by name and

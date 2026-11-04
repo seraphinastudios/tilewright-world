@@ -1253,16 +1253,17 @@ fn least_entries(root: &Path) -> usize {
     high
 }
 
-/// A copy of the fixture with two more definitions, and options whose
-/// entry budget is the least it loads with, raised by `spare`.
+/// A copy of the fixture with five more definitions, `x1` to `x5`, and
+/// options whose entry budget is the least it loads with, raised by
+/// `spare`.
 fn at_the_least_budget(spare: usize) -> (tempfile::TempDir, Options) {
     let tree = copy();
     let root = tree.path();
-    for id in ["x1", "x2"] {
+    for index in 1..=5 {
         fs::write(
-            root.join(format!("defs/proto/{id}.jsonc")),
+            root.join(format!("defs/proto/x{index}.jsonc")),
             format!(
-                r#"{{"format": "tilewright.def/1", "type": "proto", "id": "{id}", "fields": {{"face": "x.png", "layer": "item"}}}}"#
+                r#"{{"format": "tilewright.def/1", "type": "proto", "id": "x{index}", "fields": {{"face": "x.png", "layer": "item"}}}}"#
             ),
         )
         .unwrap();
@@ -1277,17 +1278,39 @@ fn at_the_least_budget(spare: usize) -> (tempfile::TempDir, Options) {
     (tree, options)
 }
 
-/// Steps that make directories the loader lists, `planes/attic` or layer
-/// 9's, each deleting the two definitions [`at_the_least_budget`] adds, so
-/// that the tree each leaves is no larger than the one it began with.
-fn making_one_directory() -> [String; 2] {
-    let deleting = r#"{"op": "document.delete", "path": "defs/proto/x1.jsonc"},
-    {"op": "document.delete", "path": "defs/proto/x2.jsonc"}"#;
-    [
-        format!("{deleting},\n    {}", add_plane("attic")),
+/// Steps that make directories the loader lists, with how many each
+/// makes: `planes/attic`; layer 9's; and `planes/attic` with its `layers`
+/// and its layer 0's. Each deletes as many of the definitions
+/// [`at_the_least_budget`] adds as it makes files and directories, so that
+/// the tree it leaves is no larger than the one it began with.
+fn making_directories() -> [(usize, String); 3] {
+    let deleting = |count: usize| {
+        (1..=count)
+            .map(|index| {
+                format!(r#"{{"op": "document.delete", "path": "defs/proto/x{index}.jsonc"}}"#)
+            })
+            .collect::<Vec<_>>()
+            .join(",\n    ")
+    };
+    let insert = |plane: &str, layer: u32| {
         format!(
-            r#"{deleting},
-    {{"op": "object.insert", "plane": "overworld", "layer": 9, "at": [1, 1], "object": {{"proto": "tree"}}}}"#
+            r#"{{"op": "object.insert", "plane": "{plane}", "layer": {layer}, "at": [1, 1], "object": {{"proto": "tree"}}}}"#
+        )
+    };
+    [
+        (1, format!("{},\n    {}", deleting(2), add_plane("attic"))),
+        (
+            1,
+            format!("{},\n    {}", deleting(2), insert("overworld", 9)),
+        ),
+        (
+            3,
+            format!(
+                "{},\n    {},\n    {}",
+                deleting(5),
+                add_plane("attic"),
+                insert("attic", 0)
+            ),
         ),
     ]
 }
@@ -1298,29 +1321,30 @@ fn an_undo_plans_with_room_for_the_directories_its_step_made() {
     // cost an undo nothing.
     let profile = r#"{"op": "document.create", "path": "profile/notes/a.jsonc", "document": {"note": 1}},
     {"op": "document.create", "path": "profile/notes/b.jsonc", "document": {"note": 2}}"#;
-    let steps = [vec![profile.to_owned()], making_one_directory().to_vec()];
     // Elsewhere each costs it an entry, as long as it is on disk.
-    for (spare, steps) in [0, 1].into_iter().zip(steps) {
-        for step in steps {
-            let (tree, options) = at_the_least_budget(spare);
-            let root = tree.path();
-            let plan = crate::plan(root, &transaction(&step), &options).unwrap();
-            plan.check_undo().unwrap();
-            published(&plan);
-            let undo = crate::plan(root, &reparsed("undo.jsonc", plan.inverse()), &options)
-                .unwrap_or_else(|problems| panic!("{step}\n{problems:#?}"));
-            published(&undo);
-            crate::plan(root, &reparsed("redo.jsonc", undo.inverse()), &options).unwrap();
-        }
+    for (spare, step) in [(0, profile.to_owned())]
+        .into_iter()
+        .chain(making_directories())
+    {
+        let (tree, options) = at_the_least_budget(spare);
+        let root = tree.path();
+        let plan = crate::plan(root, &transaction(&step), &options).unwrap();
+        plan.check_undo().unwrap();
+        published(&plan);
+        let undo = crate::plan(root, &reparsed("undo.jsonc", plan.inverse()), &options)
+            .unwrap_or_else(|problems| panic!("{step}\n{problems:#?}"));
+        published(&undo);
+        crate::plan(root, &reparsed("redo.jsonc", undo.inverse()), &options).unwrap();
     }
 }
 
 #[test]
 fn an_undo_without_room_for_the_directories_its_step_made_is_refused() {
-    // The limit section 8.1 states: the step fits the least budget, and its
-    // undo does not, by the directory it made.
-    for step in making_one_directory() {
-        let (tree, options) = at_the_least_budget(0);
+    // The limit section 8.1 states: the step fits a budget one short of
+    // that, and its undo does not, by the directories it made, nested or
+    // not.
+    for (made, step) in making_directories() {
+        let (tree, options) = at_the_least_budget(made - 1);
         let root = tree.path();
         let plan = crate::plan(root, &transaction(&step), &options).unwrap();
         plan.check_undo().unwrap();
@@ -1329,7 +1353,7 @@ fn an_undo_without_room_for_the_directories_its_step_made_is_refused() {
             .expect_err("the undo should need one more entry");
         assert!(
             has(&found, "source.budget", "directory entries"),
-            "{found:#?}"
+            "{step}\n{found:#?}"
         );
     }
 }
