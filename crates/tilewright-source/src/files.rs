@@ -107,6 +107,12 @@ pub(crate) struct Tree<'o> {
     exhausted: bool,
 }
 
+/// The most components, and bytes, of a path a document may have
+/// (`docs/spec/FORMAT.md` section 2). A directory deeper is not looked
+/// into: it counts as a file.
+const PATH_COMPONENTS: usize = 32;
+const PATH_BYTES: usize = 1_024;
+
 /// Whether `path` is a safe relative path ending in `.jsonc`: at most 1,024
 /// bytes and 32 `/`-separated components of at most 128 ASCII letters,
 /// digits, `_`, `.` and `-`, none starting with `.` or `-`.
@@ -278,30 +284,50 @@ impl<'o> Tree<'o> {
     /// Whether the directory `path` holds no file at any depth, with the
     /// overlay applied: nothing, or only directories that hold none, which
     /// the layout ignores (`docs/spec/FORMAT.md` section 2). A symbolic
-    /// link, a special file, a name that is not UTF-8, or a directory that
-    /// cannot be listed counts as a file, and nothing is reported. Each
-    /// directory is listed in full and counted against the budget as any
-    /// listing is, and those beneath it are looked into in name order, so
-    /// neither the answer nor what it costs depends on the order a file
-    /// system lists entries in.
+    /// link, a special file, a name that is not UTF-8, a directory that
+    /// cannot be listed, and a directory deeper than a document's path may
+    /// be, count as files, and nothing is reported. Directories are looked
+    /// into depth first and in name order, each listed in full and counted
+    /// against the budget as any listing is, so neither the answer nor what
+    /// it costs depends on the order a file system lists entries in, and
+    /// the walk goes no deeper than a path may: what it holds at once is
+    /// the names left at each level.
     pub fn holds_no_file(&mut self, path: &str) -> bool {
-        let mut pending = vec![path.to_owned()];
-        while let Some(directory) = pending.pop() {
-            let (entries, other) = self.listing(&directory, false);
+        let mut current = path.to_owned();
+        // For each directory on the way down: the names of those in it left
+        // to look into, the last first, and the length of its path.
+        let mut levels: Vec<(Vec<String>, usize)> = Vec::new();
+        loop {
+            if current.len() > PATH_BYTES || current.split('/').count() > PATH_COMPONENTS {
+                return false;
+            }
+            let (entries, other) = self.listing(&current, false);
             if other || self.exhausted {
                 return false;
             }
-            let mut directories = Vec::with_capacity(entries.len());
+            let mut names = Vec::with_capacity(entries.len());
             for entry in entries {
                 if entry.kind != EntryKind::Directory {
                     return false;
                 }
-                directories.push(join(&directory, &entry.name));
+                names.push(entry.name);
             }
-            // Taken from the end, so the first name goes in last.
-            pending.extend(directories.into_iter().rev());
+            names.reverse();
+            levels.push((names, current.len()));
+            // The next directory to look into, depth first, in name order.
+            loop {
+                let Some((names, length)) = levels.last_mut() else {
+                    return true;
+                };
+                if let Some(name) = names.pop() {
+                    current.truncate(*length);
+                    current.push('/');
+                    current.push_str(&name);
+                    break;
+                }
+                levels.pop();
+            }
         }
-        true
     }
 
     /// Lists a directory, sorted by name, and says whether it held anything

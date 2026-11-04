@@ -60,8 +60,9 @@ even when kept on the device, cannot be loaded there). A directory there that
 holds no file at any depth, nothing or only such directories, is ignored:
 version control keeps no such directory, and one is left behind when files
 are moved or deleted, so what a tree means does not depend on it. A
-symbolic link, a special file and an entry whose name is not UTF-8 count as
-files. Among the documents of a plane, a layer or a definition type, a
+symbolic link, a special file, an entry whose name is not UTF-8, and a
+directory whose path is longer than a document's may be (more than 32
+components or 1,024 bytes, as below) count as files. Among the documents of a plane, a layer or a definition type, a
 directory named like a document, ending in `.jsonc` in any case, is not
 ignored, since it stands where the layout has a file. Other files at the
 root, such as assets, scripts or a README, are ignored. Assets such as images and sounds stay ordinary files referenced by

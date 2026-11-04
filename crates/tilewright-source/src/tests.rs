@@ -2061,6 +2061,55 @@ fn an_entry_the_overlay_removes_is_not_counted_wherever_it_is_listed() {
 }
 
 #[test]
+fn a_directory_deeper_than_a_document_path_counts_as_a_file() {
+    // As deep as a document's path may be, 32 components, or as long, it
+    // is looked into; deeper or longer, it counts as a file.
+    for (components, name, ignored) in [
+        (32, "a", true),
+        (33, "a", false),
+        (10, &"n".repeat(120)[..], true),
+        (11, &"n".repeat(120)[..], false),
+    ] {
+        let copy = workspace();
+        let root = copy.path();
+        let mut path = "planes/attic".to_owned();
+        while path.split('/').count() < components {
+            path = format!("{path}/{name}");
+        }
+        fs::create_dir_all(root.join(&path)).unwrap();
+        if ignored {
+            assert!(load(root).is_ok(), "{components} {}", path.len());
+        } else {
+            assert!(
+                has(&problems(root), "source.unexpected_file", "planes/attic"),
+                "{components} {}",
+                path.len()
+            );
+        }
+    }
+}
+
+#[test]
+fn a_deep_or_wide_stray_directory_is_looked_into_in_bounded_time() {
+    let copy = workspace();
+    let root = copy.path();
+    // Far deeper than a path may be: it is not looked into past that.
+    let deep = vec!["a"; 1_500].join("/");
+    fs::create_dir_all(root.join("planes/attic").join(&deep)).unwrap();
+    fs::write(root.join("planes/attic").join(&deep).join("x.txt"), "x").unwrap();
+    // Wide: each directory is listed once, from a path no longer than a
+    // document's.
+    for index in 0..4_000 {
+        fs::create_dir_all(root.join(format!("planes/wide/{index}/{index}"))).unwrap();
+    }
+    let started = std::time::Instant::now();
+    let found = problems(root);
+    assert!(has(&found, "source.unexpected_file", "planes/attic"));
+    assert!(!has(&found, "source.unexpected_file", "planes/wide"));
+    assert!(started.elapsed() < std::time::Duration::from_secs(30));
+}
+
+#[test]
 fn overlay_keys_must_be_paths() {
     let root = workspace();
     for key in [
