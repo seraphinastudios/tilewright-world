@@ -702,10 +702,11 @@ tree alone is within the limit. Whether a file is at its result is known
 only once it is read, so while the base of such a transaction is checked a
 file is read as far as the two allowances left together, and then counted
 against the one it belongs to, which stops the check if that puts it past
-the limit. A file that cannot be edited, such as one that is not UTF-8, is
-a conflict and counts against neither, so such files can take the reading
-past the allowance of the files carried out; no more than twice the limit
-is read in all. The inverse's text and operations
+the limit. A file that is not UTF-8, which cannot be edited, is a
+conflict, and its bytes count against the allowance of the files carried
+out without stopping the check when it is read; the next file counted
+stops the check if that allowance is then past the limit. No more than
+twice the limit is read in all. The inverse's text and operations
 are counted as operations run and must fit a transaction; one terrain operation names at
 most 10,000 chunks; and carrying out stops as soon as a budget is spent or
 the diagnostic limit is reached. Messages describe a value over 4 KiB by its kind and size

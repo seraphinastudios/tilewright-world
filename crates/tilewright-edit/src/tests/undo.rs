@@ -1367,6 +1367,31 @@ fn reading_goes_past_the_budget_only_for_a_base_that_can_resume() {
 }
 
 #[test]
+fn a_file_that_is_not_utf8_counts_against_the_files_carried_out() {
+    let (tree, tx, whole) = swapping_sizes();
+    let root = tree.path();
+    let sealed = reparsed("sealed.jsonc", planned(root, &tx).sealed());
+    // aa, checked first, is not UTF-8. zz, at its base, fits the budget
+    // alone but not with aa's bytes, which stop the check once zz is
+    // counted.
+    let aa = whole * 6 / 10;
+    let mut bytes = vec![b'x'; usize::try_from(aa).unwrap()];
+    bytes[0] = 0xff;
+    fs::write(root.join("defs/proto/aa.jsonc"), bytes).unwrap();
+    let zz = fs::metadata(root.join("defs/proto/zz.jsonc"))
+        .unwrap()
+        .len();
+    assert!(zz <= whole && aa + zz > whole, "{aa} {zz} {whole}");
+    let _lowered = Lowered::to(whole, limits::WORK);
+    let found = problems(root, &sealed);
+    assert!(has(&found, "tx.conflict", "not UTF-8"), "{found:#?}");
+    assert!(
+        has(&found, "tx.limit", "the touched files hold more than"),
+        "{found:#?}"
+    );
+}
+
+#[test]
 fn publishing_counts_the_entries_a_load_counts() {
     // A plan that deletes files fits the entry budget of the tree it
     // leaves, which a load counts without them: so does publishing, which
