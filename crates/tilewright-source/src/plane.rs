@@ -40,17 +40,16 @@ pub(crate) fn read_planes(
             .filter_map(|entry| {
                 let path = join("planes", &entry.name);
                 if entry.kind == EntryKind::Directory && listed.contains(entry.name.as_str()) {
-                    Some(entry.name)
-                } else if !ignored(tree, &path, &entry, false) {
+                    return Some(entry.name);
+                }
+                if let Err(why) = ignored(tree, &path, &entry, false) {
                     diagnostics.push(Diagnostic::file(
                         &path,
                         Code::UnexpectedFile,
-                        "not a plane listed in world.jsonc",
+                        format!("not a plane listed in world.jsonc{why}"),
                     ));
-                    None
-                } else {
-                    None
                 }
+                None
             })
             .collect()
     } else {
@@ -115,11 +114,11 @@ fn read_plane(
             ("layers", EntryKind::Directory) => has_layers = true,
             _ => {
                 let path = join(directory, &entry.name);
-                if !ignored(tree, &path, &entry, true) {
+                if let Err(why) = ignored(tree, &path, &entry, true) {
                     diagnostics.push(Diagnostic::file(
                         &path,
                         Code::UnexpectedFile,
-                        "not part of the plane layout",
+                        format!("not part of the plane layout{why}"),
                     ));
                 }
             }
@@ -429,11 +428,11 @@ fn read_layers(
             .and_then(|layer| i32::try_from(layer).ok())
             .filter(|_| layer_entry.kind == EntryKind::Directory);
         let Some(layer) = layer else {
-            if !ignored(tree, &layer_directory, &layer_entry, false) {
+            if let Err(why) = ignored(tree, &layer_directory, &layer_entry, false) {
                 diagnostics.push(Diagnostic::file(
                     &layer_directory,
                     Code::UnexpectedFile,
-                    "layer directories are named by a canonical 32-bit integer",
+                    format!("layer directories are named by a canonical 32-bit integer{why}"),
                 ));
             }
             continue;
@@ -448,11 +447,13 @@ fn read_layers(
                 .filter(|(cx, cy)| chunks.contains(cx) && chunks.contains(cy))
                 .filter(|_| chunk_entry.kind == EntryKind::File);
             let Some((cx, cy)) = coordinates else {
-                if !ignored(tree, &path, &chunk_entry, true) {
+                if let Err(why) = ignored(tree, &path, &chunk_entry, true) {
                     diagnostics.push(Diagnostic::file(
                         &path,
                         Code::UnexpectedFile,
-                        "chunk files are named <cx>_<cy>.jsonc with canonical integers in range",
+                        format!(
+                            "chunk files are named <cx>_<cy>.jsonc with canonical integers in range{why}"
+                        ),
                     ));
                 }
                 continue;

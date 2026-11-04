@@ -1897,23 +1897,41 @@ fn a_directory_that_holds_a_file_at_any_depth_is_not_ignored() {
     }
 }
 
+/// The message of the problem at `path`.
+fn message_at(root: &Path, path: &str) -> String {
+    load(root)
+        .unwrap_err()
+        .into_iter()
+        .find(|problem| problem.code == "source.unexpected_file" && problem.path == path)
+        .map(|problem| problem.message)
+        .unwrap_or_default()
+}
+
 #[cfg(unix)]
 #[test]
-fn a_link_a_special_file_or_a_name_not_utf8_counts_as_a_file() {
-    use std::os::unix::fs::symlink;
-    type Make = fn(&Path);
-    let entries: [(&str, Make); 3] = [
+fn a_link_a_special_file_a_name_not_utf8_or_a_listing_that_fails_count_as_a_file() {
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+    type Make = fn(&Path) -> String;
+    let entries: [(&str, Make); 4] = [
         ("a link", |directory| {
             symlink("elsewhere", directory.join("link")).unwrap();
+            "a symbolic link, at planes/attic/deeper/link".to_owned()
         }),
         ("a special file", |directory| {
             std::os::unix::net::UnixListener::bind(directory.join("socket")).unwrap();
+            "a special file, at planes/attic/deeper/socket".to_owned()
         }),
         ("a name not UTF-8", |directory| {
             use std::os::unix::ffi::OsStrExt as _;
             let name = std::ffi::OsStr::from_bytes(b"\xff");
-            // Some file systems refuse such a name: nothing to check there.
             let _ = fs::create_dir(directory.join(name));
+            "an entry whose name is not UTF-8, in planes/attic/deeper".to_owned()
+        }),
+        ("a directory that cannot be listed", |directory| {
+            let locked = directory.join("locked");
+            fs::create_dir(&locked).unwrap();
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+            "a directory that cannot be listed, at planes/attic/deeper/locked".to_owned()
         }),
     ];
     for (what, make) in entries {
@@ -1921,14 +1939,26 @@ fn a_link_a_special_file_or_a_name_not_utf8_counts_as_a_file() {
         let root = copy.path();
         let directory = root.join("planes/attic/deeper");
         fs::create_dir_all(&directory).unwrap();
-        make(&directory);
-        if fs::read_dir(&directory).unwrap().next().is_none() {
-            continue;
+        let expected = make(&directory);
+        // Some file systems refuse a name, and a user that may read any
+        // directory lists a locked one: nothing to check then.
+        let made = fs::read_dir(&directory).unwrap().next().is_some();
+        let locked = what != "a directory that cannot be listed"
+            || fs::read_dir(directory.join("locked")).is_err();
+        if made && locked {
+            // The problem says what was found, and where.
+            let message = message_at(root, "planes/attic");
+            assert!(
+                message.starts_with("not a plane listed in world.jsonc; ")
+                    && message.ends_with(&expected),
+                "{what}: {message}"
+            );
         }
-        assert!(
-            has(&problems(root), "source.unexpected_file", "planes/attic"),
-            "{what}"
-        );
+        // A directory that cannot be listed is still there to be removed.
+        let locked = directory.join("locked");
+        if locked.exists() {
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        }
     }
 }
 
@@ -2080,9 +2110,10 @@ fn a_directory_deeper_than_a_document_path_counts_as_a_file() {
         if ignored {
             assert!(load(root).is_ok(), "{components} {}", path.len());
         } else {
+            let message = message_at(root, "planes/attic");
             assert!(
-                has(&problems(root), "source.unexpected_file", "planes/attic"),
-                "{components} {}",
+                message.contains("a directory deeper than a document's path may be, at "),
+                "{components} {}: {message}",
                 path.len()
             );
         }
@@ -2103,9 +2134,16 @@ fn a_deep_or_wide_stray_directory_is_looked_into_in_bounded_time() {
         fs::create_dir_all(root.join(format!("planes/wide/{index}/{index}"))).unwrap();
     }
     let started = std::time::Instant::now();
-    let found = problems(root);
-    assert!(has(&found, "source.unexpected_file", "planes/attic"));
-    assert!(!has(&found, "source.unexpected_file", "planes/wide"));
+    let message = message_at(root, "planes/attic");
+    assert!(
+        message.contains("deeper than a document's path"),
+        "{message}"
+    );
+    assert!(!has(
+        &problems(root),
+        "source.unexpected_file",
+        "planes/wide"
+    ));
     assert!(started.elapsed() < std::time::Duration::from_secs(30));
 }
 

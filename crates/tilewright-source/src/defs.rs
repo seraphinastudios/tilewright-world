@@ -33,11 +33,11 @@ pub(crate) fn read_definitions(
             .get(&type_entry.name)
             .filter(|_| type_entry.kind == EntryKind::Directory)
         else {
-            if !ignored(tree, &directory, &type_entry, false) {
+            if let Err(why) = ignored(tree, &directory, &type_entry, false) {
                 diagnostics.push(Diagnostic::file(
                     &directory,
                     Code::UnexpectedFile,
-                    "not a definition type declared by the profile",
+                    format!("not a definition type declared by the profile{why}"),
                 ));
             }
             continue;
@@ -49,11 +49,11 @@ pub(crate) fn read_definitions(
                 .strip_suffix(".jsonc")
                 .filter(|id| is_identifier(id) && entry.kind == EntryKind::File)
             else {
-                if !ignored(tree, &path, &entry, true) {
+                if let Err(why) = ignored(tree, &path, &entry, true) {
                     diagnostics.push(Diagnostic::file(
                         &path,
                         Code::UnexpectedFile,
-                        "definition files are named <id>.jsonc",
+                        format!("definition files are named <id>.jsonc{why}"),
                     ));
                 }
                 continue;
