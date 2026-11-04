@@ -537,10 +537,13 @@ Publishing:
    inverse makes a directory again with the access of the nearest one
    that is there, so it would make it, and the file in it, otherwise. A
    staging entry or an emptied directory that cannot be removed is
-   reported, once, the former since the tree does not validate while it is
-   there. Removing stops at a directory that cannot go, so those above it
-   are left too; every directory left holds no file, which validation
-   ignores (FORMAT.md section 2).
+   reported, once. Below `planes/` and `defs/` the tree does not validate
+   while such a staging entry is there; beside `world.jsonc` or a profile
+   document, which a load reads without listing their directories, it
+   does, so the report is what says to remove it by hand. Removing stops at
+   a directory that cannot go, so those above it are left too; every
+   directory left holds no file, which validation ignores (FORMAT.md
+   section 2).
 
 A transaction moves content between files: a renamed file's, a moved
 object's, a deleted file's that its inverse creates again. So the files it
