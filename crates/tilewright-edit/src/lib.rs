@@ -101,7 +101,9 @@ pub mod limits {
     pub const INDEX: usize = 250_000;
     /// Most bytes read from the files a transaction touches. A transaction
     /// that can resume has as much again for those it finds already at
-    /// their result.
+    /// their result; while its base is checked, a file is read as far as
+    /// both allowances left together, since which it counts against is
+    /// known only once it is read.
     pub const READ_BYTES: u64 = 256 << 20;
     /// Most work, in bytes: each operation costs its own size, the size of
     /// each document it reads, once per operation, and the size of each

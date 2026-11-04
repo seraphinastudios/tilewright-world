@@ -689,7 +689,12 @@ only as far as the read allowance left, and a transaction that can resume
 at their `result`, which it reads but does not edit: an interrupted apply
 can leave any mix of the trees before and after it, which can hold more
 than either, and that is how much it takes to read any such mix when each
-tree alone is within the limit. The inverse's text and operations
+tree alone is within the limit. Whether a file is at its result is known
+only once it is read, so while the base of such a transaction is checked a
+file is read as far as the two allowances left together, and then counted
+against the one it belongs to, which stops the check if that puts it past
+the limit; so no more than twice the limit is read in all. The inverse's
+text and operations
 are counted as operations run and must fit a transaction; one terrain operation names at
 most 10,000 chunks; and carrying out stops as soon as a budget is spent or
 the diagnostic limit is reached. Messages describe a value over 4 KiB by its kind and size
@@ -698,7 +703,8 @@ rather than render it.
 Each touched file must be within the JSONC limits, as read and after every
 edit; an operation that finds or leaves one past a limit fails with
 `tx.limit`. A file larger than the 64 MiB document limit, or than the read
-allowance left, is not read: that is a `tx.limit` too, and carrying out
+allowance left (both allowances, while the base of a transaction that can
+resume is checked), is not read: that is a `tx.limit` too, and carrying out
 stops there. A file a transaction deletes must be valid JSONC, so that its
 inverse can create it again.
 The sealed transaction and the inverse must themselves be valid transactions
