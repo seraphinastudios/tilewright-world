@@ -99,7 +99,11 @@ pub mod limits {
     pub const CELLS: usize = 1_000_000;
     /// Largest index in a pointer or address.
     pub const INDEX: usize = 250_000;
-    /// Most bytes read from the files a transaction touches.
+    /// Most bytes read from the files a transaction touches. A transaction
+    /// that can resume has as much again for those it finds already at
+    /// their result; while its base is checked, a file is read as far as
+    /// both allowances left together, since which it counts against is
+    /// known only once it is read.
     pub const READ_BYTES: u64 = 256 << 20;
     /// Most work, in bytes: each operation costs its own size, the size of
     /// each document it reads, once per operation, and the size of each
@@ -381,6 +385,7 @@ fn check_base(
         return done;
     };
     let resumable = transaction.documents_only();
+    workspace.set_resuming(resumable && transaction.result.is_some());
     for (path, expected) in base {
         if workspace.exhausted() || problems.full() {
             break;
@@ -395,24 +400,27 @@ fn check_base(
                 .get(path)
                 .and_then(|entry| entry.current.text()),
         );
-        if found == *expected {
-            continue;
-        }
         let result = transaction
             .result
             .as_ref()
             .and_then(|result| result.get(path));
-        if resumable && result == Some(&found) {
-            done.insert(path.clone());
+        let is_done = found != *expected && resumable && result == Some(&found);
+        if let Err(failure) = workspace.settle(path, is_done) {
+            problems.report(*span, failure);
             continue;
         }
-        problems.report(
-            *span,
-            Failure::conflict(format!(
-                "{path} has changed since the transaction's base; rebase the transaction"
-            )),
-        );
+        if is_done {
+            done.insert(path.clone());
+        } else if found != *expected {
+            problems.report(
+                *span,
+                Failure::conflict(format!(
+                    "{path} has changed since the transaction's base; rebase the transaction"
+                )),
+            );
+        }
     }
+    workspace.set_resuming(false);
     done
 }
 
@@ -842,15 +850,20 @@ impl Plan {
     ///
     /// Validating is left out. The redos leave the tree this plan
     /// validated; the undos restore the tree this plan was carried out on,
-    /// which was not validated. So when that tree validated under the
-    /// same [`LoadOptions`] (as a tree an editor loaded, or the one an
-    /// earlier plan left, does), and nothing else changes the files, every
-    /// undo and redo of this plan, published in turn, plans. Not
-    /// guaranteed: other changes to files recorded in an undo or redo's
-    /// `base` digests can cause a `tx.conflict`, as for any transaction;
-    /// other files changed meanwhile may make the tree it
-    /// leaves fail validation; and publishing may fail for reasons of its
-    /// own, such as permissions or input and output.
+    /// which was not validated, file for file: a directory may be left
+    /// that holds no file, which the loader ignores. So when that tree
+    /// validated under the same [`LoadOptions`] (as a tree an editor
+    /// loaded, or the one an earlier plan left, does), and nothing else
+    /// changes the files, every undo and redo of this plan, published in
+    /// turn, plans. Not guaranteed: at the entry budget of [`LoadOptions`],
+    /// planning or publishing an undo can need one more entry for each
+    /// directory this plan made, which publishing left in place or the undo
+    /// leaves empty, under `profile/` too, and this check does not reserve
+    /// them; other changes to files recorded in an undo or redo's `base`
+    /// digests can cause a `tx.conflict`, as for any transaction; other
+    /// files changed meanwhile may make the tree it leaves fail validation;
+    /// and publishing may fail for reasons of its own, such as permissions
+    /// or input and output.
     ///
     /// It is bounded as carrying out is, once for each of at most four
     /// rounds, and costs nothing when it is not called.
@@ -1086,6 +1099,7 @@ impl Bounded {
 fn write_operation(
     output: &mut Bounded,
     path: &str,
+    base: &str,
     primitive: &Primitive,
 ) -> Result<(), TooLarge> {
     output.push("{\"op\": ")?;
@@ -1093,7 +1107,7 @@ fn write_operation(
         Primitive::Set { .. } => "set",
         Primitive::Insert { .. } => "insert",
         Primitive::Remove { .. } => "remove",
-        Primitive::Create { .. } => "document.create",
+        Primitive::Create { .. } | Primitive::CreateBase => "document.create",
         Primitive::Delete => "document.delete",
     };
     output.push_json(kind)?;
@@ -1139,6 +1153,10 @@ fn write_operation(
         Primitive::Create { text } => {
             output.push(", \"text\": ")?;
             output.push_text(text)?;
+        }
+        Primitive::CreateBase => {
+            output.push(", \"text\": ")?;
+            output.push_text(base)?;
         }
         Primitive::Delete => {}
     }
@@ -1186,20 +1204,12 @@ fn inverse(workspace: &Workspace<'_>) -> Result<String, TooLarge> {
         let mut write = |primitive: &Primitive| -> Result<(), TooLarge> {
             output.push(if first { "\n    " } else { ",\n    " })?;
             first = false;
-            write_operation(&mut output, path, primitive)
+            let base = entry.base.as_deref().unwrap_or_default();
+            write_operation(&mut output, path, base, primitive)
         };
         match (&entry.base, entry.current.text()) {
             (None, _) => write(&Primitive::Delete)?,
-            (Some(text), None) => {
-                // The text is written straight from the entry, not copied.
-                output.push(if first { "\n    " } else { ",\n    " })?;
-                first = false;
-                output.push("{\"op\": \"document.create\", \"path\": ")?;
-                output.push_json(path)?;
-                output.push(", \"text\": ")?;
-                output.push_text(text)?;
-                output.push("}")?;
-            }
+            (Some(_), None) => write(&Primitive::CreateBase)?,
             (Some(_), Some(_)) => {
                 for primitive in entry.inverse.iter().rev() {
                     write(primitive)?;

@@ -75,7 +75,11 @@ pub struct LoadOptions {
     /// Most files read in one load.
     pub maximum_files: usize,
     /// Most directory entries listed in one load, counted before they are
-    /// examined.
+    /// examined, a directory that holds no file, which the layout ignores,
+    /// as much as any. Publishing a transaction lists the directories on
+    /// the way to its files against as large a budget, `profile/` included,
+    /// so planning or publishing its undo can need one more entry for each
+    /// directory it made (`docs/spec/TRANSACTIONS.md` section 8.1).
     pub maximum_entries: usize,
     /// Most bytes read in one load.
     pub maximum_total_bytes: u64,
@@ -537,9 +541,10 @@ pub type Overlay = BTreeMap<String, Option<String>>;
 
 /// Loads a source tree as it would be with `overlay` applied, without
 /// writing anything. Overlay files are read under the same limits and
-/// budget as files on disk, and a directory that holds one exists. An
-/// overlay of more entries than `maximum_entries` is refused before
-/// anything is read.
+/// budget as files on disk, and a directory that holds one exists. One
+/// that the overlay leaves without a file holds none, and is ignored where
+/// the layout ignores such a directory (FORMAT.md section 2). An overlay of
+/// more entries than `maximum_entries` is refused before anything is read.
 ///
 /// # Errors
 /// Returns every diagnostic found, sorted by path and position.

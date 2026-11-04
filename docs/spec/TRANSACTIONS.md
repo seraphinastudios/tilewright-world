@@ -394,8 +394,35 @@ nothing else changes the files. That tree is not validated by the check:
 the undos restore it, byte for byte, in every file the transaction touched
 or consulted, and it is the tree an editor loaded, or the one an earlier
 transaction left. The redos leave the tree the transaction did, which
-carrying it out validated. Not guaranteed:
+carrying it out validated.
 
+Validating does not depend on a directory that holds no file: the loader
+ignores one (FORMAT.md section 2). An undone tree has the bytes of the
+original in every file the transaction touched or consulted, and the same
+other files, so it can differ from the original only in such directories:
+one the transaction made, which publishing the undo leaves when it cannot
+remove it or when its mode or group is no longer that of the directory
+above it (section 9, step 5), and which it never removes when it is
+`planes/` or `defs/` itself, since it removes only those below them
+(section 4); and an empty one the transaction wrote into, which it removes
+on the same terms. So under the same load options it validates as the
+original does, and loads the same world, with one limit. A load's entry
+budget counts every entry it lists, a directory that holds no file
+included, and planning an undo meets the directories the transaction made
+still there, with the files the undo removes from them gone, as does a load
+of a tree publishing left one in. Publishing the undo counts them too: it
+lists the directories on the way to its files against a budget as large,
+outside `planes/` and `defs/` as well, such as `profile/`, which a load
+does not list (section 9). The check does not reserve those entries, so at
+the entry budget an undo can need one more for each directory the
+transaction made, under `profile/` too, and be refused with
+`source.budget` when it is planned, or with `tx.limit` when it is
+published, writing nothing. Everywhere else every undo and redo of a
+transaction that passes plans. Not guaranteed:
+
+- at the load's entry budget, an undo can be refused for the directories
+  the transaction made, as above, and so can the repair of an interrupted
+  apply (section 9);
 - the inverse of a transaction that made an invalid tree valid passes the
   check, and is refused, as above;
 - other changes to files recorded in an undo or redo's `base` digests can
@@ -515,8 +542,13 @@ Publishing:
    inverse makes a directory again with the access of the nearest one
    that is there, so it would make it, and the file in it, otherwise. A
    staging entry or an emptied directory that cannot be removed is
-   reported, once, the former since the tree does not validate while it is
-   there.
+   reported, once. Below `planes/` and `defs/` the tree does not validate
+   while such a staging entry is there; beside `world.jsonc` or a profile
+   document, which a load reads without listing their directories, it
+   does, so the report is what says to remove it by hand. Removing stops at
+   a directory that cannot go, so those above it are left too; every
+   directory left holds no file, which validation ignores (FORMAT.md
+   section 2).
 
 A transaction moves content between files: a renamed file's, a moved
 object's, a deleted file's that its inverse creates again. So the files it
@@ -591,7 +623,13 @@ extension); and so is
 one that names a file, or a directory on its way, that the file system
 finds by that name although it is named otherwise on disk (`TREE.jsonc`
 for `tree.jsonc` where case is not told apart), which validation would
-take for another file.
+take for another file. To check names it lists each directory on the way
+to the files once and counts its entries: below `planes/` and `defs/` as a
+load does, against the load's entry budget, so that a plan whose load
+fitted fits here too; in the root and the directories a load does not
+list, such as `profile/`, against a budget of their own as large, and one
+more for the lock file on Windows. Past either it refuses with `tx.limit`
+and writes nothing.
 
 Each rename and removal is atomic, but there is no atomic publication of
 several files. If a step of 4 fails, the files already published are
@@ -612,12 +650,20 @@ or `defs/`, so the tree fails validation until it is repaired. To repair
 it, apply the inverse, which the command line writes before step 1: the
 files the interrupted apply published are restored, the others already
 match and are left alone, and the staging files beside every file it names
-are removed. There is no journal: the inverse, written before anything is
-published, is the recovery record, and applying it is a manual step. If
+are removed. At the load's entry budget the repair can be refused with
+`source.budget` for the directories the transaction made, as an undo can
+(section 8.1). A transaction that can resume (section 8: every operation
+names one file by path, none is a `test` or has an `expect`, and it has a
+`result`) is then applied again instead, which completes the apply; any
+other is repaired by applying the inverse with a load that allows more
+entries (`LoadOptions::maximum_entries`), which the command line, loading
+with the default of 1,000,000, does not offer. There is no journal: the
+inverse, written before anything is published, is the recovery record,
+and applying it is a manual step. If
 the recovery is interrupted in turn, apply the inverse again; a directory
-the interrupted cleanup emptied may be left, which validation names where
-it matters, to remove by hand. The
-source tree's version control is the other way back.
+the interrupted cleanup emptied may be left, holding no file, which
+validation ignores, to remove by hand if it is not wanted. The source
+tree's version control is the other way back.
 Carrying out ignores whatever is at the staging name beside every file a
 transaction touches or consults, a link or special file included.
 
@@ -666,7 +712,20 @@ the work it is charged, so no lookup is metered on its own. A transaction
 with uid addresses also loads the tree once, within the load's own bounds
 as validating does; a uid lookup reads the chunk that holds the object and
 each chunk changed since the last lookup, as documents the operation reads. A file is read
-only as far as the read allowance left; the inverse's text and operations
+only as far as the read allowance left, and a transaction that can resume
+(section 8) has an allowance as large again for the files it finds already
+at their `result`, which it reads but does not edit: an interrupted apply
+can leave any mix of the trees before and after it, which can hold more
+than either, and that is how much it takes to read any such mix when each
+tree alone is within the limit. Whether a file is at its result is known
+only once it is read, so while the base of such a transaction is checked a
+file is read as far as the two allowances left together, and then counted
+against the one it belongs to, which stops the check if that puts it past
+the limit. A file that is not UTF-8, which cannot be edited, is a
+conflict, and its bytes count against the allowance of the files carried
+out without stopping the check when it is read; the next file counted
+stops the check if that allowance is then past the limit. No more than
+twice the limit is read in all. The inverse's text and operations
 are counted as operations run and must fit a transaction; one terrain operation names at
 most 10,000 chunks; and carrying out stops as soon as a budget is spent or
 the diagnostic limit is reached. Messages describe a value over 4 KiB by its kind and size
@@ -675,7 +734,8 @@ rather than render it.
 Each touched file must be within the JSONC limits, as read and after every
 edit; an operation that finds or leaves one past a limit fails with
 `tx.limit`. A file larger than the 64 MiB document limit, or than the read
-allowance left, is not read: that is a `tx.limit` too, and carrying out
+allowance left (both allowances, while the base of a transaction that can
+resume is checked), is not read: that is a `tx.limit` too, and carrying out
 stops there. A file a transaction deletes must be valid JSONC, so that its
 inverse can create it again.
 The sealed transaction and the inverse must themselves be valid transactions
@@ -732,7 +792,11 @@ accepts that; it then warns on standard error, naming what is not checked.
 Each command runs the undo check of section 8.1 after carrying the
 transaction out, and refuses a transaction that fails it, writing nothing:
 the inverse `apply` writes is the way back and must be one that can be
-applied, and `preview` and `rebase` refuse what `apply` would. An inverse is
+applied, and `preview` and `rebase` refuse what `apply` would. The check
+does not reserve the entries an undo can need at the load's entry budget,
+which the command line leaves at its default (section 8.1): there, the
+inverse `apply` wrote, applied as an undo or as the repair of an
+interrupted apply, can be refused, and section 9 says what to do then. An inverse is
 checked like any transaction, so applying one is refused when it carries
 out but its own undo and redo could not be; an inverse `apply` wrote passes,
 since the check of its transaction carried out every round its own check

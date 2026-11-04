@@ -46,7 +46,10 @@ F2FS, ZFS and bcachefs (an overlay root in a container needs it too) or one
 it cannot tell (as without a readable /proc), tx apply does not check
 everything (SECURITY.md), so it refuses unless --unchecked-access accepts
 that. Each command refuses a transaction that could not be undone and
-redone within the limits of a transaction (TRANSACTIONS.md section 8.1).";
+redone within the limits of a transaction (TRANSACTIONS.md section 8.1),
+but for one: at the load's entry budget (1000000 entries), an undo, or the
+repair of an interrupted apply, can need one more entry for each directory
+the transaction made, and is then refused (section 9 says what to do).";
 
 fn main() -> ExitCode {
     // Paths need not be UTF-8, so arguments are read as OS strings.

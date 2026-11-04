@@ -484,6 +484,17 @@ mod tests {
             );
         };
         refused(run(&["tx", "preview", &path("stroke.jsonc"), &root]).unwrap_err());
+        refused(
+            run(&[
+                "tx",
+                "rebase",
+                &path("stroke.jsonc"),
+                &root,
+                &path("sealed.jsonc"),
+            ])
+            .unwrap_err(),
+        );
+        assert!(!Path::new(&path("sealed.jsonc")).exists());
         // Publishing is supported on Linux, macOS and Windows.
         #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         {

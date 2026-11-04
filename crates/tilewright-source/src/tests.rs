@@ -276,8 +276,12 @@ fn unexpected_and_non_canonical_files_are_rejected() {
         root.join("planes/overworld/layers/0/00_1.jsonc"),
     )
     .unwrap();
-    fs::create_dir(root.join("planes/attic")).unwrap();
+    // A directory the layout has no place for is an error when it holds a
+    // file, at any depth.
+    fs::create_dir_all(root.join("planes/attic/layers/2")).unwrap();
+    fs::write(root.join("planes/attic/layers/2/0_0.jsonc"), "{}\n").unwrap();
     fs::create_dir(root.join("defs/sound")).unwrap();
+    fs::write(root.join("defs/sound/bell.jsonc"), "{}\n").unwrap();
     let found = problems(root);
     for path in [
         "planes/overworld/notes.txt",
@@ -1850,6 +1854,347 @@ fn a_failed_load_says_why_even_with_no_room_for_diagnostics() {
     };
     let found = load_with(copy.path(), &options).expect_err("the definition is invalid");
     assert!(!found.is_empty());
+}
+
+/// The places where the layout lists a directory, each with a directory
+/// it has no place for, and a file path beneath it.
+const STRAYS: [&str; 7] = [
+    "planes/attic",
+    "planes/overworld/notes",
+    "planes/overworld/layers/notes",
+    "planes/overworld/layers/0/notes",
+    "defs/sound",
+    "defs/proto/notes",
+    "planes/overworld/layers/5",
+];
+
+#[test]
+fn a_directory_that_holds_no_file_is_ignored() {
+    let copy = workspace();
+    let root = copy.path();
+    let fixture = load(&fixture()).unwrap();
+    for stray in STRAYS {
+        fs::create_dir_all(root.join(stray).join("deeper/still")).unwrap();
+        fs::create_dir(root.join(stray).join("beside")).unwrap();
+    }
+    // Nothing changes: they hold nothing to read, as version control has
+    // them.
+    assert_eq!(load(root).unwrap(), fixture);
+}
+
+#[test]
+fn a_directory_that_holds_a_file_at_any_depth_is_not_ignored() {
+    // `planes/overworld/layers/5` is a layer, which may hold files.
+    for stray in &STRAYS[..6] {
+        let copy = workspace();
+        let root = copy.path();
+        fs::create_dir_all(root.join(stray).join("deeper/still")).unwrap();
+        fs::write(root.join(stray).join("deeper/still/x.txt"), "x").unwrap();
+        assert!(
+            has(&problems(root), "source.unexpected_file", stray),
+            "{stray}"
+        );
+    }
+}
+
+/// The message of the problem at `path`.
+fn message_at(root: &Path, path: &str) -> String {
+    load(root)
+        .unwrap_err()
+        .into_iter()
+        .find(|problem| problem.code == "source.unexpected_file" && problem.path == path)
+        .map(|problem| problem.message)
+        .unwrap_or_default()
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_a_special_file_a_name_not_utf8_or_a_listing_that_fails_count_as_a_file() {
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+    type Make = fn(&Path) -> String;
+    let entries: [(&str, Make); 4] = [
+        ("a link", |directory| {
+            symlink("elsewhere", directory.join("link")).unwrap();
+            "a symbolic link, at planes/attic/deeper/link".to_owned()
+        }),
+        ("a special file", |directory| {
+            std::os::unix::net::UnixListener::bind(directory.join("socket")).unwrap();
+            "a special file, at planes/attic/deeper/socket".to_owned()
+        }),
+        ("a name not UTF-8", |directory| {
+            use std::os::unix::ffi::OsStrExt as _;
+            let name = std::ffi::OsStr::from_bytes(b"\xff");
+            let _ = fs::create_dir(directory.join(name));
+            "an entry whose name is not UTF-8, in planes/attic/deeper".to_owned()
+        }),
+        ("a directory that cannot be listed", |directory| {
+            let locked = directory.join("locked");
+            fs::create_dir(&locked).unwrap();
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+            "a directory that cannot be listed, at planes/attic/deeper/locked".to_owned()
+        }),
+    ];
+    for (what, make) in entries {
+        let copy = workspace();
+        let root = copy.path();
+        let directory = root.join("planes/attic/deeper");
+        fs::create_dir_all(&directory).unwrap();
+        let expected = make(&directory);
+        // Some file systems refuse a name, and a user that may read any
+        // directory lists a locked one: nothing to check then.
+        let made = fs::read_dir(&directory).unwrap().next().is_some();
+        let locked = what != "a directory that cannot be listed"
+            || fs::read_dir(directory.join("locked")).is_err();
+        if made && locked {
+            // The problem says what was found, and where.
+            let message = message_at(root, "planes/attic");
+            assert!(
+                message.starts_with("not a plane listed in world.jsonc; ")
+                    && message.ends_with(&expected),
+                "{what}: {message}"
+            );
+        }
+        // A directory that cannot be listed is still there to be removed.
+        let locked = directory.join("locked");
+        if locked.exists() {
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+}
+
+#[test]
+fn a_directory_named_like_a_document_among_documents_is_not_ignored() {
+    for path in [
+        "planes/overworld/notes.jsonc",
+        // Not Zones.JSONC: where names ignore case, that is zones.jsonc.
+        "planes/overworld/Notes.JSONC",
+        "planes/overworld/layers/0/5_5.jsonc",
+        "planes/overworld/layers/0/notes.JSONC",
+        "defs/proto/rock.jsonc",
+    ] {
+        let copy = workspace();
+        let root = copy.path();
+        fs::create_dir(root.join(path)).unwrap();
+        assert!(
+            has(&problems(root), "source.unexpected_file", path),
+            "{path}"
+        );
+    }
+    // Where the layout has only directories, it is one.
+    let copy = workspace();
+    fs::create_dir(copy.path().join("planes/notes.jsonc")).unwrap();
+    assert!(load(copy.path()).is_ok());
+}
+
+#[test]
+fn a_directory_the_overlay_leaves_without_files_is_ignored() {
+    let copy = workspace();
+    let root = copy.path();
+    fs::create_dir_all(root.join("planes/attic/layers/2")).unwrap();
+    let mut overlay = Overlay::new();
+    for file in [
+        "planes/attic/plane.jsonc",
+        "planes/attic/layers/2/0_0.jsonc",
+    ] {
+        fs::write(root.join(file), "{}\n").unwrap();
+        overlay.insert(file.to_owned(), None);
+    }
+    assert!(has(
+        &problems(root),
+        "source.unexpected_file",
+        "planes/attic"
+    ));
+    let world = load_edited(root, &LoadOptions::default(), &overlay).unwrap();
+    assert_eq!(world, load(&fixture()).unwrap());
+    // One file it keeps, or makes, is a file.
+    let mut kept = overlay.clone();
+    kept.remove("planes/attic/layers/2/0_0.jsonc");
+    assert!(load_edited(root, &LoadOptions::default(), &kept).is_err());
+    let mut made = overlay.clone();
+    made.insert("planes/attic/x.jsonc".to_owned(), Some("{}\n".to_owned()));
+    assert!(load_edited(root, &LoadOptions::default(), &made).is_err());
+}
+
+/// The least `maximum_entries` the tree at `root` loads with, the
+/// overlay applied.
+fn least_entries(root: &Path, overlay: &Overlay) -> usize {
+    let passes = |maximum_entries| {
+        let options = LoadOptions {
+            maximum_entries,
+            ..LoadOptions::default()
+        };
+        load_edited(root, &options, overlay).is_ok()
+    };
+    let (mut low, mut high) = (0, 1 << 16);
+    assert!(passes(high) && !passes(low));
+    while high - low > 1 {
+        let middle = low + (high - low) / 2;
+        if passes(middle) {
+            high = middle;
+        } else {
+            low = middle;
+        }
+    }
+    high
+}
+
+#[test]
+fn a_directory_that_holds_no_file_costs_every_entry_listed_in_it() {
+    // The load lists planes/attic and every directory in it to see that it
+    // holds no file, and counts each entry once: attic, 40 d's and 40 e's.
+    let plain = least_entries(&fixture(), &Overlay::new());
+    let copy = workspace();
+    let root = copy.path();
+    for index in 0..40 {
+        fs::create_dir_all(root.join(format!("planes/attic/d{index}/e"))).unwrap();
+    }
+    assert!(load(root).is_ok());
+    assert_eq!(least_entries(root, &Overlay::new()), plain + 81);
+}
+
+#[test]
+fn an_entry_the_overlay_removes_is_not_counted_wherever_it_is_listed() {
+    let plain = least_entries(&fixture(), &Overlay::new());
+    // Listed before the directory's other entry or after it, by name and
+    // creation order, a file the overlay removes costs nothing.
+    for name in [
+        "1_0.jsonc",
+        "2_0.jsonc",
+        "3_0.jsonc",
+        "4_0.jsonc",
+        "5_0.jsonc",
+        "6_0.jsonc",
+    ] {
+        let copy = workspace();
+        let root = copy.path();
+        let path = format!("planes/vault/layers/0/{name}");
+        fs::write(root.join(&path), "{}\n").unwrap();
+        let mut overlay = Overlay::new();
+        overlay.insert(path, None);
+        assert_eq!(least_entries(root, &overlay), plain, "{name}");
+    }
+}
+
+/// Makes the directories of `relative` beneath `root`, and with `file` an
+/// empty file at its end. On Unix each is made through its parent's handle,
+/// so that a path longer than the platform allows from the root, 1,024
+/// bytes on macOS, can be made, as the loader reads it.
+fn make_beneath(root: &Path, relative: &str, file: Option<&str>) {
+    #[cfg(unix)]
+    {
+        use rustix::fs::{CWD, Mode, OFlags, mkdirat, openat};
+        let flags = OFlags::DIRECTORY | OFlags::RDONLY;
+        let mut directory = openat(CWD, root, flags, Mode::empty()).unwrap();
+        for name in relative.split('/') {
+            match mkdirat(&directory, name, Mode::from_raw_mode(0o755)) {
+                Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+                Err(error) => panic!("{relative}: {error}"),
+            }
+            directory = openat(&directory, name, flags, Mode::empty()).unwrap();
+        }
+        if let Some(file) = file {
+            let flags = OFlags::CREATE | OFlags::WRONLY;
+            openat(&directory, file, flags, Mode::from_raw_mode(0o644)).unwrap();
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(root.join(relative)).unwrap();
+        if let Some(file) = file {
+            fs::write(root.join(relative).join(file), "").unwrap();
+        }
+    }
+}
+
+#[test]
+fn a_directory_deeper_than_a_document_path_counts_as_a_file() {
+    // As deep as a document's path may be, 32 components, or as long, it
+    // is looked into; deeper or longer, it counts as a file.
+    for (components, name, ignored) in [
+        (32, "a", true),
+        (33, "a", false),
+        (10, &"n".repeat(120)[..], true),
+        (11, &"n".repeat(120)[..], false),
+    ] {
+        let copy = workspace();
+        let root = copy.path();
+        let mut path = "planes/attic".to_owned();
+        while path.split('/').count() < components {
+            path = format!("{path}/{name}");
+        }
+        make_beneath(root, &path, None);
+        if ignored {
+            assert!(load(root).is_ok(), "{components} {}", path.len());
+        } else {
+            let message = message_at(root, "planes/attic");
+            assert!(
+                message.contains("a directory deeper than a document's path may be, at "),
+                "{components} {}: {message}",
+                path.len()
+            );
+        }
+    }
+}
+
+#[test]
+fn a_deep_or_wide_stray_directory_is_looked_into_in_bounded_time() {
+    let copy = workspace();
+    let root = copy.path();
+    // Far deeper than a path may be: it is not looked into past that. Not
+    // deeper still, since removing the tree afterwards recurses a level at
+    // a time, and on macOS a test's stack takes no more than a few hundred.
+    let deep = vec!["a"; 200].join("/");
+    make_beneath(root, &format!("planes/attic/{deep}"), Some("x.txt"));
+    // Wide: each directory is listed once, from a path no longer than a
+    // document's.
+    for index in 0..4_000 {
+        fs::create_dir_all(root.join(format!("planes/wide/{index}/{index}"))).unwrap();
+    }
+    let started = std::time::Instant::now();
+    let message = message_at(root, "planes/attic");
+    assert!(
+        message.contains("deeper than a document's path"),
+        "{message}"
+    );
+    assert!(!has(
+        &problems(root),
+        "source.unexpected_file",
+        "planes/wide"
+    ));
+    assert!(started.elapsed() < std::time::Duration::from_secs(30));
+}
+
+#[test]
+fn a_directory_at_a_staging_name_is_not_ignored() {
+    for path in [
+        "planes/overworld/.plane.jsonc.tilewright-tmp",
+        "planes/overworld/layers/0/.0_0.jsonc.tilewright-tmp",
+        "defs/proto/.tree.jsonc.tilewright-tmp",
+        "planes/.attic.tilewright-tmp",
+        // In any case.
+        "planes/.attic.TILEWRIGHT-TMP",
+        "defs/.proto.Tilewright-Tmp",
+    ] {
+        let copy = workspace();
+        let root = copy.path();
+        fs::create_dir(root.join(path)).unwrap();
+        assert!(
+            has(&problems(root), "source.unexpected_file", path),
+            "{path}"
+        );
+    }
+    // A name that ends so but does not start with `.` is no staging name:
+    // a plane or a type may have it. Nor is the rule applied below the
+    // directories the layout lists, in a directory that holds no file.
+    for path in [
+        "planes/attic.tilewright-tmp",
+        "planes/attic/.plane.jsonc.tilewright-tmp",
+        "planes/overworld/notes/.zones.jsonc.tilewright-tmp",
+    ] {
+        let copy = workspace();
+        fs::create_dir_all(copy.path().join(path)).unwrap();
+        assert!(load(copy.path()).is_ok(), "{path}");
+    }
 }
 
 #[test]

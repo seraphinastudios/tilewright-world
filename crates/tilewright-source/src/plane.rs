@@ -7,7 +7,7 @@ use crate::diagnostic::Diagnostics;
 use crate::{
     Anchor, CHUNK_SIZE, Code, Diagnostic, Plane, PlaneKind, Profile, Zone,
     chunk::{ChunkAddress, read_chunk},
-    files::{EntryKind, Tree, join},
+    files::{EntryKind, Tree, ignored, join},
     read::Reader,
     schema::{References, read_fields},
     stairwell::read_stairwells,
@@ -38,16 +38,18 @@ pub(crate) fn read_planes(
         tree.list("planes")
             .into_iter()
             .filter_map(|entry| {
+                let path = join("planes", &entry.name);
                 if entry.kind == EntryKind::Directory && listed.contains(entry.name.as_str()) {
-                    Some(entry.name)
-                } else {
-                    diagnostics.push(Diagnostic::file(
-                        &join("planes", &entry.name),
-                        Code::UnexpectedFile,
-                        "not a plane listed in world.jsonc",
-                    ));
-                    None
+                    return Some(entry.name);
                 }
+                if let Err(why) = ignored(tree, &path, &entry, false) {
+                    diagnostics.push(Diagnostic::file(
+                        &path,
+                        Code::UnexpectedFile,
+                        format!("not a plane listed in world.jsonc{why}"),
+                    ));
+                }
+                None
             })
             .collect()
     } else {
@@ -110,11 +112,16 @@ fn read_plane(
                 EntryKind::File,
             ) => {}
             ("layers", EntryKind::Directory) => has_layers = true,
-            _ => diagnostics.push(Diagnostic::file(
-                &join(directory, &entry.name),
-                Code::UnexpectedFile,
-                "not part of the plane layout",
-            )),
+            _ => {
+                let path = join(directory, &entry.name);
+                if let Err(why) = ignored(tree, &path, &entry, true) {
+                    diagnostics.push(Diagnostic::file(
+                        &path,
+                        Code::UnexpectedFile,
+                        format!("not part of the plane layout{why}"),
+                    ));
+                }
+            }
         }
     }
     let mut plane = read_plane_document(tree, id, directory, diagnostics)?;
@@ -421,11 +428,13 @@ fn read_layers(
             .and_then(|layer| i32::try_from(layer).ok())
             .filter(|_| layer_entry.kind == EntryKind::Directory);
         let Some(layer) = layer else {
-            diagnostics.push(Diagnostic::file(
-                &layer_directory,
-                Code::UnexpectedFile,
-                "layer directories are named by a canonical 32-bit integer",
-            ));
+            if let Err(why) = ignored(tree, &layer_directory, &layer_entry, false) {
+                diagnostics.push(Diagnostic::file(
+                    &layer_directory,
+                    Code::UnexpectedFile,
+                    format!("layer directories are named by a canonical 32-bit integer{why}"),
+                ));
+            }
             continue;
         };
         for chunk_entry in tree.list(&layer_directory) {
@@ -438,11 +447,15 @@ fn read_layers(
                 .filter(|(cx, cy)| chunks.contains(cx) && chunks.contains(cy))
                 .filter(|_| chunk_entry.kind == EntryKind::File);
             let Some((cx, cy)) = coordinates else {
-                diagnostics.push(Diagnostic::file(
-                    &path,
-                    Code::UnexpectedFile,
-                    "chunk files are named <cx>_<cy>.jsonc with canonical integers in range",
-                ));
+                if let Err(why) = ignored(tree, &path, &chunk_entry, true) {
+                    diagnostics.push(Diagnostic::file(
+                        &path,
+                        Code::UnexpectedFile,
+                        format!(
+                            "chunk files are named <cx>_<cy>.jsonc with canonical integers in range{why}"
+                        ),
+                    ));
+                }
                 continue;
             };
             let address = ChunkAddress {

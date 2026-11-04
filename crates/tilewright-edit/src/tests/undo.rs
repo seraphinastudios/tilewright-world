@@ -489,7 +489,9 @@ fn a_document_deleted_and_made_again_settles_on_a_shorter_undo() {
 /// set back and forth, one of them large, which its redo holds; terrain
 /// painted and cleared in a few cells, creating and deleting a chunk;
 /// objects placed and then moved, or placed and removed again; anchors
-/// added and removed; a definition deleted and made again.
+/// added and removed; a definition deleted and made again. Others make
+/// directories, which their undos must remove: a plane, with chunks or
+/// without; a definition type; a layer.
 fn revisiting_transaction(random: &mut Random) -> String {
     let coin = {
         let mut text = String::new();
@@ -499,7 +501,7 @@ fn revisiting_transaction(random: &mut Random) -> String {
     let pad = "p".repeat(4_000);
     let mut operations = Vec::new();
     for step in 0..random.between(1, 6) {
-        let operation = match random.below(10) {
+        let operation = match random.below(14) {
             0 | 1 => {
                 let value = random.pick(&["1", "2", "pad"]);
                 let value = if value == "pad" { format!("\"{pad}\"") } else { value.to_owned() };
@@ -535,6 +537,18 @@ fn revisiting_transaction(random: &mut Random) -> String {
                 r#"{{"op": "set", "path": "defs/proto/coin.jsonc", "pointer": ["fields", "weight"], "value": {}}}"#,
                 random.below(3)
             ),
+            10 => add_plane(&format!("attic{step}")),
+            11 => format!(
+                r#"{},
+    {{"op": "object.insert", "plane": "attic{step}", "layer": {}, "at": [1, 1], "object": {{"proto": "tree"}}}}"#,
+                add_plane(&format!("attic{step}")),
+                random.between(0, 3)
+            ),
+            12 => add_definition_type(&format!("quest{step}")),
+            13 => format!(
+                r#"{{"op": "object.insert", "plane": "overworld", "layer": {}, "at": [1, 1], "object": {{"proto": "tree"}}}}"#,
+                random.between(5, 8)
+            ),
             _ => format!(
                 r#"{{"op": "document.delete", "path": "defs/proto/coin.jsonc"}},
     {{"op": "document.create", "path": "defs/proto/coin.jsonc", "text": {coin}}}"#
@@ -546,12 +560,14 @@ fn revisiting_transaction(random: &mut Random) -> String {
 }
 
 /// Plans six rounds after publishing `plan`, each the inverse of the one
-/// before, publishing each that plans. Returns the transactions of the
-/// rounds that planned, and the round that did not with its problems.
+/// before, publishing each that plans: each undo restores every file and
+/// directory, and each redo gives every one the plan did. Returns the
+/// transactions of the rounds that planned, and the round that did not
+/// with its problems.
 fn rounds(root: &Path, plan: &Plan) -> (Vec<String>, Option<(usize, Vec<Diagnostic>)>) {
-    let before = snapshot(root);
+    let before = (snapshot(root), directories(root));
     published(plan);
-    let after = snapshot(root);
+    let after = (snapshot(root), directories(root));
     let mut text = plan.inverse().to_owned();
     let mut done = Vec::new();
     for round in 0..6 {
@@ -559,7 +575,10 @@ fn rounds(root: &Path, plan: &Plan) -> (Vec<String>, Option<(usize, Vec<Diagnost
             Ok(planned) => {
                 published(&planned);
                 let expected = if round % 2 == 0 { &before } else { &after };
-                assert!(snapshot(root) == *expected, "round {round}");
+                assert!(
+                    (snapshot(root), directories(root)) == *expected,
+                    "round {round}"
+                );
                 done.push(std::mem::replace(&mut text, planned.inverse().to_owned()));
             }
             Err(problems) => return (done, Some((round, problems))),
@@ -619,7 +638,7 @@ fn the_check_passes_exactly_when_every_undo_and_redo_plans() {
     // Each kind of outcome happens. Refusals by the check are few here;
     // the next test finds them at the boundary.
     assert!(
-        outcomes[0] > 10 && outcomes[1] > 40 && outcomes[2] > 4 && outcomes[3] > 10,
+        outcomes[0] > 10 && outcomes[1] > 40 && outcomes[2] > 0 && outcomes[3] > 10,
         "{outcomes:?}"
     );
 }
@@ -717,4 +736,863 @@ fn the_note_that_there_may_be_more_stays_last_and_as_it_is() {
             "the transaction could not be undone: a limit; split the transaction",
         ]
     );
+}
+
+/// Operations that add the plane `id`.
+fn add_plane(id: &str) -> String {
+    format!(
+        r#"{{"op": "insert", "path": "world.jsonc", "pointer": ["planes", 2], "value": "{id}"}},
+    {{"op": "document.create", "path": "planes/{id}/plane.jsonc", "document": {{"format": "tilewright.plane/1", "id": "{id}", "title": "A plane", "kind": "shared", "chunk_size": 32}}}}"#
+    )
+}
+
+/// Operations that add the definition type `id`, with a definition.
+fn add_definition_type(id: &str) -> String {
+    format!(
+        r#"{{"op": "document.create", "path": "profile/schema/{id}.jsonc", "document": {{"format": "tilewright.schema/1", "fields": {{"title": {{"type": "string"}}}}}}}},
+    {{"op": "insert", "path": "profile/profile.jsonc", "pointer": ["definition_types", 3], "key": "{id}", "value": {{"schema": "schema/{id}.jsonc"}}}},
+    {{"op": "document.create", "path": "defs/{id}/hello.jsonc", "document": {{"format": "tilewright.def/1", "type": "{id}", "id": "hello", "fields": {{"title": "Hello"}}}}}}"#
+    )
+}
+
+/// Applies `operations`, which pass the check, then undoes and redoes them:
+/// the files are as they were, and so are the directories, and the source
+/// digest of the tree undone is the one it had.
+fn undone_with_its_directories(operations: &str) {
+    let tree = copy();
+    let root = tree.path();
+    let digest = tilewright_source::load(root).unwrap().source_digest();
+    let folders = directories(root);
+    let tx = transaction(operations);
+    let plan = planned(root, &tx);
+    plan.check_undo().unwrap();
+    let undo = {
+        published(&plan);
+        apply(root, &reparsed("undo.jsonc", plan.inverse()))
+    };
+    assert_eq!(directories(root), folders);
+    assert_eq!(
+        tilewright_source::load(root).unwrap().source_digest(),
+        digest
+    );
+    let redo = apply(root, &reparsed("redo.jsonc", undo.inverse()));
+    apply(root, &reparsed("undo.jsonc", redo.inverse()));
+    assert_eq!(directories(root), folders);
+}
+
+#[test]
+fn a_step_that_adds_a_plane_is_undone() {
+    undone_with_its_directories(&add_plane("attic"));
+}
+
+#[test]
+fn a_step_that_adds_a_plane_with_chunks_is_undone() {
+    undone_with_its_directories(&format!(
+        r#"{},
+    {{"op": "object.insert", "plane": "attic", "layer": 0, "at": [1, 1], "object": {{"proto": "tree"}}}},
+    {{"op": "object.insert", "plane": "attic", "layer": 3, "at": [70, 1], "object": {{"proto": "tree"}}}}"#,
+        add_plane("attic")
+    ));
+}
+
+#[test]
+fn a_step_that_adds_a_definition_type_is_undone() {
+    undone_with_its_directories(&add_definition_type("quest"));
+}
+
+#[test]
+fn a_step_that_adds_a_layer_is_undone() {
+    undone_with_its_directories(
+        r#"{"op": "object.insert", "plane": "overworld", "layer": 9, "at": [1, 1], "object": {"proto": "tree"}}"#,
+    );
+}
+
+/// A file of the tree as `plan` found it.
+fn as_it_was<'a>(plan: &'a Plan, path: &str) -> &'a str {
+    plan.files()
+        .iter()
+        .find(|file| file.path == path)
+        .and_then(|file| file.before.as_deref())
+        .unwrap()
+}
+
+/// Repairs the tree at `root` with `plan`'s inverse, and checks that it is
+/// as it was: the undo passes the check and plans, as the inverse an
+/// interrupted apply left must, and every file and directory is back.
+fn repaired(root: &Path, plan: &Plan, before: &BTreeMap<String, Vec<u8>>, folders: &[String]) {
+    let undo = planned(root, &reparsed("undo.jsonc", plan.inverse()));
+    undo.check_undo().unwrap();
+    published(&undo);
+    assert_eq!(snapshot(root), *before);
+    assert_eq!(directories(root), folders);
+}
+
+#[test]
+fn an_apply_of_a_new_plane_stopped_after_a_rename_is_repaired() {
+    let tree = copy();
+    let root = tree.path();
+    let (before, folders) = (snapshot(root), directories(root));
+    let plan = planned(root, &transaction(&add_plane("attic")));
+    published(&plan);
+    // The plane's file came first; `world.jsonc` was staged, not published.
+    fs::write(root.join("world.jsonc"), as_it_was(&plan, "world.jsonc")).unwrap();
+    fs::write(root.join(staging_path("world.jsonc")), "staged").unwrap();
+    assert!(tilewright_source::load(root).is_err());
+    repaired(root, &plan, &before, &folders);
+}
+
+#[test]
+fn an_apply_of_a_new_plane_stopped_before_a_rename_is_repaired() {
+    let tree = copy();
+    let root = tree.path();
+    let (before, folders) = (snapshot(root), directories(root));
+    let plan = planned(root, &transaction(&add_plane("attic")));
+    published(&plan);
+    // Nothing was published: all there is of the plane is its staged file,
+    // in the directory staging made.
+    fs::write(root.join("world.jsonc"), as_it_was(&plan, "world.jsonc")).unwrap();
+    fs::remove_file(root.join("planes/attic/plane.jsonc")).unwrap();
+    fs::write(
+        root.join(staging_path("planes/attic/plane.jsonc")),
+        "staged",
+    )
+    .unwrap();
+    assert!(tilewright_source::load(root).is_err());
+    repaired(root, &plan, &before, &folders);
+}
+
+#[test]
+fn an_apply_of_a_new_definition_type_stopped_after_a_rename_is_repaired() {
+    let tree = copy();
+    let root = tree.path();
+    let (before, folders) = (snapshot(root), directories(root));
+    let plan = planned(root, &transaction(&add_definition_type("quest")));
+    published(&plan);
+    // The definition came first in path order.
+    let profile = "profile/profile.jsonc";
+    fs::write(root.join(profile), as_it_was(&plan, profile)).unwrap();
+    fs::remove_file(root.join("profile/schema/quest.jsonc")).unwrap();
+    assert!(tilewright_source::load(root).is_err());
+    repaired(root, &plan, &before, &folders);
+}
+
+#[test]
+fn a_plane_can_be_removed_and_made_again() {
+    let tree = copy();
+    let root = tree.path();
+    apply(root, &transaction(&add_plane("attic")));
+    apply(
+        root,
+        &transaction(
+            r#"{"op": "object.insert", "plane": "attic", "layer": 2, "at": [1, 1], "object": {"proto": "tree"}}"#,
+        ),
+    );
+    let tx = transaction(
+        r#"{"op": "remove", "path": "world.jsonc", "pointer": ["planes", 2]},
+    {"op": "document.delete", "path": "planes/attic/plane.jsonc"},
+    {"op": "document.delete", "path": "planes/attic/layers/2/0_0.jsonc"}"#,
+    );
+    round_trip(root, &tx);
+}
+
+/// Whether every directory under `root` that `before` does not have holds
+/// nothing but such directories, as an undo may leave them.
+fn only_empty_directories_added(root: &Path, before: &[String]) -> bool {
+    directories(root)
+        .iter()
+        .filter(|directory| !before.contains(directory))
+        .all(|directory| {
+            fs::read_dir(root.join(directory))
+                .unwrap()
+                .all(|entry| entry.unwrap().file_type().unwrap().is_dir())
+        })
+}
+
+#[cfg(unix)]
+#[test]
+fn a_directory_an_undo_leaves_is_ignored() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+    // Publishing leaves a directory whose mode or group is not that of the
+    // one above it, whichever changed. It holds no file, so the tree is the
+    // one the step was made on, and the undo plans and publishes.
+    for changed in ["planes/attic", "planes"] {
+        let tree = copy();
+        let root = tree.path();
+        let (before, folders) = (snapshot(root), directories(root));
+        let digest = tilewright_source::load(root).unwrap().source_digest();
+        let plan = planned(root, &transaction(&add_plane("attic")));
+        plan.check_undo().unwrap();
+        published(&plan);
+        let bits = mode(&root.join(changed));
+        fs::set_permissions(root.join(changed), fs::Permissions::from_mode(bits ^ 0o020)).unwrap();
+        apply(root, &reparsed("undo.jsonc", plan.inverse()));
+        assert!(root.join("planes/attic").is_dir(), "{changed}");
+        assert_eq!(snapshot(root), before);
+        assert!(only_empty_directories_added(root, &folders));
+        assert_eq!(
+            tilewright_source::load(root).unwrap().source_digest(),
+            digest
+        );
+    }
+}
+
+#[test]
+fn deleting_a_large_file_and_making_it_again_copies_it_no_more() {
+    const PAD: &str = "defs/proto/pad.jsonc";
+    let tree = copy();
+    let root = tree.path();
+    let text = format!(
+        "{{\"format\": \"tilewright.def/1\", \"type\": \"proto\", \"id\": \"pad\", \"fields\": {{\"face\": \"p.png\", \"layer\": \"item\"}}, \"custom\": {{\"example.org/pad\": \"{}\"}}}}\n",
+        "x".repeat(256 << 10)
+    );
+    fs::write(root.join(PAD), &text).unwrap();
+    let delete = format!(r#"{{"op": "document.delete", "path": "{PAD}"}}"#);
+    let create = format!(
+        r#"{{"op": "document.create", "path": "{PAD}", "text": "{{\"format\": \"tilewright.def/1\", \"type\": \"proto\", \"id\": \"pad\", \"fields\": {{\"face\": \"q.png\", \"layer\": \"item\"}}}}"}}"#
+    );
+    let mut operations = vec![delete.clone()];
+    for _ in 0..1_000 {
+        operations.push(create.clone());
+        operations.push(delete.clone());
+    }
+    operations.push(create.clone());
+    let tx = transaction(&operations.join(",\n    "));
+    // Each pair is charged its own small size and nothing for the file.
+    let size = u64::try_from(text.len()).unwrap();
+    let _lowered = Lowered::to(limits::READ_BYTES, size + (1 << 20));
+
+    // No step of the inverse holds a copy of the file, though each
+    // deletion dropped the steps before it, down to one creation of it.
+    let source = SourceRoot::new(root);
+    let on_disk = Overlay::new();
+    let workspace = carry_out(&source, &on_disk, Names::OWN, &tx, &Options::default()).unwrap();
+    let steps = &workspace.entries[PAD].inverse;
+    assert!(matches!(steps[0], Primitive::CreateBase), "{steps:?}");
+    assert!(
+        steps
+            .iter()
+            .all(|step| !matches!(step, Primitive::Create { text } if text.len() > 1 << 10)),
+        "{}",
+        steps.len()
+    );
+    drop(workspace);
+
+    // Its inverse still deletes the file and creates the text it began
+    // with, and writing it copied that once.
+    let plan = planned(root, &tx);
+    plan.check_undo().unwrap();
+    published(&plan);
+    apply(root, &reparsed("undo.jsonc", plan.inverse()));
+    assert_eq!(read(root, PAD), text);
+}
+
+/// The text of the definition `id`, with `pad` bytes of custom data.
+fn padded(id: &str, pad: usize) -> String {
+    format!(
+        "{{\"format\": \"tilewright.def/1\", \"type\": \"proto\", \"id\": \"{id}\", \"fields\": {{\"face\": \"p.png\", \"layer\": \"item\"}}, \"custom\": {{\"example.org/pad\": \"{}\"}}}}\n",
+        "x".repeat(pad)
+    )
+}
+
+/// An operation that gives the definition `id` `pad` bytes of custom data.
+fn set_pad(id: &str, pad: usize) -> String {
+    format!(
+        r#"{{"op": "set", "path": "defs/proto/{id}.jsonc", "pointer": ["custom", "example.org/pad"], "value": "{}"}}"#,
+        "x".repeat(pad)
+    )
+}
+
+/// The fixture with `aa` small and `zz` large, and the step that swaps
+/// their sizes, so that each whole tree holds as much, but the first file
+/// after it and the last before it hold more than that together. With
+/// the bytes each tree holds in the two files.
+fn swapping_sizes() -> (tempfile::TempDir, Transaction, u64) {
+    let (small, large) = (1 << 10, 9 << 10);
+    let tree = copy();
+    fs::write(tree.path().join("defs/proto/aa.jsonc"), padded("aa", small)).unwrap();
+    fs::write(tree.path().join("defs/proto/zz.jsonc"), padded("zz", large)).unwrap();
+    let tx = transaction(&format!(
+        "{},\n    {}",
+        set_pad("aa", large),
+        set_pad("zz", small)
+    ));
+    let whole = u64::try_from(padded("aa", small).len() + padded("zz", large).len()).unwrap();
+    (tree, tx, whole)
+}
+
+#[test]
+fn a_repair_reads_a_mix_of_the_trees_when_each_tree_is_within_the_budget() {
+    const LAST: &str = "defs/proto/zz.jsonc";
+    let (tree, tx, whole) = swapping_sizes();
+    let root = tree.path();
+    let (before, folders) = (snapshot(root), directories(root));
+    let _lowered = Lowered::to(whole, limits::WORK);
+    let plan = planned(root, &tx);
+    plan.check_undo().unwrap();
+    published(&plan);
+    // It stopped after the first rename, so the last file, read last, is
+    // as it was. Only by reading it can the repair tell that it is done.
+    fs::write(root.join(LAST), as_it_was(&plan, LAST)).unwrap();
+    let held: u64 = ["defs/proto/aa.jsonc", LAST]
+        .iter()
+        .map(|path| fs::metadata(root.join(path)).unwrap().len())
+        .sum();
+    assert!(held > whole && held <= 2 * whole, "{held} {whole}");
+    repaired(root, &plan, &before, &folders);
+}
+
+#[test]
+fn applying_again_reads_a_mix_of_the_trees_too() {
+    const LAST: &str = "defs/proto/zz.jsonc";
+    let (tree, tx, whole) = swapping_sizes();
+    let root = tree.path();
+    let _lowered = Lowered::to(whole, limits::WORK);
+    let plan = planned(root, &tx);
+    let done = {
+        published(&plan);
+        snapshot(root)
+    };
+    fs::write(root.join(LAST), as_it_was(&plan, LAST)).unwrap();
+    // The first file is at its result, and read first; the last is edited.
+    apply(root, &reparsed("sealed.jsonc", plan.sealed()));
+    assert_eq!(snapshot(root), done);
+}
+
+/// A transaction with no operations that finds the definitions `ids`
+/// already at their result.
+fn all_done(root: &Path, ids: &[&str]) -> Transaction {
+    let entries = |digest: &dyn Fn(&str) -> String| -> String {
+        ids.iter()
+            .map(|id| {
+                format!(
+                    "{{\"path\": \"defs/proto/{id}.jsonc\", \"sha256\": \"{}\"}}",
+                    digest(id)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let other = transaction::hex(&[0; 32]);
+    let text = format!(
+        "{{\"format\": \"tilewright.transaction/1\", \"base\": [{}], \"result\": [{}], \"operations\": []}}\n",
+        entries(&|_| other.clone()),
+        entries(&|id| {
+            let text = read(root, &format!("defs/proto/{id}.jsonc"));
+            transaction::hex(&digest(Some(&text)).unwrap())
+        })
+    );
+    reparsed("tx.jsonc", &text)
+}
+
+#[test]
+fn files_at_their_result_have_an_allowance_of_the_budget_and_no_more() {
+    let tree = copy();
+    let root = tree.path();
+    let ids = ["a1", "a2", "a3", "a4"];
+    for id in ids {
+        fs::write(
+            root.join(format!("defs/proto/{id}.jsonc")),
+            padded(id, 1 << 10),
+        )
+        .unwrap();
+    }
+    let size = u64::try_from(padded("a1", 1 << 10).len()).unwrap();
+    // Each file is read before it is known to be done, so these are all
+    // read, and within the allowance.
+    {
+        let _lowered = Lowered::to(2 * size, limits::WORK);
+        planned(root, &all_done(root, &ids[..2]));
+    }
+    // A transaction may claim that of every file, so that allowance has
+    // to end too: this one stops at the third.
+    let _lowered = Lowered::to(2 * size, limits::WORK);
+    let found = problems(root, &all_done(root, &ids));
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert!(has(&found, "tx.limit", "hold more than"), "{found:#?}");
+}
+
+#[test]
+fn files_at_their_base_have_the_budget_whether_or_not_it_can_resume() {
+    let (tree, tx, whole) = swapping_sizes();
+    let root = tree.path();
+    let sealed = reparsed("sealed.jsonc", planned(root, &tx).sealed());
+    let _lowered = Lowered::to(whole - 1, limits::WORK);
+    // It can resume, so it reads past the budget to see, and is refused.
+    assert!(has(&problems(root, &sealed), "tx.limit", "hold more than"));
+    // It cannot: it is refused too. How much each reads is the next
+    // test's.
+    let tests = transaction(
+        r#"{"op": "test", "path": "defs/proto/aa.jsonc", "pointer": ["id"], "value": "aa"},
+    {"op": "test", "path": "defs/proto/zz.jsonc", "pointer": ["id"], "value": "zz"}"#,
+    );
+    let sealed = {
+        let _raised = Lowered::to(limits::READ_BYTES, limits::WORK);
+        reparsed("sealed.jsonc", planned(root, &tests).sealed())
+    };
+    assert!(has(&problems(root, &sealed), "tx.limit", "hold more than"));
+}
+
+#[test]
+fn a_repair_of_an_invalid_tree_passes_the_check_and_its_undo_is_refused() {
+    const TREE: &str = "defs/proto/tree.jsonc";
+    let tree = copy();
+    let root = tree.path();
+    // A field its schema does not have, so the tree does not validate.
+    let broken = read(root, TREE).replace("\"blocks_view\": true", "\"nonsense\": true");
+    fs::write(root.join(TREE), broken).unwrap();
+    assert!(tilewright_source::load(root).is_err());
+    let tx = transaction(
+        r#"{"op": "remove", "path": "defs/proto/tree.jsonc", "pointer": ["fields", "nonsense"]}"#,
+    );
+    let plan = planned(root, &tx);
+    // The check does not validate the tree an undo leaves, so that a
+    // transaction can repair a tree: it would refuse every repair.
+    plan.check_undo().unwrap();
+    published(&plan);
+    assert!(tilewright_source::load(root).is_ok());
+    // The undo recreates the invalid tree, and planning it does validate.
+    let found = problems(root, &reparsed("undo.jsonc", plan.inverse()));
+    assert!(has(&found, "shape.unknown_key", "nonsense"), "{found:#?}");
+}
+
+#[test]
+fn an_interrupted_undo_of_a_new_plane_can_be_applied_again() {
+    let tree = copy();
+    let root = tree.path();
+    let (before, folders) = (snapshot(root), directories(root));
+    let plan = apply(
+        root,
+        &transaction(&format!(
+            r#"{},
+    {{"op": "object.insert", "plane": "attic", "layer": 0, "at": [1, 1], "object": {{"proto": "tree"}}}},
+    {{"op": "object.insert", "plane": "attic", "layer": 3, "at": [70, 1], "object": {{"proto": "tree"}}}}"#,
+            add_plane("attic")
+        )),
+    );
+    let undo = reparsed("undo.jsonc", plan.inverse());
+    let undoing = planned(root, &undo);
+    // It stopped in step 4: `world.jsonc` was published, and the first
+    // file in path order deleted, which left its layer's directory empty.
+    let world = undoing
+        .files()
+        .iter()
+        .find(|file| file.path == "world.jsonc");
+    fs::write(
+        root.join("world.jsonc"),
+        world.unwrap().after.as_ref().unwrap(),
+    )
+    .unwrap();
+    fs::remove_file(root.join("planes/attic/layers/0/0_0.jsonc")).unwrap();
+    // Applied again, it finds those files done and does the rest.
+    let again = planned(root, &undo);
+    again.check_undo().unwrap();
+    published(&again);
+    assert_eq!(snapshot(root), before);
+    assert!(only_empty_directories_added(root, &folders));
+    assert!(tilewright_source::load(root).is_ok());
+}
+
+#[test]
+fn an_interrupted_deletion_of_a_plane_can_be_applied_again() {
+    let tree = copy();
+    let root = tree.path();
+    let (before, folders) = (snapshot(root), directories(root));
+    apply(root, &transaction(&add_plane("attic")));
+    apply(
+        root,
+        &transaction(
+            r#"{"op": "object.insert", "plane": "attic", "layer": 2, "at": [1, 1], "object": {"proto": "tree"}}"#,
+        ),
+    );
+    let plan = planned(
+        root,
+        &transaction(
+            r#"{"op": "remove", "path": "world.jsonc", "pointer": ["planes", 2]},
+    {"op": "document.delete", "path": "planes/attic/plane.jsonc"},
+    {"op": "document.delete", "path": "planes/attic/layers/2/0_0.jsonc"}"#,
+        ),
+    );
+    let sealed = reparsed("sealed.jsonc", plan.sealed());
+    // It stopped in step 4, after `world.jsonc` and the chunk, the first
+    // file deleted in path order.
+    let world = plan.files().iter().find(|file| file.path == "world.jsonc");
+    fs::write(
+        root.join("world.jsonc"),
+        world.unwrap().after.as_ref().unwrap(),
+    )
+    .unwrap();
+    fs::remove_file(root.join("planes/attic/layers/2/0_0.jsonc")).unwrap();
+    let again = planned(root, &sealed);
+    again.check_undo().unwrap();
+    published(&again);
+    assert_eq!(snapshot(root), before);
+    assert!(only_empty_directories_added(root, &folders));
+    assert!(tilewright_source::load(root).is_ok());
+}
+
+/// The least `maximum_entries` the tree at `root` loads with.
+fn least_entries(root: &Path) -> usize {
+    let fits = |maximum_entries| {
+        let options = LoadOptions {
+            maximum_entries,
+            ..LoadOptions::default()
+        };
+        tilewright_source::load_with(root, &options).is_ok()
+    };
+    let (mut low, mut high) = (0, 4_096);
+    assert!(fits(high) && !fits(low));
+    while high - low > 1 {
+        let middle = low + (high - low) / 2;
+        if fits(middle) {
+            high = middle;
+        } else {
+            low = middle;
+        }
+    }
+    high
+}
+
+/// A copy of the fixture with five more definitions, `x1` to `x5`, and
+/// options whose entry budget is the least it loads with, raised by
+/// `spare`.
+fn at_the_least_budget(spare: usize) -> (tempfile::TempDir, Options) {
+    let tree = copy();
+    let root = tree.path();
+    for index in 1..=5 {
+        fs::write(
+            root.join(format!("defs/proto/x{index}.jsonc")),
+            format!(
+                r#"{{"format": "tilewright.def/1", "type": "proto", "id": "x{index}", "fields": {{"face": "x.png", "layer": "item"}}}}"#
+            ),
+        )
+        .unwrap();
+    }
+    let options = Options {
+        load: LoadOptions {
+            maximum_entries: least_entries(root) + spare,
+            ..LoadOptions::default()
+        },
+        ..Options::default()
+    };
+    (tree, options)
+}
+
+/// Steps that make directories the loader lists, with how many each
+/// makes: `planes/attic`; layer 9's; and `planes/attic` with its `layers`
+/// and its layer 0's. Each deletes as many of the definitions
+/// [`at_the_least_budget`] adds as it makes files and directories, so that
+/// the tree it leaves is no larger than the one it began with.
+fn making_directories() -> [(usize, String); 3] {
+    let deleting = |count: usize| {
+        (1..=count)
+            .map(|index| {
+                format!(r#"{{"op": "document.delete", "path": "defs/proto/x{index}.jsonc"}}"#)
+            })
+            .collect::<Vec<_>>()
+            .join(",\n    ")
+    };
+    let insert = |plane: &str, layer: u32| {
+        format!(
+            r#"{{"op": "object.insert", "plane": "{plane}", "layer": {layer}, "at": [1, 1], "object": {{"proto": "tree"}}}}"#
+        )
+    };
+    [
+        (1, format!("{},\n    {}", deleting(2), add_plane("attic"))),
+        (
+            1,
+            format!("{},\n    {}", deleting(2), insert("overworld", 9)),
+        ),
+        (
+            3,
+            format!(
+                "{},\n    {},\n    {}",
+                deleting(5),
+                add_plane("attic"),
+                insert("attic", 0)
+            ),
+        ),
+    ]
+}
+
+#[test]
+fn an_undo_plans_with_room_for_the_directories_its_step_made() {
+    // Each costs it an entry, as long as it is on disk.
+    for (spare, step) in making_directories() {
+        let (tree, options) = at_the_least_budget(spare);
+        let root = tree.path();
+        let plan = crate::plan(root, &transaction(&step), &options).unwrap();
+        plan.check_undo().unwrap();
+        published(&plan);
+        let undo = crate::plan(root, &reparsed("undo.jsonc", plan.inverse()), &options)
+            .unwrap_or_else(|problems| panic!("{step}\n{problems:#?}"));
+        published(&undo);
+        crate::plan(root, &reparsed("redo.jsonc", undo.inverse()), &options).unwrap();
+    }
+}
+
+#[test]
+fn an_undo_without_room_for_the_directories_its_step_made_is_refused() {
+    // The limit section 8.1 states: the step fits a budget one short of
+    // that, and its undo does not, by the directories it made, nested or
+    // not.
+    for (made, step) in making_directories() {
+        let (tree, options) = at_the_least_budget(made - 1);
+        let root = tree.path();
+        let plan = crate::plan(root, &transaction(&step), &options).unwrap();
+        plan.check_undo().unwrap();
+        published(&plan);
+        let found = crate::plan(root, &reparsed("undo.jsonc", plan.inverse()), &options)
+            .expect_err("the undo should need one more entry");
+        assert!(
+            has(&found, "source.budget", "directory entries"),
+            "{step}\n{found:#?}"
+        );
+    }
+}
+
+#[test]
+fn a_repair_at_the_entry_budget_can_need_the_directories_its_step_made() {
+    // An apply stopped in step 4 after its renames: the definitions it
+    // deletes are still there, each with its staging file, so the tree does
+    // not validate. The repair loads as the undo does, so at the budget it
+    // is refused for the directory the step made, and section 9 gives the
+    // ways out.
+    let [(_, plane), (_, layer), _] = making_directories();
+    for (step, resumes) in [(plane, true), (layer, false)] {
+        let (tree, options) = at_the_least_budget(0);
+        let root = tree.path();
+        let (before, folders) = (snapshot(root), directories(root));
+        let plan = crate::plan(root, &transaction(&step), &options).unwrap();
+        plan.check_undo().unwrap();
+        published(&plan);
+        for id in ["x1", "x2"] {
+            let path = format!("defs/proto/{id}.jsonc");
+            fs::write(root.join(&path), as_it_was(&plan, &path)).unwrap();
+            fs::write(root.join(staging_path(&path)), "").unwrap();
+        }
+        assert!(tilewright_source::load_with(root, &options.load).is_err());
+        let inverse = reparsed("undo.jsonc", plan.inverse());
+        let found = crate::plan(root, &inverse, &options)
+            .expect_err("the repair should need one more entry");
+        assert!(
+            has(&found, "source.budget", "directory entries"),
+            "{step}\n{found:#?}"
+        );
+        let sealed = reparsed("sealed.jsonc", plan.sealed());
+        if resumes {
+            // A step that can resume is applied again instead.
+            let again = crate::plan(root, &sealed, &options).unwrap();
+            again.check_undo().unwrap();
+            published(&again);
+            assert!(tilewright_source::load_with(root, &options.load).is_ok());
+        } else {
+            // One that cannot is repaired with a load with more entries.
+            assert!(crate::plan(root, &sealed, &options).is_err());
+            let more = Options {
+                load: LoadOptions {
+                    maximum_entries: options.load.maximum_entries + 1,
+                    ..options.load
+                },
+                ..options
+            };
+            let repair = crate::plan(root, &inverse, &more).unwrap();
+            repair.check_undo().unwrap();
+            published(&repair);
+            assert_eq!(snapshot(root), before);
+            assert_eq!(directories(root), folders);
+        }
+    }
+}
+
+#[test]
+fn publishing_an_undo_can_need_an_entry_for_a_directory_its_step_made_under_profile() {
+    // Publishing counts the entries of the root and of profile/, which a
+    // load does not list, against a budget of their own, as large as the
+    // load's and one more for the lock file it makes in the root on
+    // Windows. With the root filled with assets up to it, a step that makes
+    // profile/notes publishes, and its undo, which finds notes there, needs
+    // one more entry: the limit section 8.1 states.
+    let step =
+        r#"{"op": "document.create", "path": "profile/notes/a.jsonc", "document": {"note": 1}}"#;
+    let lock = usize::from(cfg!(windows));
+    for spare in [0, 1] {
+        let tree = copy();
+        let root = tree.path();
+        let least = least_entries(root);
+        let count = |path: &Path| fs::read_dir(path).unwrap().count();
+        let filled = least + spare + 1 - lock - count(root) - count(&root.join("profile"));
+        for index in 0..filled {
+            fs::write(root.join(format!("asset{index}.txt")), "x").unwrap();
+        }
+        assert_eq!(least_entries(root), least);
+        let options = Options {
+            load: LoadOptions {
+                maximum_entries: least + spare,
+                ..LoadOptions::default()
+            },
+            ..Options::default()
+        };
+        let plan = crate::plan(root, &transaction(step), &options).unwrap();
+        plan.check_undo().unwrap();
+        published(&plan);
+        let undo = crate::plan(root, &reparsed("undo.jsonc", plan.inverse()), &options)
+            .unwrap_or_else(|problems| panic!("{problems:#?}"));
+        let before = snapshot(root);
+        let error = publish(&undo).expect_err("the undo should need one more entry");
+        assert!(!error.applied, "{error:#?}");
+        assert!(
+            error
+                .problems
+                .iter()
+                .any(|problem| problem.path == "profile"
+                    && problem.code == "tx.limit"
+                    && problem.message.contains("that a load does not list")),
+            "{error:#?}"
+        );
+        assert_eq!(snapshot(root), before);
+        // With one more entry for notes, it publishes.
+        let options = Options {
+            load: LoadOptions {
+                maximum_entries: least + spare + 1,
+                ..LoadOptions::default()
+            },
+            ..Options::default()
+        };
+        let undo = crate::plan(root, &reparsed("undo.jsonc", plan.inverse()), &options).unwrap();
+        published(&undo);
+        assert!(!root.join("profile/notes/a.jsonc").exists());
+    }
+}
+
+#[test]
+fn reading_goes_past_the_budget_only_for_a_base_that_can_resume() {
+    let (tree, tx, whole) = swapping_sizes();
+    let root = tree.path();
+    let tests = transaction(
+        r#"{"op": "test", "path": "defs/proto/aa.jsonc", "pointer": ["id"], "value": "aa"},
+    {"op": "test", "path": "defs/proto/zz.jsonc", "pointer": ["id"], "value": "zz"}"#,
+    );
+    let cannot = reparsed("tests.jsonc", planned(root, &tests).sealed());
+    let can = reparsed("sealed.jsonc", planned(root, &tx).sealed());
+    let budget = whole - 1;
+    let _lowered = Lowered::to(budget, limits::WORK);
+    let source = SourceRoot::new(root);
+    let on_disk = Overlay::new();
+    let checked = |transaction: &Transaction| {
+        let mut workspace = Workspace::new(&source, &on_disk, Names::OWN);
+        let mut problems = Problems::new(transaction);
+        check_base(&mut workspace, transaction, &mut problems);
+        assert!(!problems.is_empty());
+        workspace
+    };
+    // One that cannot resume stops reading at the budget.
+    assert!(checked(&cannot).bytes_read() <= budget);
+    // One that can reads on, to see which files are done, up to twice
+    // the budget...
+    let mut workspace = checked(&can);
+    assert!(workspace.bytes_read() > budget && workspace.bytes_read() <= 2 * budget);
+    // ...but only while its base is checked: what it reads next has the
+    // one budget left, which is spent.
+    assert!(workspace.exists("defs/proto/tree.jsonc").is_err());
+}
+
+#[test]
+fn a_file_that_is_not_utf8_counts_against_the_files_carried_out() {
+    let (tree, tx, whole) = swapping_sizes();
+    let root = tree.path();
+    let sealed = reparsed("sealed.jsonc", planned(root, &tx).sealed());
+    // aa, checked first, is not UTF-8. zz, at its base, fits the budget
+    // alone but not with aa's bytes, which stop the check once zz is
+    // counted.
+    let aa = whole * 6 / 10;
+    let mut bytes = vec![b'x'; usize::try_from(aa).unwrap()];
+    bytes[0] = 0xff;
+    fs::write(root.join("defs/proto/aa.jsonc"), bytes).unwrap();
+    let zz = fs::metadata(root.join("defs/proto/zz.jsonc"))
+        .unwrap()
+        .len();
+    assert!(zz <= whole && aa + zz > whole, "{aa} {zz} {whole}");
+    let _lowered = Lowered::to(whole, limits::WORK);
+    let found = problems(root, &sealed);
+    assert!(has(&found, "tx.conflict", "not UTF-8"), "{found:#?}");
+    assert!(
+        has(&found, "tx.limit", "the touched files hold more than"),
+        "{found:#?}"
+    );
+}
+
+#[test]
+fn publishing_counts_the_entries_a_load_counts() {
+    // A plan that deletes files fits the entry budget of the tree it
+    // leaves, which a load counts without them: so does publishing, which
+    // lists the directory they are in to check names. The definitions it
+    // keeps make the budget large enough for the files the plan touches.
+    let tree = copy();
+    let root = tree.path();
+    let definition = |id: String| {
+        fs::write(
+            root.join(format!("defs/proto/{id}.jsonc")),
+            format!(
+                r#"{{"format": "tilewright.def/1", "type": "proto", "id": "{id}", "fields": {{"face": "x.png", "layer": "item"}}}}"#
+            ),
+        )
+        .unwrap();
+    };
+    for index in 0..100 {
+        definition(format!("kept{index}"));
+    }
+    let least = least_entries(root);
+    for index in 0..30 {
+        definition(format!("x{index}"));
+    }
+    let at = |maximum_entries| Options {
+        load: LoadOptions {
+            maximum_entries,
+            ..LoadOptions::default()
+        },
+        ..Options::default()
+    };
+    let deletions: Vec<String> = (0..30)
+        .map(|index| format!(r#"{{"op": "document.delete", "path": "defs/proto/x{index}.jsonc"}}"#))
+        .collect();
+    let plan = crate::plan(root, &transaction(&deletions.join(",\n    ")), &at(least)).unwrap();
+    published(&plan);
+    assert!(!root.join("defs/proto/x0.jsonc").exists());
+
+    // Directories that hold no file beside a file it edits are counted
+    // there as a load counts them.
+    let tree = copy();
+    let root = tree.path();
+    for index in 0..100 {
+        fs::create_dir(root.join(format!("planes/overworld/layers/0/n{index}"))).unwrap();
+    }
+    let plan = crate::plan(
+        root,
+        &transaction(
+            r#"{"op": "object.insert", "plane": "overworld", "layer": 0, "at": [1, 1], "object": {"proto": "tree"}}"#,
+        ),
+        &at(least_entries(root)),
+    )
+    .unwrap();
+    published(&plan);
+}
+
+#[test]
+fn a_plane_or_type_named_like_a_staging_file_is_undone_and_removed() {
+    // Identifiers may end in `.tilewright-tmp`; only names that also start
+    // with `.` are staging names.
+    undone_with_its_directories(&add_plane("attic.tilewright-tmp"));
+    undone_with_its_directories(&add_definition_type("quest.tilewright-tmp"));
+    let tree = copy();
+    let root = tree.path();
+    apply(root, &transaction(&add_plane("attic.tilewright-tmp")));
+    apply(
+        root,
+        &transaction(
+            r#"{"op": "remove", "path": "world.jsonc", "pointer": ["planes", 2]},
+    {"op": "document.delete", "path": "planes/attic.tilewright-tmp/plane.jsonc"}"#,
+        ),
+    );
+    assert!(tilewright_source::load(root).is_ok());
 }

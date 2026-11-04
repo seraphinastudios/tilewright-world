@@ -96,6 +96,9 @@ pub(crate) enum Primitive {
     Create {
         text: String,
     },
+    /// Creates the file with the text it began with, which its entry holds,
+    /// so that dropping the steps before it copies nothing.
+    CreateBase,
     Delete,
 }
 
@@ -152,7 +155,7 @@ impl Primitive {
                 separator,
             } => pointer(steps).saturating_add(separator.len()),
             Self::Create { text } => text.len(),
-            Self::Delete => 0,
+            Self::CreateBase | Self::Delete => 0,
         }
     }
 }
@@ -195,16 +198,16 @@ impl Entry {
     /// Drops the inverse steps the inverse will not hold: all of them for a
     /// file back as it began, and all but one creation of its text for a
     /// file deleted. Should the file be created again, undoing that and
-    /// then creating the text restores it as well.
+    /// then creating the text restores it as well. It runs once for each
+    /// operation, which is not charged for this, so it must cost next to
+    /// nothing whatever the file's size: the text is not copied.
     fn compact(&mut self) {
         if !self.is_changed() {
             self.inverse.clear();
             self.recorded = (0, 0);
-        } else if let (Some(base), Current::Absent) = (&self.base, &self.current)
-            && self.inverse.len() != 1
-        {
-            self.inverse = vec![Primitive::Create { text: base.clone() }];
-            self.recorded = size_of(&self.inverse);
+        } else if let (Some(base), Current::Absent) = (&self.base, &self.current) {
+            self.inverse = vec![Primitive::CreateBase];
+            self.recorded = (u64::try_from(base.len()).unwrap_or(u64::MAX), 1);
         }
     }
 }
@@ -296,6 +299,13 @@ pub(crate) struct Workspace<'r> {
     names: Names,
     pub entries: BTreeMap<String, Entry>,
     read_bytes: u64,
+    /// Bytes read of files found already at their result, which have an
+    /// allowance of their own, and no operation edits.
+    done_bytes: u64,
+    /// The base of a transaction that can resume is being checked: a file
+    /// may turn out to count against either allowance, so reading goes on
+    /// up to both, and [`Self::settle`] says which it was.
+    resuming: bool,
     work: u64,
     /// The documents the current operation has been charged for.
     charged: BTreeSet<String>,
@@ -352,6 +362,8 @@ impl<'r> Workspace<'r> {
             names,
             entries: BTreeMap::new(),
             read_bytes: 0,
+            done_bytes: 0,
+            resuming: false,
             work: 0,
             charged: BTreeSet::new(),
             inverse_bytes: 0,
@@ -432,7 +444,13 @@ impl<'r> Workspace<'r> {
                 let spent =
                     || Failure::limit(format!("the touched files hold more than {budget} bytes"));
                 let file_limit = u64::try_from(limits().max_input_bytes).unwrap_or(u64::MAX);
-                let left = budget.saturating_sub(self.read_bytes);
+                let left = if self.resuming {
+                    budget
+                        .saturating_mul(2)
+                        .saturating_sub(self.read_bytes.saturating_add(self.done_bytes))
+                } else {
+                    budget.saturating_sub(self.read_bytes)
+                };
                 let bytes = match read(root, self.under, path, file_limit.min(left)) {
                     Ok(bytes) => bytes,
                     // A file past either bound rejects the transaction, so
@@ -476,6 +494,49 @@ impl<'r> Workspace<'r> {
                 }))
             }
         }
+    }
+
+    /// The bytes read from the files touched so far, against either
+    /// allowance.
+    #[cfg(test)]
+    pub(crate) fn bytes_read(&self) -> u64 {
+        self.read_bytes.saturating_add(self.done_bytes)
+    }
+
+    /// Starts or ends checking the base of a transaction that can resume.
+    /// Whether a file is at its result is known only once it is read, so
+    /// each file is read and then settled.
+    pub fn set_resuming(&mut self, resuming: bool) {
+        self.resuming = resuming;
+    }
+
+    /// Counts the file `path`, read for such a base, against the allowance
+    /// of files carried out, or that of files `done`, already at their
+    /// result. Each allowance is the read budget, so a mix of a tree before
+    /// a transaction and after it is read when each tree alone is within
+    /// the budget, whatever it holds, and no more than twice the budget is
+    /// ever read.
+    pub fn settle(&mut self, path: &str, done: bool) -> Outcome<()> {
+        if !self.resuming {
+            return Ok(());
+        }
+        if done {
+            let bytes = self
+                .entries
+                .get(path)
+                .and_then(|entry| entry.base.as_ref())
+                .map_or(0, |text| u64::try_from(text.len()).unwrap_or(u64::MAX));
+            self.read_bytes = self.read_bytes.saturating_sub(bytes);
+            self.done_bytes = self.done_bytes.saturating_add(bytes);
+        }
+        let budget = self.budgets.read_bytes;
+        if self.read_bytes.max(self.done_bytes) > budget {
+            self.spent = true;
+            return Err(Failure::limit(format!(
+                "the touched files hold more than {budget} bytes"
+            )));
+        }
+        Ok(())
     }
 
     /// Whether a budget was exceeded, which was reported as the failure of
@@ -634,11 +695,13 @@ impl<'r> Workspace<'r> {
             Current::Parsed(document) => document.source().to_owned(),
         };
         let (length, recorded) = (entry.inverse.len(), entry.recorded);
-        // The next operation's `compact` leaves only the creation of the
-        // text the file began with, which is this step if no edit came
-        // before it. While the file is deleted, the inverse only creates
-        // it; should it be created again, the inverse undoes that and the
-        // edits after it, then creates the text.
+        // This step undoes the deletion should the file be made again in
+        // this operation. Before the next one, `compact` replaces it, and
+        // every step before it, with one creation of the text the file
+        // began with, which holds no copy: the inverse takes the text from
+        // the entry when it is written. While the file is deleted, the
+        // inverse only creates it; should it be created again, the inverse
+        // undoes that and the edits after it, then creates the text.
         if entry.base.is_some() {
             let create = Primitive::Create { text: text.clone() };
             entry.recorded = plus(entry.recorded, size_of(std::slice::from_ref(&create)));
