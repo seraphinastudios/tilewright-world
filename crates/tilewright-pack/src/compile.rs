@@ -680,7 +680,7 @@ pub fn compile(world: &World) -> Result<Vec<u8>, Error> {
             "the world does not compile to a valid pack: {error}"
         ))
     })?;
-    let connection = pack.into_connection();
+    let mut connection = pack.into_connection();
     let data = connection.serialize(MAIN_DB)?;
     Ok(data.to_vec())
 }

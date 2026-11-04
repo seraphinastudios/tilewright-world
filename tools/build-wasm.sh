@@ -157,6 +157,9 @@ quoted() {
 export CARGO_TARGET_DIR=${repository}/target
 export CARGO_ENCODED_RUSTFLAGS="--remap-path-prefix=${repository}=/tilewright-world"$'\x1f'"--remap-path-prefix=${cargo_home}=/cargo"
 export CC_SHELL_ESCAPED_FLAGS=1
+# SQLite is the crate's own, built with its own options, unless these say
+# otherwise.
+unset SQLITE_WASM_RS_FLAGS SQLITE_WASM_RS_SOURCE_DIR SQLITE_WASM_RS_UPDATE_BINDGEN
 CFLAGS_wasm32_unknown_unknown="-ffile-prefix-map=$(quoted "${repository}")=/tilewright-world -ffile-prefix-map=$(quoted "${cargo_home}")=/cargo"
 export CFLAGS_wasm32_unknown_unknown
 

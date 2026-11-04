@@ -20,11 +20,15 @@ tilewright-source.workspace = true
 zstd.workspace = true
 
 # On the web (`wasm32-unknown-unknown`), SQLite comes from `sqlite-wasm-rs`,
-# which compiles its own copy with its own options: SQLite 3.53.0 in
-# sqlite-wasm-rs 0.5.5, where `libsqlite3-sys` bundles 3.53.2. The
+# which compiles its own copy with its own options: SQLite 3.53.4 in
+# sqlite-wasm-rs 0.6.2, where `libsqlite3-sys` bundles 3.54.1. The
 # conformance fixtures, which both builds run, keep their behaviour alike.
+# It is a direct dependency, though only `rusqlite` calls it, for two things
+# `rusqlite` alone would not ask for: 0.6 links only with its `wasm-bindgen`
+# feature, and SQLite before 3.53.3 overruns the heap checking a crafted pack.
 [target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
 rusqlite = { workspace = true, features = ["ffi-sqlite-wasm-rs"] }
+sqlite-wasm-rs.workspace = true
 
 [dev-dependencies]
 rusqlite.workspace = true

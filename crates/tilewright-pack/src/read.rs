@@ -142,9 +142,13 @@ enum Source {
     /// A file, hashed from its path; its name is the expected digest when
     /// it is 64 hex digits.
     File(PathBuf),
-    /// An image in memory, hashed from SQLite's read-only copy of it, and
-    /// the digest the caller expects, if any.
-    Image(Option<[u8; 32]>),
+    /// An image in memory: the SHA-256 of SQLite's read-only copy of it,
+    /// taken as the copy was filled because `rusqlite` serializes only
+    /// through `&mut Connection`, and the digest the caller expects, if any.
+    Image {
+        digest: [u8; 32],
+        expected: Option<[u8; 32]>,
+    },
     /// A pack the compiler is checking in memory.
     Compiled,
 }
@@ -620,11 +624,12 @@ impl Pack {
     /// its size, identity and schema as [`Pack::open_with`] checks a file's.
     /// An image longer than `limits.maximum_pack_bytes` is rejected before
     /// any of it is read. SQLite reads a read-only copy in memory, which
-    /// stays the pack's bytes until it is dropped.
+    /// stays the pack's bytes until it is dropped. The copy is hashed as it
+    /// is filled, so opening an image costs one SHA-256 of it.
     ///
     /// `digest`, when given, is the SHA-256 the image must have. Like a file
     /// name that is a digest, verification compares it with the image's
-    /// digest; opening does not hash the image.
+    /// digest; opening does not compare them.
     ///
     /// # Errors
     /// Returns an error if `read` fails, ends early or yields more than
@@ -653,6 +658,7 @@ impl Pack {
             missing: false,
             failure: None,
             head: Vec::with_capacity(HEADER_BYTES),
+            hasher: Sha256::new(),
         };
         // An empty image is an empty database, as an empty file is; SQLite
         // cannot allocate a copy of no bytes.
@@ -687,7 +693,10 @@ impl Pack {
         check_pages(&connection, length, limits)?;
         Ok(Self {
             connection,
-            source: Source::Image(digest),
+            source: Source::Image {
+                digest: image.hasher.finalize().into(),
+                expected: digest,
+            },
             maximum_bytes: limits.maximum_pack_bytes,
         })
     }
@@ -1052,8 +1061,8 @@ impl Pack {
     /// Packs are content-addressed files opened from directories the caller
     /// controls; a directory that others can write to is not supported. It
     /// reads at most the pack size limit the pack was opened with, and fails
-    /// for a longer file. An image is hashed from the read-only copy SQLite
-    /// reads, so its digest binds to the bytes the reads see.
+    /// for a longer file. An image's digest was taken as SQLite's read-only
+    /// copy was filled, so it binds to the bytes the reads see.
     ///
     /// # Errors
     /// Returns an error if the file cannot be read or is longer than the
@@ -1066,13 +1075,7 @@ impl Pack {
     fn digest_within(&self, maximum: u64) -> Result<[u8; 32], Error> {
         let path = match &self.source {
             Source::File(path) => path,
-            Source::Image(_) => {
-                let image = self.connection.serialize(rusqlite::MAIN_DB)?;
-                if u64::try_from(image.len()).map_or(true, |length| length > maximum) {
-                    return Err(too_long(maximum));
-                }
-                return Ok(Sha256::digest(&*image).into());
-            }
+            Source::Image { digest, .. } => return Ok(*digest),
             Source::Compiled => {
                 return Err(Error::Rejected(
                     ErrorCode::NotAFile,
@@ -1130,7 +1133,9 @@ impl Pack {
     /// `limits.maximum_pack_bytes` and the one the pack was opened with, so
     /// verifying never reads more than opening allowed. The file name check
     /// hashes the file at the pack's path, so it binds to the path; see
-    /// [`Pack::file_digest`].
+    /// [`Pack::file_digest`]. An image's digest is compared before the
+    /// integrity check instead, so that SQLite's checks do not run on an
+    /// image that is not the one the caller expects.
     ///
     /// # Errors
     /// Returns the first problem found, including an exceeded limit.
@@ -1146,6 +1151,12 @@ impl Pack {
         {
             return Err(too_long(maximum_bytes));
         }
+        // An image's digest is already known. A file is hashed only once
+        // the integrity check has read its pages, as PACK.md explains.
+        let hashed = matches!(self.source, Source::Image { .. });
+        if hashed {
+            self.check_digest(maximum_bytes)?;
+        }
         let integrity: String = self
             .connection
             .query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
@@ -1155,20 +1166,30 @@ impl Pack {
                 format!("integrity check failed: {integrity}"),
             ));
         }
-        if let Some(expected) = self.expected_digest() {
-            // A name must be the lowercase digest; other cases do not match.
-            let digest = crate::compile::hex(&self.digest_within(maximum_bytes)?);
-            if digest != expected {
-                return Err(Error::Rejected(
-                    ErrorCode::Digest,
-                    match self.source {
-                        Source::File(_) => format!("file digest {digest} does not match its name"),
-                        _ => format!("pack digest {digest} is not {expected}, the expected digest"),
-                    },
-                ));
-            }
+        if !hashed {
+            self.check_digest(maximum_bytes)?;
         }
         self.verify_contents(limits.maximum_decoded_bytes)
+    }
+
+    /// Compares the pack's digest, reading at most `maximum_bytes`, with
+    /// the one verification expects, if any.
+    fn check_digest(&self, maximum_bytes: u64) -> Result<(), Error> {
+        let Some(expected) = self.expected_digest() else {
+            return Ok(());
+        };
+        // A name must be the lowercase digest; other cases do not match.
+        let digest = crate::compile::hex(&self.digest_within(maximum_bytes)?);
+        if digest != expected {
+            return Err(Error::Rejected(
+                ErrorCode::Digest,
+                match self.source {
+                    Source::File(_) => format!("file digest {digest} does not match its name"),
+                    _ => format!("pack digest {digest} is not {expected}, the expected digest"),
+                },
+            ));
+        }
+        Ok(())
     }
 
     /// The digest verification expects, in hex: a file's name when it is 64
@@ -1183,7 +1204,9 @@ impl Pack {
                     stem.len() == 64 && stem.bytes().all(|byte| byte.is_ascii_hexdigit())
                 })
                 .map(str::to_owned),
-            Source::Image(digest) => digest.as_ref().map(|digest| crate::compile::hex(digest)),
+            Source::Image { expected, .. } => {
+                expected.as_ref().map(|digest| crate::compile::hex(digest))
+            }
             Source::Compiled => None,
         }
     }
@@ -1697,13 +1720,17 @@ impl Pack {
 /// A pack image being read into SQLite's copy. Reading it never fails:
 /// once the image fails or ends, the rest of the copy is zeros, and whether
 /// it ended early or the error it failed with is kept for the caller.
-/// `rusqlite` frees its copy only once the copy is read in full.
+/// `rusqlite` would report either as an SQLite error, not as the I/O error
+/// it is.
 struct Filled<R> {
     inner: R,
     missing: bool,
     failure: Option<std::io::Error>,
     /// The first [`HEADER_BYTES`] bytes `inner` yielded.
     head: Vec<u8>,
+    /// Every byte `inner` yielded: the copy, when `inner` yields the whole
+    /// image.
+    hasher: Sha256,
 }
 
 impl<R: std::io::Read> std::io::Read for Filled<R> {
@@ -1717,6 +1744,7 @@ impl<R: std::io::Read> std::io::Read for Filled<R> {
                 Ok(read) => {
                     let wanted = HEADER_BYTES.saturating_sub(self.head.len()).min(read);
                     self.head.extend_from_slice(&buffer[..wanted]);
+                    self.hasher.update(&buffer[..read]);
                     return Ok(read);
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
@@ -2229,17 +2257,19 @@ mod tests {
     }
 
     #[test]
-    fn hashing_an_image_reads_sqlite_copy_in_place() {
+    fn an_image_digest_is_of_sqlite_copy() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(
             "../../fixtures/packs/5830e26e449a1f0d0c786b32801b7ed68e351777db5f586532478cb4384844b2.twpack",
         );
         let bytes = std::fs::read(path).unwrap();
-        let pack = Pack::open_bytes(&bytes, None, &super::VerifyLimits::default()).unwrap();
-        // The digest reads the buffer SQLite reads, without allocating a
-        // second image: serializing it is a view of that buffer.
+        let mut pack = Pack::open_bytes(&bytes, None, &super::VerifyLimits::default()).unwrap();
+        let digest = pack.file_digest().unwrap();
+        // Serializing the image is a view of the buffer SQLite reads, not a
+        // second image, and that buffer is what the digest was taken of.
         let image = pack.connection.serialize(rusqlite::MAIN_DB).unwrap();
         assert!(matches!(image, rusqlite::serialize::Data::Shared(_)));
         assert_eq!(&*image, bytes.as_slice());
+        assert_eq!(<[u8; 32]>::from(super::Sha256::digest(&*image)), digest);
     }
 
     #[test]
@@ -2248,7 +2278,7 @@ mod tests {
             "../../fixtures/packs/5830e26e449a1f0d0c786b32801b7ed68e351777db5f586532478cb4384844b2.twpack",
         );
         let bytes = std::fs::read(path).unwrap();
-        let pack = Pack::open_bytes(&bytes, None, &super::VerifyLimits::default()).unwrap();
+        let mut pack = Pack::open_bytes(&bytes, None, &super::VerifyLimits::default()).unwrap();
         // Even with query_only turned off, the image cannot be written.
         pack.connection
             .execute_batch("PRAGMA query_only = OFF")
@@ -2261,10 +2291,10 @@ mod tests {
             assert!(pack.connection.execute_batch(write).is_err(), "{write}");
         }
         pack.verify().unwrap();
-        assert_eq!(
-            pack.file_digest().unwrap(),
-            <[u8; 32]>::from(sha2::Sha256::digest(&bytes))
-        );
+        // The digest was taken at open, so only the buffer itself can show
+        // that it still holds the bytes.
+        let image = pack.connection.serialize(rusqlite::MAIN_DB).unwrap();
+        assert_eq!(&*image, bytes.as_slice());
     }
 
     /// Objects at any depth and their fields.

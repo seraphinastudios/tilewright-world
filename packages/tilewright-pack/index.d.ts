@@ -340,7 +340,7 @@ export class Pack {
   object(uid: string, limits?: ReadLimits): { location: ObjectLocation; object: ChunkObject } | undefined;
 
   /**
-   * Checks the whole pack: SQLite integrity, the expected digest, every
+   * Checks the whole pack: the expected digest, SQLite integrity, every
    * row, document and chunk record, and every reference between them.
    * Returns the row counts, with `objects` counted.
    */

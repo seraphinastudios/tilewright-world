@@ -64,9 +64,9 @@ The module is about 1.1 MB, 0.5 MB gzipped: most of it is SQLite.
 ## Opening a pack
 
 `openPack(bytes, options)` takes the pack as a `Uint8Array`, an
-`ArrayBuffer` or any view of one, copies it into the module's memory, and
-checks its size, identity, schema and metadata. Changing `bytes` afterwards
-does not change the pack. Options:
+`ArrayBuffer` or any view of one, copies it into the module's memory,
+hashing it as it goes, and checks its size, identity, schema and metadata.
+Changing `bytes` afterwards does not change the pack. Options:
 
 - `digest`: the SHA-256 the bytes must have, as 64 lowercase hex digits,
   usually the pack's file name. `verify()` compares it, as the other readers
