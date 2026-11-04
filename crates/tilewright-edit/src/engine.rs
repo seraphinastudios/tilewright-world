@@ -688,11 +688,13 @@ impl<'r> Workspace<'r> {
             Current::Parsed(document) => document.source().to_owned(),
         };
         let (length, recorded) = (entry.inverse.len(), entry.recorded);
-        // The next operation's `compact` leaves only the creation of the
-        // text the file began with, which is this step if no edit came
-        // before it. While the file is deleted, the inverse only creates
-        // it; should it be created again, the inverse undoes that and the
-        // edits after it, then creates the text.
+        // This step undoes the deletion should the file be made again in
+        // this operation. Before the next one, `compact` replaces it, and
+        // every step before it, with one creation of the text the file
+        // began with, which holds no copy: the inverse takes the text from
+        // the entry when it is written. While the file is deleted, the
+        // inverse only creates it; should it be created again, the inverse
+        // undoes that and the edits after it, then creates the text.
         if entry.base.is_some() {
             let create = Primitive::Create { text: text.clone() };
             entry.recorded = plus(entry.recorded, size_of(std::slice::from_ref(&create)));
