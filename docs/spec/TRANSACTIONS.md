@@ -421,7 +421,8 @@ published, writing nothing. Everywhere else every undo and redo of a transaction
 plans. Not guaranteed:
 
 - at the load's entry budget, an undo can be refused for the directories
-  the transaction made, as above;
+  the transaction made, as above, and so can the repair of an interrupted
+  apply (section 9);
 - the inverse of a transaction that made an invalid tree valid passes the
   check, and is refused, as above;
 - other changes to files recorded in an undo or redo's `base` digests can
@@ -649,7 +650,14 @@ or `defs/`, so the tree fails validation until it is repaired. To repair
 it, apply the inverse, which the command line writes before step 1: the
 files the interrupted apply published are restored, the others already
 match and are left alone, and the staging files beside every file it names
-are removed. There is no journal: the inverse, written before anything is
+are removed. At the load's entry budget the repair can be refused with
+`source.budget` for the directories the transaction made, as an undo can
+(section 8.1). A transaction that can resume (section 8: every operation
+names one file by path, none is a `test` or has an `expect`, and it has a
+`result`) is then applied again instead, which completes the apply; any
+other is repaired by applying the inverse with a load that allows more
+entries (`LoadOptions::maximum_entries`), since the command line loads
+with the default, 1,000,000. There is no journal: the inverse, written before anything is
 published, is the recovery record, and applying it is a manual step. If
 the recovery is interrupted in turn, apply the inverse again; a directory
 the interrupted cleanup emptied may be left, holding no file, which
@@ -783,7 +791,11 @@ accepts that; it then warns on standard error, naming what is not checked.
 Each command runs the undo check of section 8.1 after carrying the
 transaction out, and refuses a transaction that fails it, writing nothing:
 the inverse `apply` writes is the way back and must be one that can be
-applied, and `preview` and `rebase` refuse what `apply` would. An inverse is
+applied, and `preview` and `rebase` refuse what `apply` would. The check
+does not reserve the entries an undo can need at the load's entry budget,
+which the command line leaves at its default (section 8.1): there, the
+inverse `apply` wrote, applied as an undo or as the repair of an
+interrupted apply, can be refused, and section 9 says what to do then. An inverse is
 checked like any transaction, so applying one is refused when it carries
 out but its own undo and redo could not be; an inverse `apply` wrote passes,
 since the check of its transaction carried out every round its own check

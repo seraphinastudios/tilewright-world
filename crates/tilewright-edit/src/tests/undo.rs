@@ -1352,6 +1352,60 @@ fn an_undo_without_room_for_the_directories_its_step_made_is_refused() {
 }
 
 #[test]
+fn a_repair_at_the_entry_budget_can_need_the_directories_its_step_made() {
+    // An apply stopped in step 4 after its renames: the definitions it
+    // deletes are still there, each with its staging file, so the tree does
+    // not validate. The repair loads as the undo does, so at the budget it
+    // is refused for the directory the step made, and section 9 gives the
+    // ways out.
+    let [(_, plane), (_, layer), _] = making_directories();
+    for (step, resumes) in [(plane, true), (layer, false)] {
+        let (tree, options) = at_the_least_budget(0);
+        let root = tree.path();
+        let (before, folders) = (snapshot(root), directories(root));
+        let plan = crate::plan(root, &transaction(&step), &options).unwrap();
+        plan.check_undo().unwrap();
+        published(&plan);
+        for id in ["x1", "x2"] {
+            let path = format!("defs/proto/{id}.jsonc");
+            fs::write(root.join(&path), as_it_was(&plan, &path)).unwrap();
+            fs::write(root.join(staging_path(&path)), "").unwrap();
+        }
+        assert!(tilewright_source::load_with(root, &options.load).is_err());
+        let inverse = reparsed("undo.jsonc", plan.inverse());
+        let found = crate::plan(root, &inverse, &options)
+            .expect_err("the repair should need one more entry");
+        assert!(
+            has(&found, "source.budget", "directory entries"),
+            "{step}\n{found:#?}"
+        );
+        let sealed = reparsed("sealed.jsonc", plan.sealed());
+        if resumes {
+            // A step that can resume is applied again instead.
+            let again = crate::plan(root, &sealed, &options).unwrap();
+            again.check_undo().unwrap();
+            published(&again);
+            assert!(tilewright_source::load_with(root, &options.load).is_ok());
+        } else {
+            // One that cannot is repaired with a load with more entries.
+            assert!(crate::plan(root, &sealed, &options).is_err());
+            let more = Options {
+                load: LoadOptions {
+                    maximum_entries: options.load.maximum_entries + 1,
+                    ..options.load
+                },
+                ..options
+            };
+            let repair = crate::plan(root, &inverse, &more).unwrap();
+            repair.check_undo().unwrap();
+            published(&repair);
+            assert_eq!(snapshot(root), before);
+            assert_eq!(directories(root), folders);
+        }
+    }
+}
+
+#[test]
 fn publishing_an_undo_can_need_an_entry_for_a_directory_its_step_made_under_profile() {
     // Publishing counts the entries of the root and of profile/, which a
     // load does not list, against a budget of their own, as large as the
