@@ -397,20 +397,26 @@ transaction left. The redos leave the tree the transaction did, which
 carrying it out validated.
 
 Validating does not depend on a directory that holds no file: the loader
-ignores one (FORMAT.md section 2), and counts its entries, and those it
-lists to find it holds none, apart from the rest of the tree's, against an
-allowance of their own as large as the load's, so it does not make a load
-any larger either. An undone tree has the bytes of the original in every
-file the transaction touched or consulted, and the same other files, so it
-can differ from the original only in such directories: one the transaction
-made, which publishing the undo leaves when it cannot remove it, when its
-mode or group is no longer that of the directory above it, or when it is
-`planes/` or `defs/`, which publishing never removes (section 9, step 5);
-and an empty one the transaction wrote into, which it removes on the same
-terms. So under the same load options it validates as the original does,
-and loads the same world. Those directories held the transaction's files,
-so the allowance apart holds them whenever the transaction's own load did.
-Not guaranteed:
+ignores one (FORMAT.md section 2). An undone tree has the bytes of the
+original in every file the transaction touched or consulted, and the same
+other files, so it can differ from the original only in such directories:
+one the transaction made, which publishing the undo leaves when it cannot
+remove it or when its mode or group is no longer that of the directory
+above it (section 9, step 5), and which it never removes when it is
+`planes/` or `defs/` itself, since it removes only those below them
+(section 4); and an empty one the transaction wrote into, which it removes
+on the same terms. So under the same load options it validates as the
+original does, and loads the same world, with one limit. A load's entry
+budget counts every entry it lists, a directory that holds no file
+included, and planning an undo meets the directories the transaction made
+still there, with the files the undo removes from them gone, as does a load
+of a tree publishing left one in. The check does not reserve those
+entries, so at the entry budget an undo can need one more for each, and be
+refused with `source.budget`. Everywhere else every undo and redo of a
+transaction that passes plans. Not guaranteed:
+
+- at the load's entry budget, an undo can be refused for the directories
+  the transaction made, as above;
 
 - the inverse of a transaction that made an invalid tree valid passes the
   check, and is refused, as above;

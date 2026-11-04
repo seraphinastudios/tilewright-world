@@ -2039,29 +2039,6 @@ fn least_entries(root: &Path, overlay: &Overlay) -> usize {
 }
 
 #[test]
-fn directories_that_hold_no_file_are_counted_apart() {
-    let plain = least_entries(&fixture(), &Overlay::new());
-    let copy = workspace();
-    let root = copy.path();
-    // A layer's directory and one in it, which hold no file, and a stray
-    // one with five, each holding one more.
-    fs::create_dir_all(root.join("planes/vault/layers/7/notes")).unwrap();
-    for index in 0..5 {
-        fs::create_dir_all(root.join(format!("planes/attic/d{index}/e"))).unwrap();
-    }
-    // The others are counted as they are without them, and these fit an
-    // allowance of their own as large.
-    assert_eq!(least_entries(root, &Overlay::new()), plain);
-    // So the allowance is what bounds a load of many of them: the stray
-    // one, its 40 and theirs, the layer's and the one in it.
-    for index in 5..40 {
-        fs::create_dir_all(root.join(format!("planes/attic/d{index}/e"))).unwrap();
-    }
-    assert!(plain < 83);
-    assert_eq!(least_entries(root, &Overlay::new()), 83);
-}
-
-#[test]
 fn an_entry_the_overlay_removes_is_not_counted_wherever_it_is_listed() {
     let plain = least_entries(&fixture(), &Overlay::new());
     // Listed before the directory's other entry or after it, by name and

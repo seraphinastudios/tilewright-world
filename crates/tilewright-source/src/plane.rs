@@ -40,7 +40,6 @@ pub(crate) fn read_planes(
             .filter_map(|entry| {
                 let path = join("planes", &entry.name);
                 if entry.kind == EntryKind::Directory && listed.contains(entry.name.as_str()) {
-                    tree.hold(&path);
                     return Some(entry.name);
                 }
                 if let Err(why) = ignored(tree, &path, &entry, false) {
@@ -80,13 +79,14 @@ pub(crate) fn read_planes(
         .into_iter()
         .map(|(mut plane, has_layers, directory)| {
             if has_layers {
-                let layers = join(&directory, "layers");
-                let held = read_layers(tree, profile, &mut plane, &layers, references, diagnostics);
-                if held {
-                    tree.hold(&layers);
-                } else {
-                    tree.set_aside(&layers);
-                }
+                read_layers(
+                    tree,
+                    profile,
+                    &mut plane,
+                    &directory,
+                    references,
+                    diagnostics,
+                );
             }
             plane
         })
@@ -409,31 +409,26 @@ fn read_anchors(
     anchors
 }
 
-/// Reads the chunks below a plane's `layers` directory. Returns whether it
-/// held anything; a layer's directory that holds no file is counted apart,
-/// as one with any other name is (`Tree::set_aside`).
 fn read_layers(
     tree: &mut Tree<'_>,
     profile: &Profile,
     plane: &mut Plane,
-    layers: &str,
+    directory: &str,
     references: &mut References,
     diagnostics: &mut Diagnostics,
-) -> bool {
+) {
+    let layers = join(directory, "layers");
     // Chunk `c` covers tiles `c * size ..= c * size + size - 1`; both ends
     // must stay within the format's integer range.
     let size = i64::from(plane.chunk_size);
     let chunks = -(MAX_SAFE_INTEGER / size)..=(MAX_SAFE_INTEGER - (size - 1)) / size;
-    let (layer_entries, other) = tree.listing(layers, true);
-    let mut held = other.is_some();
-    for layer_entry in layer_entries {
-        let layer_directory = join(layers, &layer_entry.name);
+    for layer_entry in tree.list(&layers) {
+        let layer_directory = join(&layers, &layer_entry.name);
         let layer = canonical_integer(&layer_entry.name)
             .and_then(|layer| i32::try_from(layer).ok())
             .filter(|_| layer_entry.kind == EntryKind::Directory);
         let Some(layer) = layer else {
             if let Err(why) = ignored(tree, &layer_directory, &layer_entry, false) {
-                held = true;
                 diagnostics.push(Diagnostic::file(
                     &layer_directory,
                     Code::UnexpectedFile,
@@ -442,9 +437,7 @@ fn read_layers(
             }
             continue;
         };
-        let (chunk_entries, other) = tree.listing(&layer_directory, true);
-        let mut layer_held = other.is_some();
-        for chunk_entry in chunk_entries {
+        for chunk_entry in tree.list(&layer_directory) {
             let path = join(&layer_directory, &chunk_entry.name);
             let coordinates = chunk_entry
                 .name
@@ -455,7 +448,6 @@ fn read_layers(
                 .filter(|_| chunk_entry.kind == EntryKind::File);
             let Some((cx, cy)) = coordinates else {
                 if let Err(why) = ignored(tree, &path, &chunk_entry, true) {
-                    layer_held = true;
                     diagnostics.push(Diagnostic::file(
                         &path,
                         Code::UnexpectedFile,
@@ -466,7 +458,6 @@ fn read_layers(
                 }
                 continue;
             };
-            layer_held = true;
             let address = ChunkAddress {
                 plane: &plane.id,
                 layer,
@@ -486,12 +477,5 @@ fn read_layers(
                 plane.chunks.insert((layer, cx, cy), chunk);
             }
         }
-        if layer_held {
-            held = true;
-            tree.hold(&layer_directory);
-        } else {
-            tree.set_aside(&layer_directory);
-        }
     }
-    held
 }
