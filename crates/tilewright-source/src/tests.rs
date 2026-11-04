@@ -2149,8 +2149,10 @@ fn a_directory_deeper_than_a_document_path_counts_as_a_file() {
 fn a_deep_or_wide_stray_directory_is_looked_into_in_bounded_time() {
     let copy = workspace();
     let root = copy.path();
-    // Far deeper than a path may be: it is not looked into past that.
-    let deep = vec!["a"; 1_500].join("/");
+    // Far deeper than a path may be: it is not looked into past that. Not
+    // deeper still, since removing the tree afterwards recurses a level at
+    // a time, and on macOS a test's stack takes no more than a few hundred.
+    let deep = vec!["a"; 200].join("/");
     make_beneath(root, &format!("planes/attic/{deep}"), Some("x.txt"));
     // Wide: each directory is listed once, from a path no longer than a
     // document's.
