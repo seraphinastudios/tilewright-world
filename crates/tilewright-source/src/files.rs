@@ -396,6 +396,16 @@ impl<'o> Tree<'o> {
                 other = true;
                 break;
             }
+            // The overlay's entry takes its place, and is counted then, if
+            // it adds one: so the count does not depend on where in the
+            // listing this one came.
+            if let Ok(RawEntry {
+                name: Some(name), ..
+            }) = &entry
+                && overlay.contains_key(&join(path, name))
+            {
+                continue;
+            }
             self.entries += 1;
             if self.entries > self.options.maximum_entries {
                 self.exhaust(path);
@@ -427,11 +437,6 @@ impl<'o> Tree<'o> {
                 }
                 continue;
             };
-            if overlay.contains_key(&join(path, &name)) {
-                // The overlay's entry takes its place, and is counted then.
-                self.entries -= 1;
-                continue;
-            }
             let child = join(path, &name);
             match entry.kind {
                 RawKind::Link => {
@@ -672,6 +677,33 @@ pub(crate) fn join(directory: &str, name: &str) -> String {
 mod tests {
     use super::{Found, RawKind, Refused};
     use std::{fs, os::unix::fs::symlink};
+
+    #[test]
+    fn an_entry_the_overlay_removes_is_never_counted() {
+        use super::{LoadOptions, Overlay, Tree, platform};
+        use std::{cell::Cell, rc::Rc};
+        let root = tempfile::tempdir().unwrap();
+        for index in 0..10 {
+            fs::write(root.path().join(format!("{index}_0.jsonc")), "{}").unwrap();
+        }
+        // The overlay removes every entry the file system lists after the
+        // first, which is all the budget holds.
+        let mut listing = fs::read_dir(root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap());
+        let first = listing.next().unwrap();
+        let overlay: Overlay = listing.map(|name| (name, None)).collect();
+        let options = LoadOptions {
+            maximum_entries: 1,
+            ..LoadOptions::default()
+        };
+        let total = Rc::new(Cell::new(0));
+        let mut tree = Tree::in_root(platform::Root::new(root.path()), &options, &overlay, total);
+        let listed = tree.list("");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, first);
+        assert!(!tree.exhausted);
+    }
 
     fn tree() -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();

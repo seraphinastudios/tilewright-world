@@ -1980,6 +1980,29 @@ fn a_directory_the_overlay_leaves_without_files_is_ignored() {
     assert!(load_edited(root, &LoadOptions::default(), &made).is_err());
 }
 
+/// The least `maximum_entries` the tree at `root` loads with, the
+/// overlay applied.
+fn least_entries(root: &Path, overlay: &Overlay) -> usize {
+    let passes = |maximum_entries| {
+        let options = LoadOptions {
+            maximum_entries,
+            ..LoadOptions::default()
+        };
+        load_edited(root, &options, overlay).is_ok()
+    };
+    let (mut low, mut high) = (0, 1 << 16);
+    assert!(passes(high) && !passes(low));
+    while high - low > 1 {
+        let middle = low + (high - low) / 2;
+        if passes(middle) {
+            high = middle;
+        } else {
+            low = middle;
+        }
+    }
+    high
+}
+
 #[test]
 fn directories_that_hold_no_file_count_against_the_entry_budget() {
     let least = |root: &Path| {
@@ -2012,6 +2035,29 @@ fn directories_that_hold_no_file_count_against_the_entry_budget() {
     // and each of the 40 and the one in it as the attic is looked into in
     // full, whatever order the file system lists them in.
     assert_eq!(least(root), plain + 81);
+}
+
+#[test]
+fn an_entry_the_overlay_removes_is_not_counted_wherever_it_is_listed() {
+    let plain = least_entries(&fixture(), &Overlay::new());
+    // Listed before the directory's other entry or after it, by name and
+    // creation order, a file the overlay removes costs nothing.
+    for name in [
+        "1_0.jsonc",
+        "2_0.jsonc",
+        "3_0.jsonc",
+        "4_0.jsonc",
+        "5_0.jsonc",
+        "6_0.jsonc",
+    ] {
+        let copy = workspace();
+        let root = copy.path();
+        let path = format!("planes/vault/layers/0/{name}");
+        fs::write(root.join(&path), "{}\n").unwrap();
+        let mut overlay = Overlay::new();
+        overlay.insert(path, None);
+        assert_eq!(least_entries(root, &overlay), plain, "{name}");
+    }
 }
 
 #[test]
