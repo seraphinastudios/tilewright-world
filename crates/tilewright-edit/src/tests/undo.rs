@@ -1421,3 +1421,22 @@ fn publishing_counts_the_entries_a_load_counts() {
     .unwrap();
     published(&plan);
 }
+
+#[test]
+fn a_plane_or_type_named_like_a_staging_file_is_undone_and_removed() {
+    // Identifiers may end in `.tilewright-tmp`; only names that also start
+    // with `.` are staging names.
+    undone_with_its_directories(&add_plane("attic.tilewright-tmp"));
+    undone_with_its_directories(&add_definition_type("quest.tilewright-tmp"));
+    let tree = copy();
+    let root = tree.path();
+    apply(root, &transaction(&add_plane("attic.tilewright-tmp")));
+    apply(
+        root,
+        &transaction(
+            r#"{"op": "remove", "path": "world.jsonc", "pointer": ["planes", 2]},
+    {"op": "document.delete", "path": "planes/attic.tilewright-tmp/plane.jsonc"}"#,
+        ),
+    );
+    assert!(tilewright_source::load(root).is_ok());
+}

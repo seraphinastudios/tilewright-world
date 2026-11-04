@@ -2166,6 +2166,11 @@ fn a_directory_at_a_staging_name_is_not_ignored() {
             "{path}"
         );
     }
+    // A name that ends so but does not start with `.` is no staging name:
+    // a plane or a type may have it.
+    let copy = workspace();
+    fs::create_dir(copy.path().join("planes/attic.tilewright-tmp")).unwrap();
+    assert!(load(copy.path()).is_ok());
 }
 
 #[test]

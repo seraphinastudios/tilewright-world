@@ -722,10 +722,12 @@ fn overlay_beneath<'a>(
 /// directory that holds no file at any depth. Among `documents`, those of
 /// a plane, a layer or a definition type, a directory named like one,
 /// ending in `.jsonc` in any case, is not ignored: it is where the layout
-/// has a file, or one a file system that ignores case takes for it. Nor is
-/// one at a name reserved for staging, ending in `.tilewright-tmp`, which
-/// publishing removes as a file. When it is not ignored, `Err` holds what to
-/// add to the problem's message: why, when what it holds is not a file.
+/// has a file, or one a file system that ignores case takes for it. Nor,
+/// at any level, is one at a name reserved for staging, the form
+/// `.<name>.tilewright-tmp` that publishing removes as a file: no
+/// identifier starts with `.`, so no plane's or type's directory has such a
+/// name. When it is not ignored, `Err` holds what to add to the problem's
+/// message: why, when what it holds is not a file.
 pub(crate) fn ignored(
     tree: &mut Tree<'_>,
     path: &str,
@@ -736,10 +738,8 @@ pub(crate) fn ignored(
         let (name, suffix) = (entry.name.as_bytes(), suffix.as_bytes());
         name.len() >= suffix.len() && name[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
     };
-    if entry.kind != EntryKind::Directory
-        || (documents && ends(".jsonc"))
-        || ends(".tilewright-tmp")
-    {
+    let staging = entry.name.starts_with('.') && ends(".tilewright-tmp");
+    if entry.kind != EntryKind::Directory || (documents && ends(".jsonc")) || staging {
         return Err(String::new());
     }
     tree.holds_no_file(path).map_err(|found| {

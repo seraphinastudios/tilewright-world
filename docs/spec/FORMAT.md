@@ -66,9 +66,10 @@ a document's may be (more than 32 components or 1,024 bytes, as below)
 count as files, and the error says which was found, and where. Among the
 documents of a plane, a layer or a definition type, a directory named like
 a document, ending in `.jsonc` in any case, is not ignored, since it stands
-where the layout has a file; nor is one at a name reserved for staging
-beside a document, ending in `.tilewright-tmp` (TRANSACTIONS.md section 9).
-Other files at the root, such as assets, scripts or a README, are ignored. Assets such as images and sounds stay ordinary files referenced by
+where the layout has a file. Nor, anywhere under them, is a directory at a
+name reserved for staging, one that starts with `.` and ends in
+`.tilewright-tmp` (TRANSACTIONS.md section 9). Other files at the root,
+such as assets, scripts or a README, are ignored. Assets such as images and sounds stay ordinary files referenced by
 path or by an ID the profile defines.
 
 Paths written inside documents (the profile path, schema paths, the
