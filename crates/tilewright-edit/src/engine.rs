@@ -179,8 +179,9 @@ impl Entry {
     /// The bytes and operations the inverse holds for this file: none for
     /// a file the transaction created, which it deletes, or one that ends
     /// as it began; the text of one it deleted, whatever was done to it
-    /// before; otherwise the inverse of each edit. Comparing costs no more
-    /// than the edit that asks, which is charged its text.
+    /// before; otherwise the steps kept so far: those `compact` left, and
+    /// the inverses of the edits since. Comparing costs no more than the
+    /// edit that asks, which is charged its text.
     fn inverse_size(&self) -> (u64, usize) {
         if !self.is_changed() {
             return (0, 0);
@@ -687,8 +688,11 @@ impl<'r> Workspace<'r> {
             Current::Parsed(document) => document.source().to_owned(),
         };
         let (length, recorded) = (entry.inverse.len(), entry.recorded);
-        // Kept should the file be created again, when the inverse undoes
-        // each step; while it is deleted, the inverse only creates it.
+        // The next operation's `compact` leaves only the creation of the
+        // text the file began with, which is this step if no edit came
+        // before it. While the file is deleted, the inverse only creates
+        // it; should it be created again, the inverse undoes that and the
+        // edits after it, then creates the text.
         if entry.base.is_some() {
             let create = Primitive::Create { text: text.clone() };
             entry.recorded = plus(entry.recorded, size_of(std::slice::from_ref(&create)));
