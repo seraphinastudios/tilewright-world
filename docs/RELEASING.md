@@ -215,8 +215,10 @@ moves it.
   only with the next crate version. The plan job's summary and each later
   release's notes name the crates whose packaged content changed since the
   owning release: their files outside `tests/` and `benches/`, their
-  `Cargo.toml`, the workspace dependency requirements they inherit, and the
-  root `README.md` and `LICENSE`, which every crate packages. `Cargo.lock`
+  `Cargo.toml`; what they inherit from the workspace and Cargo writes into
+  their packaged `Cargo.toml` (dependency requirements, package fields such
+  as `rust-version` and `edition`, and lints); and the root `README.md` and
+  `LICENSE`, which every crate packages. `Cargo.lock`
   and `rust-toolchain.toml` do not reach a library's users and are left
   out. The report stops nothing; bump the crate version when those changes
   should be published.

@@ -370,7 +370,9 @@ class OwnershipTests(unittest.TestCase):
         self.repository.commit()
         self.repository.tag("v0.1.0")
         base = self.repository.commit(files={"crates/tilewright-pack/tests/t.rs": "a"})
-        cases = [({"Cargo.lock": "x", "rust-toolchain.toml.bak": "x", "crates/tilewright-pack/tests/t.rs": "b",
+        toolchain = (F.P.ROOT / "rust-toolchain.toml").read_text().replace('channel = "', 'channel = "9')
+        self.assertNotEqual(toolchain, (F.P.ROOT / "rust-toolchain.toml").read_text())
+        cases = [({"Cargo.lock": "x", "rust-toolchain.toml": toolchain, "crates/tilewright-pack/tests/t.rs": "b",
                    "crates/tilewright-edit/benches/b.rs": "c", "docs/x.md": "d"}, []),
                  ({"crates/tilewright-edit/src/lib.rs": "e"}, ["tilewright-edit"]),
                  ({"crates/tilewright-diff/Cargo.toml": (F.P.ROOT / "crates/tilewright-diff/Cargo.toml").read_text()
@@ -387,6 +389,16 @@ class OwnershipTests(unittest.TestCase):
                                    manifest.read_text()))
         revision = self.repository.commit()
         self.assertEqual(P.changed_crates(base, revision, self.repository.root), ["tilewright-pack"])
+        # What every crate inherits from [workspace.package] and
+        # [workspace.lints] reaches its packaged Cargo.toml.
+        for old, new in (('rust-version = "', 'rust-version = "9'), ('edition = "2024"', 'edition = "2021"'),
+                         ('unsafe_code = "forbid"', 'unsafe_code = "deny"')):
+            with self.subTest(change=new):
+                text = manifest.read_text()
+                self.assertIn(old, text)
+                manifest.write_text(text.replace(old, new, 1))
+                base, revision = revision, self.repository.commit()
+                self.assertEqual(P.changed_crates(base, revision, self.repository.root), list(PUBLIC))
 
     def test_owner_command_outputs_and_failures(self):
         self.repository.commit()

@@ -175,19 +175,29 @@ def changed_crates(base, revision, root=ROOT):
     """The public crates whose packaged content changed between two commits.
 
     A report, not a gate: each crate's files outside tests/ and benches/
-    (its Cargo.toml included), the workspace dependency requirements it
-    inherits, and the root README.md and LICENSE, which every crate packages.
-    Cargo.lock and rust-toolchain.toml do not reach a library's users.
+    (its Cargo.toml included); what it inherits from the workspace and Cargo
+    writes into its packaged Cargo.toml (dependency requirements, package
+    fields such as rust-version and edition, lints); and the root README.md
+    and LICENSE, which every crate packages. Cargo.lock and
+    rust-toolchain.toml do not reach a library's users.
     """
     paths = set(git(["diff", "--name-only", "--no-renames", "-z", base, revision, "--"], root).split("\0")) - {""}
     shared = bool(paths & {"README.md", "LICENSE"})
 
-    def requirements(ref):
-        value = tomllib.loads(git(["cat-file", "blob", f"{ref}:Cargo.toml"], root))["workspace"]
-        return value.get("dependencies", {})
+    def workspace(ref):
+        return tomllib.loads(git(["cat-file", "blob", f"{ref}:Cargo.toml"], root))["workspace"]
 
-    before, after = requirements(base), requirements(revision)
-    moved = {key for key in before.keys() | after.keys() if before.get(key) != after.get(key)}
+    def moved(section):
+        old, new = before.get(section, {}), after.get(section, {})
+        return {key for key in old.keys() | new.keys() if old.get(key) != new.get(key)}
+
+    def inherits(value):
+        return isinstance(value, dict) and value.get("workspace") is True
+
+    before, after = workspace(base), workspace(revision)
+    # The version is the same, or this release would own its own.
+    requirements, fields = moved("dependencies"), moved("package") - {"version"}
+    lints = before.get("lints") != after.get("lints")
     changed = []
     for name in PREPARE.PUBLIC:
         prefix = f"crates/{name}/"
@@ -197,9 +207,10 @@ def changed_crates(base, revision, root=ROOT):
         inherited = set()
         for table in [manifest, *manifest.get("target", {}).values()]:
             for section in ("dependencies", "build-dependencies"):
-                inherited |= {key for key, value in table.get(section, {}).items()
-                              if isinstance(value, dict) and value.get("workspace") is True}
-        if shared or files or inherited & moved:
+                inherited |= {key for key, value in table.get(section, {}).items() if inherits(value)}
+        package = {key for key, value in manifest.get("package", {}).items() if inherits(value)}
+        if (shared or files or inherited & requirements or package & fields or
+                (lints and inherits(manifest.get("lints")))):
             changed.append(name)
     return changed
 
