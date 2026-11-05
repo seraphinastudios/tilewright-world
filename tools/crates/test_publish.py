@@ -810,8 +810,12 @@ class TreePolicyTests(unittest.TestCase):
         with mock.patch.object(P, "github", return_value=good):
             self.assertEqual(P.main_abandoned(READ), [])
         # Each answer is valid apart from the one field, so each check must fire.
-        for changes in ({"type": "dir"}, {"encoding": "utf-8"}, {"size": len(data) + 1}, {"size": 0},
-                        {"size": 64 * 1024 + 1}):
+        # The size bounds with sizes that match: an empty body, and a valid
+        # one padded past 64 KiB.
+        empty = {"size": 0, "content": ""}
+        padded = data + b" " * (64 * 1024)
+        large = {"size": len(padded), "content": base64.encodebytes(padded).decode()}
+        for changes in ({"type": "dir"}, {"encoding": "utf-8"}, {"size": len(data) + 1}, empty, large):
             with self.subTest(changes=changes), mock.patch.object(P, "github", return_value=dict(good, **changes)), \
                     self.assertRaisesRegex(P.Refusal, "unreadable"):
                 P.main_abandoned(READ)
@@ -1300,14 +1304,19 @@ class UploadTests(unittest.TestCase):
         self.assertEqual(len(world.puts), 5)
 
     def test_an_attempt_ref_that_is_not_this_runs_stays_unresolved(self):
-        for case in ("another run's record", "reads keep failing"):
+        for case in ("another run's record", "a re-run's record", "reads keep failing"):
             context = Context(self)
             world = context.world
             plan = context.verify()
             row = world.rows["tilewright-jsonc"]
-            if case == "another run's record":
-                # As valid an attempt record as this run's, from another run.
-                with mock.patch.dict(os.environ, {"GITHUB_RUN_ID": "77"}):
+            self.assertEqual(set(P.attempt_message(plan, row, 1)["publisher"]),
+                             {"run_id", "run_attempt", "workflow_sha"})
+            if case != "reads keep failing":
+                # As valid an attempt record as this run's, from another run,
+                # or from another attempt of this run: only the publisher
+                # fields tell them apart.
+                other = {"GITHUB_RUN_ID": "77"} if case == "another run's record" else {"GITHUB_RUN_ATTEMPT": "2"}
+                with mock.patch.dict(os.environ, other):
                     other = P.canonical(P.attempt_message(plan, row, 1)).decode()
                 self.fail_attempt_ref(context, "tilewright-jsonc", create=False, holder=other)
             else:
@@ -1459,6 +1468,25 @@ class UploadTests(unittest.TestCase):
             context.upload()
         self.assertFalse(any(name.startswith(f"refs/tags/{P.REFUSED}/") for name in world.refs))
         self.assertIn("could not be read back as this run's", context.stderr.getvalue())
+
+    def test_an_interrupt_while_creating_the_attempt_record_writes_nothing(self):
+        # An interrupt is not settled: the run stops as it is.
+        context = Context(self)
+        world = context.world
+        real = world.github_write
+        ref = f"refs/tags/{P.ATTEMPT}/tilewright-jsonc/{world.version}/1"
+
+        def write(suffix, body, token):
+            answer = real(suffix, body, token)
+            if suffix == "git/refs" and body["ref"] == ref:
+                raise KeyboardInterrupt
+            return answer
+        context.stack.enter_context(mock.patch.object(P, "github_write", side_effect=write))
+        with self.assertRaises(KeyboardInterrupt):
+            context.upload()
+        self.assertIn(ref, world.refs)
+        self.assertFalse(any(name.startswith(f"refs/tags/{P.REFUSED}/") for name in world.refs))
+        self.assertNotIn("could not be read back", context.stderr.getvalue())
 
     def test_an_interrupt_during_or_after_the_put_writes_no_refused_record(self):
         # The PUT may have been sent, so nothing may say it was not: the
