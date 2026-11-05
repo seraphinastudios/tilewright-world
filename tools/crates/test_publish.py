@@ -560,6 +560,13 @@ class TransportTests(unittest.TestCase):
             with self.assertRaises(P.Failure) as caught:
                 P.request("https://crates.io/x")
             self.assertEqual(caught.exception.status, 404)
+        # static.crates.io answers 403 for a file it does not serve.
+        forbidden = P.urllib.error.HTTPError("u", 403, "m", {}, None)
+        with mock.patch.object(P.urllib.request, "build_opener", return_value=self.opener(error=forbidden)):
+            self.assertIsNone(P.request("https://static.crates.io/x", absent=(403, 404)))
+            with self.assertRaises(P.Failure) as caught:
+                P.request("https://static.crates.io/x", absent=True)
+            self.assertEqual(caught.exception.status, 403)
 
     def test_github_reads_retry_only_transient_failures(self):
         for status, readback, calls in ((503, False, 3), (404, False, 1), (404, True, 3), (403, False, 1)):
@@ -782,10 +789,15 @@ class TreePolicyTests(unittest.TestCase):
         context.world.main_candidates = json.dumps(value).encode()
         with self.assertRaisesRegex(P.Refusal, "abandoned"):
             context.verify()
-        for answer in ({"type": "dir"}, {"type": "file", "encoding": "base64", "size": 3, "content": "e30="},
-                       {"type": "file", "encoding": "base64", "size": 2, "content": "W10="}):
-            with self.subTest(answer=answer), mock.patch.object(P, "github", return_value=answer), \
-                    self.assertRaises(ValueError):
+        data = (context.world.root / "tools/crates/candidates.json").read_bytes()
+        good = {"type": "file", "encoding": "base64", "size": len(data), "content": base64.encodebytes(data).decode()}
+        with mock.patch.object(P, "github", return_value=good):
+            self.assertEqual(P.main_abandoned(READ), [])
+        # Each answer is valid apart from the one field, so each check must fire.
+        for changes in ({"type": "dir"}, {"encoding": "utf-8"}, {"size": len(data) + 1}, {"size": 0},
+                        {"size": 64 * 1024 + 1}):
+            with self.subTest(changes=changes), mock.patch.object(P, "github", return_value=dict(good, **changes)), \
+                    self.assertRaisesRegex(P.Refusal, "unreadable"):
                 P.main_abandoned(READ)
 
     def test_a_release_that_does_not_own_its_version_plans_nothing(self):
@@ -871,6 +883,30 @@ class RecordTests(unittest.TestCase):
             with self.subTest(records=records), mock.patch.object(P, "github", side_effect=world.github), \
                     self.assertRaisesRegex(P.Refusal, "inconsistent"):
                 P.next_attempt(P.records(row, world.values(), INTENT), row)
+
+    def test_a_refused_record_needs_a_known_reason(self):
+        for reason in ("http-500", "", None):
+            world = World(self)
+            row = world.rows["tilewright-pack"]
+            world.record(P.ATTEMPT, "tilewright-pack", 1)
+            world.record(P.REFUSED, "tilewright-pack", 1, reason=reason)
+            with self.subTest(reason=reason), mock.patch.object(P, "github", side_effect=world.github), \
+                    self.assertRaisesRegex(P.Refusal, "names another release or is malformed"):
+                P.records(row, world.values(), INTENT)
+
+    def test_an_existing_record_at_another_revision_is_not_ours(self):
+        context = Context(self)
+        world = context.world
+        plan = context.verify()
+        row = world.rows["tilewright-pack"]
+        short = f"{P.REFUSED}/tilewright-pack/{world.version}/1"
+        message = P.refused_message(plan, row, 1, "a" * 40, "http-403")
+        other = world.repository.git("rev-parse", "v0.1.0^{commit}")
+        made = world.github_write("git/tags", {"tag": short, "message": P.canonical(message).decode(), "object": other,
+                                               "type": "commit"}, INTENT, quiet=True)
+        world.github_write("git/refs", {"ref": "refs/tags/" + short, "sha": made["sha"]}, INTENT, quiet=True)
+        with self.assertRaisesRegex(P.Refusal, "not as this run's record"):
+            P.record_refusal(plan, row, 1, "a" * 40, "http-403", world.values(), INTENT)
 
     def test_records_must_name_this_release(self):
         other = {"tag": "v0.6.0", "revision": self.world.revision, "bundle_sha256": self.world.digest}
@@ -1457,6 +1493,24 @@ class CommandTests(unittest.TestCase):
             self.assertIn(f"does not have {PUBLIC[-1]} at {LATER}", stdout.getvalue())
             world.publish(PUBLIC[-1])
             self.assertEqual(P.main(["confirm", "--evidence", str(evidence)]), 0)
+        # A failed read counts as "unreadable", and the polls go on.
+        failures = {"count": 0}
+
+        def flaky(url, **kwargs):
+            if PUBLIC[0] in url and (failures["count"] < 1 or "always" in failures):
+                failures["count"] += 1
+                raise P.Failure("crates.io", 503)
+            return world.request(url, **kwargs)
+        summary = context.scratch / "summary"
+        with mock.patch.dict(os.environ, dict(world.values(), GITHUB_STEP_SUMMARY=str(summary))), \
+                mock.patch.object(P, "boundary"), mock.patch.object(P, "request", side_effect=flaky), \
+                mock.patch.object(P, "offline_plan", side_effect=lambda v, e: real(v, e, world.root)), \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            self.assertEqual(P.main(["confirm", "--evidence", str(evidence)]), 0)
+            failures["always"] = True
+            self.assertEqual(P.main(["confirm", "--evidence", str(evidence)]), 1)
+            self.assertIn(f"does not have {PUBLIC[0]} at {LATER}", stdout.getvalue())
+        self.assertIn(f"| {PUBLIC[0]} {LATER} | unreadable |", summary.read_text())
 
     def test_errors_print_static_text_only(self):
         cases = [(P.Refusal("a static refusal"), "a static refusal"),
