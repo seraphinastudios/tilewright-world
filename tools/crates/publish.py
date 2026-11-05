@@ -69,6 +69,10 @@ ATTESTATION_TRIES, ATTESTATION_SECONDS = 6, 20
 # PUT that crates.io refused before writing, a refused record.
 LEGACY, ATTEMPT, REFUSED = "crate-upload-intent", "crate-upload-attempt", "crate-upload-refused"
 LEGACY_KIND, ATTEMPT_KIND, REFUSED_KIND = "world-first-crate-upload", "world-crate-upload", "world-crate-upload-refused"
+# Why an attempt is known not to have published: its PUT was never sent, or
+# crates.io refused it definitely (see PutOutcome).
+REFUSED_REASONS = ("not-sent", "http-401", "http-403", "http-429")
+RECORD_TRIES, RECORD_SECONDS = 3, 5
 
 
 def load(name, path):
@@ -661,7 +665,7 @@ def check_record(ref, target, kind, row, values, number, token):
             release.get("bundle_sha256") == values["BUNDLE_SHA256"] and
             coordinate.get("name") == row["name"] and coordinate.get("version") == row["version"], other)
     if kind == REFUSED_KIND:
-        require(message.get("attempt") == number and
+        require(message.get("attempt") == number and message.get("reason") in REFUSED_REASONS and
                 message.get("attempt_ref") == f"refs/tags/{ATTEMPT}/{row['name']}/{row['version']}/{number}", other)
     else:
         require(coordinate.get("sha256") == row["sha256"] and (number is None or message.get("attempt") == number),
@@ -708,8 +712,8 @@ def next_attempt(found, row):
         return 1
     require(attempts[-1] in refused, f"attempt {attempts[-1]} for {coordinate} is unresolved: crates.io does not "
             "have it and no refusal was recorded; the owner investigates")
-    require(len(attempts) < MAX_ATTEMPTS, f"crates.io refused all {MAX_ATTEMPTS} attempts for {coordinate}; "
-            "the owner decides what next")
+    require(len(attempts) < MAX_ATTEMPTS, f"all {MAX_ATTEMPTS} attempts for {coordinate} were refused or never "
+            "sent; the owner decides what next")
     return len(attempts) + 1
 
 
@@ -753,12 +757,41 @@ def attempt_message(plan, row, number):
             "publisher": publisher()}
 
 
-def refused_message(plan, row, number, attempt, outcome):
+def refused_message(plan, row, number, attempt, reason):
+    require(reason in REFUSED_REASONS, "an unknown refusal reason")
     return {"schema": 1, "kind": REFUSED_KIND, "repository_id": REPOSITORY_ID, "attempt": number,
             "attempt_ref": f"refs/tags/{ATTEMPT}/{row['name']}/{row['version']}/{number}",
-            "attempt_object": attempt, "http_status": outcome.status, "category": outcome.category,
+            "attempt_object": attempt, "reason": reason,
             "release": {"tag": plan["tag"], "revision": plan["revision"], "bundle_sha256": plan["bundle_sha256"]},
             "coordinate": {"name": row["name"], "version": row["version"]}, "publisher": publisher()}
+
+
+def record_refusal(plan, row, number, attempt, reason, values, token, sleep=None):
+    """Record that attempt `number` is known not to have published.
+
+    Unlike the attempt record, this is retried a few times: a reference that
+    already exists is accepted only if it holds exactly this record.
+    """
+    short = f"{REFUSED}/{row['name']}/{row['version']}/{number}"
+    message = refused_message(plan, row, number, attempt, reason)
+    for tried in range(RECORD_TRIES):
+        try:
+            seen = github(f"git/ref/tags/{short}", token, absent=True)
+            if seen is not None:
+                target = seen.get("object", {})
+                tag = github(f"git/tags/{target.get('sha')}", token) if SHA.fullmatch(str(target.get("sha"))) else {}
+                require(target.get("type") == "tag" and tag.get("tag") == short and
+                        tag.get("object", {}).get("type") == "commit" and
+                        tag.get("object", {}).get("sha") == values["SOURCE_REVISION"] and
+                        isinstance(tag.get("message"), str) and
+                        tag["message"].rstrip("\n") == canonical(message).decode(),
+                        f"refs/tags/{short} exists, but not as this run's record")
+                return target["sha"]
+            return create_record(short, message, values, token)
+        except Failure:
+            if tried + 1 == RECORD_TRIES:
+                raise
+        (sleep or time.sleep)(RECORD_SECONDS)
 
 
 class Receipts:
@@ -794,9 +827,12 @@ class Receipts:
 # --- The upload -------------------------------------------------------------
 
 class PutOutcome(typing.NamedTuple):
-    """One PUT. crates.io answers 401 and 403 (trusted-publishing token
-    checks) and 429 (rate limits) before it reads the archive or writes
-    anything, so those are definite refusals; anything else is uncertain."""
+    """One PUT. For a trusted-publishing token, crates.io answers 401 and 403
+    (its token checks) before it reads the archive. Its only 429 for such a
+    token is the daily limit of new versions for a crate, which it checks
+    inside its database transaction, after reading the archive but before
+    storing it, and rolls back. So after any of the three nothing was
+    published, and they are definite refusals; anything else is uncertain."""
     status: int | None
     category: str  # acknowledged, refused, rate_limited or uncertain
     detail: str  # a fixed local label, never server text
@@ -854,8 +890,11 @@ def put_once(data, metadata, token):
 def confirm_upload(row, run_id, sleep=None):
     """After a PUT, whatever its outcome: is it on crates.io, from this run?"""
     for poll in range(POLLS):
-        state = registry_state(row)
-        if state.state == "present":
+        try:
+            state = registry_state(row)
+        except Failure:
+            state = None  # A read that failed says nothing yet.
+        if state is not None and state.state == "present":
             trust = state.version.get("trustpub_data")
             require(isinstance(trust, dict) and trust.get("provider") == "github" and
                     trust.get("repository") == REPOSITORY and str(trust.get("run_id")) == str(run_id) and
@@ -1000,19 +1039,30 @@ def upload(plan, values, token, intent, receipts, sleep=None):
         require(sha256(data) == row["sha256"], "a held archive changed")
         attempt = create_record(f"{ATTEMPT}/{name}/{row['version']}/{number}", attempt_message(plan, row, number),
                                 values, intent)
-        receipts.write(plan, row, number, attempt, "reserved")
-        require(registry_state(row).state == "absent", f"{coordinate} changed on crates.io after attempt {number} "
-                "was recorded, so nothing was uploaded; dispatch again to check it")
+        # From here until the PUT is sent, any failure means attempt
+        # `number` sent nothing: record that, so a later run can go on.
+        try:
+            receipts.write(plan, row, number, attempt, "reserved")
+            require(registry_state(row).state == "absent", f"{coordinate} changed on crates.io after attempt "
+                    f"{number} was recorded, so nothing was uploaded; dispatch again to check it")
+        except BaseException:
+            try:
+                record_refusal(plan, row, number, attempt, "not-sent", values, intent, sleep)
+            except Exception:
+                print(f"Attempt {number} for {coordinate} sent nothing, but that could not be recorded either; "
+                      "it stays unresolved.", file=sys.stderr)
+            raise
         outcome = put_once(data, plan["metadata"][name], token)
+        print(f"Attempt {number} for {coordinate}: HTTP {outcome.status}, {outcome.category}", file=sys.stderr)
+        if outcome.definite:
+            record_refusal(plan, row, number, attempt, f"http-{outcome.status}", values, intent, sleep)
         receipts.write(plan, row, number, attempt, "put", outcome)
         if confirm_upload(row, run_id, sleep):
             print(f"crates.io has {coordinate} from attempt {number} (HTTP {outcome.status}, {outcome.category})")
             continue
         if outcome.definite:
-            create_record(f"{REFUSED}/{name}/{row['version']}/{number}",
-                          refused_message(plan, row, number, attempt, outcome), values, intent)
-            raise Refusal(f"crates.io refused attempt {number} for {coordinate} with HTTP {outcome.status}, before "
-                          f"writing it. Fix the cause, then dispatch again for attempt {number + 1}")
+            raise Refusal(f"crates.io refused attempt {number} for {coordinate} with HTTP {outcome.status}, without "
+                          f"publishing it. Fix the cause, then dispatch again for attempt {number + 1}")
         raise Refusal(f"attempt {number} for {coordinate} is unresolved ({outcome.category}, {outcome.detail}): "
                       "crates.io does not show it; the owner investigates")
 
@@ -1059,7 +1109,10 @@ def confirm_command(args, sleep=None):
     for poll in range(POLLS):
         for row in plan["order"]:
             if states.get(row["name"]) != "present":
-                states[row["name"]] = registry_state(row).state
+                try:
+                    states[row["name"]] = registry_state(row).state
+                except Failure:
+                    states[row["name"]] = "unreadable"
         if all(state == "present" for state in states.values()) or poll + 1 == POLLS:
             break
         (sleep or time.sleep)(POLL_SECONDS)

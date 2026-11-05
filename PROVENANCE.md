@@ -96,9 +96,11 @@ never copied, adapted or used as a dependency.
   `src/controllers/krate/publish.rs` and its trusted-publishing token
   exchange at revision `e0edaf98831e94b4a6d0969b957bda0094a45f3d` of
   <https://github.com/rust-lang/crates.io> (MIT, Copyright (c) 2014 The
-  Rust Project Developers): which answers come
-  before the archive is read or anything is written, and that a config
-  without an environment matches any run of its workflow file. No
+  Rust Project Developers): that for a trusted-publishing token the 401 and
+  403 answers come before the archive is read, and the only 429, the daily
+  limit of new versions for a crate, comes inside the database transaction
+  before the archive is stored and is rolled back; and that a config without
+  an environment matches any run of its workflow file. No
   implementation, tests or source text are copied or adapted.
 
 ## Owner publication API contract research

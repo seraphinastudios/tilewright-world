@@ -102,7 +102,8 @@ class World:
              "trustpub_data": None if by_hand else {"provider": "github", "repository": P.REPOSITORY,
                                                     "run_id": run_id, "sha": "e" * 40}}, **flags)
 
-    def record(self, space, name, number=None, *, release=None, attempt=None, kind=None, sha256=None):
+    def record(self, space, name, number=None, *, release=None, attempt=None, kind=None, sha256=None,
+               reason="http-403"):
         short = f"{space}/{name}/{self.version}" + (f"/{number}" if number else "")
         release = release or {"tag": self.tag, "revision": self.revision, "bundle_sha256": self.digest}
         message = {"schema": 1, "kind": kind or {P.LEGACY: P.LEGACY_KIND, P.ATTEMPT: P.ATTEMPT_KIND,
@@ -114,6 +115,7 @@ class World:
             message["attempt"] = attempt or number
         if space == P.REFUSED:
             message["attempt_ref"] = f"refs/tags/{P.ATTEMPT}/{name}/{self.version}/{number}"
+            message["reason"] = reason
         self.github_write("git/tags", {"tag": short, "message": json.dumps(message), "object": self.revision,
                                        "type": "commit"}, INTENT, quiet=True)
         sha = hashlib.sha1(json.dumps(message).encode()).hexdigest()
@@ -935,8 +937,12 @@ class UploadTests(unittest.TestCase):
             self.assertEqual(world.puts, ["tilewright-jsonc", "tilewright-source", "tilewright-pack"])
             refused = f"refs/tags/{P.REFUSED}/tilewright-pack/{world.version}/1"
             message = json.loads(world.tags[world.refs[refused]["sha"]]["message"])
-            self.assertEqual((message["http_status"], message["attempt"], message["attempt_ref"]),
-                             (status, 1, f"refs/tags/{P.ATTEMPT}/tilewright-pack/{world.version}/1"))
+            self.assertEqual((message["reason"], message["attempt"], message["attempt_ref"]),
+                             (f"http-{status}", 1, f"refs/tags/{P.ATTEMPT}/tilewright-pack/{world.version}/1"))
+            # Recorded right after the PUT, before any confirm poll.
+            put = world.events.index(("put", "tilewright-pack"))
+            self.assertEqual(world.events[put + 1:put + 3], [("write", "git/tags", refused[len("refs/tags/"):]),
+                                                             ("write", "git/refs", refused)])
             context.upload()
             self.assertEqual(world.puts[3:], ["tilewright-pack", "tilewright-edit", "tilewright-diff"])
             self.assertIn(f"refs/tags/{P.ATTEMPT}/tilewright-pack/{world.version}/2", world.refs)
@@ -1009,19 +1015,154 @@ class UploadTests(unittest.TestCase):
                              root=world.root)
         self.assertEqual((world.puts, world.writes), ([], []))
 
-    def test_a_receipt_that_cannot_be_written_stops_before_the_put(self):
+    def not_sent(self, world, name, number=1):
+        ref = f"refs/tags/{P.REFUSED}/{name}/{world.version}/{number}"
+        self.assertIn(ref, world.refs)
+        return json.loads(world.tags[world.refs[ref]["sha"]]["message"])["reason"]
+
+    def test_a_read_failure_after_a_refusal_still_leaves_the_refused_record(self):
+        # The review's repro: a 403, then crates.io reads fail during the polls.
+        context = Context(self)
+        world = context.world
+        world.outcomes["tilewright-pack"] = [403]
+        real_request, real_put = world.request, world.put
+        armed = []
+
+        def flaky(url, **kwargs):
+            if armed == [True] and "tilewright-pack" in url:
+                world.events.append(("read", url))
+                raise P.Failure("crates.io", 503)
+            return real_request(url, **kwargs)
+
+        def put(data, metadata, token):
+            outcome = real_put(data, metadata, token)
+            if metadata["name"] == "tilewright-pack" and not armed:
+                armed.append(True)  # every pack read fails after the first PUT
+            return outcome
+        context.stack.enter_context(mock.patch.object(P, "request", side_effect=flaky))
+        context.stack.enter_context(mock.patch.object(P, "put_once", side_effect=put))
+        with self.assertRaisesRegex(P.Refusal, "refused attempt 1 for tilewright-pack .* HTTP 403"):
+            context.upload()
+        self.assertEqual(self.not_sent(world, "tilewright-pack"), "http-403")
+        first_read = next(index for index, event in enumerate(world.events) if event[0] == "read")
+        self.assertLess(world.events.index(("write", "git/refs",
+                                            f"refs/tags/{P.REFUSED}/tilewright-pack/{world.version}/1")), first_read)
+        armed.append(False)  # disarmed for good
+        context.upload()
+        self.assertEqual(world.puts[3:], ["tilewright-pack", "tilewright-edit", "tilewright-diff"])
+
+    def test_the_refused_record_is_retried_and_accepts_only_its_own_copy(self):
+        context = Context(self)
+        world = context.world
+        world.outcomes["tilewright-pack"] = [429]
+        real = world.github_write
+        lost = []
+
+        def write(suffix, body, token):
+            answer = real(suffix, body, token)
+            if suffix == "git/refs" and body["ref"].startswith(f"refs/tags/{P.REFUSED}/") and not lost:
+                lost.append(body["ref"])
+                raise P.Failure("GitHub", 502)  # created, but the answer was lost
+            return answer
+        context.stack.enter_context(mock.patch.object(P, "github_write", side_effect=write))
+        with self.assertRaisesRegex(P.Refusal, "refused attempt 1"):
+            context.upload()
+        self.assertEqual(self.not_sent(world, "tilewright-pack"), "http-429")
+        # Three attempt records and the refused record, created once.
+        self.assertEqual(sum(1 for event in world.events if event[:2] == ("write", "git/refs")), 4)
+        plan = context.verify()
+        row = world.rows["tilewright-pack"]
+        attempt = world.refs[f"refs/tags/{P.ATTEMPT}/tilewright-pack/{world.version}/1"]["sha"]
+        with self.assertRaisesRegex(P.Refusal, "not as this run's record"):
+            P.record_refusal(plan, row, 1, attempt, "not-sent", world.values(), INTENT)
+        sleep = mock.Mock()
+        context.stack.enter_context(mock.patch.object(P, "github_write", side_effect=P.Failure("GitHub", 503)))
+        with self.assertRaises(P.Failure):
+            P.record_refusal(plan, row, 2, attempt, "http-403", world.values(), INTENT, sleep)
+        self.assertEqual(sleep.call_count, P.RECORD_TRIES - 1)
+
+    def test_a_crate_that_appears_before_the_put_gets_a_not_sent_record(self):
+        context = Context(self)
+        world = context.world
+        real = world.github_write
+
+        def write(suffix, body, token):
+            answer = real(suffix, body, token)
+            if suffix == "git/refs" and body["ref"] == f"refs/tags/{P.ATTEMPT}/tilewright-jsonc/{world.version}/1":
+                world.publish("tilewright-jsonc", by_hand=True)  # someone else published it meanwhile
+            return answer
+        context.stack.enter_context(mock.patch.object(P, "github_write", side_effect=write))
+        with self.assertRaisesRegex(P.Refusal, "changed on crates.io after attempt 1"):
+            context.upload()
+        self.assertEqual((world.puts, self.not_sent(world, "tilewright-jsonc")), ([], "not-sent"))
+        context.upload()
+        self.assertEqual(world.puts, ["tilewright-source", "tilewright-pack", "tilewright-edit", "tilewright-diff"])
+
+    def test_a_failed_read_before_the_put_gets_a_not_sent_record(self):
+        context = Context(self)
+        world = context.world
+        real = world.request
+        armed = []
+
+        def flaky(url, **kwargs):
+            if armed and "tilewright-jsonc" in url:
+                armed.clear()
+                raise P.Failure("crates.io", 503)
+            return real(url, **kwargs)
+        real_write = world.github_write
+
+        def write(suffix, body, token):
+            answer = real_write(suffix, body, token)
+            if suffix == "git/refs" and body["ref"] == f"refs/tags/{P.ATTEMPT}/tilewright-jsonc/{world.version}/1":
+                armed.append(True)
+            return answer
+        context.stack.enter_context(mock.patch.object(P, "request", side_effect=flaky))
+        context.stack.enter_context(mock.patch.object(P, "github_write", side_effect=write))
+        with self.assertRaisesRegex(P.Failure, "503"):
+            context.upload()
+        self.assertEqual((world.puts, self.not_sent(world, "tilewright-jsonc")), ([], "not-sent"))
+        context.upload()
+        self.assertIn(f"refs/tags/{P.ATTEMPT}/tilewright-jsonc/{world.version}/2", world.refs)
+        self.assertEqual(len(world.puts), 5)
+
+    def test_a_receipt_that_cannot_be_written_gets_a_not_sent_record(self):
         context = Context(self)
         real = Path.open
 
         def open_(path, *args, **kwargs):
-            if path.name.endswith("-reserved.json"):
+            if path.name.endswith("-1-reserved.json"):
                 raise OSError("disk full")
             return real(path, *args, **kwargs)
-        with mock.patch.object(Path, "open", open_), mock.patch("sys.stderr", new_callable=io.StringIO), \
+        with mock.patch.object(Path, "open", open_), \
                 self.assertRaisesRegex(P.Refusal, "receipt .* could not be written"):
             context.upload()
-        self.assertEqual(context.world.puts, [])
-        self.assertIn(f"refs/tags/{P.ATTEMPT}/tilewright-jsonc/{context.world.version}/1", context.world.refs)
+        world = context.world
+        self.assertEqual(world.puts, [])
+        self.assertIn(f"refs/tags/{P.ATTEMPT}/tilewright-jsonc/{world.version}/1", world.refs)
+        self.assertEqual(self.not_sent(world, "tilewright-jsonc"), "not-sent")
+        context.upload()
+        self.assertEqual(len(world.puts), 5)
+
+    def test_an_unrecordable_not_sent_attempt_stays_unresolved(self):
+        context = Context(self)
+        world = context.world
+        real_open, real_write = Path.open, world.github_write
+
+        def open_(path, *args, **kwargs):
+            if path.name.endswith("-reserved.json"):
+                raise OSError("disk full")
+            return real_open(path, *args, **kwargs)
+
+        def write(suffix, body, token):
+            if body.get("ref", body.get("tag", "")).replace("refs/tags/", "").startswith(P.REFUSED):
+                raise P.Failure("GitHub", 503)
+            return real_write(suffix, body, token)
+        context.stack.enter_context(mock.patch.object(P, "github_write", side_effect=write))
+        with mock.patch.object(Path, "open", open_), self.assertRaisesRegex(P.Refusal, "receipt"):
+            context.upload()
+        self.assertIn("could not be recorded either", context.stderr.getvalue())
+        with self.assertRaisesRegex(P.Refusal, "attempt 1 for tilewright-jsonc .* unresolved"):
+            context.verify()
 
     def test_confirm_needs_this_runs_trusted_publishing_and_treats_lag_as_not_yet(self):
         world = World(self)
@@ -1038,6 +1179,22 @@ class UploadTests(unittest.TestCase):
                 world.publish("tilewright-jsonc", **flags)
                 with self.subTest(flags=flags), self.assertRaises(P.Refusal):
                     P.confirm_upload(row, RUN_ID, sleep)
+        # A read that fails is "not yet"; the next one may see it.
+        world.publish("tilewright-jsonc")
+        failures = iter([P.Failure("crates.io", 503), P.Failure("crates.io", None)])
+
+        def flaky(url, **kwargs):
+            failure = next(failures, None)
+            if failure:
+                raise failure
+            return world.request(url, **kwargs)
+        with mock.patch.object(P, "request", side_effect=flaky):
+            self.assertTrue(P.confirm_upload(row, RUN_ID, mock.Mock()))
+        # Outside the polls, a CDN that does not serve the file yet is
+        # indeterminate, and a 403 there is no error.
+        world.publish("tilewright-jsonc", cdn=False)
+        with mock.patch.object(P, "request", side_effect=world.request):
+            self.assertEqual(P.registry_state(row).state, "indeterminate")
 
 
 class ConsumerTests(unittest.TestCase):

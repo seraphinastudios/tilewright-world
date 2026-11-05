@@ -328,16 +328,34 @@ release's commit whose message (canonical JSON) names the release, the run
 that built the bundle, the archive's digest, the upload metadata's digest
 and the publishing run. Creating the reference is create-only, so no two
 runs can make the same attempt. The publisher then writes a `reserved`
-receipt, sends one upload, and writes a receipt of the answer. crates.io
-answers 401, 403 and 429 before it reads the archive or writes anything:
-after such an answer the run creates a refused record,
-`refs/tags/crate-upload-refused/NAME/VERSION/N`, and stops. After any
-answer, the run waits up to two minutes for crates.io's API, index and
-download to show the version with the archive's checksum, published by
-this run through trusted publishing and owned by `zoeyrose`; then it goes on
-to the next crate. A later run makes attempt N+1 only if attempt N was
-refused and crates.io still lacks the version, and there are at most three
-attempts. Records are never deleted, moved or reused. The receipts, which
+receipt, checks that crates.io still lacks the version, sends one upload,
+and writes a receipt of the answer.
+
+A refused record, `refs/tags/crate-upload-refused/NAME/VERSION/N`, says
+that attempt N is known not to have published, and why. Its reason is
+`not-sent` when the run stopped after the attempt record and before the
+upload was sent, for example because the receipt could not be written or a
+crates.io read failed. It is `http-401`, `http-403` or `http-429` when
+crates.io refused the upload definitely. For a trusted-publishing token,
+crates.io answers 401 and 403 before it reads the archive. Its only 429 for
+such a token is the daily limit of new versions for a crate, which it checks
+inside its database transaction, after reading the archive but before
+storing it, and rolls back. So after any of the three nothing was
+published. The run writes the refused record as soon as it knows, before
+anything else, retrying a few times; a record that already exists counts
+only if it is exactly this run's. If the record cannot be written either,
+the attempt stays unresolved.
+
+After any answer, the run waits up to two minutes for crates.io's API,
+index and download to show the version with the archive's checksum,
+published by this run through trusted publishing and owned by `zoeyrose`. A
+read that fails during that wait counts as "not yet". Then it goes on to
+the next crate, or stops after a refusal. A later run makes attempt N+1
+only if attempt N has a refused record and crates.io still lacks the
+version, and there are at most three attempts. An attempt without a refused
+record while crates.io lacks the version is unresolved: no run can tell
+whether crates.io will still accept it, so the publisher stops there for
+good. Records are never deleted, moved or reused. The receipts, which
 hold no response text, are kept for 90 days as the run's artifact
 `crate-put-outcomes-RUN-ATTEMPT`. The first publication's intents,
 `refs/tags/crate-upload-intent/NAME/0.1.0`, are only read, to check that
@@ -770,9 +788,10 @@ still in progress then: check its "Publish crates" run first.
 | "Verify the release's crate archives" | Nothing was uploaded or recorded | Read its error, which names the check. Fix a cause on `main`, then dispatch again. A changed or unattested release is not publishable at all. Refusals about upload records, a newer crate version or the abandoned list are below |
 | "Resolve the archives against crates.io" | Nothing was uploaded | The crates at this version would not resolve or build for a consumer. The release's archives cannot change: fix it in the next crate version, and consider abandoning this one (see "Crate versions") |
 | "Exchange the job's OIDC token for a crates.io token" | Nothing was uploaded or recorded | No trusted publisher matched the run. Check steps 1 to 3 of "Turning on crates.io publication", then dispatch again |
-| The upload got HTTP 401, 403 or 429 | crates.io refused attempt N before writing anything, and the run created the refused record and stopped. The crates before it in dependency order are published | 403: the crate's trusted publisher is missing or wrong (check step 3), or the crates.io token expired. 401: crates.io could not read the token. 429: a rate limit, such as crates.io's daily limit of new versions for a crate; wait until it passes. Then dispatch again, which makes attempt N+1. After three refused attempts the publisher stops for that crate version; bump to the next patch version instead |
+| The upload got HTTP 401, 403 or 429 | crates.io refused attempt N without publishing it. The run created the refused record (reason `http-401`, `http-403` or `http-429`) right away, and stopped. The crates before it in dependency order are published | 403: the crate's trusted publisher is missing or wrong (check step 3), or the crates.io token expired. 401: crates.io could not read the token. 429: crates.io's daily limit of new versions for a crate; wait until it passes. Then dispatch again, which makes attempt N+1. After three attempts with refused records the publisher stops for that crate version; bump to the next patch version instead |
 | The upload timed out, got a server error or another answer | Attempt N is unresolved: there is no refused record. If crates.io showed the version from this run within two minutes, the run went on; otherwise it stopped | Wait, then dispatch again: if crates.io now has the version with the release's archive, the run skips it and goes on. If it still does not, no run can tell whether crates.io will accept that upload, so the publisher refuses that crate version for good. After looking into it, bump to the next patch version, which publishes all five again |
-| The run stopped, was cancelled or could not write a receipt after an attempt record and before its upload | The `reserved` receipt is there without a `put` one, or the log says which step stopped. The attempt is unresolved | As for an unresolved attempt: bump to the next patch version |
+| The run stopped after an attempt record and before its upload: a receipt could not be written, a crates.io read failed, or crates.io showed the version meanwhile | Nothing was sent. The run created the refused record with reason `not-sent` and stopped | Dispatch again: crates.io's version is skipped if it is there with the release's archive, and otherwise the run makes attempt N+1 |
+| An attempt record with no `put` receipt and no refused record: the run was killed or cancelled before it could write one, or the refused record could not be written | The log says which step stopped, or that the record could not be written. The attempt is unresolved | As for an unresolved attempt: bump to the next patch version |
 | crates.io has the version with other bytes, yanked, or without `zoeyrose` as an owner | Nothing was uploaded for it | Find out why. Publish the content as a new crate version |
 | crates.io has a newer crate version | That cohort is stale and is not published, by design | Nothing. A run that had started uploading finishes its cohort; a later run for that release refuses. So an older cohort can stay partly published. Its published crates are dependency-closed, since a crate is uploaded only after its dependencies are on crates.io |
 | "Confirm the five crates on crates.io", after the upload step succeeded | crates.io's index or download is slow | Dispatch again later; present crates are skipped |
