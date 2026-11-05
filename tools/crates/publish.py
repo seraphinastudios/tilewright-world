@@ -66,8 +66,9 @@ MAX_ATTEMPTS = 3
 POLLS, POLL_SECONDS = 12, 10
 ATTESTATION_TRIES, ATTESTATION_SECONDS = 6, 20
 # Records of uploads: the first publication's intents (read for the
-# cross-check only), then one attempt record before each PUT and, after a
-# PUT that crates.io refused before writing, a refused record.
+# cross-check only), then one attempt record before each PUT and a refused
+# record once attempt N is known not to have published: it was never sent,
+# or crates.io refused it definitely (401, 403 or 429).
 LEGACY, ATTEMPT, REFUSED = "crate-upload-intent", "crate-upload-attempt", "crate-upload-refused"
 LEGACY_KIND, ATTEMPT_KIND, REFUSED_KIND = "world-first-crate-upload", "world-crate-upload", "world-crate-upload-refused"
 # Why an attempt is known not to have published: its PUT was never sent, or
