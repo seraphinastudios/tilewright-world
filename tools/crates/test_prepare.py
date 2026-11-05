@@ -6,7 +6,9 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
+import subprocess
 import tarfile
 import tempfile
 import unittest
@@ -18,37 +20,98 @@ SPEC.loader.exec_module(P)
 REVISION = "a" * 40
 
 
-def crate(crate_name, extra=(), **package_changes):
+def crate(crate_name, extra=(), *, version="0.1.0", revision=REVISION, dependencies=(), **package_changes):
     name = crate_name
-    package = {"name": name, "version": "0.1.0", "publish": ["crates-io"],
+    package = {"name": name, "version": version, "publish": ["crates-io"],
                "license": "MIT", "license-file": "LICENSE", "repository": P.REPOSITORY}
     package.update(package_changes)
     manifest = "[package]\n" + "".join(f"{key} = {json.dumps(value)}\n" for key, value in package.items())
+    manifest += "".join(f'[dependencies.{dependency}]\nversion = "={version}"\n' for dependency in dependencies)
     files = [("Cargo.toml", manifest.encode()), ("Cargo.toml.orig", b"original"),
-             (".cargo_vcs_info.json", json.dumps({"git": {"sha1": REVISION},
+             (".cargo_vcs_info.json", json.dumps({"git": {"sha1": revision},
                                                 "path_in_vcs": f"crates/{name}"}).encode()),
              ("LICENSE", (P.ROOT / "LICENSE").read_bytes()), ("README.md", b"candidate")]
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as stream:
         for path, data in [*files, *extra]:
-            info = tarfile.TarInfo(f"{name}-0.1.0/{path}")
+            info = tarfile.TarInfo(f"{name}-{version}/{path}")
             info.size = len(data)
             stream.addfile(info, io.BytesIO(data))
     return buffer.getvalue()
 
 
-def write_candidate(output):
+def write_candidate(output, version="0.1.0", revision=None, root=P.ROOT, graph=False):
+    """Five candidate archives and their manifest; `graph` gives them the
+    internal dependencies of the real crates/*/Cargo.toml."""
+    revision = revision or REVISION
     rows = []
     for name in P.PUBLIC:
-        data = crate(name)
-        row = P.package_row(name, "0.1.0", data, REVISION)
+        data = crate(name, version=version, revision=revision,
+                     dependencies=internal_dependencies(name) if graph else ())
+        row = P.package_row(name, version, data, revision, root)
         rows.append(row)
         (output / row["asset"]).write_bytes(data)
     manifest = {"schema": 1, "status": "candidate-only", "repository": P.REPOSITORY,
-                "revision": REVISION, "toolchain": "1.97.1", "registry": "crates-io",
+                "revision": revision, "toolchain": P.policy(root)[1], "registry": "crates-io",
                 "reproducible_packages": True, "packages": rows}
     (output / "candidate.json").write_text(json.dumps(manifest))
     return manifest
+
+
+def internal_dependencies(name):
+    manifest = P.load_toml(P.ROOT / f"crates/{name}/Cargo.toml")
+    return sorted(key for key in manifest.get("dependencies", {}) if key in P.PUBLIC)
+
+
+POLICY_FILES = ("Cargo.toml", "rust-toolchain.toml", "LICENSE", "README.md", "tools/crates/candidates.json",
+                "scripts/release/release-policy.cjs", *(f"crates/{name}/Cargo.toml" for name in P.PUBLIC + P.PRIVATE))
+
+
+def next_minor(version):
+    major, minor, _ = map(int, version.split("."))
+    return f"{major}.{minor + 1}.0"
+
+
+def set_version(root, version):
+    """Moves a policy tree's workspace crate version and exact internal pins."""
+    manifest = root / "Cargo.toml"
+    text = manifest.read_text()
+    text, count = re.subn(r'(\[workspace\.package\]\nversion = ")[^"]+(")', rf"\g<1>{version}\g<2>", text)
+    assert count == 1
+    text, count = re.subn(r'(path = "crates/tilewright-[a-z]+", version = "=)[^"]+(")', rf"\g<1>{version}\g<2>", text)
+    assert count == len(P.PUBLIC)
+    manifest.write_text(text)
+
+
+class Repository:
+    """A git repository of this checkout's policy files, at chosen crate versions."""
+
+    def __init__(self, test):
+        scratch = tempfile.TemporaryDirectory()
+        test.addCleanup(scratch.cleanup)
+        self.root = Path(scratch.name)
+        self.git("init", "-q", "-b", "main")
+        for path in POLICY_FILES:
+            (self.root / path).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(P.ROOT / path, self.root / path)
+
+    def git(self, *arguments):
+        return subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                               "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", *arguments],
+                              cwd=self.root, check=True, capture_output=True, text=True).stdout.strip()
+
+    def commit(self, version=None, files=None):
+        if version:
+            set_version(self.root, version)
+        for path, data in (files or {}).items():
+            (self.root / path).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / path).write_text(data)
+        self.git("add", "-A")
+        self.git("commit", "-q", "--allow-empty", "-m", "change")
+        return self.git("rev-parse", "HEAD")
+
+    def tag(self, name, revision="HEAD"):
+        self.git("tag", name, revision)
 
 
 class CandidateTests(unittest.TestCase):
@@ -264,6 +327,141 @@ class CandidateTests(unittest.TestCase):
                 (Path(scratch) / "credentials.toml").write_text("not-a-real-credential")
                 with self.assertRaisesRegex(ValueError, "credential files"):
                     P.environment()
+
+
+
+class ReleaseTreeTests(unittest.TestCase):
+    """main verifies a release's bytes against the policy files of its tree."""
+
+    def test_policy_and_archives_follow_the_given_tree(self):
+        version, toolchain = P.policy()
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            for path in POLICY_FILES:
+                (root / path).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(P.ROOT / path, root / path)
+            later = next_minor(version)
+            set_version(root, later)
+            self.assertEqual(P.policy(root), (later, toolchain))
+            name = P.PUBLIC[0]
+            data = crate(name, version=later)
+            P.archive(data, name, later, REVISION, root)
+            (root / "LICENSE").write_bytes(b"another notice")
+            with self.assertRaisesRegex(ValueError, "root MIT license notice"):
+                P.archive(data, name, later, REVISION, root)
+            with self.assertRaisesRegex(ValueError, "root MIT license notice"):
+                P.package_row(name, later, data, REVISION, root)
+
+    def test_verify_files_takes_the_tree_policy(self):
+        version, _ = P.policy()
+        later = next_minor(version)
+        with tempfile.TemporaryDirectory() as scratch, tempfile.TemporaryDirectory() as tree:
+            root = Path(tree)
+            for path in POLICY_FILES:
+                (root / path).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(P.ROOT / path, root / path)
+            set_version(root, later)
+            output = Path(scratch)
+            write_candidate(output, later, root=root)
+            files = {path.name: path.read_bytes() for path in output.iterdir()}
+            manifest, archives = P.verify_files(files, root)
+            self.assertEqual({row["version"] for row in manifest["packages"]}, {later})
+            self.assertEqual(len(archives), 5)
+            with self.assertRaises((ValueError, KeyError)):
+                P.verify_files(files)
+
+    def test_older_trees_without_an_abandoned_list_still_pass(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            for path in POLICY_FILES:
+                (root / path).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(P.ROOT / path, root / path)
+            config = root / "tools/crates/candidates.json"
+            value = json.loads(config.read_text())
+            value.pop("abandoned")
+            config.write_text(json.dumps(value))
+            self.assertEqual(P.policy(root), P.policy())
+            self.assertEqual(P.candidates(root), [])
+
+    def test_abandoned_list_is_checked_for_its_form(self):
+        self.assertEqual(P.candidates(), [])
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            (root / "tools/crates").mkdir(parents=True)
+            config = root / "tools/crates/candidates.json"
+            value = json.loads((P.ROOT / "tools/crates/candidates.json").read_text())
+            value["abandoned"] = [{"version": "0.2.0", "release": "v0.7.0"}]
+            config.write_text(json.dumps(value))
+            self.assertEqual(P.candidates(root), [("0.2.0", "v0.7.0")])
+            for abandoned in ([{"version": "0.2", "release": "v0.7.0"}], [{"version": "0.2.0", "release": "0.7.0"}],
+                              [{"version": "0.2.0"}], [{"version": "0.2.0", "release": "v0.7.0", "why": "x"}],
+                              [{"version": "0.2.0", "release": "v0.7.0"}, {"version": "0.2.0", "release": "v0.8.0"}],
+                              {"version": "0.2.0"}):
+                value["abandoned"] = abandoned
+                config.write_text(json.dumps(value))
+                with self.subTest(abandoned=abandoned), self.assertRaisesRegex(ValueError, "abandoned"):
+                    P.candidates(root)
+            config.write_text("[]")
+            with self.assertRaisesRegex(ValueError, "allowlist"):
+                P.candidates(root)
+
+
+class CheckVersionTests(unittest.TestCase):
+    def setUp(self):
+        self.version = P.policy()[0]
+        self.repository = Repository(self)
+        self.base = self.repository.commit()
+
+    def check(self, version):
+        if version != P.policy(self.repository.root)[0]:
+            set_version(self.repository.root, version)
+        return P.check_version(self.base, self.repository.root)
+
+    def test_unchanged_next_patch_and_next_minor_pass(self):
+        major, minor, patch = map(int, self.version.split("."))
+        for version, step in ((self.version, "unchanged"), (f"{major}.{minor}.{patch + 1}", "the next patch version"),
+                              (f"{major}.{minor + 1}.0", "the next minor version")):
+            with self.subTest(version=version):
+                self.assertEqual(self.check(version), (self.version, version, step))
+
+    def test_backward_skipping_and_major_moves_fail(self):
+        major, minor, patch = map(int, self.version.split("."))
+        self.repository.commit(f"{major}.{minor + 1}.1")
+        self.base = self.repository.git("rev-parse", "HEAD")
+        for version, message in ((self.version, "backward"), (f"{major}.{minor + 1}.0", "backward"),
+                                 (f"{major}.{minor + 1}.3", "may only stay"), (f"{major}.{minor + 3}.0", "may only stay"),
+                                 (f"{major}.{minor + 2}.1", "may only stay"), (f"{major + 1}.0.0", "may only stay")):
+            with self.subTest(version=version), self.assertRaisesRegex(ValueError, message):
+                self.check(version)
+
+    def test_major_stays_zero_while_pre_1_0(self):
+        policy = self.repository.root / "scripts/release/release-policy.cjs"
+        self.assertTrue(P.pre_1_0(self.repository.root))
+        self.repository.commit("1.0.0")
+        self.base = self.repository.git("rev-parse", "HEAD")
+        with self.assertRaisesRegex(ValueError, "PRE_1_0"):
+            self.check("1.0.1")
+        policy.write_text(policy.read_text().replace("const PRE_1_0 = true;", "const PRE_1_0 = false;"))
+        self.assertEqual(self.check("1.0.1")[2], "the next patch version")
+        policy.write_text("const PRE_1_0 = true;\nconst PRE_1_0 = false;\n")
+        with self.assertRaisesRegex(ValueError, "exactly once"):
+            P.pre_1_0(self.repository.root)
+
+    def test_lockstep_and_pins_come_from_policy(self):
+        package = self.repository.root / "crates/tilewright-edit/Cargo.toml"
+        package.write_text(package.read_text().replace("version.workspace = true", 'version = "9.9.9"'))
+        with self.assertRaisesRegex(ValueError, "identity"):
+            P.check_version(self.base, self.repository.root)
+        shutil.copy(P.ROOT / "crates/tilewright-edit/Cargo.toml", package)
+        manifest = self.repository.root / "Cargo.toml"
+        manifest.write_text(manifest.read_text().replace(f'version = "={self.version}"', 'version = "=9.9.9"', 1))
+        with self.assertRaisesRegex(ValueError, "exact candidate version"):
+            P.check_version(self.base, self.repository.root)
+
+    def test_missing_or_option_like_base_fails(self):
+        for base in ("", "--help", "f" * 40, "no-such-ref"):
+            with self.subTest(base=base), self.assertRaises(ValueError):
+                P.check_version(base, self.repository.root)
 
 
 if __name__ == "__main__":

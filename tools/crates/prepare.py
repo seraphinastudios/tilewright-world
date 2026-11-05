@@ -22,6 +22,7 @@ PUBLIC = ("tilewright-jsonc", "tilewright-source", "tilewright-pack",
 PRIVATE = ("tilewright-cli", "tilewright-pack-wasm")
 REPOSITORY = "https://github.com/seraphinastudios/tilewright-world"
 MAX_ARCHIVE_BYTES = 128 * 1024 * 1024
+VERSION = r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
 
 
 def require(condition, message):
@@ -33,10 +34,30 @@ def load_toml(path):
     return tomllib.loads(path.read_text())
 
 
-def policy(root=ROOT):
+def candidates(root=ROOT):
+    """The candidate allowlist, and the crate versions publication refuses.
+
+    Only main's "abandoned" list counts: a release tree's own list is checked
+    for its form and otherwise ignored, and older trees have none.
+    """
     config = json.loads((root / "tools/crates/candidates.json").read_text())
+    require(isinstance(config, dict), "candidate allowlist changed")
+    abandoned = config.pop("abandoned", [])
     require(config == {"schema": 1, "status": "candidate-only", "registry": "crates-io",
                        "crates": list(PUBLIC), "private": list(PRIVATE)}, "candidate allowlist changed")
+    require(isinstance(abandoned, list) and len(abandoned) <= 64 and
+            all(isinstance(row, dict) and set(row) == {"version", "release"} and
+                isinstance(row["version"], str) and re.fullmatch(VERSION, row["version"]) and
+                isinstance(row["release"], str) and re.fullmatch("v" + VERSION, row["release"])
+                for row in abandoned) and
+            len({row["version"] for row in abandoned}) == len(abandoned) and
+            len({row["release"] for row in abandoned}) == len(abandoned),
+            "abandoned crate versions are malformed")
+    return [(row["version"], row["release"]) for row in abandoned]
+
+
+def policy(root=ROOT):
+    candidates(root)
     workspace = load_toml(root / "Cargo.toml")["workspace"]
     require(workspace["package"].get("license") == "MIT" and
             workspace["package"].get("license-file") == "LICENSE" and (root / "LICENSE").is_file(),
@@ -44,8 +65,7 @@ def policy(root=ROOT):
     require(set(workspace["members"]) == {f"crates/{name}" for name in PUBLIC + PRIVATE},
             "workspace membership differs from candidate policy")
     version = workspace["package"]["version"]
-    require(re.fullmatch(r"0|[1-9][0-9]*", version.split(".")[0]) and
-            re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", version),
+    require(re.fullmatch(r"0|[1-9][0-9]*", version.split(".")[0]) and re.fullmatch(VERSION, version),
             "candidate version must be a release version")
     for name in PUBLIC + PRIVATE:
         package = load_toml(root / f"crates/{name}/Cargo.toml")["package"]
@@ -63,6 +83,44 @@ def policy(root=ROOT):
                 "internal dependency must have the exact candidate version")
     toolchain = load_toml(root / "rust-toolchain.toml")["toolchain"]["channel"]
     return version, toolchain
+
+
+def pre_1_0(root=ROOT):
+    """PRE_1_0 in scripts/release/release-policy.cjs, the release planner's rule."""
+    found = re.findall(r"^const PRE_1_0 = (true|false);$",
+                       (root / "scripts/release/release-policy.cjs").read_text(), re.MULTILINE)
+    require(len(found) == 1, "scripts/release/release-policy.cjs must set PRE_1_0 exactly once")
+    return found[0] == "true"
+
+
+def check_version(base, root=ROOT):
+    """Require the checkout's crate version to stay, or to move one step.
+
+    A crate version is published once and owned forever, so it moves only on
+    purpose: to the next patch or minor version, never backward and never
+    further. Lockstep and the exact internal pins are policy()'s. Git only.
+    """
+    version, _ = policy(root)
+    require(isinstance(base, str) and base and not base.startswith("-"), "a base revision is required")
+    try:
+        commit = run(["git", "rev-parse", "--verify", "--quiet", "--end-of-options", base + "^{commit}"],
+                     cwd=root)
+        previous = tomllib.loads(run(["git", "cat-file", "blob", f"{commit}:Cargo.toml"], cwd=root))
+    except subprocess.CalledProcessError:
+        raise ValueError("the base revision or its Cargo.toml is not in this repository") from None
+    previous = previous["workspace"]["package"]["version"]
+    require(isinstance(previous, str) and re.fullmatch(VERSION, previous),
+            "the base crate version is not a release version")
+    old, new = (tuple(map(int, value.split("."))) for value in (previous, version))
+    require(new >= old, f"the crate version moves backward, from {previous} to {version}")
+    steps = {old: "unchanged", (old[0], old[1], old[2] + 1): "the next patch version",
+             (old[0], old[1] + 1, 0): "the next minor version"}
+    require(new in steps, f"the crate version moves from {previous} to {version}; it may only stay at "
+            f"{previous} or move to {'.'.join(map(str, (old[0], old[1], old[2] + 1)))} or "
+            f"{'.'.join(map(str, (old[0], old[1] + 1, 0)))}")
+    require(new[0] == 0 or not pre_1_0(root),
+            "the crate version stays below 1.0.0 while PRE_1_0 is true in scripts/release/release-policy.cjs")
+    return previous, version, steps[new]
 
 
 def environment():
@@ -114,7 +172,7 @@ def regular_tar_member(stream, item):
             item.offset_data - item.offset == tarfile.BLOCKSIZE)
 
 
-def archive(data, name, version, revision):
+def archive(data, name, version, revision, root=ROOT):
     files = {}
     prefix = f"{name}-{version}"
     with bounded_tar(data, MAX_ARCHIVE_BYTES) as stream:
@@ -137,7 +195,7 @@ def archive(data, name, version, revision):
             package["publish"] == ["crates-io"] and package["license"] == "MIT" and
             package.get("license-file") == "LICENSE" and
             package["repository"] == REPOSITORY, "archive package identity differs")
-    require(relative["LICENSE"] == (ROOT / "LICENSE").read_bytes(),
+    require(relative["LICENSE"] == (root / "LICENSE").read_bytes(),
             "archive must contain the exact root MIT license notice")
     require(json.loads(relative[".cargo_vcs_info.json"]) ==
             {"git": {"sha1": revision}, "path_in_vcs": f"crates/{name}"},
@@ -155,8 +213,8 @@ def archive(data, name, version, revision):
     return relative
 
 
-def package_row(name, version, data, revision):
-    files = archive(data, name, version, revision)
+def package_row(name, version, data, revision, root=ROOT):
+    files = archive(data, name, version, revision, root)
     return {"name": name, "version": version, "path": f"crates/{name}",
             "asset": f"{name}-{version}.crate", "sha256": digest(data),
             "inventory": [{"path": path, "sha256": digest(value), "size": len(value)}
@@ -213,14 +271,16 @@ def verify(output, build=False):
     print(f"Verified {len(archives)} local candidate archives" + (" and compiled isolated graph" if build else ""))
 
 
-def verify_files(files):
+def verify_files(files, root=ROOT):
     """Check candidate bytes without executing Cargo or accessing credentials.
 
     Release verification uses this pure boundary in privileged jobs; callers
     must separately authenticate the expected source revision and origin.
+    `root` holds the policy files: a checkout, or the files of the release's
+    own tree, so that main can verify an older release.
     """
     manifest = json.loads(files["candidate.json"])
-    version, toolchain = policy()
+    version, toolchain = policy(root)
     require(set(manifest) == {"schema", "status", "repository", "revision", "toolchain", "registry",
                               "reproducible_packages", "packages"} and
             manifest["schema"] == 1 and manifest["status"] == "candidate-only" and
@@ -235,9 +295,9 @@ def verify_files(files):
     for row in manifest["packages"]:
         asset = f"{row['name']}-{version}.crate"
         data = files[asset]
-        require(row == package_row(row["name"], version, data, manifest["revision"]),
+        require(row == package_row(row["name"], version, data, manifest["revision"], root),
                 "candidate manifest digest, identity or inventory differs")
-        archives[row["name"]] = archive(data, row["name"], version, manifest["revision"])
+        archives[row["name"]] = archive(data, row["name"], version, manifest["revision"], root)
     return manifest, archives
 
 
@@ -277,14 +337,20 @@ def main():
     verifier = commands.add_parser("verify")
     verifier.add_argument("output", type=Path)
     verifier.add_argument("--build", action="store_true")
+    commands.add_parser("check-version", help="the crate version stays or moves one step from --base").add_argument(
+        "--base", required=True, help="the revision to compare with, such as the pull request's base")
     args = parser.parse_args()
     try:
         if args.command == "prepare":
             prepare(args.output)
+        elif args.command == "check-version":
+            previous, version, step = check_version(args.base)
+            print(f"Crate version {version}: {step}" + ("" if previous == version else f" after {previous}"))
         else:
             verify(args.output, args.build)
     except (ValueError, OSError, KeyError, TypeError, subprocess.SubprocessError, tarfile.TarError) as error:
-        parser.exit(1, f"candidate preparation: {error}\n")
+        label = "crate version" if args.command == "check-version" else "candidate preparation"
+        parser.exit(1, f"{label}: {error}\n")
 
 
 if __name__ == "__main__":
