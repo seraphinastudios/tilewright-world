@@ -21,6 +21,7 @@ docs/RELEASING.md describes the procedure.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import http.client
 import importlib.util
@@ -565,6 +566,25 @@ def tree(revision, directory, root=ROOT):
     return directory
 
 
+def main_abandoned(token):
+    """The abandoned list on main's tip now, which a re-run of an older
+    publish run would otherwise miss: its checkout is that run's main."""
+    value = github("contents/tools/crates/candidates.json?ref=main", token)
+    require(isinstance(value, dict) and value.get("type") == "file" and value.get("encoding") == "base64" and
+            isinstance(value.get("content"), str) and isinstance(value.get("size"), int) and
+            0 < value["size"] <= 64 * 1024, "main's tools/crates/candidates.json is unreadable")
+    try:
+        data = base64.b64decode(value["content"])
+    except ValueError:
+        raise Refusal("main's tools/crates/candidates.json is unreadable") from None
+    require(len(data) == value["size"], "main's tools/crates/candidates.json is unreadable")
+    with tempfile.TemporaryDirectory(prefix="tilewright-world-main-policy-") as temporary:
+        path = Path(temporary) / "tools/crates/candidates.json"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(data)
+        return PREPARE.candidates(Path(temporary))
+
+
 def candidate_bundle(data, revision, root=ROOT):
     """The byte-only verifier, against the release tree's policy. No Cargo."""
     with tempfile.TemporaryDirectory(prefix="tilewright-world-release-tree-") as temporary:
@@ -950,7 +970,8 @@ def verify_release(values, token, evidence, *, fresh, root=ROOT, sleep=None):
     check_sums(sums, name, digest)
     made_by = provenance(data, name, lines, revision, digest)
     manifest, files, archives, version = candidate_bundle(data, revision, root)
-    for refused_version, refused_tag in PREPARE.candidates(root):
+    # Both this run's checkout and main as it is now: either may list it.
+    for refused_version, refused_tag in {*PREPARE.candidates(root), *main_abandoned(token)}:
         require(refused_version != version and refused_tag != tag,
                 f"crate version {version} of {tag} is abandoned in tools/crates/candidates.json")
     owner = ownership(revision, tag, root)

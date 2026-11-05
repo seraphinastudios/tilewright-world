@@ -236,8 +236,9 @@ moves it.
   release to the `abandoned` list in `main`'s
   `tools/crates/candidates.json`, as `{"version": "0.2.0", "release":
   "v0.7.0"}`, in a reviewed pull request, and bump the crate version to the
-  next patch version. The publisher refuses any listed version and any
-  listed release. Only `main`'s list counts.
+  next patch version. The publisher refuses any version or release listed
+  there, in its own checkout of `main` or on `main`'s tip when it runs, so
+  a re-run of an older run refuses it too. Only `main`'s list counts.
 
 ## When releases happen
 
@@ -770,11 +771,13 @@ gh workflow run publish-crate.yml --ref main -R "$repository" \
 
 The owning release's "Start crate publication" summary has the same
 command filled in. `-f operation=verify` checks everything and uploads
-nothing. Dispatch the workflow directly: do not re-run the release run
-instead. A re-run of all its jobs plans no release and so starts nothing,
-and any re-run joins the release queue, where it can cancel a waiting
-merge's run. Upload records are never deleted: each run reads them and goes
-on as far as they allow. The run's summary and the receipts artifact
+nothing. Always dispatch the workflow anew. Do not re-run the release run:
+a re-run of all its jobs plans no release and so starts nothing, and any
+re-run joins the release queue, where it can cancel a waiting merge's run.
+Do not re-run a "Publish crates" run either: a re-run runs the code of
+`main` as it was when that run started, not `main`'s fixes since. Upload
+records are never deleted: each run reads them and goes on as far as they
+allow. The run's summary and the receipts artifact
 `crate-put-outcomes-RUN-ATTEMPT` show each attempt.
 
 Every later release's "Start crate publication" warns while crates.io lacks

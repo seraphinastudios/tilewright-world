@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Crate publication tests. GitHub, crates.io, gh and time are faked; git is real."""
 import argparse
+import base64
 import copy
 import gzip
 import hashlib
@@ -88,6 +89,7 @@ class World:
         self.outcomes = {}
         self.puts, self.writes, self.events = [], [], []
         self.attested = True
+        self.main_candidates = None  # main's candidates.json now, if not the checkout's
 
     def values(self, operation="publish"):
         return {"OPERATION": operation, "RELEASE_TAG": self.tag, "SOURCE_REVISION": self.revision,
@@ -135,6 +137,10 @@ class World:
             return {"sha": self.revision}
         if suffix == f"compare/{self.revision}...main":
             return {"status": "ahead", "base_commit": {"sha": self.revision}}
+        if suffix == "contents/tools/crates/candidates.json?ref=main":
+            data = self.main_candidates or (self.root / "tools/crates/candidates.json").read_bytes()
+            return {"type": "file", "encoding": "base64", "size": len(data),
+                    "content": base64.encodebytes(data).decode()}
         if suffix.startswith(f"attestations/sha256:{self.digest}?"):
             return {"attestations": [{"repository_id": P.REPOSITORY_ID, "bundle": {"mediaType": "test"}}]} \
                 if self.attested else None
@@ -750,6 +756,21 @@ class TreePolicyTests(unittest.TestCase):
             config.write_text(json.dumps(value))
             with self.subTest(entry=entry), self.assertRaisesRegex(P.Refusal, "abandoned"):
                 context.verify()
+
+    def test_mains_current_abandoned_list_counts_too(self):
+        # A re-run of an older publish run checks out that run's main; the
+        # list on main's tip now must refuse as well.
+        context = Context(self)
+        value = json.loads((context.world.root / "tools/crates/candidates.json").read_text())
+        value["abandoned"] = [{"version": LATER, "release": "v0.7.0"}]
+        context.world.main_candidates = json.dumps(value).encode()
+        with self.assertRaisesRegex(P.Refusal, "abandoned"):
+            context.verify()
+        for answer in ({"type": "dir"}, {"type": "file", "encoding": "base64", "size": 3, "content": "e30="},
+                       {"type": "file", "encoding": "base64", "size": 2, "content": "W10="}):
+            with self.subTest(answer=answer), mock.patch.object(P, "github", return_value=answer), \
+                    self.assertRaises(ValueError):
+                P.main_abandoned(READ)
 
     def test_a_release_that_does_not_own_its_version_plans_nothing(self):
         context = Context(self, owner=False)
