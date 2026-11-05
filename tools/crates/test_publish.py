@@ -1444,6 +1444,36 @@ class UploadTests(unittest.TestCase):
                     context.upload()
                 self.assertEqual((world.puts, self.not_sent(world, "tilewright-jsonc")), ([], "not-sent"))
 
+    def test_an_unexpected_answer_or_read_while_settling_still_settles(self):
+        for case in ("a 201 with object null", "a settle read that is not JSON"):
+            context = Context(self)
+            world = context.world
+            ref = f"refs/tags/{P.ATTEMPT}/tilewright-jsonc/{world.version}/1"
+            if case == "a 201 with object null":
+                real = world.github_write
+
+                def write(suffix, body, token, real=real, ref=ref):
+                    answer = real(suffix, body, token)
+                    return dict(answer, object=None) if suffix == "git/refs" and body["ref"] == ref else answer
+                context.stack.enter_context(mock.patch.object(P, "github_write", side_effect=write))
+                expected = AttributeError
+            else:
+                self.fail_attempt_ref(context, "tilewright-jsonc", create=True)
+                real = world.github
+                bad = []
+
+                def read(suffix, token, real=real, ref=ref, bad=bad, **flags):
+                    if suffix == "git/ref/" + ref[len("refs/"):] and ref in world.refs and not bad:
+                        bad.append(suffix)
+                        raise json.JSONDecodeError("Expecting value", "<html>", 0)  # a 200 that is not JSON
+                    return real(suffix, token, **flags)
+                context.stack.enter_context(mock.patch.object(P, "github", side_effect=read))
+                expected = P.Failure
+            with self.subTest(case=case):
+                with self.assertRaises(expected):
+                    context.upload()
+                self.assertEqual((world.puts, self.not_sent(world, "tilewright-jsonc")), ([], "not-sent"))
+
     def test_an_existing_attempt_ref_settles_as_unresolved(self):
         # A ref already there when this run creates attempt 1 (hidden from the
         # listing, as by lag) is another run's: nothing is written.

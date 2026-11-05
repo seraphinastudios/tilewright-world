@@ -342,8 +342,12 @@ the run writes nothing and a later run makes attempt N again; should the
 reference appear after all, that later run reports attempt N as
 unresolved. If it holds anything else, cannot be read, or was acknowledged
 but never shows, the run writes nothing and the attempt may be unresolved.
-The publisher then writes a `reserved` receipt, checks that crates.io still lacks the version, sends one upload,
-and writes a receipt of the answer.
+Acknowledged means that GitHub's whole 201 answer arrived, even if it was
+not the expected object. A connection that fails after the 201 status,
+with the answer cut off or too large, does not count: if no read finds
+such a reference, it counts as not made, and the run writes nothing. The
+publisher then writes a `reserved` receipt, checks that crates.io still
+lacks the version, sends one upload, and writes a receipt of the answer.
 
 A refused record, `refs/tags/crate-upload-refused/NAME/VERSION/N`, says
 that attempt N is known not to have published, and why. Its reason is

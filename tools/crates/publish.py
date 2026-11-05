@@ -98,6 +98,10 @@ class Backward(Refusal):
     """The crate version moves backward: the one error that stops a release."""
 
 
+class NotOurs(Refusal):
+    """A record exists at the reference, but it is not the one expected."""
+
+
 class Failure(Refusal):
     """A request that failed; `status` is its HTTP status, or None."""
 
@@ -405,8 +409,13 @@ def github(suffix, token, *, absent=False, readback=False):
 
 
 def github_write(suffix, body, token):
-    """One create; never retried, since its outcome may be unknown. A failure
-    after GitHub answered 201 is marked `acknowledged`: the create happened."""
+    """One create; never retried, since its outcome may be unknown.
+
+    A failure after GitHub's 201 answer arrived whole, but was not the
+    expected JSON object, is marked `acknowledged`: the create happened. A
+    transport failure after the 201 status (a body cut off or too large, a
+    reset) is a Failure and is not marked.
+    """
     data = request(f"https://api.github.com/repos/{REPOSITORY}/{suffix}", token=token, method="POST",
                    body=canonical(body), expect=(201,))
     try:
@@ -757,7 +766,8 @@ def create_record(short, message, values, token):
     """Create an annotated tag at the revision and its ref, create-only.
 
     An exception carries the `stage` it stopped at and whether GitHub
-    `acknowledged` creating the ref, so that the caller can settle it.
+    `acknowledged` creating the ref: its 201 answer arrived whole, whatever
+    it held. A transport failure after the 201 status is not acknowledged.
     """
     ref = "refs/tags/" + short
     stage, acknowledged = "existence check", False
@@ -821,11 +831,11 @@ def existing_record(short, message, values, token):
         return None
     target = seen.get("object", {})
     tag = github(f"git/tags/{target.get('sha')}", token) if SHA.fullmatch(str(target.get("sha"))) else {}
-    require(target.get("type") == "tag" and tag.get("tag") == short and
+    if not (target.get("type") == "tag" and tag.get("tag") == short and
             tag.get("object", {}).get("type") == "commit" and
             tag.get("object", {}).get("sha") == values["SOURCE_REVISION"] and
-            isinstance(tag.get("message"), str) and tag["message"].rstrip("\n") == canonical(message).decode(),
-            f"refs/tags/{short} exists, but not as this run's record")
+            isinstance(tag.get("message"), str) and tag["message"].rstrip("\n") == canonical(message).decode()):
+        raise NotOurs(f"refs/tags/{short} exists, but not as this run's record")
     return target["sha"]
 
 
@@ -853,8 +863,8 @@ def settle_attempt(short, message, values, token, acknowledged=False, sleep=None
     message names this run and attempt, so no other run's matches).
     ("absent", None) only when every read found no ref and GitHub never
     acknowledged creating it; a ref not visible yet may still appear.
-    ("unresolved", None) when it holds anything else, or reads kept failing,
-    or an acknowledged ref never showed.
+    ("unresolved", None) when it holds another record, or a read failed in
+    any way and no later one settled it, or an acknowledged ref never showed.
     """
     certain = not acknowledged
     for tried in range(RECORD_TRIES):
@@ -862,10 +872,10 @@ def settle_attempt(short, message, values, token, acknowledged=False, sleep=None
             sha = existing_record(short, message, values, token)
             if sha:
                 return "ours", sha
-        except Failure:
-            certain = False
-        except Refusal:
+        except NotOurs:
             return "unresolved", None
+        except Exception:  # any read that failed says nothing; read again
+            certain = False
         if tried + 1 < RECORD_TRIES:
             (sleep or time.sleep)(RECORD_SECONDS)
     return ("absent", None) if certain else ("unresolved", None)
@@ -1118,10 +1128,10 @@ def upload(plan, values, token, intent, receipts, sleep=None):
         short, message = f"{ATTEMPT}/{name}/{row['version']}/{number}", attempt_message(plan, row, number)
         try:
             attempt = create_record(short, message, values, intent)
-        except ValueError as error:  # Refusal, Failure, a bad answer; never an interrupt
-            # The ref may exist though the answer was lost or odd, or its
-            # read-back failed. Nothing was sent either way; only an attempt
-            # ref read back as exactly this run's gets a refused record.
+        except Exception as error:  # never an interrupt
+            # create_record sends no PUT. The ref may exist though the answer
+            # was lost or odd, or its read-back failed; only an attempt ref
+            # read back as exactly this run's gets a refused record.
             state, attempt = settle_attempt(short, message, values, intent,
                                             getattr(error, "acknowledged", False), sleep)
             if state == "ours":
