@@ -405,11 +405,16 @@ def github(suffix, token, *, absent=False, readback=False):
 
 
 def github_write(suffix, body, token):
-    """One create; never retried, since its outcome may be unknown."""
+    """One create; never retried, since its outcome may be unknown. A failure
+    after GitHub answered 201 is marked `acknowledged`: the create happened."""
     data = request(f"https://api.github.com/repos/{REPOSITORY}/{suffix}", token=token, method="POST",
                    body=canonical(body), expect=(201,))
-    value = decode(data)
-    require(isinstance(value, dict), "GitHub's answer to a create is not an object")
+    try:
+        value = decode(data)
+        require(isinstance(value, dict), "GitHub's answer to a create is not an object")
+    except ValueError as error:
+        error.acknowledged = True
+        raise
     return value
 
 
@@ -749,9 +754,13 @@ def next_attempt(found, row):
 
 
 def create_record(short, message, values, token):
-    """Create an annotated tag at the revision and its ref, create-only."""
+    """Create an annotated tag at the revision and its ref, create-only.
+
+    An exception carries the `stage` it stopped at and whether GitHub
+    `acknowledged` creating the ref, so that the caller can settle it.
+    """
     ref = "refs/tags/" + short
-    stage = "existence check"
+    stage, acknowledged = "existence check", False
     try:
         require(github(f"git/ref/tags/{short}", token, absent=True) is None, f"{ref} already exists")
         stage = "tag object"
@@ -761,13 +770,19 @@ def create_record(short, message, values, token):
         require(isinstance(sha, str) and SHA.fullmatch(sha), "GitHub's tag object answer is malformed")
         stage = "reference"
         made = github_write("git/refs", {"ref": ref, "sha": sha}, token)
+        acknowledged = True
         require(made.get("ref") == ref and made.get("object", {}).get("sha") == sha and
                 made.get("object", {}).get("type") == "tag", "GitHub's reference answer differs")
         stage = "read-back"
         seen = github(f"git/ref/tags/{short}", token, readback=True)
         require(seen.get("ref") == ref and seen.get("object") == made.get("object"), "the record read back differs")
         return sha
-    except BaseException:
+    except BaseException as error:
+        acknowledged = acknowledged or (stage == "reference" and getattr(error, "acknowledged", False))
+        try:
+            error.stage, error.acknowledged = stage, acknowledged
+        except (AttributeError, TypeError):
+            pass
         print(f"Creating {ref} stopped at its {stage}. If it exists, it stays; see \"When a crate publication "
               "fails\" in docs/RELEASING.md.", file=sys.stderr)
         raise
@@ -831,24 +846,29 @@ def record_refusal(plan, row, number, attempt, reason, values, token, sleep=None
         (sleep or time.sleep)(RECORD_SECONDS)
 
 
-def settle_attempt(short, message, values, token, sleep=None):
+def settle_attempt(short, message, values, token, acknowledged=False, sleep=None):
     """After creating an attempt record failed: what does its ref hold now?
 
-    ("ours", sha) when it is exactly this run's record (the message names
-    this run and attempt, so no other run's matches), ("absent", None) when
-    no ref was made, and ("unresolved", None) when it holds anything else
-    or keeps failing to read.
+    ("ours", sha) when it reads back as exactly this run's record (the
+    message names this run and attempt, so no other run's matches).
+    ("absent", None) only when every read found no ref and GitHub never
+    acknowledged creating it; a ref not visible yet may still appear.
+    ("unresolved", None) when it holds anything else, or reads kept failing,
+    or an acknowledged ref never showed.
     """
+    certain = not acknowledged
     for tried in range(RECORD_TRIES):
         try:
             sha = existing_record(short, message, values, token)
-            return ("ours", sha) if sha else ("absent", None)
+            if sha:
+                return "ours", sha
         except Failure:
-            if tried + 1 == RECORD_TRIES:
-                return "unresolved", None
+            certain = False
         except Refusal:
             return "unresolved", None
-        (sleep or time.sleep)(RECORD_SECONDS)
+        if tried + 1 < RECORD_TRIES:
+            (sleep or time.sleep)(RECORD_SECONDS)
+    return ("absent", None) if certain else ("unresolved", None)
 
 
 class Receipts:
@@ -1098,11 +1118,12 @@ def upload(plan, values, token, intent, receipts, sleep=None):
         short, message = f"{ATTEMPT}/{name}/{row['version']}/{number}", attempt_message(plan, row, number)
         try:
             attempt = create_record(short, message, values, intent)
-        except Failure:
-            # The ref may exist though the answer was lost or its read-back
-            # failed. Nothing was sent either way; only an attempt ref read
-            # back as exactly this run's gets a refused record.
-            state, attempt = settle_attempt(short, message, values, intent, sleep)
+        except ValueError as error:  # Refusal, Failure, a bad answer; never an interrupt
+            # The ref may exist though the answer was lost or odd, or its
+            # read-back failed. Nothing was sent either way; only an attempt
+            # ref read back as exactly this run's gets a refused record.
+            state, attempt = settle_attempt(short, message, values, intent,
+                                            getattr(error, "acknowledged", False), sleep)
             if state == "ours":
                 try:
                     record_refusal(plan, row, number, attempt, "not-sent", values, intent, sleep)
@@ -1110,11 +1131,13 @@ def upload(plan, values, token, intent, receipts, sleep=None):
                     print(f"Attempt {number} for {coordinate} sent nothing, but that could not be recorded; "
                           "it stays unresolved.", file=sys.stderr)
             elif state == "absent":
-                print(f"Attempt {number} for {coordinate} was not recorded; a later run makes it again.",
-                      file=sys.stderr)
-            else:
-                print(f"Attempt {number} for {coordinate} could not be read back as this run's; it stays "
+                print(f"Attempt {number} for {coordinate} was not recorded, as far as GitHub shows; a later run "
+                      f"makes it again. If the record appears after all, that run reports attempt {number} as "
                       "unresolved.", file=sys.stderr)
+            else:
+                print(f"Attempt {number} for {coordinate} could not be read back as this run's. Dispatch with "
+                      f"operation=verify: it reports attempt {number} as unresolved, or plans it again.",
+                      file=sys.stderr)
             raise
         # From here until the PUT is sent, any failure means attempt
         # `number` sent nothing: record that, so a later run can go on.
