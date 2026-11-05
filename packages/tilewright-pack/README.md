@@ -12,7 +12,7 @@ compile them.
 import { initialize, openPack, PackError } from "@seraphinastudios/tilewright-pack";
 
 await initialize();
-const digest = "5830e26e449a1f0d0c786b32801b7ed68e351777db5f586532478cb4384844b2";
+const digest = "e803c54e5772bb7e3767469ae7105b969204ae3e28a5ad410e6be5ba65f15767";
 const response = await fetch(`/packs/${digest}.twpack`);
 const pack = openPack(new Uint8Array(await response.arrayBuffer()), { digest });
 try {
