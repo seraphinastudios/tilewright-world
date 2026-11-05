@@ -299,8 +299,11 @@ The "Publish crates" workflow (`.github/workflows/publish-crate.yml`) runs
 only when dispatched on `main`, with the inputs `operation` (`verify` or
 `publish`), `release_tag`, `source_revision` (the commit the tag points at)
 and `bundle_sha256` (the crate archive bundle's digest). Every job checks
-those first. Runs for one release and operation queue one at a time and are
-never cancelled. It always runs `main`'s code, which reads the release's
+those first. Runs for one release and operation run one at a time, and a
+running one is never cancelled. GitHub keeps one more waiting: a newer
+dispatch for the same release and operation replaces the waiting run, which
+has written no upload records yet, so dispatch again if the replaced one is
+the one you wanted. It always runs `main`'s code, which reads the release's
 policy files (`Cargo.toml`, each crate's `Cargo.toml`,
 `rust-toolchain.toml`, `LICENSE` and `tools/crates/candidates.json`) from
 the release's tree as data. So `main` can publish a release made at an
@@ -654,9 +657,10 @@ without the owner's go-ahead.
 
    Expect the verify job's summary to show all five crates present at
    0.1.0, each with its first-publication intent and nothing to upload, and
-   the resolve job to build. Do the same for the latest release, with its
-   revision and bundle digest (its "Start crate publication" summary has
-   the command): expect it to say that v0.1.0 owns 0.1.0, and nothing more.
+   the resolve job to build. Do the same for the latest release, with
+   `-f operation=verify` in the command in "When a crate publication fails",
+   which looks up the revision and bundle digest from the tag: expect it to
+   say that v0.1.0 owns 0.1.0, and nothing more.
    Then the credentialed canary: the v0.1.0 command with
    `-f operation=publish`. Expect the environment to admit the run, the
    OIDC exchange to succeed, no upload and no record, and "Build a
@@ -790,7 +794,8 @@ still in progress then: check its "Publish crates" run first.
 | --- | --- | --- |
 | "Start crate publication" says the plan could not decide the crate version | The release is out; nothing was started | Read the warning of the plan job's "Decide crate version ownership" step. Once the cause is fixed on `main`, dispatch for the owning release as above |
 | "Start crate publication" could not dispatch | The release is out; nothing was started | Dispatch as above |
-| "Verify the release's crate archives" | Nothing was uploaded or recorded | Read its error, which names the check. Fix a cause on `main`, then dispatch again. A changed or unattested release is not publishable at all. Refusals about upload records, a newer crate version or the abandoned list are below |
+| "Verify the release's crate archives" | Nothing was uploaded or recorded | Read its error, which names the check. Fix a cause on `main`, then dispatch again. A changed or unattested release is not publishable at all. Refusals about upload records and a newer crate version are in the rows below |
+| "Verify the release's crate archives" says the version is abandoned | Nothing was uploaded or recorded, by design | Nothing. The content reaches crates.io with the next patch version (see "Crate versions") |
 | "Resolve the archives against crates.io" | Nothing was uploaded | The crates at this version would not resolve or build for a consumer. The release's archives cannot change: fix it in the next crate version, and consider abandoning this one (see "Crate versions") |
 | "Exchange the job's OIDC token for a crates.io token" | Nothing was uploaded or recorded | No trusted publisher matched the run. Check steps 1 to 3 of "Turning on crates.io publication", then dispatch again |
 | The upload got HTTP 401, 403 or 429 | crates.io refused attempt N without publishing it. The run created the refused record (reason `http-401`, `http-403` or `http-429`) right away, and stopped. The crates before it in dependency order are published | 403: the crate's trusted publisher is missing or wrong (check step 3), or the crates.io token expired. 401: crates.io could not read the token. 429: crates.io's daily limit of new versions for a crate; wait until it passes. Then dispatch again, which makes attempt N+1. After three attempts with refused records the publisher stops for that crate version; bump to the next patch version instead |

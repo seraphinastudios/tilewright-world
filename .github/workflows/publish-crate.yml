@@ -54,9 +54,11 @@ on:
 
 permissions: {}
 
-# One run at a time per release and operation, never cancelled. Only the
-# owning release can upload a crate version, so runs for different releases
-# never touch the same coordinate.
+# One run at a time per release and operation. A running run is never
+# cancelled; GitHub keeps one more waiting, and a newer dispatch replaces
+# the waiting one, which has created no upload records yet. Only the owning
+# release can upload a crate version, so runs for different releases never
+# touch the same coordinate.
 concurrency:
   group: world-crate-publication-${{ inputs.release_tag }}-${{ inputs.operation }}
   cancel-in-progress: false

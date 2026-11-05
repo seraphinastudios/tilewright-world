@@ -83,11 +83,13 @@ never copied, adapted or used as a dependency.
   (absent, indeterminate or present across the API, sparse index and
   download), here also requiring the crate's owner and treating a download
   not yet served as indeterminate; the upload receipts, here also written
-  before each upload; the publication boundary and the authenticated,
+  before each upload; the immutable release snapshot (`release_snapshot`,
+  here `snapshot`); the publication boundary and the authenticated,
   redirect-free GitHub reads and create-only writes; and the offline
   `gh attestation verify --bundle` step. The ownership rule, the attempt and
-  refused records, the release-tree policy, the verifier and the workflows
-  are new. `.github/workflows/publish-crate.yml` follows the shape of the
+  refused records, reading the policy from the release's tree and the
+  workflows are new; the release verification combines the adapted parts
+  above with checks written for this repository's bundle. `.github/workflows/publish-crate.yml` follows the shape of the
   renderer's workflow of the same name. Tests in
   `tools/crates/test_publish.py` are new MIT work; no renderer tests are
   copied.
