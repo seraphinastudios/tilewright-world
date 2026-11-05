@@ -184,24 +184,25 @@ class World:
                 return json.dumps({"version": {"crate": match[1], "num": match[2], "checksum": entry["checksum"],
                                                "yanked": entry["yanked"], "published_by": entry["published_by"],
                                                "trustpub_data": entry["trustpub_data"]}}).encode()
-            return self.absent(absent)
+            return self.absent(absent, 404)
         match = re.fullmatch(r"https://index\.crates\.io/ti/le/([a-z-]+)", url)
         if match:
             lines = [json.dumps({"name": match[1], "vers": version, "cksum": entry["checksum"],
                                  "yanked": entry["yanked"]}) for version, entry in self.registry[match[1]].items()
                      if entry["index"]]
-            return "\n".join(lines).encode() if lines else self.absent(absent)
+            return "\n".join(lines).encode() if lines else self.absent(absent, 404)
         match = re.fullmatch(r"https://static\.crates\.io/crates/([a-z-]+)/\1-([0-9.]+)\.crate", url)
         if match:
             entry = self.registry[match[1]].get(match[2])
-            return entry["data"] if entry and entry["cdn"] else self.absent(absent)
+            # As static.crates.io does, a file not served answers 403.
+            return entry["data"] if entry and entry["cdn"] else self.absent(absent, 403)
         raise AssertionError(url)
 
     @staticmethod
-    def absent(absent):
-        if absent:
+    def absent(absent, status):
+        if absent and status in ((404,) if absent is True else absent):
             return None
-        raise P.Failure("crates.io", 404)
+        raise P.Failure("crates.io", status)
 
     def put(self, data, metadata, token):
         self.test.assertEqual(token, CRATES)
@@ -1029,7 +1030,7 @@ class UploadTests(unittest.TestCase):
         with mock.patch.object(P, "request", side_effect=world.request):
             self.assertFalse(P.confirm_upload(row, RUN_ID, sleep))
             self.assertEqual(sleep.call_count, P.POLLS - 1)
-            world.publish("tilewright-jsonc", cdn=False)
+            world.publish("tilewright-jsonc", cdn=False)  # the CDN answers 403 for now
             self.assertFalse(P.confirm_upload(row, RUN_ID, sleep))
             world.publish("tilewright-jsonc")
             self.assertTrue(P.confirm_upload(row, RUN_ID, sleep))

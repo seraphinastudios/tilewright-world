@@ -340,6 +340,8 @@ class Redirects(urllib.request.HTTPRedirectHandler):
 
 
 def request(url, *, token=None, method="GET", body=None, absent=False, maximum=MAX_JSON, expect=(200,)):
+    """One bounded HTTPS request. `absent` makes a 404 (or the statuses it
+    lists) answer None instead of failing."""
     parsed = urllib.parse.urlparse(url)
     require(parsed.scheme == "https" and parsed.hostname in HOSTS, "an unsupported service")
     api = parsed.hostname == "api.github.com"
@@ -363,7 +365,7 @@ def request(url, *, token=None, method="GET", body=None, absent=False, maximum=M
     except urllib.error.HTTPError as error:
         status = error.code
         error.close()
-        if absent and status == 404:
+        if absent and status in ((404,) if absent is True else absent):
             return None
         raise Failure(service, status) from None
     except (urllib.error.URLError, OSError, http.client.HTTPException):
@@ -604,7 +606,8 @@ def registry_state(row):
         return Registry("absent", None, versions)
     if found is None or not matches:
         return Registry("indeterminate", found, versions)
-    data = request(f"https://static.crates.io/crates/{name}/{name}-{version}.crate", absent=True,
+    # static.crates.io answers 403, not 404, for a file it does not serve.
+    data = request(f"https://static.crates.io/crates/{name}/{name}-{version}.crate", absent=(403, 404),
                    maximum=MAX_ARCHIVE)
     if data is None:
         return Registry("indeterminate", found, versions)
