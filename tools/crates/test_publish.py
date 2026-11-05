@@ -1471,6 +1471,11 @@ class PublishWorkflowTests(unittest.TestCase):
         self.assertIn("needs.publish.outputs.complete == 'true'", accept)
         self.assertNotIn("needs.publish.result", accept)
         self.assertIn("publish.py accept-lock", accept)
+        # Index lag at this runner must not fail its verify step at once.
+        verify = next(step for step in steps(accept) if "publish.py verify" in step)
+        self.assertIn("for attempt in 1 2 3 4 5; do", verify)
+        self.assertIn('rm -rf "${RUNNER_TEMP}/evidence"', verify)
+        self.assertIn("sleep 30", verify)
         self.assertIn('cargo "+${TOOLCHAIN}" check --locked', accept)
         resolve = self.JOBS["resolve"]
         self.assertIn("--patch", resolve)

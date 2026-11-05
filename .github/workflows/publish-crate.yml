@@ -257,10 +257,24 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # This runner can see crates.io's index before the new version is in
+      # it, as the resolve step below allows for too: the same bounded retry.
       - name: Verify the release's crate archives
         env:
           GH_READ_TOKEN: ${{ github.token }}
-        run: python3 tools/crates/publish.py verify --evidence "${RUNNER_TEMP}/evidence"
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5; do
+            rm -rf "${RUNNER_TEMP}/evidence"
+            if python3 tools/crates/publish.py verify --evidence "${RUNNER_TEMP}/evidence"; then
+              exit 0
+            fi
+            if [[ ${attempt} -lt 5 ]]; then
+              sleep 30
+            fi
+          done
+          echo "::error::the release's crate archives did not verify"
+          exit 1
 
       - name: Write a consumer of the five crates
         id: consumer
