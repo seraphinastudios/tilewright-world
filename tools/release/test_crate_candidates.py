@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import tarfile
 import tempfile
 import unittest
@@ -138,6 +139,19 @@ class CandidateBundleTests(unittest.TestCase):
         with self.assertRaisesRegex(package.ReleaseError, "missing assets"):
             package.verify(output, "0.2.0", npm=True, revision=fixture.revision)
 
+    def test_verify_takes_the_release_trees_policy(self):
+        version = C.CANDIDATES.policy()[0]
+        later = F.next_minor(version)
+        repository = F.Repository(self)
+        F.set_version(repository.root, later)
+        F.write_candidate(self.root, later, root=repository.root)
+        files = {path.name: path.read_bytes() for path in self.root.iterdir()
+                 if path.name.endswith(f"-{later}.crate") or path.name == "candidate.json"}
+        data = tar([(name, value, tarfile.REGTYPE) for name, value in files.items()])
+        self.assertEqual(set(C.verify(data, F.REVISION, repository.root)), set(files))
+        with self.assertRaises((ValueError, KeyError)):
+            C.verify(data, F.REVISION)
+
     def test_workflow_preserves_candidate_and_publish_boundaries(self):
         workflow = (C.CANDIDATES.ROOT / ".github/workflows/release.yml").read_text()
         job = workflow.split("  crates:\n", 1)[1].split("  package:\n", 1)[0]
@@ -152,6 +166,51 @@ class CandidateBundleTests(unittest.TestCase):
             job = workflow.split(f"  {job_name}:\n", 1)[1].split("    runs-on:", 1)[0]
             self.assertIn("github.event_name != 'pull_request'", job)
         self.assertNotIn("cargo publish", workflow)
+        self.assertNotIn("cargo publish", (C.CANDIDATES.ROOT / ".github/workflows/publish-crate.yml").read_text())
+
+    def test_crate_publication_job_only_reads_and_dispatches(self):
+        workflow = (C.CANDIDATES.ROOT / ".github/workflows/release.yml").read_text()
+        job = workflow.split("  crate-publication:\n", 1)[1].split("\n  npm-publish:\n", 1)[0]
+        permissions = job.split("    permissions:\n", 1)[1].split("\n    env:\n", 1)[0]
+        self.assertEqual(permissions.split("\n"), ["      contents: read", "      actions: write"])
+        for absent in ("uses:", "id-token", "environment:", "checkout", "CARGO", "cargo"):
+            self.assertNotIn(absent, job)
+        self.assertIn("    needs: [plan, release]\n", job)
+        condition = job.split("    if: ", 1)[1].split("\n", 1)[0]
+        for part in ("!cancelled()", "github.event_name != 'pull_request'", "needs.plan.outputs.publish == 'true'",
+                     "github.ref == 'refs/heads/main'", "needs.release.result == 'success'"):
+            self.assertIn(part, condition)
+        self.assertIn("GH_TOKEN: ${{ github.token }}", job)
+        self.assertIn("ENABLED: ${{ vars.TILEWRIGHT_CRATES_PUBLISH == 'true' }}", job)
+        self.assertIn('gh workflow run publish-crate.yml --ref main -R "${GH_REPO}" -f operation=publish', job)
+        self.assertIn("environments/crates-io-release", job)
+        crates = job.split("crates=(", 1)[1].split(")", 1)[0].split()
+        self.assertEqual(tuple(crates), C.CANDIDATES.PUBLIC)
+        # It sits after the release, which is out before it starts.
+        self.assertLess(workflow.index("  release:\n"), workflow.index("  crate-publication:\n"))
+        self.assertLess(workflow.index("  crate-publication:\n"), workflow.index("  npm-publish:\n"))
+
+    def test_plan_outputs_reach_the_jobs_that_use_them(self):
+        workflow = (C.CANDIDATES.ROOT / ".github/workflows/release.yml").read_text()
+        plan = workflow.split("  plan:\n", 1)[1].split("\n    steps:\n", 1)[0]
+        declared = dict(re.findall(r"^      ([a-z_]+): \$\{\{ steps\.(?:plan|crates)\.outputs\.([a-z_]+) \}\}$",
+                                   plan, re.MULTILINE))
+        self.assertEqual({key: value for key, value in declared.items() if key.startswith("crate_")},
+                         {name: name for name in ("crate_version", "crate_owner", "crate_owner_tag", "crate_changed")})
+        for used in set(re.findall(r"needs\.plan\.outputs\.([a-z_]+)", workflow)):
+            self.assertIn(used, declared)
+        notes = workflow.split("      - name: Write the release notes\n", 1)[1].split("\n      - name:", 1)[0]
+        mapped = dict(re.findall(r"^          ([A-Z_]+): \$\{\{ needs\.plan\.outputs\.([a-z_]+) \}\}$",
+                                 notes, re.MULTILINE))
+        self.assertEqual(mapped, {"CRATE_VERSION": "crate_version", "CRATE_OWNER": "crate_owner",
+                                  "CRATE_OWNER_TAG": "crate_owner_tag", "CRATE_CHANGED": "crate_changed"})
+        script = (C.CANDIDATES.ROOT / "tools/release/notes.sh").read_text()
+        self.assertEqual(set(re.findall(r"\$\{(CRATE_[A-Z_]+):-\}", script)), set(mapped))
+        step = workflow.split("      - name: Decide crate version ownership\n", 1)[1].split("\n      - name:", 1)[0]
+        self.assertIn("if: steps.plan.outputs.build == 'true'", step)
+        self.assertIn("python3 tools/crates/publish.py owner", step)
+        self.assertIn("--pull-request", step)
+        self.assertIn('--tag "v${VERSION}"', step)
 
 
 if __name__ == "__main__":

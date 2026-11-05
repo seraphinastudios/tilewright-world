@@ -1,10 +1,21 @@
 # First publication of the World crates
 
+This procedure published the five World crate names at 0.1.0, their first
+version. It covers only that first publication. Later versions of these names
+are published by the "Publish crates" workflow from the release that owns
+each crate version, through trusted publishing (see "Crate versions" in
+[docs/RELEASING.md](RELEASING.md)). crates.io refuses trusted-publishing tokens
+for a name that does not exist yet, so a new name still needs a first
+publication by the owner. This helper cannot do that as it stands: it is bound
+to the five names, and its preflight requires each to have exactly one version
+on crates.io. A new name needs a reviewed policy change and a first-publication
+procedure written for it ("New crate names" in docs/RELEASING.md).
+
 First publication is a separate owner decision about a concrete immutable source
 release. Merging this tooling, creating GitHub releases and observing public
-registry 404 responses do not authorize uploads or reserve names. Registry
-publishing automation remains deferred. Never place registry tokens in chat,
-command arguments, environment variables, build tools, CI or committed files.
+registry 404 responses do not authorize uploads or reserve names. Never place an
+owner's registry token in chat, command arguments, environment variables, build
+tools, CI or committed files.
 
 The exact five public coordinates are `tilewright-jsonc`, `tilewright-source`,
 `tilewright-pack`, `tilewright-diff` and `tilewright-edit`, all at the workspace
@@ -202,12 +213,16 @@ owner's confirmation. A crate that remains absent but has any existing intent
 is blocked, even if the previous process died before PUT. A 404 cannot establish
 that an earlier request was never accepted or is no longer processing.
 
-Never delete, move or reuse an intent to retry. There is no retry/reset override.
-Unresolved intents, conflicting bytes or wrong owners need a separate owner
-investigation and reviewed recovery decision; this helper cannot repair them.
-GitHub repository writers remain trusted to preserve intent refs, just as they
-are trusted to preserve the release workflow. This tool does not add ref
-protection settings or claim its tags are repository-policy immutable.
+Never delete, move or reuse a first-publication intent to retry. There is no
+retry/reset override. Unresolved intents, conflicting bytes or wrong owners need
+a separate owner investigation and reviewed recovery decision; this helper
+cannot repair them. GitHub repository writers remain trusted to preserve intent
+refs, just as they are trusted to preserve the release workflow. No ruleset
+protects `crate-upload-intent/*`. The "Publish crates" workflow only reads these
+intents, to check that they name the owning release. It keeps records of its
+own, `crate-upload-attempt/*` and `crate-upload-refused/*`, which a ruleset
+protects and which it never deletes either; a refused upload gets a new attempt
+record, not a deleted one.
 
 ## Protocol references
 

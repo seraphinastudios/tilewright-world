@@ -1,0 +1,321 @@
+name: Publish crates
+
+# Uploads the exact crate archives of the release that owns a crate version
+# (the first release at it) to crates.io, through crates.io trusted
+# publishing: no token is stored anywhere. docs/RELEASING.md describes it.
+#
+# The release workflow's "Start crate publication" job dispatches this for
+# an owning release while the repository variable TILEWRIGHT_CRATES_PUBLISH
+# is "true". The owner can dispatch it at any time, for example to finish a
+# publication, with the command that job prints. It always runs main's
+# code, which reads the release's policy files from its tree as data.
+#
+# - verify: authenticates the release's bundle (immutable release, tags,
+#   digests, build provenance, archive bytes) and plans the upload. No
+#   credentials but a read token. A release that does not own its crate
+#   version stops here, successfully.
+# - resolve: builds a consumer of the release's archives that resolves its
+#   dependencies fresh from crates.io, before anything is uploaded. Cargo
+#   runs only here and in accept, which hold no credentials.
+# - publish: for operation=publish only, in the environment
+#   crates-io-release, which admits only main. id-token: write holds for the
+#   whole job, so the job runs nothing but main's standard-library Python,
+#   the runner's GitHub CLI and three pinned actions. The auth action
+#   exchanges the job's OIDC token for a crates.io token that only the
+#   upload step receives and that the action revokes when the job ends. The
+#   upload sends each archive's exact bytes, at most once per attempt
+#   record, in dependency order.
+# - accept: builds a consumer of the five crates as crates.io serves them.
+#
+# Every job first checks the dispatch inputs; run steps read them only
+# through the environment.
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: verify only checks; publish also uploads
+        type: choice
+        options: [verify, publish]
+        default: verify
+        required: true
+      release_tag:
+        description: The release that owns the crate version, vX.Y.Z
+        type: string
+        required: true
+      source_revision:
+        description: The full commit SHA the release tag points at
+        type: string
+        required: true
+      bundle_sha256:
+        description: The SHA-256 of the release's crate archive bundle
+        type: string
+        required: true
+
+permissions: {}
+
+# One run at a time per release and operation. A running run is never
+# cancelled; GitHub keeps one more waiting, and a newer dispatch replaces
+# the waiting one, which has created no upload records yet. Only the owning
+# release can upload a crate version, so runs for different releases never
+# touch the same coordinate.
+concurrency:
+  group: world-crate-publication-${{ inputs.release_tag }}-${{ inputs.operation }}
+  cancel-in-progress: false
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+  OPERATION: ${{ inputs.operation }}
+  RELEASE_TAG: ${{ inputs.release_tag }}
+  SOURCE_REVISION: ${{ inputs.source_revision }}
+  BUNDLE_SHA256: ${{ inputs.bundle_sha256 }}
+
+jobs:
+  verify:
+    name: Verify the release's crate archives
+    if: github.repository == 'seraphinastudios/tilewright-world' && github.repository_id == '1423814231' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      attestations: read
+    outputs:
+      owner: ${{ steps.verify.outputs.owner }}
+      pending: ${{ steps.verify.outputs.pending }}
+    steps:
+      - name: Check the inputs
+        run: |
+          set -euo pipefail
+          release_version='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
+          if [[ ! ${OPERATION} =~ ^(verify|publish)$ || ! ${RELEASE_TAG} =~ ^v${release_version}$ ||
+            ! ${SOURCE_REVISION} =~ ^[0-9a-f]{40}$ || ! ${BUNDLE_SHA256} =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::the inputs must be operation verify or publish, release_tag vX.Y.Z, a 40-digit source_revision and a 64-digit bundle_sha256"
+            exit 1
+          fi
+
+      - name: Check out main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify the release and plan the upload
+        id: verify
+        env:
+          GH_READ_TOKEN: ${{ github.token }}
+        run: python3 tools/crates/publish.py verify --evidence "${RUNNER_TEMP}/evidence" --github-output
+
+  resolve:
+    name: Resolve the archives against crates.io
+    needs: verify
+    if: github.repository == 'seraphinastudios/tilewright-world' && github.repository_id == '1423814231' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && needs.verify.outputs.owner == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - name: Check the inputs
+        run: |
+          set -euo pipefail
+          release_version='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
+          if [[ ! ${OPERATION} =~ ^(verify|publish)$ || ! ${RELEASE_TAG} =~ ^v${release_version}$ ||
+            ! ${SOURCE_REVISION} =~ ^[0-9a-f]{40}$ || ! ${BUNDLE_SHA256} =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::the inputs must be operation verify or publish, release_tag vX.Y.Z, a 40-digit source_revision and a 64-digit bundle_sha256"
+            exit 1
+          fi
+
+      - name: Check out main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify the release's crate archives
+        env:
+          GH_READ_TOKEN: ${{ github.token }}
+        run: python3 tools/crates/publish.py verify --evidence "${RUNNER_TEMP}/evidence"
+
+      # The release's archives stand in for crates.io's copies of the five,
+      # and every other dependency resolves fresh, without a lockfile, as it
+      # would for a consumer.
+      - name: Write a consumer of the release's archives
+        id: consumer
+        run: python3 tools/crates/publish.py consumer --evidence "${RUNNER_TEMP}/evidence" --output "${RUNNER_TEMP}/resolve" --patch --github-output
+
+      - name: Install the bundle's toolchain
+        env:
+          TOOLCHAIN: ${{ steps.consumer.outputs.toolchain }}
+        run: rustup toolchain install "${TOOLCHAIN}" --profile minimal
+
+      - name: Check the consumer
+        env:
+          TOOLCHAIN: ${{ steps.consumer.outputs.toolchain }}
+          CARGO_HOME: ${{ runner.temp }}/resolve-cargo
+          CARGO_TARGET_DIR: ${{ runner.temp }}/resolve-target
+        # Outside the checkout, so neither its Cargo configuration nor its
+        # rust-toolchain.toml applies.
+        run: |
+          set -euo pipefail
+          cd "${RUNNER_TEMP}/resolve/consumer"
+          cargo "+${TOOLCHAIN}" check
+
+  publish:
+    name: Publish to crates.io
+    needs: [verify, resolve]
+    # Off until the owner sets the repository variable
+    # TILEWRIGHT_CRATES_PUBLISH to true; see docs/RELEASING.md.
+    if: github.repository == 'seraphinastudios/tilewright-world' && github.repository_id == '1423814231' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.operation == 'publish' && vars.TILEWRIGHT_CRATES_PUBLISH == 'true' && needs.verify.outputs.owner == 'true' && needs.resolve.result == 'success'
+    environment: crates-io-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: write
+      attestations: read
+      id-token: write
+    outputs:
+      complete: ${{ steps.upload.outputs.complete }}
+    steps:
+      - name: Check the inputs
+        run: |
+          set -euo pipefail
+          release_version='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
+          if [[ ! ${OPERATION} =~ ^(verify|publish)$ || ! ${RELEASE_TAG} =~ ^v${release_version}$ ||
+            ! ${SOURCE_REVISION} =~ ^[0-9a-f]{40}$ || ! ${BUNDLE_SHA256} =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::the inputs must be operation verify or publish, release_tag vX.Y.Z, a 40-digit source_revision and a 64-digit bundle_sha256"
+            exit 1
+          fi
+
+      - name: Check out main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Keeps the bundle, SHA256SUMS and the provenance bundles, so that the
+      # upload step checks them offline and hands no token to a subprocess.
+      - name: Verify the release's crate archives
+        env:
+          GH_READ_TOKEN: ${{ github.token }}
+        run: python3 tools/crates/publish.py verify --evidence "${RUNNER_TEMP}/evidence"
+
+      - name: Exchange the job's OIDC token for a crates.io token
+        id: auth
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+
+      # The intent token reads the release again and creates the attempt
+      # and refused records (contents: write).
+      - name: Upload the exact archives
+        id: upload
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          GH_INTENT_TOKEN: ${{ github.token }}
+          TILEWRIGHT_PUBLISH_RECEIPTS: ${{ runner.temp }}/crate-put-outcomes
+          TILEWRIGHT_CRATES_PUBLISH: ${{ vars.TILEWRIGHT_CRATES_PUBLISH }}
+        run: python3 tools/crates/publish.py upload --evidence "${RUNNER_TEMP}/evidence" --github-output
+
+      - name: Keep the upload receipts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: crate-put-outcomes-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/crate-put-outcomes/
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: Confirm the five crates on crates.io
+        if: ${{ !cancelled() && (steps.upload.outcome == 'success' || steps.upload.outcome == 'failure') }}
+        run: python3 tools/crates/publish.py confirm --evidence "${RUNNER_TEMP}/evidence"
+
+  accept:
+    name: Build a crates.io consumer
+    needs: publish
+    # On the upload step's own word, not the job's result: the auth
+    # action's revocation runs after it and can fail on its own.
+    if: ${{ !cancelled() && github.repository == 'seraphinastudios/tilewright-world' && github.repository_id == '1423814231' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && needs.publish.outputs.complete == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - name: Check the inputs
+        run: |
+          set -euo pipefail
+          release_version='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
+          if [[ ! ${OPERATION} =~ ^(verify|publish)$ || ! ${RELEASE_TAG} =~ ^v${release_version}$ ||
+            ! ${SOURCE_REVISION} =~ ^[0-9a-f]{40}$ || ! ${BUNDLE_SHA256} =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::the inputs must be operation verify or publish, release_tag vX.Y.Z, a 40-digit source_revision and a 64-digit bundle_sha256"
+            exit 1
+          fi
+
+      - name: Check out main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # This runner can see crates.io's index before the new version is in
+      # it, as the resolve step below allows for too: the same bounded retry.
+      - name: Verify the release's crate archives
+        env:
+          GH_READ_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5; do
+            rm -rf "${RUNNER_TEMP}/evidence"
+            if python3 tools/crates/publish.py verify --evidence "${RUNNER_TEMP}/evidence"; then
+              exit 0
+            fi
+            if [[ ${attempt} -lt 5 ]]; then
+              sleep 30
+            fi
+          done
+          echo "::error::the release's crate archives did not verify"
+          exit 1
+
+      - name: Write a consumer of the five crates
+        id: consumer
+        run: python3 tools/crates/publish.py consumer --evidence "${RUNNER_TEMP}/evidence" --output "${RUNNER_TEMP}/accept" --github-output
+
+      - name: Install the bundle's toolchain
+        env:
+          TOOLCHAIN: ${{ steps.consumer.outputs.toolchain }}
+        run: rustup toolchain install "${TOOLCHAIN}" --profile minimal
+
+      # crates.io's sparse index can take a little while to list a new
+      # version everywhere.
+      - name: Resolve the consumer from crates.io
+        env:
+          TOOLCHAIN: ${{ steps.consumer.outputs.toolchain }}
+          CARGO_HOME: ${{ runner.temp }}/accept-cargo
+        run: |
+          set -euo pipefail
+          cd "${RUNNER_TEMP}/accept/consumer"
+          for attempt in 1 2 3 4 5; do
+            if cargo "+${TOOLCHAIN}" generate-lockfile; then
+              exit 0
+            fi
+            if [[ ${attempt} -lt 5 ]]; then
+              sleep 30
+            fi
+          done
+          echo "::error::the consumer did not resolve from crates.io"
+          exit 1
+
+      - name: Check the lockfile against the release's archives
+        run: python3 tools/crates/publish.py accept-lock --evidence "${RUNNER_TEMP}/evidence" --lock "${RUNNER_TEMP}/accept/consumer/Cargo.lock"
+
+      - name: Build the consumer
+        env:
+          TOOLCHAIN: ${{ steps.consumer.outputs.toolchain }}
+          CARGO_HOME: ${{ runner.temp }}/accept-cargo
+          CARGO_TARGET_DIR: ${{ runner.temp }}/accept-target
+        run: |
+          set -euo pipefail
+          cd "${RUNNER_TEMP}/accept/consumer"
+          cargo "+${TOOLCHAIN}" check --locked

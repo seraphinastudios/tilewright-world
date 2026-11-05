@@ -5,6 +5,18 @@ repository=$(git rev-parse --show-toplevel)
 cd "${repository}"
 
 python3 -m unittest discover -s tools/crates -p 'test_*.py'
+# The release tools' tests run in the Release workflow's plan job too, which
+# no ruleset requires.
+python3 -m unittest discover -s tools/release -p 'test_*.py'
+
+# A crate version is published once and owned forever: it stays, or moves
+# to the next patch or minor version (docs/RELEASING.md, "Crate versions").
+# CI compares with the pull request's base or the pushed commit's parent.
+crate_version_base=${CRATE_VERSION_BASE:-}
+if [[ -z ${crate_version_base} || ${crate_version_base} =~ ^0+$ ]]; then
+  crate_version_base=$(git rev-parse HEAD)
+fi
+python3 tools/crates/prepare.py check-version --base "${crate_version_base}"
 
 cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings

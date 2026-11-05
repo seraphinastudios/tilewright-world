@@ -23,9 +23,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
+      # The whole history, so the crate version check can read the base.
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       # The toolchain go/go.mod names, for the Go pack reader. No cache, so
@@ -46,6 +48,10 @@ jobs:
           package-manager-cache: false
 
       - name: Validate
+        env:
+          # The crate version is compared with the pull request's base or,
+          # for a push, the commit before it.
+          CRATE_VERSION_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: tools/validate.sh
 
   # Applying transactions has its own code on macOS and Windows: build the

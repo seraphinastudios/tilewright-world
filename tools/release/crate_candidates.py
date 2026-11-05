@@ -21,8 +21,8 @@ def name(version):
     return f"tilewright-world-{version}-crate-candidates.tar.gz"
 
 
-def check(files, revision):
-    manifest, _ = CANDIDATES.verify_files(files)
+def check(files, revision, root=CANDIDATES.ROOT):
+    manifest, _ = CANDIDATES.verify_files(files, root)
     CANDIDATES.require(manifest["revision"] == revision,
                        "crate candidates are from a different source revision")
 
@@ -57,10 +57,15 @@ def bundle(directory, revision):
     return result
 
 
-def verify(data, revision):
+def verify(data, revision, root=CANDIDATES.ROOT):
+    """Check a bundle's bytes against the policy files under `root`.
+
+    `root` is a checkout, or the files of the release's own tree, so that
+    main can verify a release made at another crate version.
+    """
     files = {}
     total = 0
-    version, _ = CANDIDATES.policy()
+    version, _ = CANDIDATES.policy(root)
     expected = {"candidate.json", *(f"{name}-{version}.crate" for name in CANDIDATES.PUBLIC)}
     with CANDIDATES.bounded_tar(data, MAX_BUNDLE_BYTES) as archive:
         for item in archive:
@@ -71,7 +76,8 @@ def verify(data, revision):
             CANDIDATES.require(item.size <= MAX_FILE_BYTES and total <= MAX_BUNDLE_BYTES,
                                "candidate bundle size limit exceeded")
             files[item.name] = archive.extractfile(item).read()
-    check(files, revision)
+    check(files, revision, root)
+    return files
 
 
 def verify_path(path, revision):
