@@ -71,6 +71,35 @@ never copied, adapted or used as a dependency.
   Second, a breaking-change note that runs into a trailing field line
   counts; the parser threw on it.
   `scripts/release/THIRD_PARTY_LICENSES.md` holds their notices.
+- **Automatic crate publication.** `tools/crates/publish.py` adapts parts of
+  tilewright-renderer's `tools/crate_release.py` at revision
+  `dafd2187aaed965299e326f8dd0aeee1478da65f`
+  (<https://github.com/seraphinastudios/tilewright-renderer>), MIT, Copyright
+  (c) 2026 Seraphina Studios; the root `LICENSE` preserves that notice and
+  the full license. Adapted, and rewritten for this repository: the
+  `PutOutcome` and `put_once` upload client (one PUT, no proxies or
+  redirects, a bounded answer, fixed outcome labels), here with 401 and 403
+  as definite refusals besides 429; the per-version `registry_state`
+  (absent, indeterminate or present across the API, sparse index and
+  download), here also requiring the crate's owner and treating a download
+  not yet served as indeterminate; the upload receipts, here also written
+  before each upload; the publication boundary and the authenticated,
+  redirect-free GitHub reads and create-only writes; and the offline
+  `gh attestation verify --bundle` step. The ownership rule, the attempt and
+  refused records, the release-tree policy, the verifier and the workflows
+  are new. `.github/workflows/publish-crate.yml` follows the shape of the
+  renderer's workflow of the same name. Tests in
+  `tools/crates/test_publish.py` are new MIT work; no renderer tests are
+  copied.
+- **crates.io upload behaviour.** The refusal classes and the trusted
+  publisher matching rely on facts read in crates.io's
+  `src/controllers/krate/publish.rs` and its trusted-publishing token
+  exchange at revision `e0edaf98831e94b4a6d0969b957bda0094a45f3d` of
+  <https://github.com/rust-lang/crates.io> (MIT, Copyright (c) 2014 The
+  Rust Project Developers): which answers come
+  before the archive is read or anything is written, and that a config
+  without an environment matches any run of its workflow file. No
+  implementation, tests or source text are copied or adapted.
 
 ## Owner publication API contract research
 

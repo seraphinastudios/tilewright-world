@@ -4,7 +4,13 @@
 # notes follow it.
 #
 # usage: TAG=vX.Y.Z GO_TAG=go/vX.Y.Z GH_REPO=OWNER/REPO BRANCH=main REVISION=SHA \
+#   [CRATE_VERSION=X.Y.Z CRATE_OWNER=true|false CRATE_OWNER_TAG=vX.Y.Z CRATE_CHANGED='NAME ...'] \
 #   tools/release/notes.sh ASSETS
+#
+# The CRATE_ variables are the plan job's crate version outputs. Notes
+# cannot change once the release is out, and the tags are already pushed
+# when they are written, so these never stop the script: a missing or
+# malformed value only gives neutral wording.
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
@@ -14,6 +20,23 @@ fi
 assets=$1
 : "${TAG:?}" "${GO_TAG:?}" "${GH_REPO:?}" "${BRANCH:?}" "${REVISION:?}"
 version=${TAG#v}
+release_version='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
+crate_version=${CRATE_VERSION:-}
+crate_owner=${CRATE_OWNER:-}
+crate_owner_tag=${CRATE_OWNER_TAG:-}
+if [[ ! ${crate_version} =~ ^${release_version}$ ]]; then
+  crate_version=
+fi
+if [[ ! ${crate_owner_tag} =~ ^v${release_version}$ ]]; then
+  crate_owner_tag=
+fi
+changed=()
+read -r -a words <<<"${CRATE_CHANGED:-}"
+for crate in "${words[@]}"; do
+  if [[ ${crate} =~ ^tilewright-[a-z]+$ && ${#changed[@]} -lt 5 ]]; then
+    changed+=("${crate}")
+  fi
+done
 
 describe() {
   case $1 in
@@ -22,7 +45,7 @@ describe() {
     *-macos-amd64.tar.gz) echo "tilewright for macOS x86_64" ;;
     *-macos-arm64.tar.gz) echo "tilewright for macOS on Apple silicon" ;;
     *-windows-amd64.zip) echo "tilewright for Windows x86_64" ;;
-    *-crate-candidates.tar.gz) echo "Unpublished Rust crate candidates (owner review required)" ;;
+    *-crate-candidates.tar.gz) echo "Rust crate archives${crate_version:+ (crate version ${crate_version})}" ;;
     *-source.tar.gz) echo "Source code" ;;
     *.tgz) echo "npm package of the browser pack reader" ;;
     *) echo "Release asset" ;;
@@ -39,7 +62,23 @@ done <"${assets}/SHA256SUMS"
 echo
 echo "\`SHA256SUMS\` lists the same digests."
 echo
-echo "The crate candidate bundle is not a registry publication or a grant of crate-name ownership."
+# What the immutable notes say about crates.io is intent only; the "Publish
+# crates" run and crates.io itself show the result.
+if [[ -n ${crate_version} && ${crate_owner} == true ]]; then
+  echo "This release owns crate version ${crate_version}. The \"Publish crates\" workflow uploads these exact archives to crates.io; see crates.io for the result."
+elif [[ -n ${crate_version} && ${crate_owner} == false && -n ${crate_owner_tag} ]]; then
+  echo "Crate version ${crate_version} was first released in ${crate_owner_tag}; crates.io receives that release's archives, not these."
+  if [[ ${#changed[@]} -gt 0 ]]; then
+    list=
+    for crate in "${changed[@]}"; do
+      list+="${list:+, }\`${crate}\`"
+    done
+    echo
+    echo "Changed since ${crate_owner_tag}, so on crates.io only with a new crate version: ${list}."
+  fi
+else
+  echo "The crate archive bundle is not by itself a crates.io publication. docs/RELEASING.md says which release's archives crates.io receives."
+fi
 echo
 echo "The Go pack reader is tagged \`${GO_TAG}\` at the same commit:"
 echo

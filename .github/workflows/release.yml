@@ -16,6 +16,13 @@ name: Release
 #
 # npm publication is off until the repository variable TILEWRIGHT_NPM_PUBLISH
 # is "true"; docs/RELEASING.md says how to turn it on.
+#
+# The first release at a workspace crate version owns that version of the
+# five public crates. Its "Start crate publication" job starts the "Publish
+# crates" workflow (publish-crate.yml), which uploads the release's exact
+# crate archives to crates.io. That is off until the repository variable
+# TILEWRIGHT_CRATES_PUBLISH is "true", and a crate publication failure never
+# holds up a release; docs/RELEASING.md says how to turn it on.
 
 on:
   push:
@@ -67,6 +74,10 @@ jobs:
       previous_tag: ${{ steps.plan.outputs.previous_tag }}
       build: ${{ steps.plan.outputs.build }}
       publish: ${{ steps.plan.outputs.publish }}
+      crate_version: ${{ steps.crates.outputs.crate_version }}
+      crate_owner: ${{ steps.crates.outputs.crate_owner }}
+      crate_owner_tag: ${{ steps.crates.outputs.crate_owner_tag }}
+      crate_changed: ${{ steps.crates.outputs.crate_changed }}
     steps:
       - name: Check out with tags
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -163,6 +174,29 @@ jobs:
             echo "build=${build}"
             echo "publish=${publish}"
           } >>"${GITHUB_OUTPUT}"
+
+      # Which release owns the workspace crate version: the first at it.
+      # Only a crate version lower than the previous release's stops the
+      # plan. Any other failure gives crate_owner=error, and "Start crate
+      # publication" fails once the release is out.
+      - name: Decide crate version ownership
+        id: crates
+        if: steps.plan.outputs.build == 'true'
+        env:
+          EVENT: ${{ github.event_name }}
+          VERSION: ${{ steps.plan.outputs.version }}
+          PREVIOUS_TAG: ${{ steps.plan.outputs.previous_tag }}
+          TILEWRIGHT_CRATES_PUBLISH: ${{ vars.TILEWRIGHT_CRATES_PUBLISH }}
+        run: |
+          set -euo pipefail
+          # A pull request's check has no release tag.
+          if [[ ${EVENT} == pull_request ]]; then
+            release=(--pull-request)
+          else
+            release=(--tag "v${VERSION}")
+          fi
+          python3 tools/crates/publish.py owner --revision "${GITHUB_SHA}" \
+            --previous-tag "${PREVIOUS_TAG}" "${release[@]}" --github-output
 
       # A release tag is created before its release is published. If a run
       # failed in between, finish that release before any newer one, which
@@ -489,6 +523,11 @@ jobs:
 
       - name: Write the release notes
         if: steps.tag.outputs.published != 'true'
+        env:
+          CRATE_VERSION: ${{ needs.plan.outputs.crate_version }}
+          CRATE_OWNER: ${{ needs.plan.outputs.crate_owner }}
+          CRATE_OWNER_TAG: ${{ needs.plan.outputs.crate_owner_tag }}
+          CRATE_CHANGED: ${{ needs.plan.outputs.crate_changed }}
         run: bash tools/release/notes.sh dist/release/assets >"${RUNNER_TEMP}/notes.md"
 
       # gh creates a draft, uploads every asset, then publishes it. With
@@ -622,6 +661,125 @@ jobs:
             echo '```'
           } >>"${GITHUB_STEP_SUMMARY}"
           echo "::notice::sum.golang.org recorded ${module}@${TAG}"
+
+  crate-publication:
+    name: Start crate publication
+    needs: [plan, release]
+    # Starts the "Publish crates" workflow for the release that owns its
+    # crate version, once the GitHub release is out. That workflow runs
+    # main's publish-crate.yml in its own run, so a crate publication never
+    # holds up this run or the release queue, and it can be started again
+    # by hand at any time (docs/RELEASING.md, "When a crate publication
+    # fails"). Checks out nothing.
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.plan.outputs.publish == 'true' && github.ref == 'refs/heads/main' && needs.release.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
+    env:
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ format('v{0}', needs.plan.outputs.version) }}
+      REVISION: ${{ github.sha }}
+      CRATE_VERSION: ${{ needs.plan.outputs.crate_version }}
+      CRATE_OWNER: ${{ needs.plan.outputs.crate_owner }}
+      CRATE_OWNER_TAG: ${{ needs.plan.outputs.crate_owner_tag }}
+      ENABLED: ${{ vars.TILEWRIGHT_CRATES_PUBLISH == 'true' }}
+    steps:
+      - name: Start or report crate publication
+        run: |
+          set -euo pipefail
+          crates=(tilewright-jsonc tilewright-source tilewright-pack tilewright-diff tilewright-edit)
+          release_version='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
+          see='see "When a crate publication fails" in docs/RELEASING.md'
+          if [[ ${CRATE_OWNER} != true && ${CRATE_OWNER} != false ]]; then
+            echo "::error::the plan job could not decide which release owns the crate version, so no crate publication was started for ${TAG}; ${see}"
+            exit 1
+          fi
+          if [[ ! ${CRATE_VERSION} =~ ^${release_version}$ || ! ${CRATE_OWNER_TAG} =~ ^v${release_version}$ || ! ${TAG} =~ ^v${release_version}$ || ! ${REVISION} =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::the plan's crate version or owner is malformed; ${see}"
+            exit 1
+          fi
+
+          # The environment that admits the upload: only main, and no
+          # administrator bypass. A job that names a missing environment
+          # creates it with no branch rule.
+          # A failed request prints its error body, which is not "true".
+          if ! environment=$(gh api "repos/${GH_REPO}/environments/crates-io-release" --jq '.can_admins_bypass == false and .deployment_branch_policy.custom_branch_policies == true and .deployment_branch_policy.protected_branches == false' 2>/dev/null); then
+            environment=missing
+          fi
+          policies=$(gh api "repos/${GH_REPO}/environments/crates-io-release/deployment-branch-policies" --jq '[.branch_policies[] | {name, type}] == [{"name": "main", "type": "branch"}]' 2>/dev/null || true)
+          if [[ ${environment} == missing ]]; then
+            if [[ ${ENABLED} == true ]]; then
+              echo "::warning::the environment crates-io-release is missing or unreadable; see \"Turning on crates.io publication\" in docs/RELEASING.md"
+            else
+              echo "::notice::the environment crates-io-release is not set up yet; crates.io publication is off"
+            fi
+          elif [[ ${environment} != true || ${policies} != true ]]; then
+            echo "::warning::the environment crates-io-release must admit only the branch main and no administrator bypass; see \"Repository settings it relies on\" in docs/RELEASING.md"
+          fi
+
+          if [[ ${CRATE_OWNER} == false ]]; then
+            # Reading crates.io only reports: the owning release's own
+            # publication may still be in progress.
+            missing=()
+            for crate in "${crates[@]}"; do
+              if ! status=$(curl -sS --retry 3 -o /dev/null -w '%{http_code}' \
+                -H 'User-Agent: tilewright-world-release (https://github.com/seraphinastudios/tilewright-world)' \
+                "https://crates.io/api/v1/crates/${crate}/${CRATE_VERSION}"); then
+                status=unreachable
+              fi
+              if [[ ${status} != 200 ]]; then
+                missing+=("${crate}")
+              fi
+            done
+            {
+              echo '### Crate publication'
+              echo
+              echo "Crate version ${CRATE_VERSION} is owned by ${CRATE_OWNER_TAG}, so ${TAG} publishes no crates."
+            } >>"${GITHUB_STEP_SUMMARY}"
+            if [[ ${#missing[@]} -gt 0 ]]; then
+              echo "::warning::crates.io does not show ${missing[*]} at ${CRATE_VERSION}, which ${CRATE_OWNER_TAG} owns (or could not be read). That publication is possibly still in progress; if not, ${see}"
+            fi
+            exit 0
+          fi
+          if [[ ${CRATE_OWNER_TAG} != "${TAG}" ]]; then
+            echo "::error::the plan says ${CRATE_OWNER_TAG}, not ${TAG}, owns crate version ${CRATE_VERSION}; ${see}"
+            exit 1
+          fi
+
+          bundle="tilewright-world-${TAG#v}-crate-candidates.tar.gz"
+          digest=$(gh api "repos/${GH_REPO}/releases/tags/${TAG}" --jq "[.assets[] | select(.name == \"${bundle}\") | .digest] | if length == 1 then .[0] | ltrimstr(\"sha256:\") else \"\" end")
+          if [[ ! ${digest} =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::${TAG} does not carry one ${bundle} with a SHA-256 digest; ${see}"
+            exit 1
+          fi
+          command="gh workflow run publish-crate.yml --ref main -R ${GH_REPO} -f operation=publish -f release_tag=${TAG} -f source_revision=${REVISION} -f bundle_sha256=${digest}"
+          if [[ ${ENABLED} != true ]]; then
+            echo "::notice::${TAG} owns crate version ${CRATE_VERSION}, and crates.io publication is off. Once it is on, start the publication with: ${command}"
+            {
+              echo '### Crate publication'
+              echo
+              echo "${TAG} owns crate version ${CRATE_VERSION}. crates.io publication is off (the repository variable TILEWRIGHT_CRATES_PUBLISH is not true). Once it is on, start the publication with:"
+              echo
+              echo '```sh'
+              echo "${command}"
+              echo '```'
+            } >>"${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+          gh workflow run publish-crate.yml --ref main -R "${GH_REPO}" -f operation=publish \
+            -f release_tag="${TAG}" -f source_revision="${REVISION}" -f bundle_sha256="${digest}"
+          {
+            echo '### Crate publication'
+            echo
+            echo "Started the \"Publish crates\" workflow for ${TAG}, which owns crate version ${CRATE_VERSION}. If it does not finish, start it again with:"
+            echo
+            echo '```sh'
+            echo "${command}"
+            echo '```'
+          } >>"${GITHUB_STEP_SUMMARY}"
 
   npm-publish:
     name: Publish to npm

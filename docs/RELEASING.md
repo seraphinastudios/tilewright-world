@@ -16,7 +16,7 @@ build provenance attestation. `.github/workflows/release.yml` does the work.
 | `tilewright-X.Y.Z-windows-amd64.zip` | The CLI for Windows x86_64, with the C runtime linked in |
 | `tilewright-world-X.Y.Z-source.tar.gz` | `git archive` of the released commit |
 | `seraphinastudios-tilewright-pack-X.Y.Z.tgz` | The npm package `@seraphinastudios/tilewright-pack`, the browser pack reader (`packages/tilewright-pack`), built by `tools/build-wasm.sh` |
-| `tilewright-world-X.Y.Z-crate-candidates.tar.gz` | The five exact `.crate` candidates and `candidate.json`, qualified by source-release version; no registry publication |
+| `tilewright-world-X.Y.Z-crate-candidates.tar.gz` | The five `.crate` archives at the crate version, and `candidate.json`. The first release at a crate version publishes them to crates.io (see "Crate versions") |
 | `SHA256SUMS` | The SHA-256 digest of every other asset |
 
 Each CLI archive holds one directory, `tilewright-X.Y.Z-PLATFORM/`, with
@@ -50,16 +50,17 @@ tilewright 0.1.0 (release v0.4.0)
 
 The first number is the version of the crates, which packs record as
 their `compiler`. As in the renderer, it is independent of release tags, and
-it changes only when the crates' version is bumped. The second number is
-the release. A build from source prints only the first number, unless
-`TILEWRIGHT_RELEASE` was set when it was compiled.
+it changes only when the crates' version is bumped (see "Crate versions").
+The second number is the release. A build from source prints only the first
+number, unless `TILEWRIGHT_RELEASE` was set when it was compiled.
 
-The five public crates are on crates.io, but no release publishes them: the
-owner uploads them by hand (see
-[Owner-run first crate publication](#owner-run-first-crate-publication)), and
-registry automation is deferred. The local candidate preparation below does
-not enable publication. The npm package is not published to the npm registry
-until the owner turns that on (see below).
+The five public crates are on crates.io. The first release at a crate
+version publishes that release's exact crate archives there, through the
+"Publish crates" workflow (`.github/workflows/publish-crate.yml`), once the
+owner has turned crates.io publication on (see
+[Turning on crates.io publication](#turning-on-cratesio-publication)). Until
+then no release publishes them. The npm package is not published to the npm
+registry until the owner turns that on (see below).
 
 ## Preparing Rust crate candidates locally
 
@@ -71,11 +72,11 @@ use the workspace crate version and exact internal dependency versions.
 The public crates inherit both the MIT SPDX identifier and the root `LICENSE`
 file explicitly, so Cargo includes the complete copyright and license notice
 in each archive; the verifier requires those exact notice bytes.
-This is candidate policy, not an activated registry publisher. The GitHub
-release workflow bundles these exact candidates as a checksummed, attested source
-release asset after building the packaged graph. Its source revalidation also
-exercises local candidates through `tools/validate.sh`. Neither step publishes
-to crates.io or reserves names or versions.
+The GitHub release workflow bundles these exact candidates as a checksummed,
+attested release asset after building the packaged graph, and its source
+revalidation exercises local candidates through `tools/validate.sh`. Neither
+step publishes anything: the "Publish crates" workflow uploads an owning
+release's bundle (see "Crate versions").
 
 Use a clean committed checkout, the pinned Rust toolchain and a credential-free
 Cargo home with the locked dependencies already cached. In the documented
@@ -118,91 +119,24 @@ after the Go and browser checks, performs actual candidate preparation and
 `verify --build` in a fresh temporary directory outside the checkout. It removes
 that directory on exit, preserving the same credential-free/offline boundary.
 This proves the local packaged graph can build, not that it was downloaded
-from crates.io or that the editor works against registry releases.
+from crates.io or that the editor works against registry releases. The
+"Publish crates" workflow checks that before and after it uploads a crate
+version (see "The pipeline").
 
-## Owner-run first crate publication
+## New crate names
 
-Registry automation remains deferred. No crate upload, token, trusted publisher,
-registry environment or registry permission is added by this pipeline. The first
-publication is a separate owner action after review of one concrete release.
-Do not supply a registry credential to preparation, verification, Cargo builds,
-CI, chat or committed files.
-
-Choose one published, immutable, non-prerelease source release produced by
-`release.yml` on protected `main`. Record its repository, release ID, tag, full
-source revision, producing workflow run/attempt, candidate bundle SHA-256 and
-`candidate.json` SHA-256 in the publication decision. Confirm the exact producing
-run succeeded, both source and Go tags resolve to the recorded revision, and
-that revision is the one being reviewed. PR artifacts and maintenance-branch
-candidates are test evidence, never candidates for the first registry upload.
-
-Download the selected release's `SHA256SUMS` and candidate bundle into a fresh
-directory. In the following read-only verification example, replace `X.Y.Z` and
-`FULL_SOURCE_SHA` with the reviewed values; do not select an unreviewed `latest`:
-
-```sh
-repository=seraphinastudios/tilewright-world
-tag=vX.Y.Z
-revision=FULL_SOURCE_SHA
-bundle=tilewright-world-X.Y.Z-crate-candidates.tar.gz
-gh release view "$tag" --repo "$repository" --json databaseId,tagName,isDraft,isPrerelease,url
-gh api "repos/$repository/releases/tags/$tag" --jq '{id, tag_name, immutable, draft, prerelease, assets: [.assets[] | {name,digest}]}'
-gh release download "$tag" --repo "$repository" --pattern SHA256SUMS --pattern "$bundle"
-gh release verify-asset "$tag" "$bundle" --repo "$repository"
-gh attestation verify "$bundle" --repo "$repository" \
-  --cert-identity "https://github.com/$repository/.github/workflows/release.yml@refs/heads/main" \
-  --source-ref refs/heads/main --source-digest "$revision" --deny-self-hosted-runners
-sha256sum --check --strict --ignore-missing SHA256SUMS
-```
-
-Require exactly one bundle entry in `SHA256SUMS` and equality with both the local
-bundle digest and GitHub's recorded asset digest. Check the attestation result's
-source workflow run and attempt against the successful producing run recorded
-above. A digest alone does not authenticate an origin. From a clean checkout of
-that exact source revision, run the byte-only verifier (no Cargo or upload):
-
-```sh
-python3 tools/release/crate_candidates.py /absolute/downloads/tilewright-world-X.Y.Z-crate-candidates.tar.gz --revision FULL_SOURCE_SHA
-```
-
-It bounds decompression before parsing outer and nested TAR headers, rejects
-PAX/GNU extensions, extra, duplicate, unsafe or nonregular members, excessive sizes,
-wrong source revision, changed archives, metadata or license notices. Only after
-it succeeds, unpack the verified bundle into a new empty directory and retain
-its exact five archives and manifest. Review the manifest's package inventory,
-versions and checksums. The credential-free `verify --build` command above can
-also verify that extracted graph with the pinned toolchain and cached dependencies;
-its local overrides still provide no registry-consumer evidence.
-
-Immediately before a separately authorized first upload, check each exact name
-and version through the public crates.io API and sparse index. All five crate
-names must be unclaimed for this first-publication procedure; a 404 is only a
-point-in-time observation, not a reservation. Any existing name, version, owner,
-conflicting checksum, inconsistent API/index result or unavailable service stops
-that procedure for owner review. Confirm no other person/session is publishing
-these coordinates. Use the manifest order (`jsonc`, `source`, `pack`, `diff`,
-`edit`), waiting for each dependency's registry archive and sparse-index checksum
-to equal the selected archive before proceeding to dependents.
-
-This change supplies verified assets and the review procedure, not an upload
-helper. The separately reviewed owner publication method must upload these exact
-archive bytes without running package/build hooks with credentials. Ordinary
-`cargo publish` repackages source and is not proof that the selected asset bytes
-were uploaded. After each upload, verify the registry archive digest, index
-checksum and owner identity and retain the owning source-release record. An
-ambiguous response requires owner investigation; do not retry or switch to a
-newer source release merely because public reads still show absence.
-
-Later source releases can contain different candidate bytes at the same Cargo
-version (including a new VCS revision). Their qualified bundle names distinguish
-them, but none owns or supersedes a registry coordinate by attachment alone.
-Once a version is published, its originally selected archive/release remains the
-owner of that coordinate forever. Never upload a later candidate for the same
-name/version, even if its code looks unchanged. Changed published content needs
-a reviewed Cargo version bump; unchanged versions retain the original registry
-bytes. Automated ownership/reuse/version checks and registry-consumer acceptance
-remain separate follow-up work. Source/application releases continue independently.
-
+crates.io refuses trusted-publishing tokens for a crate name that does not
+exist yet, so the "Publish crates" workflow publishes only new versions of
+the five existing names. A new public crate needs, in one reviewed pull
+request, a policy change (`tools/crates/candidates.json` and the lists in
+`tools/crates/prepare.py`) and a first-publication procedure written for it.
+`tools/crates/owner_publish.py` and
+[docs/CRATE-FIRST-PUBLICATION.md](CRATE-FIRST-PUBLICATION.md) published the
+five names at 0.1.0. As they stand they cannot publish another name: the
+helper is bound to the five names and requires each to have exactly one
+version on crates.io. A change to the policy lists also makes older release
+trees fail verification, so publish any pending owned crate version first
+(see "Crate versions").
 
 ## Versions
 
@@ -247,6 +181,64 @@ counts.
   harmless. After 1.0, a major release would need a `/v2` module path, so
   the Go numbering will be revisited then.
 
+### Crate versions
+
+The five public crates share the workspace crate version
+(`workspace.package.version` in `Cargo.toml`) and pin each other exactly
+(`=X.Y.Z`), so they always move together. The crate version is independent
+of the release version, and only a pull request that changes it on purpose
+moves it.
+
+- While the crates are at 0.x, a breaking change to a public API, including
+  a public dependency moving to a new major or 0.x minor version, takes the
+  next minor version. Anything else takes the next patch version.
+- `tools/validate.sh`, in the required "World validation" check, runs
+  `tools/crates/prepare.py check-version` against the pull request's base
+  (or, on `main`, the commit before): the crate version stays, or moves to
+  exactly the next patch or the next minor version. It never moves backward
+  or skips a version, and it stays below 1.0.0 while `PRE_1_0` is true in
+  `scripts/release/release-policy.cjs`. The pull request that freezes 1.0
+  changes that check on purpose.
+- The first release from `main` at a crate version owns that version of all
+  five crates, for good. The plan job's "Decide crate version ownership"
+  step finds it from git tags alone: a release owns crate version V when
+  the previous release tag's crate version is lower than V, or there is no
+  previous release. Later releases carry archives at the same version with
+  other bytes (the revision in `.cargo_vcs_info.json`, the sibling checksums
+  in each packaged `Cargo.lock`), but crates.io only ever gets the owning
+  release's. Never upload a later release's archive for a published name and
+  version. The plan job stops a release whose crate version is lower than
+  the previous release's. Any other failure there only leaves the crate
+  version undecided: the release goes ahead, and its "Start crate
+  publication" job fails afterwards.
+- Crate content that changes after a version was released reaches crates.io
+  only with the next crate version. The plan job's summary and each later
+  release's notes name the crates whose packaged content changed since the
+  owning release: their files outside `tests/` and `benches/`, their
+  `Cargo.toml`, the workspace dependency requirements they inherit, and the
+  root `README.md` and `LICENSE`, which every crate packages. `Cargo.lock`
+  and `rust-toolchain.toml` do not reach a library's users and are left
+  out. The report stops nothing; bump the crate version when those changes
+  should be published.
+- While crates.io publication is on, merging a crate version bump publishes
+  the five crates at it: the bump's release owns the version, and its
+  "Start crate publication" job starts the "Publish crates" workflow.
+  Merge everything meant for that version before the bump or with it. A
+  merge released after it carries the same version without publishing it.
+  If a waiting run is cancelled for a newer merge, the newer merge's release
+  carries both and owns the version.
+- Publish a pending owned version before changing the workspace's members
+  or the crate lists in `tools/crates/candidates.json`. The publisher runs
+  `main`'s code against the owning release's own policy files, and it
+  refuses a release tree whose members or lists differ from `main`'s.
+- To give up a crate version that must never reach crates.io, for example
+  one with a defect found before it was published, add it and its owning
+  release to the `abandoned` list in `main`'s
+  `tools/crates/candidates.json`, as `{"version": "0.2.0", "release":
+  "v0.7.0"}`, in a reviewed pull request, and bump the crate version to the
+  next patch version. The publisher refuses any listed version and any
+  listed release. Only `main`'s list counts.
+
 ## When releases happen
 
 | Event | What runs |
@@ -255,6 +247,7 @@ counts.
 | Push before any `vX.Y.Z` tag exists | The plan job only, which says the first release has to be started by hand. Merging never cuts the first release. |
 | Run workflow (`workflow_dispatch`) on `main` | The same as a push, except that it can also cut the first release |
 | Run workflow on a maintenance branch `MAJOR.MINOR.x` | The plan job only, which says what it would release; publishing from maintenance branches is off |
+| A release from `main` that first carries a crate version | Its "Start crate publication" job starts the "Publish crates" workflow for it while crates.io publication is on, and otherwise prints the command that would. See "Crate versions". |
 | Pull request that changes the release workflows, `scripts/release/`, `tools/release/`, `tools/crates/`, `tools/build-wasm.sh`, `packages/tilewright-pack/`, `rust-toolchain.toml`, `Cargo.lock` or a `Cargo.toml` | The tests, plan, five builds, npm build and packaging under the version `0.0.0-check.N` (N is the pull request number), as a check. A pull request into another pull request's branch is planned as one into `main`. Nothing is attested or published: the plan job never plans publication for a pull request, and the attest, release and npm jobs refuse to run for one. |
 
 To cut the first release, run the Release workflow on `main`, either from
@@ -296,7 +289,59 @@ its own, so a maintenance release never displaces a release of `main`.
 | Package release assets | ubuntu-24.04 | `contents: read` | `tools/release/package.py assemble`: archives, license bundles, the source archive, the revision-checked crate candidate bundle and `SHA256SUMS`; checks that all five platforms compiled the fixture to the same pack |
 | Attest build provenance | ubuntu-24.04 | `contents: read`, `id-token: write`, `attestations: write` | Verifies the assets, then `actions/attest-build-provenance` for every asset and each bare binary |
 | Publish the GitHub release | ubuntu-24.04 | `contents: write` | Creates `vX.Y.Z` and `go/vX.Y.Z` at the commit in one atomic push, which fails if either exists elsewhere. Then it publishes the release on the tag with every asset at once, and checks that the release is immutable, that both tags point at the commit, and that GitHub's asset digests equal `SHA256SUMS`. Last, it has `sum.golang.org` record the new Go version, which only warns if the proxy is slow. |
+| Start crate publication | ubuntu-24.04 | `contents: read`, `actions: write` | For a release from `main`, once it is out: checks the `crates-io-release` environment's settings. If the release owns its crate version, starts the "Publish crates" workflow for it, or, while crates.io publication is off, prints the command that would. Otherwise it only warns if crates.io lacks the crate version, which another release owns. Fails if the plan could not decide the crate version. Checks out nothing |
 | Publish to npm | ubuntu-24.04 | `contents: read`, `attestations: read`, `id-token: write`, environment `npm` | Publishes the release's npm tarball for a release from `main`; skipped unless npm publication is on |
+
+The "Publish crates" workflow (`.github/workflows/publish-crate.yml`) runs
+only when dispatched on `main`, with the inputs `operation` (`verify` or
+`publish`), `release_tag`, `source_revision` (the commit the tag points at)
+and `bundle_sha256` (the crate archive bundle's digest). Every job checks
+those first. Runs for one release and operation queue one at a time and are
+never cancelled. It always runs `main`'s code, which reads the release's
+policy files (`Cargo.toml`, each crate's `Cargo.toml`,
+`rust-toolchain.toml`, `LICENSE` and `tools/crates/candidates.json`) from
+the release's tree as data. So `main` can publish a release made at an
+older crate version.
+
+| Job | Permissions | Does |
+| --- | --- | --- |
+| Verify the release's crate archives | `contents: read`, `attestations: read` | Checks that the release is published, immutable and stable; that `vX.Y.Z` and `go/vX.Y.Z` point at the revision, which is on `main`; that the bundle matches the dispatched digest, GitHub's asset digest and `SHA256SUMS`; GitHub's release attestation and the bundle's build provenance from `release.yml` on `main` at the revision, on a GitHub-hosted runner; the archives' bytes against the release tree's policy; the abandoned list; and that the release owns its crate version. A release that does not stops here, successfully, naming the owner. For the owner, it plans the upload from crates.io and the upload records, and stops if crates.io has a newer crate version and anything is left to upload |
+| Resolve the archives against crates.io | `contents: read`, `attestations: read` | Builds a consumer of the five crates with the bundle's toolchain, the release's archives standing in for crates.io's, and every other dependency resolved fresh from crates.io, as a consumer's would be |
+| Publish to crates.io | `contents: write`, `attestations: read`, `id-token: write`, environment `crates-io-release` | Only for `operation=publish` while crates.io publication is on. Verifies again, has `rust-lang/crates-io-auth-action` exchange the job's OIDC token for a crates.io token, then uploads the archives crates.io lacks in dependency order (`jsonc`, `source`, `pack`, `edit`, `diff`), each after its dependencies are on crates.io, then checks all five |
+| Build a crates.io consumer | `contents: read`, `attestations: read` | Once the upload step has seen all five on crates.io: resolves a consumer of the five from crates.io, checks that its lockfile holds the release's checksums, and builds it |
+
+Only the upload step receives the crates.io token, and it holds no other
+GitHub token than the one that creates upload records. The auth action
+revokes the crates.io token when the job ends; it would expire after 30
+minutes anyway. The OIDC token, though, can be requested in every step of
+the publish job, so that job runs nothing but `main`'s standard-library
+Python, the runner's GitHub CLI and three pinned actions (checkout, the auth
+action and upload-artifact): no Cargo, npm or pip. Cargo runs only in the
+resolve and accept jobs, which hold no credentials.
+
+The upload does not use `cargo publish`, which would package the source
+again: it sends each archive's exact bytes to the registry's upload
+endpoint, with metadata taken from the archive's own `Cargo.toml`.
+Before each upload the publisher creates an attempt record,
+`refs/tags/crate-upload-attempt/NAME/VERSION/N`: an annotated tag at the
+release's commit whose message (canonical JSON) names the release, the run
+that built the bundle, the archive's digest, the upload metadata's digest
+and the publishing run. Creating the reference is create-only, so no two
+runs can make the same attempt. The publisher then writes a `reserved`
+receipt, sends one upload, and writes a receipt of the answer. crates.io
+answers 401, 403 and 429 before it reads the archive or writes anything:
+after such an answer the run creates a refused record,
+`refs/tags/crate-upload-refused/NAME/VERSION/N`, and stops. After any
+answer, the run waits up to two minutes for crates.io's API, index and
+download to show the version with the archive's checksum, published by
+this run through trusted publishing and owned by `zoeyrose`; then it goes on
+to the next crate. A later run makes attempt N+1 only if attempt N was
+refused and crates.io still lacks the version, and there are at most three
+attempts. Records are never deleted, moved or reused. The receipts, which
+hold no response text, are kept for 90 days as the run's artifact
+`crate-put-outcomes-RUN-ATTEMPT`. The first publication's intents,
+`refs/tags/crate-upload-intent/NAME/0.1.0`, are only read, to check that
+they name the owning release.
 
 The build runners are `ubuntu-24.04` (x86_64 Linux), `ubuntu-24.04-arm`
 (ARM64 Linux), `macos-15-intel`, `macos-15` (Apple silicon) and
@@ -393,7 +438,47 @@ The pipeline changes no settings. It relies on:
   download-artifact, attest-build-provenance and the `actions/attest` it
   calls, and `actions/setup-go`, which Revalidate runs through
   `validate.yml`. `dependency-review.yml` also needs
-  `actions/dependency-review-action`.
+  `actions/dependency-review-action`, and `publish-crate.yml`
+  `rust-lang/crates-io-auth-action`, which are on it.
+- **The environment `crates-io-release`**, for the "Publish to crates.io"
+  job. It admits only the branch `main`, through exactly one deployment
+  branch policy, `{"name": "main", "type": "branch"}`, and administrators
+  cannot bypass it (`can_admins_bypass` false). It has no reviewers, wait
+  timer, secrets or variables: publication is fully automatic. Every
+  release's "Start crate publication" job warns if it is set up otherwise,
+  or is missing while crates.io publication is on.
+- **The repository variable `TILEWRIGHT_CRATES_PUBLISH`**: `true` turns
+  crates.io publication on. "Start crate publication" dispatches the
+  "Publish crates" workflow only then, and the publish job and its upload
+  step check it again.
+- **Five crates.io trusted publishers**, one for each public crate, and no
+  other. crates.io accepts a config without an environment for any run of a
+  workflow file of that name, from any branch, which would bypass the
+  environment's branch rule. So each crate has exactly one config, and its
+  fields are exactly:
+
+  | Field | Value |
+  | --- | --- |
+  | `repository_owner` | `seraphinastudios` |
+  | `repository_owner_id` | `314492348` |
+  | `repository_name` | `tilewright-world` |
+  | `workflow_filename` | `publish-crate.yml` |
+  | `environment` | `crates-io-release` |
+
+  The workflow file name and the environment name are load-bearing:
+  renaming either, or renaming or transferring the repository or the
+  organization, breaks publication until all five publishers are set up
+  again. `tools/crates/test_publish.py` checks the names.
+- **The organization ruleset "Tilewright 05 - World crate upload records"**,
+  which the owner creates before the first crate version bump (see
+  "Turning on crates.io publication"). It covers
+  `refs/tags/crate-upload-attempt/**` and `refs/tags/crate-upload-refused/**`
+  in this repository only, with the rules "Restrict deletions" and
+  "Restrict updates" and no bypass list. Creating such a tag stays allowed,
+  so the publish job's `GITHUB_TOKEN` creates records, and nobody can
+  delete or move one. It is not part of "Tilewright 04", which also covers
+  the renderer, whose stranded upload intents may need deleting. The first
+  publication's `refs/tags/crate-upload-intent/*` are not covered.
 
 Repository writers are trusted. Anyone who can push a branch can run
 workflow code of their own with `contents: write` and create tags and
@@ -458,14 +543,117 @@ automatically. Publish one by hand after verifying its tarball as above.
 To turn publishing off again, delete the variable or set it to anything
 else.
 
-## Future crates.io automation
+## Turning on crates.io publication
 
-Use [Owner-run first crate publication](#owner-run-first-crate-publication) for
-the selected first-publication procedure. Registry automation is deferred and
-is not a prerequisite for preparing or reviewing the candidate release assets.
-A future, separately reviewed change may add coordinate ownership/reuse checks,
-exact-byte upload and recovery, and trusted publishing. Do not activate or port
-another repository's publisher as part of the current asset workflow.
+The "Publish crates" workflow publishes the five crates at a crate version
+from the release that owns it, through crates.io trusted publishing: no
+crates.io token is stored anywhere. Nothing is published until the owner
+has done the following, in this order. These are owner steps: agents do not
+change GitHub or crates.io settings, and do not dispatch the workflow
+without the owner's go-ahead.
+
+1. **Create the environment `crates-io-release`** in this repository, before
+   any `operation=publish` dispatch: a job that names a missing environment
+   creates it with no branch rule. Settings, Environments, New environment,
+   `crates-io-release`. Under "Deployment branches and tags" choose
+   "Selected branches and tags" and add the branch rule `main`. Untick
+   "Allow administrators to bypass configured protection rules". Add no
+   required reviewers, wait timer, secrets or variables. Check it:
+
+   ```sh
+   gh api repos/seraphinastudios/tilewright-world/environments/crates-io-release \
+     --jq '{name, can_admins_bypass, deployment_branch_policy}'
+   gh api repos/seraphinastudios/tilewright-world/environments/crates-io-release/deployment-branch-policies \
+     --jq '[.branch_policies[] | {name, type}]'
+   ```
+
+   The first must show `can_admins_bypass` false and
+   `{"custom_branch_policies": true, "protected_branches": false}`, the
+   second exactly `[{"name": "main", "type": "branch"}]`.
+2. **Add a GitHub trusted publisher to each of the five crates** on
+   crates.io, signed in as `zoeyrose`: in the crate's Settings, Trusted
+   Publishing, Add, GitHub, enter the repository owner `seraphinastudios`,
+   the repository name `tilewright-world`, the workflow filename
+   `publish-crate.yml` and the environment `crates-io-release`. Do this for
+   `tilewright-jsonc`, `tilewright-source`, `tilewright-pack`,
+   `tilewright-diff` and `tilewright-edit`. Leave "Trusted Publishing only"
+   off for now (step 7).
+3. **Check every config, field for field.** In the same signed-in browser,
+   open `https://crates.io/api/v1/trusted_publishing/github_configs?crate=NAME`
+   for each of the five names. Each must list exactly one config, with
+   `repository_owner` `seraphinastudios`, `repository_owner_id`
+   `314492348`, `repository_name` `tilewright-world`, `workflow_filename`
+   `publish-crate.yml` and `environment` `crates-io-release`. Delete any
+   other config, above all one without an environment. A missing or wrong
+   config for one crate shows only when that crate's upload gets HTTP 403,
+   partway through a crate version's cohort.
+4. **Protect the upload records** with a ruleset for this repository alone,
+   before the first crate version bump merges, so its records are protected
+   from the start:
+
+   ```sh
+   gh api --method POST orgs/seraphinastudios/rulesets --input - <<'EOF'
+   {
+     "name": "Tilewright 05 - World crate upload records",
+     "target": "tag",
+     "enforcement": "active",
+     "bypass_actors": [],
+     "conditions": {
+       "ref_name": {
+         "include": ["refs/tags/crate-upload-attempt/**", "refs/tags/crate-upload-refused/**"],
+         "exclude": []
+       },
+       "repository_name": {"include": ["tilewright-world"], "exclude": []}
+     },
+     "rules": [{"type": "deletion"}, {"type": "update"}]
+   }
+   EOF
+   ```
+
+   Or, in the organization's Settings, Repository, Rulesets: New ruleset,
+   New tag ruleset, named as above, enforcement Active, no bypass list,
+   target repositories by name `tilewright-world` only, target tags
+   `crate-upload-attempt/**` and `crate-upload-refused/**`, and only the
+   rules "Restrict deletions" and "Restrict updates". Leave "Restrict
+   creations" off, or the publish job could not create records. Do not add
+   these patterns to "Tilewright 04". Check it:
+   `gh api orgs/seraphinastudios/rulesets --jq '.[] | select(.name | startswith("Tilewright 05")) | .id'`,
+   then `gh api orgs/seraphinastudios/rulesets/ID --jq '{target, enforcement, bypass_actors, conditions, rules}'`.
+5. **Set the repository variable last**, as the statement that steps 1 to 4
+   are done:
+   `gh variable set TILEWRIGHT_CRATES_PUBLISH --body true -R seraphinastudios/tilewright-world`.
+6. **Dry runs.** First without credentials, for v0.1.0, which owns 0.1.0:
+
+   ```sh
+   gh workflow run publish-crate.yml --ref main -R seraphinastudios/tilewright-world \
+     -f operation=verify -f release_tag=v0.1.0 \
+     -f source_revision=70a86f25f9f6c3077991309a65137afb7a08a54d \
+     -f bundle_sha256=f3c57f44a6525b3c05113dd2cc5c13845e0f1292a397f8b6c62cb724b40af669
+   ```
+
+   Expect the verify job's summary to show all five crates present at
+   0.1.0, each with its first-publication intent and nothing to upload, and
+   the resolve job to build. Do the same for the latest release, with its
+   revision and bundle digest (its "Start crate publication" summary has
+   the command): expect it to say that v0.1.0 owns 0.1.0, and nothing more.
+   Then the credentialed canary: the v0.1.0 command with
+   `-f operation=publish`. Expect the environment to admit the run, the
+   OIDC exchange to succeed, no upload and no record, and "Build a
+   crates.io consumer" to build 0.1.0 from crates.io. That proves the
+   workflow file, the environment and at least one trusted publisher. Only
+   a real upload proves all five, which step 3 covers.
+7. **After the first crate version this workflow publishes**, once crates.io
+   shows all five crates at it with `trustpub_data` naming GitHub, this
+   repository and the publish run: decide whether to turn on "Trusted
+   Publishing only" for the five crates, which stops any API token from
+   publishing their versions. Check first, under crates.io's Account
+   Settings, API Tokens, that no token with publish scope for
+   `tilewright-*` remains, and revoke any that does.
+
+From then on, merging a crate version bump publishes the five crates at it.
+To turn publication off, delete the variable or set it to anything else.
+Releases that own a crate version while it is off can be published later
+with the command in "When a crate publication fails".
 
 ## When a release fails
 
@@ -507,7 +695,8 @@ another repository's publisher as part of the current asset workflow.
 - **"Publish the GitHub release" failed its checks after publishing**: the
   release exists. Do not delete an immutable release. Read the error, fix
   the cause, then re-run the failed jobs: the re-run skips publishing,
-  checks the existing release again, and goes on to npm.
+  checks the existing release again, and goes on to npm and "Start crate
+  publication".
 - **The release came out mutable** (immutable releases were off when it was
   published): GitHub cannot make it immutable afterwards, so its checks
   keep failing, and the plan job of every later run on the branch stops at
@@ -543,3 +732,48 @@ another repository's publisher as part of the current asset workflow.
   command to run. npm's registry can take a few minutes to list a new
   version: if the re-run fails because the version already exists, re-run
   it again later.
+
+## When a crate publication fails
+
+A crate publication never holds up a release: it starts once the GitHub
+release and the Go tag are out, in a run of its own, and nothing waits for
+it. To publish an owning release's crate version, or finish publishing it,
+dispatch the "Publish crates" workflow for that release:
+
+```sh
+tag=vX.Y.Z
+repository=seraphinastudios/tilewright-world
+gh workflow run publish-crate.yml --ref main -R "$repository" \
+  -f operation=publish -f release_tag="$tag" \
+  -f source_revision="$(gh api "repos/$repository/commits/$tag" --jq .sha)" \
+  -f bundle_sha256="$(gh api "repos/$repository/releases/tags/$tag" \
+    --jq ".assets[] | select(.name == \"tilewright-world-${tag#v}-crate-candidates.tar.gz\") | .digest | ltrimstr(\"sha256:\")")"
+```
+
+The owning release's "Start crate publication" summary has the same
+command filled in. `-f operation=verify` checks everything and uploads
+nothing. Dispatch the workflow directly: do not re-run the release run
+instead. A re-run of all its jobs plans no release and so starts nothing,
+and any re-run joins the release queue, where it can cancel a waiting
+merge's run. Upload records are never deleted: each run reads them and goes
+on as far as they allow. The run's summary and the receipts artifact
+`crate-put-outcomes-RUN-ATTEMPT` show each attempt.
+
+Every later release's "Start crate publication" warns while crates.io lacks
+the owned crate version. The owning release's publication is possibly
+still in progress then: check its "Publish crates" run first.
+
+| What failed | What happened | What to do |
+| --- | --- | --- |
+| "Start crate publication" says the plan could not decide the crate version | The release is out; nothing was started | Read the warning of the plan job's "Decide crate version ownership" step. Once the cause is fixed on `main`, dispatch for the owning release as above |
+| "Start crate publication" could not dispatch | The release is out; nothing was started | Dispatch as above |
+| "Verify the release's crate archives" | Nothing was uploaded or recorded | Read its error, which names the check. Fix a cause on `main`, then dispatch again. A changed or unattested release is not publishable at all. Refusals about upload records, a newer crate version or the abandoned list are below |
+| "Resolve the archives against crates.io" | Nothing was uploaded | The crates at this version would not resolve or build for a consumer. The release's archives cannot change: fix it in the next crate version, and consider abandoning this one (see "Crate versions") |
+| "Exchange the job's OIDC token for a crates.io token" | Nothing was uploaded or recorded | No trusted publisher matched the run. Check steps 1 to 3 of "Turning on crates.io publication", then dispatch again |
+| The upload got HTTP 401, 403 or 429 | crates.io refused attempt N before writing anything, and the run created the refused record and stopped. The crates before it in dependency order are published | 403: the crate's trusted publisher is missing or wrong (check step 3), or the crates.io token expired. 401: crates.io could not read the token. 429: a rate limit, such as crates.io's daily limit of new versions for a crate; wait until it passes. Then dispatch again, which makes attempt N+1. After three refused attempts the publisher stops for that crate version; bump to the next patch version instead |
+| The upload timed out, got a server error or another answer | Attempt N is unresolved: there is no refused record. If crates.io showed the version from this run within two minutes, the run went on; otherwise it stopped | Wait, then dispatch again: if crates.io now has the version with the release's archive, the run skips it and goes on. If it still does not, no run can tell whether crates.io will accept that upload, so the publisher refuses that crate version for good. After looking into it, bump to the next patch version, which publishes all five again |
+| The run stopped, was cancelled or could not write a receipt after an attempt record and before its upload | The `reserved` receipt is there without a `put` one, or the log says which step stopped. The attempt is unresolved | As for an unresolved attempt: bump to the next patch version |
+| crates.io has the version with other bytes, yanked, or without `zoeyrose` as an owner | Nothing was uploaded for it | Find out why. Publish the content as a new crate version |
+| crates.io has a newer crate version | That cohort is stale and is not published, by design | Nothing. A run that had started uploading finishes its cohort; a later run for that release refuses. So an older cohort can stay partly published. Its published crates are dependency-closed, since a crate is uploaded only after its dependencies are on crates.io |
+| "Confirm the five crates on crates.io", after the upload step succeeded | crates.io's index or download is slow | Dispatch again later; present crates are skipped |
+| "Build a crates.io consumer" | The crates are published | crates.io's crates at this version do not resolve or build for consumers. Fix that in the next crate version |

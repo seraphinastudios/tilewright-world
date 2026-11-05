@@ -18,6 +18,10 @@
 - `fixtures/packs` is generated: when compiler output changes, regenerate
   it as its README says, and keep the Rust and Go readers' error codes
   equal to the manifest's.
+- The five public crates share the workspace crate version. Bump it only on
+  purpose, to the next patch or minor version: the release that first
+  carries a crate version publishes the five crates to crates.io at it
+  (docs/RELEASING.md, "Crate versions").
 - Run `tools/validate.sh` and `git diff --check`. Commits and PR titles use
   Conventional Commits. Merges to `main` are squash-merged and released,
   versioned by the pull request's title plus any `BREAKING CHANGE:` line
