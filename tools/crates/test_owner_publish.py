@@ -104,7 +104,8 @@ class PreflightTests(unittest.TestCase):
             manifest, files, archives = P.verify_bundle(data, plan)
             self.assertEqual(len(manifest["packages"]), 5)
             self.assertEqual(len(archives), 5)
-            self.assertEqual(files["tilewright-jsonc-0.1.0.crate"], (root / "tilewright-jsonc-0.1.0.crate").read_bytes())
+            asset = f"tilewright-jsonc-{fixture.VERSION}.crate"
+            self.assertEqual(files[asset], (root / asset).read_bytes())
             command.assert_not_called()
             with self.assertRaisesRegex(P.Refusal, "manifest differs"):
                 P.verify_bundle(data, dict(plan, manifest_sha256="f" * 64))

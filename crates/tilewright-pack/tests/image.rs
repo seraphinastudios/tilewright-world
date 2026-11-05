@@ -9,12 +9,26 @@
 use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use tilewright_jsonc::{Document, Limits, Value};
 use tilewright_pack::{ErrorCode, Pack, Page, VerifyLimits};
 
+/// The valid conformance pack, by the name `manifest.json` lists, read when
+/// the test runs: the name is the pack's digest, which changes with the
+/// compiler version, and the crate archive holds this test but not the
+/// fixtures.
 fn valid() -> (PathBuf, Vec<u8>) {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/packs");
-    let path =
-        directory.join("5830e26e449a1f0d0c786b32801b7ed68e351777db5f586532478cb4384844b2.twpack");
+    let text = std::fs::read_to_string(directory.join("manifest.json")).unwrap();
+    let manifest = Document::parse(text, &Limits::default()).unwrap();
+    let file = manifest
+        .root()
+        .get("valid")
+        .and_then(Value::as_array)
+        .and_then(<[Value]>::first)
+        .and_then(|valid| valid.get("file"))
+        .and_then(Value::as_str)
+        .expect("the manifest lists a valid pack");
+    let path = directory.join(file);
     let bytes = std::fs::read(&path).unwrap();
     (path, bytes)
 }

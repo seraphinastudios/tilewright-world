@@ -18,9 +18,12 @@ SPEC = importlib.util.spec_from_file_location("candidate_prepare", Path(__file__
 P = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(P)
 REVISION = "a" * 40
+# The workspace crate version: archives are checked against it, so the
+# candidates written here carry it.
+VERSION = P.policy()[0]
 
 
-def crate(crate_name, extra=(), *, version="0.1.0", revision=REVISION, dependencies=(), **package_changes):
+def crate(crate_name, extra=(), *, version=VERSION, revision=REVISION, dependencies=(), **package_changes):
     name = crate_name
     package = {"name": name, "version": version, "publish": ["crates-io"],
                "license": "MIT", "license-file": "LICENSE", "repository": P.REPOSITORY}
@@ -40,7 +43,7 @@ def crate(crate_name, extra=(), *, version="0.1.0", revision=REVISION, dependenc
     return buffer.getvalue()
 
 
-def write_candidate(output, version="0.1.0", revision=None, root=P.ROOT, graph=False):
+def write_candidate(output, version=VERSION, revision=None, root=P.ROOT, graph=False):
     """Five candidate archives and their manifest; `graph` gives them the
     internal dependencies of the real crates/*/Cargo.toml."""
     revision = revision or REVISION
@@ -125,7 +128,7 @@ class CandidateTests(unittest.TestCase):
             target = Path(command[command.index("--target-dir") + 1]) / "package"
             target.mkdir(parents=True)
             for name, data in archives.items():
-                (target / f"{name}-0.1.0.crate").write_bytes(data)
+                (target / f"{name}-{VERSION}.crate").write_bytes(data)
 
         def git(command, **_kwargs):
             return REVISION if command[1] == "rev-parse" else ""
@@ -148,7 +151,7 @@ class CandidateTests(unittest.TestCase):
                 package(command, **kwargs)
                 if len(calls) == 2:
                     target = Path(command[command.index("--target-dir") + 1]) / "package"
-                    (target / f"{P.PUBLIC[0]}-0.1.0.crate").write_bytes(b"changed")
+                    (target / f"{P.PUBLIC[0]}-{VERSION}.crate").write_bytes(b"changed")
 
             with patch.object(P, "run", side_effect=git), patch.object(P.subprocess, "run", side_effect=changed_package):
                 output = Path(scratch) / "different"
@@ -157,7 +160,8 @@ class CandidateTests(unittest.TestCase):
                 self.assertFalse((output / "candidate.json").exists())
 
     def test_repository_policy(self):
-        self.assertEqual(P.policy(), ("0.1.0", "1.97.1"))
+        workspace = P.load_toml(P.ROOT / "Cargo.toml")["workspace"]["package"]["version"]
+        self.assertEqual(P.policy(), (workspace, "1.97.1"))
 
     def test_policy_rejects_extra_public_package_and_private_publish(self):
         with tempfile.TemporaryDirectory() as scratch:
@@ -219,7 +223,7 @@ class CandidateTests(unittest.TestCase):
 
     def test_archive_identity_provenance_and_safe_paths(self):
         name = P.PUBLIC[0]
-        P.archive(crate(name), name, "0.1.0", REVISION)
+        P.archive(crate(name), name, VERSION, REVISION)
         for extra, changes, revision in [
             ([("../escape", b"no")], {}, REVISION),
             ([("README.md", b"duplicate")], {}, REVISION),
@@ -229,7 +233,7 @@ class CandidateTests(unittest.TestCase):
         ]:
             with self.subTest(extra=extra, changes=changes, revision=revision):
                 with self.assertRaises(ValueError):
-                    P.archive(crate(name, extra, **changes), name, "0.1.0", revision)
+                    P.archive(crate(name, extra, **changes), name, VERSION, revision)
 
     def test_nested_archive_metadata_is_bounded_before_parsing(self):
         name = P.PUBLIC[0]
@@ -243,9 +247,9 @@ class CandidateTests(unittest.TestCase):
         self.assertLess(len(data), 128 * 1024)
         with patch.object(P, "MAX_ARCHIVE_BYTES", 128 * 1024), \
                 self.assertRaisesRegex(ValueError, "decompressed archive size limit"):
-            P.archive(data, name, "0.1.0", REVISION)
+            P.archive(data, name, VERSION, REVISION)
         with self.assertRaisesRegex(ValueError, "unsafe"):
-            P.archive(data, name, "0.1.0", REVISION)
+            P.archive(data, name, VERSION, REVISION)
 
     def test_archive_rejects_links_and_nonregistry_dependencies(self):
         name = P.PUBLIC[0]
@@ -260,15 +264,15 @@ class CandidateTests(unittest.TestCase):
                         info.size = len(content)
                     target.addfile(info, io.BytesIO(content))
         with self.assertRaisesRegex(ValueError, "non-crates.io"):
-            P.archive(buffer.getvalue(), name, "0.1.0", REVISION)
+            P.archive(buffer.getvalue(), name, VERSION, REVISION)
         buffer = io.BytesIO()
         with tarfile.open(fileobj=buffer, mode="w:gz") as target:
-            info = tarfile.TarInfo(f"{name}-0.1.0/link")
+            info = tarfile.TarInfo(f"{name}-{VERSION}/link")
             info.type = tarfile.SYMTYPE
             info.linkname = "/tmp/outside"
             target.addfile(info)
         with self.assertRaisesRegex(ValueError, "unsafe"):
-            P.archive(buffer.getvalue(), name, "0.1.0", REVISION)
+            P.archive(buffer.getvalue(), name, VERSION, REVISION)
 
     def test_archive_requires_exact_root_license_notice(self):
         name = P.PUBLIC[0]
@@ -285,7 +289,7 @@ class CandidateTests(unittest.TestCase):
                             info.size = len(content)
                         target.addfile(info, io.BytesIO(content))
             with self.subTest(notice=notice), self.assertRaises(ValueError):
-                P.archive(buffer.getvalue(), name, "0.1.0", REVISION)
+                P.archive(buffer.getvalue(), name, VERSION, REVISION)
 
     @patch.object(P, "environment", return_value={})
     def test_candidate_manifest_rejects_mutation_and_extra_files(self, _):
