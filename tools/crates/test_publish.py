@@ -595,7 +595,7 @@ class EvidenceTests(unittest.TestCase):
         context = Context(self)
         plan = context.verify()
         self.assertTrue(plan["owner"])
-        self.assertEqual(plan["producer"], {"run_id": 123, "attempt": 1})
+        self.assertEqual(plan["runs"], [f"{P.REPO_URL}/actions/runs/123/attempts/1"])
         self.assertEqual([row["name"] for row in plan["order"]], ["tilewright-jsonc", "tilewright-source",
                                                                  "tilewright-pack", "tilewright-edit", "tilewright-diff"])
         self.assertEqual(plan["pending"], [row["name"] for row in plan["order"]])
@@ -659,7 +659,8 @@ class EvidenceTests(unittest.TestCase):
 
     def test_certificate_fields_run_and_subject_are_bound(self):
         revision, digest = "a" * 40, "b" * 64
-        self.assertEqual(P.producer(attested(revision, digest), revision, digest), {"run_id": 123, "attempt": 1})
+        self.assertEqual(P.producer(attested(revision, digest), revision, digest),
+                         [f"{P.REPO_URL}/actions/runs/123/attempts/1"])
         for key in attested(revision, digest)[0]["verificationResult"]["signature"]["certificate"]:
             for value in ("wrong", None):
                 with self.subTest(key=key, value=value), self.assertRaises(P.Refusal):
@@ -670,11 +671,14 @@ class EvidenceTests(unittest.TestCase):
                 P.producer(attested(revision, digest, runInvocationURI=uri), revision, digest)
         with self.assertRaises(P.Refusal):
             P.producer(attested(revision, "c" * 64), revision, digest)
-        two = attested(revision, digest) + attested(revision, digest, runInvocationURI=f"{P.REPO_URL}/actions/runs/124/attempts/1")
-        with self.assertRaisesRegex(P.Refusal, "more than one"):
-            P.producer(two, revision, digest)
-        retried = attested(revision, digest) + attested(revision, digest, runInvocationURI=f"{P.REPO_URL}/actions/runs/123/attempts/2")
-        self.assertEqual(P.producer(retried, revision, digest), {"run_id": 123, "attempt": 1})
+        # A start-over at the same commit attests the same bytes again: each
+        # run is recorded, sorted, once every certificate passes.
+        runs = [f"{P.REPO_URL}/actions/runs/{run}/attempts/{attempt}" for run, attempt in ((1000, 2), (124, 1), (123, 1))]
+        both = [item for uri in runs for item in attested(revision, digest, runInvocationURI=uri)]
+        self.assertEqual(P.producer(both, revision, digest), [runs[2], runs[1], runs[0]])
+        both[1]["verificationResult"]["signature"]["certificate"]["buildConfigDigest"] = "c" * 40
+        with self.assertRaises(P.Refusal):
+            P.producer(both, revision, digest)
 
     def test_attestation_lookup_is_bounded_and_needs_bundles(self):
         sleep = mock.Mock()
@@ -927,9 +931,10 @@ class UploadTests(unittest.TestCase):
                                                         for name in order for stage in ("put", "reserved")))
         tag = world.tags[world.refs[f"refs/tags/{P.ATTEMPT}/tilewright-jsonc/{version}/1"]["sha"]]
         message = json.loads(tag["message"])
-        self.assertEqual((message["kind"], message["attempt"], message["release"]["tag"], message["release"]["run_id"],
+        self.assertEqual((message["kind"], message["attempt"], message["release"]["tag"], message["release"]["runs"],
                           message["coordinate"]["sha256"], message["publisher"]["run_id"]),
-                         (P.ATTEMPT_KIND, 1, world.tag, 123, world.rows["tilewright-jsonc"]["sha256"], int(RUN_ID)))
+                         (P.ATTEMPT_KIND, 1, world.tag, [f"{P.REPO_URL}/actions/runs/123/attempts/1"],
+                          world.rows["tilewright-jsonc"]["sha256"], int(RUN_ID)))
         self.assertEqual(tag["object"], {"sha": world.revision, "type": "commit"})
         # A second dispatch finds all five present and writes nothing.
         writes = len(world.writes)

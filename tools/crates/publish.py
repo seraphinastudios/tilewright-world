@@ -497,11 +497,12 @@ def gh(arguments, directory, token=None):
 
 
 def provenance(data, name, lines, revision, digest):
-    """Verify the build provenance offline, then bind its certificate.
+    """Verify the build provenance offline, then bind its certificates.
 
-    The certificate must name release.yml on main at the revision, a
-    GitHub-hosted runner and one release run; the run and attempt are
-    recorded, not required in advance.
+    Every certificate must name release.yml on main at the revision, a
+    GitHub-hosted runner and a release run and attempt. Two runs can attest
+    one bundle (a start-over at the same commit rebuilds the same bytes), so
+    the runs are recorded, not required in advance.
     """
     with tempfile.TemporaryDirectory(prefix="tilewright-world-provenance-") as temporary:
         directory = Path(temporary)
@@ -537,8 +538,7 @@ def producer(verified, revision, digest):
         run = RUN.fullmatch(str(certificate.get("runInvocationURI")))
         require(run, "an attestation certificate does not name a release run and attempt")
         runs.add((int(run[1]), int(run[2])))
-    require(len({run for run, _ in runs}) == 1, "the bundle was attested by more than one release run")
-    return {"run_id": min(runs)[0], "attempt": min(runs)[1]}
+    return [f"{REPO_URL}/actions/runs/{run}/attempts/{attempt}" for run, attempt in sorted(runs)]
 
 
 def release_attestation(tag, name, data, token, sleep=None):
@@ -659,8 +659,7 @@ def newer(registry, version):
 def release_record(plan):
     return {"repository": REPOSITORY, "release_id": plan["release"]["id"], "tag": plan["tag"],
             "revision": plan["revision"], "bundle_sha256": plan["bundle_sha256"],
-            "manifest_sha256": plan["manifest_sha256"], "run_id": plan["producer"]["run_id"],
-            "attempt": plan["producer"]["attempt"]}
+            "manifest_sha256": plan["manifest_sha256"], "runs": plan["runs"]}
 
 
 def check_record(ref, target, kind, row, values, number, token):
@@ -978,7 +977,7 @@ def verify_release(values, token, evidence, *, fresh, root=ROOT, sleep=None):
     require(owner["tags_at_revision"] == [tag], f"the local {tag} is not the one release tag at {revision}")
     require(owner["crate_version"] == version, "the bundle's crate version differs from the release tree's")
     plan = {"tag": tag, "revision": revision, "bundle_sha256": digest, "release": snapshot(release),
-            "producer": made_by, "manifest": manifest, "manifest_sha256": sha256(files["candidate.json"]),
+            "runs": made_by, "manifest": manifest, "manifest_sha256": sha256(files["candidate.json"]),
             "files": files, "archives": archives, "version": version, "owner": owner["owner"],
             "owner_tag": owner["owner_tag"], "pending": []}
     if not owner["owner"]:
@@ -1006,7 +1005,7 @@ def verify_release(values, token, evidence, *, fresh, root=ROOT, sleep=None):
 def plan_summary(plan, heading):
     lines = [f"### {heading}", "",
              f"{plan['tag']} at {plan['revision']}, crate version {plan['version']}, bundle {plan['bundle_sha256']}, "
-             f"attested by release run {plan['producer']['run_id']} attempt {plan['producer']['attempt']}.", ""]
+             f"attested by {', '.join(plan['runs'])}.", ""]
     if not plan["owner"]:
         return lines + [f"Crate version {plan['version']} is owned by {plan['owner_tag']}: dispatch the \"Publish "
                         f"crates\" workflow for {plan['owner_tag']} instead. Nothing is uploaded for {plan['tag']}."]
