@@ -20,6 +20,7 @@ from unittest import mock
 SPEC = importlib.util.spec_from_file_location("world_publish", Path(__file__).with_name("publish.py"))
 P = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(P)
+GITHUB_WRITE = P.github_write  # the real one, which the fake world replaces
 FIXTURE_SPEC = importlib.util.spec_from_file_location("world_publish_fixture", Path(__file__).with_name("test_prepare.py"))
 F = importlib.util.module_from_spec(FIXTURE_SPEC)
 FIXTURE_SPEC.loader.exec_module(F)
@@ -1474,6 +1475,32 @@ class UploadTests(unittest.TestCase):
                     context.upload()
                 self.assertEqual((world.puts, self.not_sent(world, "tilewright-jsonc")), ([], "not-sent"))
 
+    def test_a_201_answer_that_is_not_json_marks_the_ref_as_acknowledged(self):
+        # Through the real github_write: GitHub makes the ref and answers 201
+        # with a body that does not parse, and no read finds the ref. It may
+        # exist, so it is neither made again nor refused.
+        context = Context(self)
+        world = context.world
+        ref = f"refs/tags/{P.ATTEMPT}/tilewright-jsonc/{world.version}/1"
+        downloads = world.request
+
+        def request(url, *, token=None, method="GET", body=None, **kwargs):
+            if method == "POST":
+                suffix = url.split(f"/repos/{P.REPOSITORY}/", 1)[1]
+                answer = world.github_write(suffix, json.loads(body), token)
+                return b"not json" if suffix == "git/refs" and json.loads(body)["ref"] == ref else \
+                    json.dumps(answer).encode()
+            return downloads(url, token=token, **kwargs)
+        context.stack.enter_context(mock.patch.object(P, "request", side_effect=request))
+        context.stack.enter_context(mock.patch.object(P, "github_write", side_effect=GITHUB_WRITE))
+        self.lagging_reads(context, "tilewright-jsonc", hidden=99)
+        with self.assertRaises(ValueError):
+            context.upload()
+        self.assertIn(ref, world.refs)
+        self.assertIn("could not be read back as this run's", context.stderr.getvalue())
+        self.assertNotIn("was not recorded", context.stderr.getvalue())
+        self.assertFalse(any(name.startswith(f"refs/tags/{P.REFUSED}/") for name in world.refs))
+
     def test_an_existing_attempt_ref_settles_as_unresolved(self):
         # A ref already there when this run creates attempt 1 (hidden from the
         # listing, as by lag) is another run's: nothing is written.
@@ -1487,8 +1514,10 @@ class UploadTests(unittest.TestCase):
                                                "type": "commit"}, INTENT, quiet=True)
         world.github_write("git/refs", {"ref": "refs/tags/" + short, "sha": made["sha"]}, INTENT, quiet=True)
         real = world.github
+        reads = []
 
         def read(suffix, token, **flags):
+            reads.extend([suffix] if suffix == "git/ref/tags/" + short else [])
             answer = real(suffix, token, **flags)
             if suffix.startswith("git/matching-refs/"):
                 answer = [item for item in answer if item["ref"] != "refs/tags/" + short]
@@ -1498,6 +1527,8 @@ class UploadTests(unittest.TestCase):
             context.upload()
         self.assertFalse(any(name.startswith(f"refs/tags/{P.REFUSED}/") for name in world.refs))
         self.assertIn("could not be read back as this run's", context.stderr.getvalue())
+        # The existence check, then one settle read: another record ends it.
+        self.assertEqual(len(reads), 2)
 
     def test_an_interrupt_while_creating_the_attempt_record_writes_nothing(self):
         # An interrupt is not settled: the run stops as it is.
