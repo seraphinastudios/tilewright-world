@@ -389,6 +389,11 @@ class OwnershipTests(unittest.TestCase):
                                    manifest.read_text()))
         revision = self.repository.commit()
         self.assertEqual(P.changed_crates(base, revision, self.repository.root), ["tilewright-pack"])
+        with self.subTest(change="tempfile, a dev-dependency only of source and diff"):
+            manifest.write_text(re.sub(r'tempfile = "[^"]+"', 'tempfile = "3.99.0"', manifest.read_text()))
+            base, revision = revision, self.repository.commit()
+            self.assertEqual(P.changed_crates(base, revision, self.repository.root),
+                             ["tilewright-source", "tilewright-pack", "tilewright-diff", "tilewright-edit"])
         # What every crate inherits from [workspace.package] and
         # [workspace.lints] reaches its packaged Cargo.toml.
         for old, new in (('rust-version = "', 'rust-version = "9'), ('edition = "2024"', 'edition = "2021"'),

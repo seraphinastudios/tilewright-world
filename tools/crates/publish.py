@@ -206,7 +206,7 @@ def changed_crates(base, revision, root=ROOT):
         manifest = tomllib.loads(git(["cat-file", "blob", f"{revision}:{prefix}Cargo.toml"], root))
         inherited = set()
         for table in [manifest, *manifest.get("target", {}).values()]:
-            for section in ("dependencies", "build-dependencies"):
+            for section in ("dependencies", "build-dependencies", "dev-dependencies"):
                 inherited |= {key for key, value in table.get(section, {}).items() if inherits(value)}
         package = {key for key, value in manifest.get("package", {}).items() if inherits(value)}
         if (shared or files or inherited & requirements or package & fields or
