@@ -70,6 +70,16 @@ class NotesTests(unittest.TestCase):
                            CRATE_CHANGED="tilewright-edit * `rm` tilewright-Source")
         self.assertIn("new crate version: `tilewright-edit`.", notes)
 
+    def test_an_empty_or_missing_list_of_changed_crates(self):
+        # bash before 4.4 calls an empty array unbound under set -u, so the
+        # script expands the list guarded.
+        for crates in ({"CRATE_CHANGED": ""}, {"CRATE_CHANGED": "   "}, {}):
+            with self.subTest(crates=crates):
+                notes = self.notes(CRATE_VERSION="0.2.0", CRATE_OWNER="false", CRATE_OWNER_TAG="v0.7.0", **crates)
+                self.assertIn("first released in v0.7.0", notes)
+                self.assertNotIn("Changed since", notes)
+        self.assertIn('${words[@]+"${words[@]}"}', SCRIPT.read_text())
+
     def test_the_rest_is_unchanged(self):
         notes = self.notes()
         self.assertTrue(notes.startswith("## Assets\n"))

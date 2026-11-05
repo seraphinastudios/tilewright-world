@@ -32,7 +32,8 @@ if [[ ! ${crate_owner_tag} =~ ^v${release_version}$ ]]; then
 fi
 changed=()
 read -r -a words <<<"${CRATE_CHANGED:-}"
-for crate in "${words[@]}"; do
+# The guarded expansion: bash before 4.4 calls an empty array unbound.
+for crate in ${words[@]+"${words[@]}"}; do
   if [[ ${crate} =~ ^tilewright-[a-z]+$ && ${#changed[@]} -lt 5 ]]; then
     changed+=("${crate}")
   fi
