@@ -796,6 +796,23 @@ def refused_message(plan, row, number, attempt, reason):
             "coordinate": {"name": row["name"], "version": row["version"]}, "publisher": publisher()}
 
 
+def existing_record(short, message, values, token):
+    """The tag object `refs/tags/<short>` points at, if it is exactly this
+    record: an annotated tag at the revision holding this canonical message.
+    None if the ref is absent; a refusal if it holds anything else."""
+    seen = github(f"git/ref/tags/{short}", token, absent=True)
+    if seen is None:
+        return None
+    target = seen.get("object", {})
+    tag = github(f"git/tags/{target.get('sha')}", token) if SHA.fullmatch(str(target.get("sha"))) else {}
+    require(target.get("type") == "tag" and tag.get("tag") == short and
+            tag.get("object", {}).get("type") == "commit" and
+            tag.get("object", {}).get("sha") == values["SOURCE_REVISION"] and
+            isinstance(tag.get("message"), str) and tag["message"].rstrip("\n") == canonical(message).decode(),
+            f"refs/tags/{short} exists, but not as this run's record")
+    return target["sha"]
+
+
 def record_refusal(plan, row, number, attempt, reason, values, token, sleep=None):
     """Record that attempt `number` is known not to have published.
 
@@ -806,21 +823,30 @@ def record_refusal(plan, row, number, attempt, reason, values, token, sleep=None
     message = refused_message(plan, row, number, attempt, reason)
     for tried in range(RECORD_TRIES):
         try:
-            seen = github(f"git/ref/tags/{short}", token, absent=True)
-            if seen is not None:
-                target = seen.get("object", {})
-                tag = github(f"git/tags/{target.get('sha')}", token) if SHA.fullmatch(str(target.get("sha"))) else {}
-                require(target.get("type") == "tag" and tag.get("tag") == short and
-                        tag.get("object", {}).get("type") == "commit" and
-                        tag.get("object", {}).get("sha") == values["SOURCE_REVISION"] and
-                        isinstance(tag.get("message"), str) and
-                        tag["message"].rstrip("\n") == canonical(message).decode(),
-                        f"refs/tags/{short} exists, but not as this run's record")
-                return target["sha"]
-            return create_record(short, message, values, token)
+            return existing_record(short, message, values, token) or create_record(short, message, values, token)
         except Failure:
             if tried + 1 == RECORD_TRIES:
                 raise
+        (sleep or time.sleep)(RECORD_SECONDS)
+
+
+def settle_attempt(short, message, values, token, sleep=None):
+    """After creating an attempt record failed: what does its ref hold now?
+
+    ("ours", sha) when it is exactly this run's record (the message names
+    this run and attempt, so no other run's matches), ("absent", None) when
+    no ref was made, and ("unresolved", None) when it holds anything else
+    or keeps failing to read.
+    """
+    for tried in range(RECORD_TRIES):
+        try:
+            sha = existing_record(short, message, values, token)
+            return ("ours", sha) if sha else ("absent", None)
+        except Failure:
+            if tried + 1 == RECORD_TRIES:
+                return "unresolved", None
+        except Refusal:
+            return "unresolved", None
         (sleep or time.sleep)(RECORD_SECONDS)
 
 
@@ -1068,8 +1094,27 @@ def upload(plan, values, token, intent, receipts, sleep=None):
                 "the release changed during the upload")
         data = plan["files"][row["asset"]]
         require(sha256(data) == row["sha256"], "a held archive changed")
-        attempt = create_record(f"{ATTEMPT}/{name}/{row['version']}/{number}", attempt_message(plan, row, number),
-                                values, intent)
+        short, message = f"{ATTEMPT}/{name}/{row['version']}/{number}", attempt_message(plan, row, number)
+        try:
+            attempt = create_record(short, message, values, intent)
+        except Failure:
+            # The ref may exist though the answer was lost or its read-back
+            # failed. Nothing was sent either way; only an attempt ref read
+            # back as exactly this run's gets a refused record.
+            state, attempt = settle_attempt(short, message, values, intent, sleep)
+            if state == "ours":
+                try:
+                    record_refusal(plan, row, number, attempt, "not-sent", values, intent, sleep)
+                except Exception:
+                    print(f"Attempt {number} for {coordinate} sent nothing, but that could not be recorded; "
+                          "it stays unresolved.", file=sys.stderr)
+            elif state == "absent":
+                print(f"Attempt {number} for {coordinate} was not recorded; a later run makes it again.",
+                      file=sys.stderr)
+            else:
+                print(f"Attempt {number} for {coordinate} could not be read back as this run's; it stays "
+                      "unresolved.", file=sys.stderr)
+            raise
         # From here until the PUT is sent, any failure means attempt
         # `number` sent nothing: record that, so a later run can go on.
         try:

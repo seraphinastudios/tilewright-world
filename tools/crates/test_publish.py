@@ -1181,6 +1181,126 @@ class UploadTests(unittest.TestCase):
         context.upload()
         self.assertEqual(len(world.puts), 5)
 
+    def fail_attempt_ref(self, context, name, *, create, holder=None):
+        """The attempt ref POST for `name`'s attempt 1 fails: after creating it
+        (a lost answer), without creating it, or after another run's record."""
+        world = context.world
+        real = world.github_write
+        ref = f"refs/tags/{P.ATTEMPT}/{name}/{world.version}/1"
+
+        def write(suffix, body, token):
+            if suffix == "git/refs" and body["ref"] == ref:
+                if holder is not None:
+                    made = real("git/tags", {"tag": ref[len("refs/tags/"):], "message": holder,
+                                             "object": world.revision, "type": "commit"}, token)
+                    real(suffix, {"ref": ref, "sha": made["sha"]}, token)
+                elif create:
+                    real(suffix, body, token)
+                raise P.Failure("GitHub", 502)
+            return real(suffix, body, token)
+        context.stack.enter_context(mock.patch.object(P, "github_write", side_effect=write))
+        return ref
+
+    def test_a_lost_answer_to_the_attempt_ref_still_gets_a_not_sent_record(self):
+        context = Context(self)
+        world = context.world
+        ref = self.fail_attempt_ref(context, "tilewright-jsonc", create=True)
+        with self.assertRaisesRegex(P.Failure, "502"):
+            context.upload()
+        self.assertIn(ref, world.refs)
+        self.assertEqual((world.puts, self.not_sent(world, "tilewright-jsonc")), ([], "not-sent"))
+        context.stack.enter_context(mock.patch.object(P, "github_write", side_effect=world.github_write))
+        context.upload()
+        self.assertIn(f"refs/tags/{P.ATTEMPT}/tilewright-jsonc/{world.version}/2", world.refs)
+        self.assertEqual(len(world.puts), 5)
+
+    def test_an_attempt_ref_that_was_never_made_is_made_again(self):
+        context = Context(self)
+        world = context.world
+        ref = self.fail_attempt_ref(context, "tilewright-jsonc", create=False)
+        with self.assertRaisesRegex(P.Failure, "502"):
+            context.upload()
+        self.assertNotIn(ref, world.refs)
+        self.assertFalse(any(name.startswith(f"refs/tags/{P.REFUSED}/") for name in world.refs))
+        self.assertIn("was not recorded; a later run makes it again", context.stderr.getvalue())
+        context.stack.enter_context(mock.patch.object(P, "github_write", side_effect=world.github_write))
+        context.upload()
+        self.assertIn(ref, world.refs)
+        self.assertNotIn(f"refs/tags/{P.ATTEMPT}/tilewright-jsonc/{world.version}/2", world.refs)
+        self.assertEqual(len(world.puts), 5)
+
+    def test_a_failed_read_back_after_the_attempt_ref_gets_a_not_sent_record(self):
+        context = Context(self)
+        world = context.world
+        real = world.github
+        ref = f"git/ref/tags/{P.ATTEMPT}/tilewright-jsonc/{world.version}/1"
+
+        def read(suffix, token, **flags):
+            if suffix == ref and flags.get("readback"):
+                raise P.Failure("GitHub", 503)  # the read-back's own retries all failed
+            return real(suffix, token, **flags)
+        context.stack.enter_context(mock.patch.object(P, "github", side_effect=read))
+        with self.assertRaisesRegex(P.Failure, "503"):
+            context.upload()
+        self.assertEqual((world.puts, self.not_sent(world, "tilewright-jsonc")), ([], "not-sent"))
+        context.stack.enter_context(mock.patch.object(P, "github", side_effect=real))
+        context.upload()
+        self.assertEqual(len(world.puts), 5)
+
+    def test_an_attempt_ref_that_is_not_this_runs_stays_unresolved(self):
+        for case in ("another run's record", "reads keep failing"):
+            context = Context(self)
+            world = context.world
+            plan = context.verify()
+            row = world.rows["tilewright-jsonc"]
+            if case == "another run's record":
+                # As valid an attempt record as this run's, from another run.
+                with mock.patch.dict(os.environ, {"GITHUB_RUN_ID": "77"}):
+                    other = P.canonical(P.attempt_message(plan, row, 1)).decode()
+                self.fail_attempt_ref(context, "tilewright-jsonc", create=False, holder=other)
+            else:
+                self.fail_attempt_ref(context, "tilewright-jsonc", create=True)
+                real = world.github
+                short = f"git/ref/tags/{P.ATTEMPT}/tilewright-jsonc/{world.version}/1"
+
+                def read(suffix, token, real=real, short=short, world=world, **flags):
+                    # Every read of the ref fails once it has been made.
+                    if suffix == short and "refs/tags/" + short[len("git/ref/tags/"):] in world.refs:
+                        raise P.Failure("GitHub", 503)
+                    return real(suffix, token, **flags)
+                context.stack.enter_context(mock.patch.object(P, "github", side_effect=read))
+            with self.subTest(case=case):
+                with self.assertRaisesRegex(P.Failure, "502|503"):
+                    context.upload()
+                self.assertFalse(any(name.startswith(f"refs/tags/{P.REFUSED}/") for name in world.refs))
+                self.assertIn("could not be read back as this run's", context.stderr.getvalue())
+                context.stack.enter_context(mock.patch.object(P, "github", side_effect=world.github))
+                with self.assertRaisesRegex(P.Refusal, "attempt 1 for tilewright-jsonc .* unresolved"):
+                    context.verify()
+
+    def test_an_interrupt_during_or_after_the_put_writes_no_refused_record(self):
+        # The PUT may have been sent, so nothing may say it was not: the
+        # attempt stays unresolved rather than allow a second upload.
+        for after_put in (False, True):
+            context = Context(self)
+            world = context.world
+            real = world.put
+
+            def put(data, metadata, token, real=real, after_put=after_put):
+                if metadata["name"] == "tilewright-source":
+                    if after_put:
+                        real(data, metadata, token)
+                    raise KeyboardInterrupt
+                return real(data, metadata, token)
+            context.stack.enter_context(mock.patch.object(P, "put_once", side_effect=put))
+            with self.subTest(after_put=after_put):
+                with self.assertRaises(KeyboardInterrupt):
+                    context.upload()
+                self.assertFalse(any(name.startswith(f"refs/tags/{P.REFUSED}/") for name in world.refs))
+                if not after_put:
+                    with self.assertRaisesRegex(P.Refusal, "attempt 1 for tilewright-source .* unresolved"):
+                        context.verify()
+
     def test_an_unrecordable_not_sent_attempt_stays_unresolved(self):
         context = Context(self)
         world = context.world
