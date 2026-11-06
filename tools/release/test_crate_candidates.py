@@ -79,7 +79,7 @@ class CandidateBundleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "digest, identity or inventory"):
             C.verify(tar(self.entries()), F.REVISION)
         F.write_candidate(self.root)
-        archive = self.root / "tilewright-jsonc-0.1.0.crate"
+        archive = self.root / f"tilewright-jsonc-{F.VERSION}.crate"
         archive.write_bytes(F.crate("tilewright-jsonc", [("extra", b"changed")]))
         with self.assertRaisesRegex(ValueError, "digest, identity or inventory"):
             C.bundle(self.root, F.REVISION)

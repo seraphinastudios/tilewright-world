@@ -8,10 +8,30 @@ use super::{
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use tilewright_jsonc::{Document, Limits, Value};
 use tilewright_source::World;
 
 fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/basic")
+}
+
+/// The valid pack of the reader conformance fixtures in `fixtures/packs`.
+/// Its name is its digest, which changes with the compiler version, so it
+/// is the one `manifest.json` lists, read when the test runs: the crate
+/// archive holds the tests, but not the fixtures.
+pub(crate) fn valid_pack() -> PathBuf {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/packs");
+    let text = std::fs::read_to_string(directory.join("manifest.json")).unwrap();
+    let manifest = Document::parse(text, &Limits::default()).unwrap();
+    let file = manifest
+        .root()
+        .get("valid")
+        .and_then(Value::as_array)
+        .and_then(<[Value]>::first)
+        .and_then(|valid| valid.get("file"))
+        .and_then(Value::as_str)
+        .expect("the manifest lists a valid pack");
+    directory.join(file)
 }
 
 fn world() -> World {

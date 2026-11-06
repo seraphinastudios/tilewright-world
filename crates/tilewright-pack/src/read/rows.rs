@@ -832,13 +832,9 @@ mod tests {
         plane_columns, planes_listing, types,
     };
     use crate::{Error, ErrorCode, Pack, VerifyLimits};
-    use std::path::Path;
 
     fn pack() -> Pack {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(
-            "../../fixtures/packs/5830e26e449a1f0d0c786b32801b7ed68e351777db5f586532478cb4384844b2.twpack",
-        );
-        Pack::open_with(&path, &VerifyLimits::default()).unwrap()
+        Pack::open_with(&crate::tests::valid_pack(), &VerifyLimits::default()).unwrap()
     }
 
     /// The rows of a listing read all at once, and read one page of one row

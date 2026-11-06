@@ -11,7 +11,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.97.1"
 license = "MIT"
@@ -21,11 +21,11 @@ authors = ["Seraphina Studios"]
 readme = "README.md"
 
 [workspace.dependencies]
-tilewright-diff = { path = "crates/tilewright-diff", version = "=0.1.0" }
-tilewright-edit = { path = "crates/tilewright-edit", version = "=0.1.0" }
-tilewright-jsonc = { path = "crates/tilewright-jsonc", version = "=0.1.0" }
-tilewright-pack = { path = "crates/tilewright-pack", version = "=0.1.0" }
-tilewright-source = { path = "crates/tilewright-source", version = "=0.1.0" }
+tilewright-diff = { path = "crates/tilewright-diff", version = "=0.2.0" }
+tilewright-edit = { path = "crates/tilewright-edit", version = "=0.2.0" }
+tilewright-jsonc = { path = "crates/tilewright-jsonc", version = "=0.2.0" }
+tilewright-pack = { path = "crates/tilewright-pack", version = "=0.2.0" }
+tilewright-source = { path = "crates/tilewright-source", version = "=0.2.0" }
 rustix = { version = "1.1.5", features = ["fs", "process"] }
 rusqlite = { version = "0.41.1", default-features = false, features = ["bundled", "serialize"] }
 sha2 = "0.11.0"

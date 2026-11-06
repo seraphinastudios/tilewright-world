@@ -2258,9 +2258,7 @@ mod tests {
 
     #[test]
     fn an_image_digest_is_of_sqlite_copy() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(
-            "../../fixtures/packs/5830e26e449a1f0d0c786b32801b7ed68e351777db5f586532478cb4384844b2.twpack",
-        );
+        let path = crate::tests::valid_pack();
         let bytes = std::fs::read(path).unwrap();
         let mut pack = Pack::open_bytes(&bytes, None, &super::VerifyLimits::default()).unwrap();
         let digest = pack.file_digest().unwrap();
@@ -2274,9 +2272,7 @@ mod tests {
 
     #[test]
     fn images_are_read_only() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(
-            "../../fixtures/packs/5830e26e449a1f0d0c786b32801b7ed68e351777db5f586532478cb4384844b2.twpack",
-        );
+        let path = crate::tests::valid_pack();
         let bytes = std::fs::read(path).unwrap();
         let mut pack = Pack::open_bytes(&bytes, None, &super::VerifyLimits::default()).unwrap();
         // Even with query_only turned off, the image cannot be written.
@@ -2317,9 +2313,7 @@ mod tests {
 
     #[test]
     fn chunk_reads_keep_to_their_entry_budget() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(
-            "../../fixtures/packs/5830e26e449a1f0d0c786b32801b7ed68e351777db5f586532478cb4384844b2.twpack",
-        );
+        let path = crate::tests::valid_pack();
         let pack = Pack::open(&path).unwrap();
         let chunk = pack.chunk("overworld", 0, 0, 0).unwrap().unwrap();
         let entries = count(&chunk.objects);
@@ -2357,9 +2351,7 @@ mod tests {
 
     #[test]
     fn stairwell_reads_keep_to_their_step_budget() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(
-            "../../fixtures/packs/5830e26e449a1f0d0c786b32801b7ed68e351777db5f586532478cb4384844b2.twpack",
-        );
+        let path = crate::tests::valid_pack();
         let pack = Pack::open(&path).unwrap();
         let mut stairwells = Vec::new();
         pack.visit_stairwells("overworld", crate::Page::all(), &mut |stairwell| {

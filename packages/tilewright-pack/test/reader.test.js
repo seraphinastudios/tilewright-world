@@ -13,8 +13,12 @@ import { initialize, initializeSync, openPack, Pack, PackError } from "../index.
 import { Reader } from "../wasm/tilewright_pack.js";
 
 const fixtures = new URL("../../../fixtures/packs/", import.meta.url);
-const validName = "5830e26e449a1f0d0c786b32801b7ed68e351777db5f586532478cb4384844b2";
-const valid = await readFile(new URL(`${validName}.twpack`, fixtures));
+// The valid pack is named by its digest, which changes with the compiler
+// version, so its name comes from the manifest.
+const manifest = JSON.parse(await readFile(new URL("manifest.json", fixtures), "utf8"));
+const validFile = manifest.valid[0].file;
+const validName = validFile.slice(0, -".twpack".length);
+const valid = await readFile(new URL(validFile, fixtures));
 const module = await readFile(new URL("../wasm/tilewright_pack_bg.wasm", import.meta.url));
 
 // Garbage collection on demand, to see what a collected pack does.

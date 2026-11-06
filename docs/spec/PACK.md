@@ -38,7 +38,7 @@ CREATE TABLE object_uids (uid TEXT PRIMARY KEY, plane TEXT NOT NULL, layer INTEG
 | Key | Value |
 | --- | --- |
 | `chunk_encoding` | `twc1+zstd` |
-| `compiler` | The compiler's name and version, such as `tilewright-pack 0.1.0`. |
+| `compiler` | The compiler's name and version, such as `tilewright-pack 0.2.0`. |
 | `format` | `tilewright.pack/1` |
 | `profile` | The profile document as canonical JSON, including its `layer_height`. |
 | `profile_id`, `profile_version` | From the profile. |

@@ -45,7 +45,7 @@ A released binary reports both versions:
 
 ```console
 $ tilewright --version
-tilewright 0.1.0 (release v0.4.0)
+tilewright 0.2.0 (release v0.7.0)
 ```
 
 The first number is the version of the crates, which packs record as

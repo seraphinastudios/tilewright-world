@@ -21,7 +21,7 @@ from unittest import mock
 import package
 
 REPOSITORY = Path(__file__).resolve().parents[2]
-PACK = "5830e26e449a1f0d0c786b32801b7ed68e351777db5f586532478cb4384844b2.twpack"
+PACK = "e803c54e5772bb7e3767469ae7105b969204ae3e28a5ad410e6be5ba65f15767.twpack"
 RUST_NOTICES = b"<html>notices of the Rust standard library</html>\n"
 MUSL_NOTICE = "musl as a whole is licensed under the following standard MIT license:\n"
 

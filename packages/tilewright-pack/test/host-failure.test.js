@@ -13,7 +13,10 @@ import { initializeSync, openPack, PackError } from "../index.js";
 import { Reader } from "../wasm/tilewright_pack.js";
 
 const fixtures = new URL("../../../fixtures/packs/", import.meta.url);
-const valid = await readFile(new URL("5830e26e449a1f0d0c786b32801b7ed68e351777db5f586532478cb4384844b2.twpack", fixtures));
+// The valid pack is named by its digest, which changes with the compiler
+// version, so its name comes from the manifest.
+const manifest = JSON.parse(await readFile(new URL("manifest.json", fixtures), "utf8"));
+const valid = await readFile(new URL(manifest.valid[0].file, fixtures));
 initializeSync(await readFile(new URL("../wasm/tilewright_pack_bg.wasm", import.meta.url)));
 
 test("a rejected pack does not stop the module", () => {
