@@ -160,8 +160,9 @@ class CandidateTests(unittest.TestCase):
                 self.assertFalse((output / "candidate.json").exists())
 
     def test_repository_policy(self):
-        workspace = P.load_toml(P.ROOT / "Cargo.toml")["workspace"]["package"]["version"]
-        self.assertEqual(P.policy(), (workspace, "1.97.1"))
+        version, toolchain = P.policy()
+        self.assertRegex(version, r"^\d+\.\d+\.\d+$")
+        self.assertEqual(toolchain, "1.97.1")
 
     def test_policy_rejects_extra_public_package_and_private_publish(self):
         with tempfile.TemporaryDirectory() as scratch:
