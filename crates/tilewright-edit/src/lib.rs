@@ -114,6 +114,71 @@ pub mod limits {
     pub const DIAGNOSTICS: usize = 1_000;
 }
 
+/// The read and work budgets of planning a transaction, which can only be
+/// tighter than [`limits::READ_BYTES`] and [`limits::WORK`]: those are the
+/// [`Default`], and a value above one is lowered to it.
+///
+/// [`plan_in_within`] plans within them, and the [`Plan`] keeps them, so
+/// [`Plan::check_undo`] carries out each round within the same budgets. A
+/// transaction refused under tighter budgets may still plan under the
+/// default ones, as [`plan`] and the CLI use: tighter budgets bound what a
+/// caller spends, not what the format allows. Whatever plans under tighter
+/// budgets plans under the default ones, with the same result.
+///
+/// ```
+/// use tilewright_edit::{Budgets, limits};
+///
+/// let budgets = Budgets::new(64 << 20, 1 << 40);
+/// assert_eq!(budgets.read_bytes(), 64 << 20);
+/// assert_eq!(budgets.work(), limits::WORK); // lowered to the limit
+/// assert_eq!(Budgets::default(), Budgets::new(u64::MAX, u64::MAX));
+/// ```
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Budgets {
+    read_bytes: u64,
+    work: u64,
+}
+
+impl Budgets {
+    /// Budgets of at most `read_bytes` read and `work` work, each lowered
+    /// to its limit where it is above it.
+    #[must_use]
+    pub const fn new(read_bytes: u64, work: u64) -> Self {
+        Self {
+            read_bytes: if read_bytes < limits::READ_BYTES {
+                read_bytes
+            } else {
+                limits::READ_BYTES
+            },
+            work: if work < limits::WORK {
+                work
+            } else {
+                limits::WORK
+            },
+        }
+    }
+
+    /// Most bytes read from the files a transaction touches; see
+    /// [`limits::READ_BYTES`].
+    #[must_use]
+    pub const fn read_bytes(&self) -> u64 {
+        self.read_bytes
+    }
+
+    /// Most work, in bytes; see [`limits::WORK`].
+    #[must_use]
+    pub const fn work(&self) -> u64 {
+        self.work
+    }
+}
+
+impl Default for Budgets {
+    fn default() -> Self {
+        Self::new(limits::READ_BYTES, limits::WORK)
+    }
+}
+
 /// Stable diagnostic codes of transactions. Problems with the edited world
 /// itself use the loader's codes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -195,6 +260,8 @@ pub struct Plan {
     /// use it, not the path.
     source: SourceRoot,
     load: LoadOptions,
+    /// The budgets it was planned within, which the undo check keeps.
+    budgets: Budgets,
     files: Vec<FileChange>,
     world: World,
     sealed: String,
@@ -212,6 +279,13 @@ impl Plan {
     #[must_use]
     pub const fn world(&self) -> &World {
         &self.world
+    }
+
+    /// The budgets it was planned within, which [`Plan::check_undo`]
+    /// carries out each round within too.
+    #[must_use]
+    pub const fn budgets(&self) -> Budgets {
+        self.budgets
     }
 
     /// The transaction with `base` and `result` recording the digests of
@@ -616,16 +690,16 @@ fn terrain_addresses(transaction: &Transaction) -> Vec<(String, String, Diagnost
 }
 
 /// Carries out `transaction` in memory on the tree at `source`, with the
-/// files of `under` laid over it, and checks what it recorded. Messages
-/// use `names`.
+/// files of `under` laid over it, and checks what it recorded, within
+/// `budgets`. Messages use `names`.
 fn carry_out<'r>(
-    source: &'r SourceRoot,
-    under: &'r Overlay,
+    (source, under): (&'r SourceRoot, &'r Overlay),
     names: Names,
     transaction: &Transaction,
     options: &Options,
+    budgets: Budgets,
 ) -> Result<Workspace<'r>, Vec<Diagnostic>> {
-    let mut workspace = Workspace::new(source, under, names);
+    let mut workspace = Workspace::new(source, under, names, budgets);
     let mut problems = Problems::new(transaction);
     let done = if options.rebase {
         BTreeSet::new()
@@ -757,6 +831,22 @@ pub fn plan_in(
     transaction: &Transaction,
     options: &Options,
 ) -> Result<Plan, Vec<Diagnostic>> {
+    plan_in_within(root, transaction, options, Budgets::default())
+}
+
+/// Plans `transaction` as [`plan_in`] does, within `budgets`, which can
+/// only be tighter than the default ones. The plan keeps them, so its
+/// [`Plan::check_undo`] uses them too. A budget it would exceed refuses
+/// it with the `tx.limit` diagnostic that [`plan_in`] gives at the limit.
+///
+/// # Errors
+/// As [`plan_in`].
+pub fn plan_in_within(
+    root: &SourceRoot,
+    transaction: &Transaction,
+    options: &Options,
+    budgets: Budgets,
+) -> Result<Plan, Vec<Diagnostic>> {
     let source = root.try_clone();
     // The edited world's diagnostics are a transaction's too, and the
     // loader's note of those it dropped takes the last place.
@@ -771,7 +861,13 @@ pub fn plan_in(
         ..*options
     };
     let on_disk = Overlay::new();
-    let workspace = carry_out(&source, &on_disk, Names::OWN, transaction, options)?;
+    let workspace = carry_out(
+        (&source, &on_disk),
+        Names::OWN,
+        transaction,
+        options,
+        budgets,
+    )?;
     let files = file_changes(&workspace);
     let world = load_result(&source, &options.load, transaction, &files)?;
     let Records {
@@ -786,6 +882,7 @@ pub fn plan_in(
         terrain,
         source,
         load: options.load,
+        budgets,
         files,
         world,
         sealed,
@@ -798,12 +895,18 @@ pub fn plan_in(
 /// a round of the undo check. Returns the files it touched or consulted,
 /// and its inverse.
 fn carry_out_round(
-    source: &SourceRoot,
-    under: &Overlay,
+    (source, under): (&SourceRoot, &Overlay),
     transaction: &Transaction,
     options: &Options,
+    budgets: Budgets,
 ) -> Result<(Vec<FileChange>, Transaction), Vec<Diagnostic>> {
-    let workspace = carry_out(source, under, Names::NESTED, transaction, options)?;
+    let workspace = carry_out(
+        (source, under),
+        Names::NESTED,
+        transaction,
+        options,
+        budgets,
+    )?;
     let files = file_changes(&workspace);
     let records = records(transaction, &workspace, &files, Names::NESTED)?;
     Ok((files, records.parsed_inverse))
@@ -838,11 +941,13 @@ impl Plan {
     /// it again, without the file being as it began after that, which
     /// leaves the rounds only deleting and creating the file.)
     ///
-    /// Each round is carried out as [`plan`] would carry it out then, with
-    /// every check it makes except validating its result: the `base`
-    /// digests, every operation, every budget of [`limits`] (the files it
-    /// reads count against [`limits::READ_BYTES`] as the round before left
-    /// them, and their documents against [`limits::WORK`]), the counts of
+    /// Each round is carried out as [`plan_in_within`] would carry it out
+    /// then, within the budgets this plan was planned within
+    /// ([`Plan::budgets`]), with every check it makes except validating its
+    /// result: the `base` digests, every operation, every budget (the files
+    /// it reads count against the read budget, [`limits::READ_BYTES`] by
+    /// default, as the round before left them, and their documents against
+    /// the work budget, [`limits::WORK`] by default), the counts of
     /// files and operations, the recorded `result`, and that its own
     /// sealed form and inverse are transactions within the limits. Nothing
     /// is read from disk: an inverse names only files this plan changed,
@@ -889,8 +994,9 @@ impl Plan {
             .map_err(|problems| self.refused("its inverse is not a transaction", problems))?;
         let mut previous: Option<Transaction> = None;
         for what in ROUNDS {
-            let (files, next) = carry_out_round(&self.source, &tree, &current, &options)
-                .map_err(|problems| self.refused(what, problems))?;
+            let (files, next) =
+                carry_out_round((&self.source, &tree), &current, &options, self.budgets)
+                    .map_err(|problems| self.refused(what, problems))?;
             // Carrying out is deterministic, and every other round meets
             // the same tree, as each round's recorded `result` makes sure:
             // a round whose inverse is the transaction of the round before

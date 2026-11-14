@@ -253,13 +253,7 @@ impl Names {
     };
 }
 
-/// The read and work budgets of carrying a transaction out:
-/// [`limits::READ_BYTES`] and [`limits::WORK`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct Budgets {
-    pub read_bytes: u64,
-    pub work: u64,
-}
+pub(crate) use crate::Budgets;
 
 #[cfg(test)]
 thread_local! {
@@ -270,15 +264,16 @@ thread_local! {
 }
 
 impl Budgets {
-    fn current() -> Self {
+    /// These budgets, lowered on a test's thread where it lowers them.
+    fn current(self) -> Self {
         #[cfg(test)]
-        if let Some(budgets) = TEST_BUDGETS.get() {
-            return budgets;
+        if let Some(lowered) = TEST_BUDGETS.get() {
+            return Self::new(
+                self.read_bytes.min(lowered.read_bytes),
+                self.work.min(lowered.work),
+            );
         }
-        Self {
-            read_bytes: limits::READ_BYTES,
-            work: limits::WORK,
-        }
+        self
     }
 }
 
@@ -353,12 +348,12 @@ fn read(
 
 impl<'r> Workspace<'r> {
     /// A workspace over the tree at `root` with the files of `under` laid
-    /// over it, whose messages use `names`.
-    pub fn new(root: &'r SourceRoot, under: &'r Overlay, names: Names) -> Self {
+    /// over it, whose messages use `names`, within `budgets`.
+    pub fn new(root: &'r SourceRoot, under: &'r Overlay, names: Names, budgets: Budgets) -> Self {
         Self {
             root,
             under,
-            budgets: Budgets::current(),
+            budgets: budgets.current(),
             names,
             entries: BTreeMap::new(),
             read_bytes: 0,
