@@ -10,6 +10,8 @@ use std::fmt::Write as _;
 /// Writes `text` as a JSON string with every control character escaped in
 /// JSON's `\u00XX` form, DEL and C1 controls included, so JSON output needs
 /// no further escaping to be safe for a terminal, and holds no raw newline.
+/// The line and paragraph separators U+2028 and U+2029, which some line
+/// splitters break lines at, are escaped too ([`escaped`]).
 /// The CLI's `validate --json` writes its strings with this too.
 pub fn json_string(text: &str, output: &mut String) {
     output.push('"');
@@ -17,13 +19,19 @@ pub fn json_string(text: &str, output: &mut String) {
         match character {
             '"' => output.push_str("\\\""),
             '\\' => output.push_str("\\\\"),
-            character if character.is_control() => {
+            character if escaped(character) => {
                 let _ = write!(output, "\\u{:04x}", u32::from(character));
             }
             character => output.push(character),
         }
     }
     output.push('"');
+}
+
+/// Whether [`json_string`] writes `character` as `\uXXXX`: a control
+/// character, or U+2028 or U+2029.
+pub(crate) fn escaped(character: char) -> bool {
+    character.is_control() || matches!(character, '\u{2028}' | '\u{2029}')
 }
 
 /// `text` cut to at most `maximum` bytes at a character boundary, and

@@ -139,10 +139,164 @@ fn result(server: &mut Server, tool: &str, arguments: &str) -> (String, Document
     if let Some(structured) = result.get("structuredContent") {
         // The text content is the structured result, serialized.
         assert_eq!(text, document.text(structured.span()));
+        // And it conforms to the tool's output schema.
+        check_schema(tool, structured, &document);
     } else {
         assert!(!text.contains('\n'), "{text}");
     }
     (reply, document)
+}
+
+/// Panics unless `value`, a structured result of `tool` in `document`,
+/// conforms to the tool's output schema.
+fn check_schema(tool: &str, value: &Value, document: &Document) {
+    let schemas =
+        Document::parse(format!("{{{}}}", crate::tools::list()), &Limits::default()).unwrap();
+    let schema = at(schemas.root(), &["tools"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry.get("name").and_then(Value::as_str) == Some(tool))
+        .map(|entry| at(entry, &["outputSchema"]))
+        .unwrap();
+    if let Err(problem) = conforms(schema, value) {
+        panic!("{tool}: {problem}: {}", document.text(value.span()));
+    }
+}
+
+/// Whether `value` conforms to `schema`, as far as this server's output
+/// schemas use JSON Schema: `type` (a name or a list of names), `enum`,
+/// `properties`, `required`, `items`, `minItems`, `maxItems` and the one
+/// `pattern` they use, 64 lowercase hex digits. Strictly: an object whose
+/// schema lists `properties` may hold no other member, as if the schema
+/// said `additionalProperties: false`, so a field the schema does not
+/// declare is found.
+fn conforms(schema: &Value, value: &Value) -> Result<(), String> {
+    let kind = match value {
+        Value::Null { .. } => "null",
+        Value::Bool { .. } => "boolean",
+        Value::Integer { .. } => "integer",
+        Value::Float { .. } => "number",
+        Value::String { .. } => "string",
+        Value::Array { .. } => "array",
+        Value::Object { .. } => "object",
+    };
+    let names: Vec<&str> = match schema.get("type") {
+        None => Vec::new(),
+        Some(Value::String { value, .. }) => vec![value.as_str()],
+        Some(types) => types
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|name| name.as_str().unwrap())
+            .collect(),
+    };
+    if !names.is_empty()
+        && !names
+            .iter()
+            .any(|name| *name == kind || (*name == "number" && kind == "integer"))
+    {
+        return Err(format!("a {kind} where the schema has {names:?}"));
+    }
+    if let Some(allowed) = schema.get("enum").and_then(Value::as_array) {
+        let same = |item: &Value| match (item, value) {
+            (Value::Null { .. }, Value::Null { .. }) => true,
+            (Value::String { value: a, .. }, Value::String { value: b, .. }) => a == b,
+            _ => false,
+        };
+        if !allowed.iter().any(same) {
+            return Err(format!("a value outside the enum ({kind})"));
+        }
+    }
+    if let (Some(pattern), Value::String { value: text, .. }) =
+        (schema.get("pattern").and_then(Value::as_str), value)
+    {
+        assert_eq!(pattern, "^[0-9a-f]{64}$");
+        if !(text.len() == 64
+            && text
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')))
+        {
+            return Err(format!("{text:?} is not 64 lowercase hex digits"));
+        }
+    }
+    if let Value::Object { .. } = value {
+        for name in schema
+            .get("required")
+            .and_then(Value::as_array)
+            .unwrap_or(&[])
+        {
+            let name = name.as_str().unwrap();
+            if value.get(name).is_none() {
+                return Err(format!("no required {name}"));
+            }
+        }
+        if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+            for member in value.as_object().unwrap() {
+                if !properties.iter().any(|declared| declared.key == member.key) {
+                    return Err(format!("{} is not declared", member.key));
+                }
+            }
+            for member in properties {
+                if let Some(found) = value.get(&member.key) {
+                    conforms(&member.value, found)
+                        .map_err(|problem| format!("{}: {problem}", member.key))?;
+                }
+            }
+        }
+    }
+    if let Value::Array { .. } = value {
+        let items = value.as_array().unwrap();
+        let bound = |key| {
+            schema
+                .get(key)
+                .and_then(Value::as_i64)
+                .map(|bound| usize::try_from(bound).unwrap())
+        };
+        if bound("minItems").is_some_and(|least| items.len() < least)
+            || bound("maxItems").is_some_and(|most| items.len() > most)
+        {
+            return Err(format!("{} items", items.len()));
+        }
+        if let Some(schema) = schema.get("items") {
+            for (index, item) in items.iter().enumerate() {
+                conforms(schema, item).map_err(|problem| format!("{index}: {problem}"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn the_schema_check_finds_what_does_not_conform() {
+    let schema = Document::parse(
+        r#"{"type":"object","properties":{"a":{"type":["string","null"],"pattern":"^[0-9a-f]{64}$"},"b":{"type":"array","items":{"type":"integer"},"maxItems":2},"c":{"type":"string","enum":["x","y"]}},"required":["a","b"]}"#,
+        &Limits::default(),
+    )
+    .unwrap();
+    let check = |text: &str| {
+        let value = Document::parse(text, &Limits::default()).unwrap();
+        conforms(schema.root(), value.root())
+    };
+    let hex = "0".repeat(64);
+    assert_eq!(
+        check(&format!(r#"{{"a":"{hex}","b":[1,2],"c":"y"}}"#)),
+        Ok(())
+    );
+    assert_eq!(check(r#"{"a":null,"b":[]}"#), Ok(()));
+    for wrong in [
+        r#"{"b":[]}"#.to_owned(),
+        r#"{"a":"00","b":[]}"#.to_owned(),
+        format!(r#"{{"a":"{}","b":[]}}"#, "A".repeat(64)),
+        r#"{"a":1,"b":[]}"#.to_owned(),
+        r#"{"a":null,"b":[1,2,3]}"#.to_owned(),
+        r#"{"a":null,"b":[1.5]}"#.to_owned(),
+        r#"{"a":null,"b":[],"c":"z"}"#.to_owned(),
+        r#"{"a":null,"b":[],"d":1}"#.to_owned(),
+        "[]".to_owned(),
+    ] {
+        assert!(check(&wrong).is_err(), "{wrong}");
+    }
 }
 
 /// The `structuredContent` of a successful call.
@@ -381,7 +535,7 @@ fn malformed_messages_are_refused() {
     let discover = request("1", "server/discover", "");
     let tools_list_cursor = request("1", "tools/list", r#""cursor":"x""#);
     let tools_call = request("1", "tools/call", "");
-    let tools_call_inspect = request("1", "tools/call", r#""name":"inspect""#);
+    let tools_call_unknown = request("1", "tools/call", r#""name":"apply_transaction""#);
     let tools_call_arguments = request("1", "tools/call", r#""name":"validate","arguments":[]"#);
     let duplicate = discover.replacen("\"id\":1,", "\"id\":1,\"id\":2,", 1);
     let trailing = format!("{},}}", &discover[..discover.len() - 1]);
@@ -427,7 +581,7 @@ fn malformed_messages_are_refused() {
             "method.unknown",
         ),
         (&tools_call, -32602, "params.name"),
-        (&tools_call_inspect, -32602, "tool.unknown"),
+        (&tools_call_unknown, -32602, "tool.unknown"),
         (&tools_call_arguments, -32602, "params.arguments"),
         (&tools_list_cursor, -32602, "cursor.invalid"),
     ];
@@ -532,9 +686,25 @@ fn tools_list_describes_read_only_tools() {
         .collect();
     assert_eq!(
         names,
-        ["world_summary", "validate", "search_ids", "refresh"]
+        [
+            "world_summary",
+            "validate",
+            "search_ids",
+            "search_definitions",
+            "search_objects",
+            "inspect",
+            "preview_transaction",
+            "refresh"
+        ]
     );
     for tool in tools {
+        // Every read tool takes a revision; refresh moves the snapshot.
+        assert_eq!(
+            at(tool, &["inputSchema", "properties"])
+                .get("revision")
+                .is_some(),
+            at(tool, &["name"]).as_str() != Some("refresh")
+        );
         let annotations = at(tool, &["annotations"]);
         assert_eq!(at(annotations, &["readOnlyHint"]).as_bool(), Some(true));
         assert_eq!(at(annotations, &["destructiveHint"]).as_bool(), Some(false));
@@ -1015,8 +1185,8 @@ fn cursors_are_bound_to_revision_tool_and_arguments() {
     assert_eq!(tool_error(&document), "cursor.stale");
 }
 
-/// What a listing keeps of one entry: `None` for a directory or a file's
-/// bytes, its permissions and its modification time.
+/// What a listing keeps of one entry: `None` for a directory, a file's
+/// bytes, or where a link points, its permissions and its modification time.
 type Entry = (Option<Vec<u8>>, std::fs::Permissions, std::time::SystemTime);
 
 /// Every entry under `root`, and `root` itself as the empty path.
@@ -1033,9 +1203,14 @@ fn listing(root: &Path) -> BTreeMap<PathBuf, Entry> {
             let entry = entry.unwrap();
             let path = entry.path();
             let relative = path.strip_prefix(root).unwrap().to_path_buf();
-            let kept = if entry.file_type().unwrap().is_dir() {
+            let kind = entry.file_type().unwrap();
+            let kept = if kind.is_dir() {
                 directories.push(path.clone());
                 describe(&path, None)
+            } else if kind.is_symlink() {
+                // A link as itself: where it points.
+                let target = std::fs::read_link(&path).unwrap();
+                describe(&path, Some(target.to_string_lossy().as_bytes().to_vec()))
             } else {
                 describe(&path, Some(std::fs::read(&path).unwrap()))
             };
@@ -1062,6 +1237,8 @@ fn every_tool(server: &mut Server) {
             2,
         );
     }
+    read::every_new_tool(server);
+    preview::every_preview(server);
     let replies = send(
         server,
         &[
@@ -1189,6 +1366,26 @@ fn arbitrary_input_never_panics_and_gets_only_replies() {
             r#"{"kind":"zone","prefix":"over","limit":1}"#,
         ),
         &call(6, "refresh", "{}"),
+        &call(
+            8,
+            "inspect",
+            r#"{"kind":"object","id":"village.chest","revision":"2ae46b1363c68613d1bb144fea68497d5515d7261cd43817c44e7de5bf59a020"}"#,
+        ),
+        &call(
+            9,
+            "search_definitions",
+            r#"{"type":"loot","field":"entries","equals":5,"limit":1,"scan_limit":1}"#,
+        ),
+        &call(
+            10,
+            "search_objects",
+            r#"{"plane":"overworld","layer":0,"bbox":[-5,0,9,9],"carried":false,"field":"count","contains":"x"}"#,
+        ),
+        &call(
+            11,
+            "preview_transaction",
+            r#"{"transaction":{"format":"tilewright.transaction/1","operations":[{"op":"set","path":"planes/overworld/zones.jsonc","pointer":["zones",0,"name"],"value":"W"}]},"excerpts":true}"#,
+        ),
     ]
     .map(str::to_owned);
     let tree = invalid_tree();
@@ -1400,3 +1597,6 @@ fn world_summary_caps_planes_and_layers() {
     let (ids, _) = exhaust(&mut server, "search_ids", r#"{"kind":"plane"}"#, "ids", 500);
     assert_eq!(ids.len(), 522);
 }
+
+mod preview;
+mod read;

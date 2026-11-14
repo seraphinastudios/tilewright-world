@@ -13,7 +13,10 @@ prints, so content from a source or pack cannot send escape sequences to the
 terminal or add lines to the output.
 
 `tilewright mcp` (docs/MCP.md) reads one source tree for an MCP client: it
-takes no path from the client, and nothing it does writes. That is
+takes no path from the client, and nothing it does writes. It previews a
+transaction the client sends by planning it in memory with
+`tilewright-edit`, as `tilewright tx preview` does, and never publishes
+it; the transaction's paths are confined as when it is applied. That is
 enforced by a list and by tests, not proven: a lint in its crate refuses
 the std and toolkit functions it lists that write, lock, publish, change
 permissions, owners or times, start a process or open a connection, and
@@ -21,7 +24,9 @@ its tests require every tool to leave copies of the fixtures with the same
 entries, bytes, permissions and modification times. Its requests are
 bounded (64 KiB a line, the strict JSONC parser with tight limits) and its
 replies escape every control character. Values read from the world reach
-the client only as JSON strings inside typed fields of results, which the
+the client only as JSON values inside typed fields of results (strings,
+or an inspected item's own JSON, every string escaped; a refusal's
+message, which can quote the transaction or the world, included), which the
 server says are world data, not instructions; a client that hands results
 to a language model still has to treat them as untrusted.
 

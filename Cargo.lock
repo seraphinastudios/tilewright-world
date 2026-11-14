@@ -412,6 +412,7 @@ version = "0.2.0"
 dependencies = [
  "tempfile",
  "tilewright-diff",
+ "tilewright-edit",
  "tilewright-jsonc",
  "tilewright-source",
 ]
