@@ -21,7 +21,8 @@ its tests require every tool to leave copies of the fixtures with the same
 entries, bytes, permissions and modification times. Its requests are
 bounded (64 KiB a line, the strict JSONC parser with tight limits) and its
 replies escape every control character. Values read from the world reach
-the client only as JSON strings inside typed fields of results, which the
+the client only as JSON values inside typed fields of results (strings,
+or an inspected item's own JSON, every string escaped), which the
 server says are world data, not instructions; a client that hands results
 to a language model still has to treat them as untrusted.
 
