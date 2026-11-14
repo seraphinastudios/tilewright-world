@@ -654,6 +654,13 @@ fn arguments_are_checked_before_the_revision_and_the_tree() {
     );
     let (_, document) = preview(&mut invalid, &orchard(), "");
     assert_eq!(tool_error(&document), "tree.invalid");
+    // A revision on a tree that does not load is checked before the tree.
+    let (_, document) = preview(
+        &mut invalid,
+        &orchard(),
+        &format!(r#","revision":"{other}""#),
+    );
+    assert_eq!(tool_error(&document), "revision.changed");
     // Even a malformed transaction needs a tree that loads.
     let (_, document) = preview(&mut invalid, &transaction(r#"{"op": "frob"}"#), "");
     assert_eq!(tool_error(&document), "tree.invalid");
@@ -685,6 +692,11 @@ fn generated(root: &Path, chunks: usize, objects: usize) {
 
 #[test]
 fn files_and_refusals_are_capped() {
+    // The caps docs/MCP.md states.
+    assert_eq!(
+        (MAXIMUM_OPERATIONS, MAXIMUM_FILES, MAXIMUM_REFUSALS),
+        (256, 200, 500)
+    );
     let mut server = ready(&fixture("basic"));
     // A stroke over more new chunks than a result lists.
     let chunks = MAXIMUM_FILES + 100;
@@ -859,6 +871,22 @@ fn a_preview_stays_within_the_byte_budget_as_sent() {
         integer(at(page, &["truncated_strings"])),
         files + shown.len()
     );
+
+    // Refusals alone can reach the budget too, after files that fit.
+    let basic = ready(&fixture("basic"));
+    let State::Valid(valid) = &basic.snapshot.state else {
+        panic!("basic loads");
+    };
+    let structured_text =
+        crate::preview::preview_with(valid, &fixture("basic"), &orchard(), false, |_| {
+            Err(long.clone())
+        })
+        .unwrap();
+    let document = Document::parse(structured_text.as_str(), &Limits::default()).unwrap();
+    let page = document.root();
+    assert_eq!(at(page, &["files_truncated"]).as_bool(), Some(false));
+    assert_eq!(at(page, &["refusals_truncated"]).as_bool(), Some(true));
+    assert_eq!(at(page, &["byte_budget_reached"]).as_bool(), Some(true));
 }
 
 #[test]
