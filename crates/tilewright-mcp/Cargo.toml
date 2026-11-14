@@ -1,0 +1,21 @@
+[package]
+name = "tilewright-mcp"
+description = "A read-only Model Context Protocol server over one Tilewright world source tree, for `tilewright mcp`"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+tilewright-diff.workspace = true
+tilewright-jsonc.workspace = true
+tilewright-source.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
