@@ -730,74 +730,145 @@ fn an_indexed_load_gives_the_same_world_as_any_other() {
     }
 }
 
-/// Trees that fail with each kind of reference, and other problems.
-fn broken_trees() -> Vec<tempfile::TempDir> {
+/// Trees that fail with each kind of reference, by name: one edit of a
+/// fixture each, with `\n` line endings.
+fn broken_trees() -> Vec<(String, tempfile::TempDir)> {
     let chunk = super::CHUNK;
-    let cases: &[(&str, &str, &str)] = &[
-        (chunk, "\"proto\": \"stairs_down\"", "\"proto\": \"nope\""),
+    let transitions = "profile/transitions.jsonc";
+    let cases: &[(&str, &str, &str, &str)] = &[
         (
+            "basic",
+            chunk,
+            "\"proto\": \"stairs_down\"",
+            "\"proto\": \"nope\"",
+        ),
+        (
+            "basic",
+            chunk,
+            "\"layer\": \"wall\", \"fields\"",
+            "\"layer\": \"roof\", \"fields\"",
+        ),
+        (
+            "basic",
+            chunk,
+            "\"loot\": \"chest_common\"",
+            "\"loot\": \"nope\"",
+        ),
+        (
+            "basic",
             chunk,
             "\"anchor\": \"cave.entrance\"",
             "\"anchor\": \"nope\"",
         ),
-        (chunk, "\"plane\": \"vault\"", "\"plane\": \"nope\""),
-        ("planes/overworld/plane.jsonc", "\"wilderness\"", "\"nope\""),
         (
+            "basic",
+            chunk,
+            "\"plane\": \"vault\"",
+            "\"plane\": \"nope\"",
+        ),
+        ("basic", chunk, "\"v\": \"village\"", "\"v\": \"nope\""),
+        ("basic", chunk, "\"g\": \"grass\"", "\"g\": \"nope\""),
+        (
+            "basic",
+            "planes/overworld/plane.jsonc",
+            "\"wilderness\"",
+            "\"nope\"",
+        ),
+        (
+            "basic",
             "planes/overworld/zones.jsonc",
             "\"parent\": \"island\"",
             "\"parent\": \"nope\"",
         ),
         (
+            "basic",
             "planes/overworld/zones.jsonc",
             "\"parent\": \"island\"",
             "\"parent\": \"village\"",
         ),
         (
+            "basic",
+            "planes/overworld/stairwells.jsonc",
+            "\"stairs_up\"",
+            "\"nope\"",
+        ),
+        (
+            "basic",
             "profile/profile.jsonc",
             "\"ground_layers\": [\"floor\"",
             "\"ground_layers\": [\"nope\"",
         ),
         (
-            "profile/schema/loot.jsonc",
-            "\"target\": \"proto\"",
-            "\"target\": \"nope\"",
+            "basic",
+            "profile/profile.jsonc",
+            "\"ground_layers\": [\"floor\"",
+            "\"ground_layers\": [\"zone\"",
         ),
         (
+            "basic",
             "profile/profile.jsonc",
             "\"schema/loot.jsonc\"",
             "\"schema/nope.jsonc\"",
         ),
-        ("world.jsonc", "\"vault\"", "\"nope\""),
-        (super::LOOT, "\"coin\"", "\"nope\""),
         (
-            "planes/overworld/stairwells.jsonc",
-            "\"stairs_up\"",
-            "\"nope\"",
+            "basic",
+            "profile/schema/loot.jsonc",
+            "\"target\": \"proto\"",
+            "\"target\": \"nope\"",
         ),
+        ("basic", "world.jsonc", "\"vault\"", "\"nope\""),
+        ("basic", super::LOOT, "\"chest\"", "\"nope\""),
+        (
+            "terrain",
+            transitions,
+            "\"layer\": \"floor\"",
+            "\"layer\": \"nope\"",
+        ),
+        (
+            "terrain",
+            transitions,
+            "\"layer\": \"edge\"",
+            "\"layer\": \"nope\"",
+        ),
+        (
+            "terrain",
+            transitions,
+            "\"protos\": [\"sand\"]",
+            "\"protos\": [\"nope\"]",
+        ),
+        (
+            "terrain",
+            transitions,
+            "\"with\": [\"dirt\"]",
+            "\"with\": [\"nope\"]",
+        ),
+        ("terrain", transitions, "\"0\": \"pond\"", "\"0\": \"nope\""),
     ];
     let mut trees = Vec::new();
-    for (path, from, to) in cases {
-        let root = workspace();
+    for (fixture_name, path, from, to) in cases {
+        let source = match *fixture_name {
+            "basic" => fixture(),
+            _ => terrain_fixture(),
+        };
+        let root = normalised(&source);
         edit(root.path(), path, from, to);
-        trees.push(root);
+        trees.push((format!("{fixture_name} {path} {to}"), root));
     }
-    // A zone palette entry and a ground palette entry that resolve
-    // nowhere, many times over, past the diagnostic cap.
-    let root = workspace();
+    // Every prototype of the chunk renamed, past a small diagnostic cap.
+    let root = normalised(&fixture());
     let text = fs::read_to_string(root.path().join(chunk)).unwrap();
-    assert!(text.contains("\"palette\""));
     fs::write(
         root.path().join(chunk),
-        text.replacen("\"proto\": \"", "\"proto\": \"x", usize::MAX),
+        text.replace("\"proto\": \"", "\"proto\": \"x"),
     )
     .unwrap();
-    trees.push(root);
+    trees.push(("basic every proto".to_owned(), root));
     trees
 }
 
 #[test]
 fn an_indexed_load_of_a_broken_tree_gives_the_same_diagnostics() {
-    for tree in broken_trees() {
+    for (name, tree) in broken_trees() {
         for options in [
             LoadOptions::default(),
             LoadOptions {
@@ -808,9 +879,40 @@ fn an_indexed_load_of_a_broken_tree_gives_the_same_diagnostics() {
             let root = SourceRoot::new(tree.path());
             let plain = load_edited_in(&root, &options, &Overlay::new()).unwrap_err();
             let indexed = load_indexed_in(&root, &options, &Overlay::new()).unwrap_err();
-            assert_eq!(plain, indexed);
+            assert_eq!(plain, indexed, "{name}");
         }
     }
+}
+
+/// The diagnostics of a broken reference keep their codes, wording and
+/// places; the golden was checked against the loader before references
+/// had one check.
+#[test]
+fn broken_references_are_reported_as_they_always_were_golden() {
+    let mut text = String::new();
+    for (name, tree) in broken_trees() {
+        let _ = writeln!(text, "{name}");
+        for diagnostic in load_edited_in(
+            &SourceRoot::new(tree.path()),
+            &LoadOptions::default(),
+            &Overlay::new(),
+        )
+        .unwrap_err()
+        {
+            let _ = writeln!(
+                text,
+                "  {} {}..{} {}:{} {} {}",
+                diagnostic.path,
+                diagnostic.start,
+                diagnostic.end,
+                diagnostic.line,
+                diagnostic.column,
+                diagnostic.code,
+                diagnostic.message
+            );
+        }
+    }
+    golden("reference-diagnostics", &text);
 }
 
 #[test]

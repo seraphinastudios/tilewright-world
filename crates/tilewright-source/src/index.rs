@@ -826,6 +826,11 @@ impl Recorder {
                 .then_with(|| source_order(a, b))
                 .then_with(|| a.target().cmp(&b.target()))
         });
+        // Recording grew the tables by doubling; the index keeps only what
+        // it holds.
+        records.shrink_to_fit();
+        let mut names = names;
+        names.shrink_to_fit();
         ReferenceIndex {
             names,
             holders,

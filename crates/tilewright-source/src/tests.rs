@@ -11,6 +11,7 @@ use std::{
 };
 
 mod index;
+mod revision;
 
 fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/basic")
