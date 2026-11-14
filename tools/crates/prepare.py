@@ -19,7 +19,7 @@ import tomllib
 ROOT = Path(__file__).resolve().parents[2]
 PUBLIC = ("tilewright-jsonc", "tilewright-source", "tilewright-pack",
           "tilewright-diff", "tilewright-edit")
-PRIVATE = ("tilewright-cli", "tilewright-pack-wasm")
+PRIVATE = ("tilewright-cli", "tilewright-mcp", "tilewright-pack-wasm")
 REPOSITORY = "https://github.com/seraphinastudios/tilewright-world"
 MAX_ARCHIVE_BYTES = 128 * 1024 * 1024
 VERSION = r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
