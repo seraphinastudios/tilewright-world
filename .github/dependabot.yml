@@ -4,6 +4,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    assignees:
+      - zoeyrose
   - package-ecosystem: gomod
     directory: /go
     schedule:
@@ -14,6 +16,8 @@ updates:
       modernc:
         patterns:
           - "modernc.org/*"
+    assignees:
+      - zoeyrose
   - package-ecosystem: github-actions
     directory: /
     schedule:
@@ -22,3 +26,5 @@ updates:
       github-actions:
         patterns:
           - "*"
+    assignees:
+      - zoeyrose
