@@ -594,7 +594,8 @@ pub fn load_edited_in(
 /// returns the index of its references: every reference the loader
 /// checks or follows, with its target, role, holder, file and span (see
 /// [`index`]). The world, and on failure the diagnostics, are those
-/// [`load_edited_in`] gives.
+/// [`load_edited_in`] gives, with one exception: a tree whose index would
+/// be too large to number is refused (see below).
 ///
 /// Indexing costs memory in proportion to the references, about 36 bytes
 /// each plus their distinct strings, and some time to sort them; the
@@ -617,7 +618,10 @@ pub fn load_edited_in(
 /// ```
 ///
 /// # Errors
-/// Returns every diagnostic found, sorted by path and position.
+/// Returns every diagnostic found, sorted by path and position, as
+/// [`load_edited_in`] does; or, for a tree that otherwise loads but whose
+/// references, distinct strings or holders are too many to number, one
+/// `source.budget` diagnostic at `.`.
 pub fn load_indexed_in(
     root: &SourceRoot,
     options: &LoadOptions,

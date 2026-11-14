@@ -698,9 +698,11 @@ impl Default for Recorder {
         let maximum = TEST_MAXIMUM_COUNT.get().unwrap_or(MAXIMUM_COUNT);
         #[cfg(not(test))]
         let maximum = MAXIMUM_COUNT;
+        // Symbol 0 is the empty string, which absent parts name, whatever
+        // is recorded first.
         Self {
-            symbols: HashMap::new(),
-            names: Vec::new(),
+            symbols: HashMap::from([(Box::from(""), 0)]),
+            names: vec![Box::from("")],
             holders: HashMap::new(),
             holder_entries: Vec::new(),
             records: Vec::new(),
@@ -802,10 +804,6 @@ impl Recorder {
     fn try_record(&mut self, site: &Site<'_>, argument: Option<u32>) -> Option<()> {
         if self.overflowed {
             return None;
-        }
-        // Symbol 0 is the empty string, which absent parts name.
-        if self.names.is_empty() {
-            self.intern("")?;
         }
         let (kind, a, b) = split_target(site.target);
         let target = TargetKey {
@@ -1072,6 +1070,56 @@ mod tests {
             0,
         ));
         assert!(ordinal.overflowed());
+    }
+
+    /// A field value recorded first must not take symbol 0, which absent
+    /// parts name.
+    #[test]
+    fn a_field_recorded_first_keeps_symbol_zero_empty() {
+        use crate::schema::{FieldPath, FieldType, Schema};
+        use std::sync::Arc;
+        let schema = Arc::new(Schema::new("s.jsonc".into()));
+        let field_type = FieldType::Reference {
+            target: "proto".into(),
+        };
+        let root = FieldPath::Root;
+        let path = FieldPath::Field(&root, "f");
+        let holder = Holder::Object {
+            plane: "p",
+            chunk: (0, 0, 0),
+            ordinal: 0,
+        };
+        let mut recorder = Recorder::default();
+        recorder.record_field(
+            &Site {
+                target: Target::Definition {
+                    kind: "proto",
+                    id: "x",
+                },
+                role: Role::Field { field: "" },
+                holder,
+                file: "c.jsonc",
+                start: 1,
+                end: 4,
+            },
+            (&schema, &field_type),
+            &path,
+        );
+        recorder.record(&Site {
+            target: Target::Plane("p"),
+            role: Role::ChunkPlane,
+            holder: Holder::Chunk {
+                plane: "p",
+                chunk: (0, 0, 0),
+            },
+            file: "c.jsonc",
+            start: 10,
+            end: 13,
+        });
+        let index = recorder.finish();
+        let fields: Vec<Role<'_>> = index.from(holder).map(|found| found.role()).collect();
+        assert_eq!(fields, [Role::Field { field: "f" }]);
+        assert_eq!(index.to(Target::Plane("p")).count(), 1);
     }
 
     #[test]

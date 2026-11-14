@@ -11,7 +11,7 @@ use std::fmt::Write as _;
 /// JSON's `\u00XX` form, DEL and C1 controls included, so JSON output needs
 /// no further escaping to be safe for a terminal, and holds no raw newline.
 /// The line and paragraph separators U+2028 and U+2029, which some line
-/// splitters break lines at, are escaped too ([`escaped`]).
+/// splitters break lines at, are escaped too (`escaped`).
 /// The CLI's `validate --json` writes its strings with this too.
 pub fn json_string(text: &str, output: &mut String) {
     output.push('"');
