@@ -9,12 +9,13 @@ use crate::{
     files::{Tree, is_jsonc_path},
     index::{Holder, Role, Site, Target},
     read::Reader,
-    schema::{References, Schema, SchemaTarget, read_schema},
+    schema::{References, Schema, read_schema},
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
+use tilewright_jsonc::Span;
 
 /// Reads `world.jsonc`: the profile path and the plane list.
 pub(crate) fn read_manifest(
@@ -60,27 +61,31 @@ pub(crate) fn read_manifest(
 
 /// Whether every reference field of `schema` targets a declared definition
 /// type; reports each one that does not, on the schema as a whole.
+/// `spans` are the `target` values' spans, in the order
+/// [`FieldType::targets`](crate::FieldType) visits them.
 fn references_resolve(
     schema: &Schema,
-    targets: &[SchemaTarget],
+    spans: &[Span],
     references: &References,
     diagnostics: &mut Diagnostics,
 ) -> bool {
     let mut ok = true;
-    for target in targets {
-        ok &= references.check_file(
-            &Site {
-                target: Target::DefinitionType(&target.target),
-                role: Role::SchemaTarget {
-                    field: &target.field,
+    let mut spans = spans.iter();
+    for (name, spec) in schema.fields() {
+        spec.field_type.targets(name, &mut |field, target| {
+            let span = spans.next().copied().unwrap_or(Span { start: 0, end: 0 });
+            ok &= references.check_file(
+                &Site {
+                    target: Target::DefinitionType(target),
+                    role: Role::SchemaTarget { field },
+                    holder: Holder::Schema { path: &schema.path },
+                    file: &schema.path,
+                    start: span.start,
+                    end: span.end,
                 },
-                holder: Holder::Schema { path: &schema.path },
-                file: &schema.path,
-                start: target.span.start,
-                end: target.span.end,
-            },
-            diagnostics,
-        );
+                diagnostics,
+            );
+        });
     }
     ok
 }
@@ -363,8 +368,8 @@ pub(crate) fn read_profile(
             schema.clone()
         } else {
             let schema = read_schema(tree, &schema_path, diagnostics)
-                .filter(|(schema, targets)| {
-                    references_resolve(schema, targets, references, diagnostics)
+                .filter(|(schema, spans)| {
+                    references_resolve(schema, spans, references, diagnostics)
                 })
                 .map(|(schema, _)| Arc::new(schema));
             loaded.insert(schema_path, schema.clone());

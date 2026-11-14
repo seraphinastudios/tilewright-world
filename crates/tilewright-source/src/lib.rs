@@ -14,6 +14,12 @@
 //! variant tiles from painted terrain; [`Transitions::resolve_chunk`] is the
 //! one resolver the compiler, editors and other tools share.
 //!
+//! [`load_indexed_in`] also returns a [`ReferenceIndex`]: every reference
+//! the loader checks, such as an object's prototype or a zone's parent,
+//! with what it names, what holds it and its byte span, for finding what
+//! names something before it is removed or renamed ([`index`]). A
+//! [`World`] lists the files its revision covers ([`World::files`]).
+//!
 //! The root path is resolved as the caller gives it and may be a link;
 //! nothing beneath it is followed. On Unix every path component beneath the
 //! root is opened through its parent directory's handle without following
@@ -104,8 +110,8 @@ impl Default for LoadOptions {
 
 /// A validated world source tree.
 ///
-/// A `World` can only be produced by [`load`] or [`load_with`], so every one
-/// has passed validation; its parts are read through accessors and cannot be
+/// A `World` can only be produced by a load, such as [`load`] or
+/// [`load_with`], so every one has passed validation; its parts are read through accessors and cannot be
 /// changed in place.
 ///
 /// ```compile_fail
@@ -593,6 +599,18 @@ pub fn load_edited_in(
 /// Indexing costs memory in proportion to the references, about 36 bytes
 /// each plus their distinct strings, and some time to sort them; the
 /// other loads record nothing.
+///
+/// ```no_run
+/// use tilewright_source::{LoadOptions, Overlay, SourceRoot, index::Target};
+///
+/// let root = SourceRoot::new(std::path::Path::new("content"));
+/// let (_, index) = tilewright_source::load_indexed_in(&root, &LoadOptions::default(), &Overlay::new())
+///     .map_err(|diagnostics| diagnostics.len())?;
+/// for reference in index.to(Target::Definition { kind: "proto", id: "tree" }) {
+///     println!("{} {:?} {:?}", reference.file(), reference.span(), reference.role());
+/// }
+/// # Ok::<(), usize>(())
+/// ```
 ///
 /// # Errors
 /// Returns every diagnostic found, sorted by path and position.

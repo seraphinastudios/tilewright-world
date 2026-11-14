@@ -735,18 +735,8 @@ impl Recorder {
             records,
             ..
         } = self;
-        let mut order: Vec<u32> = (0..narrow(names.len())).collect();
-        order.sort_by(|a, b| names[widen(*a)].cmp(&names[widen(*b)]));
-        let mut renumbered = vec![0; names.len()];
-        for (new, old) in order.iter().enumerate() {
-            renumbered[widen(*old)] = narrow(new);
-        }
+        let (names, renumbered) = sorted(names);
         let symbol = |old: u32| renumbered.get(widen(old)).copied().unwrap_or(0);
-        let mut slots: Vec<Option<Box<str>>> = names.into_iter().map(Some).collect();
-        let names: Vec<Box<str>> = order
-            .iter()
-            .map(|old| slots[widen(*old)].take().unwrap_or_default())
-            .collect();
 
         let renumber_holder = |key: HolderKey| HolderKey {
             a: symbol(key.a),
@@ -829,8 +819,6 @@ impl Recorder {
         // Recording grew the tables by doubling; the index keeps only what
         // it holds.
         records.shrink_to_fit();
-        let mut names = names;
-        names.shrink_to_fit();
         ReferenceIndex {
             names,
             holders,
@@ -838,6 +826,23 @@ impl Recorder {
             by_holder,
         }
     }
+}
+
+/// `names` sorted, and the new position of each old one.
+fn sorted(names: Vec<Box<str>>) -> (Vec<Box<str>>, Vec<u32>) {
+    let mut order: Vec<u32> = (0..narrow(names.len())).collect();
+    order.sort_by(|a, b| names[widen(*a)].cmp(&names[widen(*b)]));
+    let mut renumbered = vec![0; names.len()];
+    for (new, old) in order.iter().enumerate() {
+        renumbered[widen(*old)] = narrow(new);
+    }
+    let mut slots: Vec<Option<Box<str>>> = names.into_iter().map(Some).collect();
+    let mut names: Vec<Box<str>> = order
+        .iter()
+        .map(|old| slots[widen(*old)].take().unwrap_or_default())
+        .collect();
+    names.shrink_to_fit();
+    (names, renumbered)
 }
 
 /// The diagnostic message for a reference that does not resolve. Each

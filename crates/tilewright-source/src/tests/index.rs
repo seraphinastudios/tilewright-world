@@ -732,6 +732,7 @@ fn an_indexed_load_gives_the_same_world_as_any_other() {
 
 /// Trees that fail with each kind of reference, by name: one edit of a
 /// fixture each, with `\n` line endings.
+#[allow(clippy::too_many_lines)]
 fn broken_trees() -> Vec<(String, tempfile::TempDir)> {
     let chunk = super::CHUNK;
     let transitions = "profile/transitions.jsonc";

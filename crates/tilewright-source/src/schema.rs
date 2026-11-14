@@ -14,6 +14,7 @@ use crate::{
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
+    rc::Rc,
     sync::Arc,
 };
 use tilewright_jsonc::{MAX_SAFE_INTEGER, Member, Span, Value};
@@ -125,6 +126,24 @@ pub enum FieldType {
     },
 }
 
+impl FieldType {
+    /// Calls `visit` with every reference target in this type, nested ones
+    /// included, and the dotted path of the field below this one that
+    /// holds it (`[]` stands for a list's items).
+    pub(crate) fn targets<'s>(&'s self, path: &str, visit: &mut impl FnMut(&str, &'s str)) {
+        match self {
+            Self::Reference { target } => visit(path, target),
+            Self::List { items, .. } => items.targets(&format!("{path}[]"), visit),
+            Self::Object { fields } => {
+                for (name, spec) in fields.fields() {
+                    spec.field_type.targets(&format!("{path}.{name}"), visit);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Whether `name` is a valid field name: `^[a-z][a-z0-9_]{0,63}$`.
 fn is_field_name(name: &str) -> bool {
     let bytes = name.as_bytes();
@@ -136,22 +155,15 @@ fn is_field_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_')
 }
 
-/// A `reference` field type of a schema: the field's path (names joined
-/// by `.`, `[]` for a list's items), its target type, and the span of
-/// the `target` value.
-pub(crate) struct SchemaTarget {
-    pub field: String,
-    pub target: String,
-    pub span: Span,
-}
-
-/// Reads a schema document at `path`, with its `reference` field types in
-/// declaration order, nested ones after the field that holds them.
+/// Reads a schema document at `path`. Also returns the span of the
+/// `target` of each `reference` field type, in the order
+/// [`FieldType::targets`] visits them: declaration order, a nested one
+/// after the field that holds it.
 pub(crate) fn read_schema(
     tree: &mut Tree<'_>,
     path: &str,
     diagnostics: &mut Diagnostics,
-) -> Option<(Schema, Vec<SchemaTarget>)> {
+) -> Option<(Schema, Vec<Span>)> {
     let source = tree.document(path)?;
     let reader = Reader::new(&source, diagnostics);
     let root = reader.object(reader.root(), &["format", "fields"])?;
@@ -161,21 +173,21 @@ pub(crate) fn read_schema(
         &reader,
         reader.required(root, "fields")?,
         &path.into(),
-        (0, ""),
+        0,
         &mut targets,
     );
     schema.filter(|_| format_ok).map(|schema| (schema, targets))
 }
 
 /// Reads a `fields` object of field specs. `depth` is the number of `list`
-/// and `object` types around it, and `field` the path of the field that
-/// holds it, empty at the top.
+/// and `object` types around it. The span of each `reference` type's
+/// `target` is added to `targets`.
 fn read_field_specs<'a>(
     reader: &Reader<'a>,
     value: &'a Value,
     path: &Arc<str>,
-    (depth, field): (usize, &str),
-    targets: &mut Vec<SchemaTarget>,
+    depth: usize,
+    targets: &mut Vec<Span>,
 ) -> Option<Schema> {
     let members = reader.members(value)?;
     let mut schema = Schema::new(Arc::clone(path));
@@ -191,14 +203,7 @@ fn read_field_specs<'a>(
             );
             ok = false;
         }
-        let name = if field.is_empty() {
-            member.key.clone()
-        } else {
-            format!("{field}.{}", member.key)
-        };
-        match read_spec(reader, &member.value, path, (depth, &name), true, targets)
-            .filter(|_| named)
-        {
+        match read_spec(reader, &member.value, path, depth, true, targets).filter(|_| named) {
             Some((field_type, required)) => schema.push(
                 member.key.clone(),
                 FieldSpec {
@@ -214,16 +219,16 @@ fn read_field_specs<'a>(
 
 /// Reads one field spec: its type and whether it is required. List items
 /// are never missing, so they take no `required`: `takes_required` is
-/// `false` for them. `field` is the spec's path, which a `reference`
-/// type is collected in `targets` with.
+/// `false` for them. The span of a `reference` type's `target` is added
+/// to `targets`.
 #[allow(clippy::too_many_lines)]
 fn read_spec<'a>(
     reader: &Reader<'a>,
     value: &'a Value,
     path: &Arc<str>,
-    (depth, field): (usize, &str),
+    depth: usize,
     takes_required: bool,
-    targets: &mut Vec<SchemaTarget>,
+    targets: &mut Vec<Span>,
 ) -> Option<(FieldType, bool)> {
     if value.as_object().is_none() {
         reader.report(
@@ -340,11 +345,7 @@ fn read_spec<'a>(
         }
         Some("reference") => reader.required(spec, "target").and_then(|value| {
             let target = reader.identifier(value)?;
-            targets.push(SchemaTarget {
-                field: field.to_owned(),
-                target: target.clone(),
-                span: value.span(),
-            });
+            targets.push(value.span());
             Some(FieldType::Reference { target })
         }),
         Some("list") => {
@@ -361,17 +362,9 @@ fn read_spec<'a>(
                 count("min_items", 0),
                 count("max_items", MAXIMUM_LIST_ITEMS),
             );
-            let items = reader.required(spec, "items").and_then(|items| {
-                let items_field = format!("{field}[]");
-                read_spec(
-                    reader,
-                    items,
-                    path,
-                    (depth + 1, &items_field),
-                    false,
-                    targets,
-                )
-            });
+            let items = reader
+                .required(spec, "items")
+                .and_then(|items| read_spec(reader, items, path, depth + 1, false, targets));
             let bounds = ordered(
                 reader,
                 spec,
@@ -388,7 +381,7 @@ fn read_spec<'a>(
         }
         Some("object") => reader
             .required(spec, "fields")
-            .and_then(|fields| read_field_specs(reader, fields, path, (depth + 1, field), targets))
+            .and_then(|fields| read_field_specs(reader, fields, path, depth + 1, targets))
             .map(|fields| FieldType::Object { fields }),
         _ => {
             reader.report(
@@ -463,6 +456,9 @@ pub(crate) struct References {
     uids: Claims,
     /// Present when the load records its references.
     recorder: Option<RefCell<Recorder>>,
+    /// The field path of each `reference` field type a recorded value
+    /// had, by the type's address, so that each is written out once.
+    field_paths: RefCell<BTreeMap<usize, Rc<str>>>,
 }
 
 impl References {
@@ -478,7 +474,23 @@ impl References {
             terrains: BTreeSet::new(),
             uids: Claims::default(),
             recorder: record.then(|| RefCell::new(Recorder::default())),
+            field_paths: RefCell::new(BTreeMap::new()),
         }
+    }
+
+    /// The field path of a value of the `reference` type `field_type`,
+    /// at `path`: written out the first time a value of that type is
+    /// recorded, and shared after that, as every value of one type of a
+    /// schema has one path. Schemas live as long as the load, so a type's
+    /// address names it.
+    fn field_path(&self, field_type: &FieldType, path: &FieldPath<'_>) -> Rc<str> {
+        let key = std::ptr::from_ref(field_type).addr();
+        Rc::clone(
+            self.field_paths
+                .borrow_mut()
+                .entry(key)
+                .or_insert_with(|| path.render().into()),
+        )
     }
 
     /// Whether this load records its references, so that a caller builds
@@ -833,9 +845,9 @@ fn check_value<'a>(
             }
             // The path is written out only for a reference that is kept.
             let field = if references.records() {
-                at.path.render()
+                references.field_path(field_type, at.path)
             } else {
-                String::new()
+                Rc::from("")
             };
             reader.reference(
                 references,
