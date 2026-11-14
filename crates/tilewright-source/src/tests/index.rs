@@ -7,7 +7,7 @@
 use super::{copy_tree, edit, fixture, workspace};
 use crate::{
     LoadOptions, Overlay, ReferenceIndex, SourceRoot, World,
-    index::{Holder, Reference, Role, Target},
+    index::{Holder, RECORDED, Reference, Role, TEST_MAXIMUM_COUNT, Target},
     load_edited_in, load_indexed_in,
 };
 use std::{
@@ -321,6 +321,7 @@ fn every_role_is_recorded_somewhere() {
         "DefaultZone",
         "GroundPalette { layer: \"floor\" }",
         "ZonePalette",
+        "ChunkPlane",
         "Proto",
         "Layer",
         "PortalPlane",
@@ -544,6 +545,7 @@ fn palette_entries_are_recorded_at_their_values() {
     };
     let palettes: Vec<(Role<'_>, Target<'_>)> = index
         .from(chunk)
+        .filter(|reference| reference.role() != Role::ChunkPlane)
         .map(|reference| (reference.role(), reference.target()))
         .collect();
     let plane = &world.planes()["overworld"].chunks[&(0, 0, 0)];
@@ -855,6 +857,26 @@ fn broken_trees() -> Vec<(String, tempfile::TempDir)> {
         edit(root.path(), path, from, to);
         trees.push((format!("{fixture_name} {path} {to}"), root));
     }
+    // A ground layer named like a chunk's other grids, though it is a
+    // render layer.
+    let root = normalised(&fixture());
+    let profile = "profile/profile.jsonc";
+    edit(
+        root.path(),
+        profile,
+        "\"render_layers\": [\"floor\"",
+        "\"render_layers\": [\"zone\", \"floor\"",
+    );
+    edit(
+        root.path(),
+        profile,
+        "\"ground_layers\": [\"floor\", \"mask\"]",
+        "\"ground_layers\": [\"floor\", \"zone\"]",
+    );
+    trees.push((
+        "basic profile/profile.jsonc a render layer named zone as a ground layer".to_owned(),
+        root,
+    ));
     // Every prototype of the chunk renamed, past a small diagnostic cap.
     let root = normalised(&fixture());
     let text = fs::read_to_string(root.path().join(chunk)).unwrap();
@@ -963,4 +985,139 @@ fn copying_a_tree_keeps_its_index() {
     let second = tempfile::tempdir().unwrap();
     copy_tree(first.path(), second.path());
     assert_eq!(indexed(first.path()).1, indexed(second.path()).1);
+}
+
+/// The references recorded on this thread while `load` runs.
+fn recorded_by<T>(load: impl FnOnce() -> T) -> (T, usize) {
+    RECORDED.set(0);
+    let result = load();
+    (result, RECORDED.get())
+}
+
+#[test]
+fn a_plain_load_records_nothing() {
+    let root = SourceRoot::new(&fixture());
+    let (world, recorded) =
+        recorded_by(|| load_edited_in(&root, &LoadOptions::default(), &Overlay::new()));
+    world.unwrap();
+    assert_eq!(recorded, 0);
+    let (indexed, recorded) =
+        recorded_by(|| load_indexed_in(&root, &LoadOptions::default(), &Overlay::new()));
+    let (_, index) = indexed.unwrap();
+    assert_eq!(recorded, index.len());
+    assert!(
+        crate::schema::References::new(false, std::rc::Rc::default())
+            .into_recorder()
+            .is_none()
+    );
+}
+
+#[test]
+fn an_indexed_load_stops_recording_at_its_first_problem() {
+    // The manifest, read first, has a problem before any reference.
+    let early = normalised(&fixture());
+    edit(
+        early.path(),
+        "world.jsonc",
+        "\"format\"",
+        "\"extra\": 1, \"format\"",
+    );
+    let root = SourceRoot::new(early.path());
+    let (result, recorded) =
+        recorded_by(|| load_indexed_in(&root, &LoadOptions::default(), &Overlay::new()));
+    let diagnostics = result.unwrap_err();
+    assert_eq!(recorded, 0);
+    assert_eq!(
+        diagnostics,
+        load_edited_in(&root, &LoadOptions::default(), &Overlay::new()).unwrap_err()
+    );
+    // One read last: what is recorded is what came before it.
+    let valid = SourceRoot::new(&fixture());
+    let (indexed, all) =
+        recorded_by(|| load_indexed_in(&valid, &LoadOptions::default(), &Overlay::new()));
+    indexed.unwrap();
+    let late = normalised(&fixture());
+    edit(
+        late.path(),
+        "planes/vault/layers/0/0_0.jsonc",
+        "\"proto\": \"chest\"",
+        "\"proto\": \"nope\"",
+    );
+    let (result, recorded) = recorded_by(|| {
+        load_indexed_in(
+            &SourceRoot::new(late.path()),
+            &LoadOptions::default(),
+            &Overlay::new(),
+        )
+    });
+    result.unwrap_err();
+    assert!(recorded > 0 && recorded < all, "{recorded} of {all}");
+}
+
+#[test]
+fn an_index_that_would_not_fit_is_refused() {
+    let root = SourceRoot::new(&fixture());
+    let (_, index) = load_indexed_in(&root, &LoadOptions::default(), &Overlay::new()).unwrap();
+    // The largest of the numbered tables: the references, here.
+    let needed = u32::try_from(index.len()).unwrap();
+    for (maximum, fits) in [(needed, true), (needed - 1, false), (0, false)] {
+        TEST_MAXIMUM_COUNT.set(Some(maximum));
+        let indexed = load_indexed_in(&root, &LoadOptions::default(), &Overlay::new());
+        let plain = load_edited_in(&root, &LoadOptions::default(), &Overlay::new());
+        TEST_MAXIMUM_COUNT.set(None);
+        plain.unwrap();
+        match indexed {
+            Ok((_, found)) => {
+                assert!(fits, "{maximum}");
+                assert_eq!(found, index);
+            }
+            Err(diagnostics) => {
+                assert!(!fits, "{maximum}: {diagnostics:#?}");
+                let [diagnostic] = &diagnostics[..] else {
+                    panic!("{diagnostics:#?}");
+                };
+                assert_eq!(
+                    (diagnostic.code, diagnostic.path.as_str()),
+                    ("source.budget", ".")
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_chunk_names_its_plane() {
+    let root = normalised(&fixture());
+    let (world, index) = indexed(root.path());
+    for (plane_id, plane) in world.planes() {
+        let chunks: Vec<(Holder<'_>, &str)> = index
+            .to(Target::Plane(plane_id))
+            .filter(|reference| reference.role() == Role::ChunkPlane)
+            .map(|reference| (reference.holder(), reference.file()))
+            .collect();
+        let expected: Vec<(Holder<'_>, &str)> = plane
+            .chunks
+            .iter()
+            .map(|(key, chunk)| {
+                (
+                    Holder::Chunk {
+                        plane: plane_id,
+                        chunk: *key,
+                    },
+                    chunk.path.as_str(),
+                )
+            })
+            .collect();
+        let mut chunks = chunks;
+        chunks.sort();
+        let mut expected = expected;
+        expected.sort();
+        assert_eq!(chunks, expected, "{plane_id}");
+    }
+    // A plane's own `id` is the plane, not a reference to it.
+    assert!(
+        index
+            .iter()
+            .all(|reference| reference.file() != "planes/vault/plane.jsonc")
+    );
 }

@@ -268,10 +268,9 @@ impl Budgets {
     fn current(self) -> Self {
         #[cfg(test)]
         if let Some(lowered) = TEST_BUDGETS.get() {
-            return Self::new(
-                self.read_bytes.min(lowered.read_bytes),
-                self.work.min(lowered.work),
-            );
+            return self
+                .with_read_bytes(self.read_bytes.min(lowered.read_bytes))
+                .with_work(self.work.min(lowered.work));
         }
         self
     }

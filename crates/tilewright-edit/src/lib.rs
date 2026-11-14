@@ -115,8 +115,9 @@ pub mod limits {
 }
 
 /// The read and work budgets of planning a transaction, which can only be
-/// tighter than [`limits::READ_BYTES`] and [`limits::WORK`]: those are the
-/// [`Default`], and a value above one is lowered to it.
+/// tighter than [`limits::READ_BYTES`] and [`limits::WORK`]: the
+/// [`Default`] is those limits, and each `with_` method sets one budget,
+/// lowering a value above its limit to the limit.
 ///
 /// [`plan_in_within`] plans within them, and the [`Plan`] keeps them, so
 /// [`Plan::check_undo`] carries out each round within the same budgets. A
@@ -128,10 +129,10 @@ pub mod limits {
 /// ```
 /// use tilewright_edit::{Budgets, limits};
 ///
-/// let budgets = Budgets::new(64 << 20, 1 << 40);
+/// let budgets = Budgets::default().with_read_bytes(64 << 20).with_work(1 << 40);
 /// assert_eq!(budgets.read_bytes(), 64 << 20);
 /// assert_eq!(budgets.work(), limits::WORK); // lowered to the limit
-/// assert_eq!(Budgets::default(), Budgets::new(u64::MAX, u64::MAX));
+/// assert_eq!(Budgets::default().read_bytes(), limits::READ_BYTES);
 /// ```
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -141,21 +142,31 @@ pub struct Budgets {
 }
 
 impl Budgets {
-    /// Budgets of at most `read_bytes` read and `work` work, each lowered
-    /// to its limit where it is above it.
+    /// These budgets with at most `read_bytes` read from the files a
+    /// transaction touches ([`limits::READ_BYTES`] at most).
     #[must_use]
-    pub const fn new(read_bytes: u64, work: u64) -> Self {
+    pub const fn with_read_bytes(self, read_bytes: u64) -> Self {
         Self {
             read_bytes: if read_bytes < limits::READ_BYTES {
                 read_bytes
             } else {
                 limits::READ_BYTES
             },
+            ..self
+        }
+    }
+
+    /// These budgets with at most `work` bytes of work ([`limits::WORK`]
+    /// at most).
+    #[must_use]
+    pub const fn with_work(self, work: u64) -> Self {
+        Self {
             work: if work < limits::WORK {
                 work
             } else {
                 limits::WORK
             },
+            ..self
         }
     }
 
@@ -175,7 +186,10 @@ impl Budgets {
 
 impl Default for Budgets {
     fn default() -> Self {
-        Self::new(limits::READ_BYTES, limits::WORK)
+        Self {
+            read_bytes: limits::READ_BYTES,
+            work: limits::WORK,
+        }
     }
 }
 

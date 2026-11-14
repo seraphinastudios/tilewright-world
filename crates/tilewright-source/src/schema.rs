@@ -12,7 +12,7 @@ use crate::{
     uid::Claims,
 };
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell, RefMut},
     collections::{BTreeMap, BTreeSet},
     rc::Rc,
     sync::Arc,
@@ -454,16 +454,18 @@ pub(crate) struct References {
     /// The terrains of the transitions document.
     terrains: BTreeSet<String>,
     uids: Claims,
-    /// Present when the load records its references.
-    recorder: Option<RefCell<Recorder>>,
-    /// The field path of each `reference` field type a recorded value
-    /// had, by the type's address, so that each is written out once.
-    field_paths: RefCell<BTreeMap<usize, Rc<str>>>,
+    /// Present while the load records its references: from its start
+    /// until its first diagnostic, after which no index is returned.
+    recorder: RefCell<Option<Recorder>>,
+    /// The diagnostics the load has kept so far, shared with every
+    /// collection of the load.
+    problems: Rc<Cell<usize>>,
 }
 
 impl References {
-    /// The references of a load; `record` makes it keep them.
-    pub fn new(record: bool) -> Self {
+    /// The references of a load; `record` makes it keep them until the
+    /// load's diagnostics, counted by `problems`, are no longer none.
+    pub fn new(record: bool, problems: Rc<Cell<usize>>) -> Self {
         Self {
             render_layers: BTreeSet::new(),
             ground_layers: BTreeSet::new(),
@@ -473,35 +475,25 @@ impl References {
             zones: BTreeMap::new(),
             terrains: BTreeSet::new(),
             uids: Claims::default(),
-            recorder: record.then(|| RefCell::new(Recorder::default())),
-            field_paths: RefCell::new(BTreeMap::new()),
+            recorder: RefCell::new(record.then(Recorder::default)),
+            problems,
         }
     }
 
-    /// The field path of a value of the `reference` type `field_type`,
-    /// at `path`: written out the first time a value of that type is
-    /// recorded, and shared after that, as every value of one type of a
-    /// schema has one path. Schemas live as long as the load, so a type's
-    /// address names it.
-    fn field_path(&self, field_type: &FieldType, path: &FieldPath<'_>) -> Rc<str> {
-        let key = std::ptr::from_ref(field_type).addr();
-        Rc::clone(
-            self.field_paths
-                .borrow_mut()
-                .entry(key)
-                .or_insert_with(|| path.render().into()),
-        )
+    /// The recorder, while the load still records: the first time it is
+    /// asked for after a diagnostic, it is dropped, with all it holds.
+    fn recorder(&self) -> Option<RefMut<'_, Recorder>> {
+        let mut slot = self.recorder.borrow_mut();
+        if self.problems.get() > 0 {
+            *slot = None;
+        }
+        RefMut::filter_map(slot, Option::as_mut).ok()
     }
 
-    /// Whether this load records its references, so that a caller builds
-    /// what only a record needs.
-    pub const fn records(&self) -> bool {
-        self.recorder.is_some()
-    }
-
-    /// The references recorded, if this load records them.
+    /// The references recorded, if this load recorded them to the end.
     pub fn into_recorder(self) -> Option<Recorder> {
-        self.recorder.map(RefCell::into_inner)
+        let recorder = self.recorder.into_inner();
+        recorder.filter(|_| self.problems.get() == 0)
     }
 
     /// Records the profile's render layers.
@@ -592,9 +584,25 @@ impl References {
     /// Records a reference that the layout, not a lookup, checks: a path
     /// read as a document, a plane directory, a definition's directory.
     pub fn follow(&self, site: &Site<'_>) {
-        if let Some(recorder) = &self.recorder {
-            recorder.borrow_mut().record(site);
+        if let Some(mut recorder) = self.recorder() {
+            recorder.record(site);
         }
+    }
+
+    /// The one check of a value of a schema `reference` field, as
+    /// [`References::check`]; `schema` holds its type, `field_type`, and
+    /// `path` is where the value is, written out only the first time a
+    /// value of that type is recorded.
+    fn check_field(
+        &self,
+        site: &Site<'_>,
+        types: (&Arc<Schema>, &FieldType),
+        path: &FieldPath<'_>,
+    ) -> bool {
+        if let Some(mut recorder) = self.recorder() {
+            recorder.record_field(site, types, path);
+        }
+        self.resolves(&site.target)
     }
 
     /// Checks a reference whose problem is reported on its file as a
@@ -621,7 +629,7 @@ pub(crate) enum FieldPath<'p> {
 impl FieldPath<'_> {
     /// The path as [`Role::Field`](crate::index::Role::Field) documents
     /// it: names joined by `.`, with `[]` for a list's items.
-    fn render(&self) -> String {
+    pub(crate) fn render(&self) -> String {
         match self {
             Self::Root => String::new(),
             Self::Field(parent, name) => match parent.render() {
@@ -640,7 +648,7 @@ pub(crate) fn read_fields<'a>(
     reader: &Reader<'a>,
     (owner, holder): (&'a Value, Holder<'_>),
     fields: Option<&'a Value>,
-    schema: &Schema,
+    schema: &Arc<Schema>,
     references: &mut References,
 ) -> Option<Vec<(String, FieldValue)>> {
     let members = match fields {
@@ -650,6 +658,7 @@ pub(crate) fn read_fields<'a>(
     let mut output = Vec::with_capacity(members.len());
     let at = Values {
         holder,
+        schema,
         path: &FieldPath::Root,
     };
     let ok = check_members(
@@ -778,6 +787,8 @@ fn typed_value(reader: &Reader<'_>, value: &Value, field_type: &FieldType) -> Fi
 #[derive(Clone, Copy)]
 struct Values<'p> {
     holder: Holder<'p>,
+    /// The schema document's own schema, which holds every type checked.
+    schema: &'p Arc<Schema>,
     path: &'p FieldPath<'p>,
 }
 
@@ -843,18 +854,15 @@ fn check_value<'a>(
                 );
                 return false;
             }
-            // The path is written out only for a reference that is kept.
-            let field = if references.records() {
-                references.field_path(field_type, at.path)
-            } else {
-                Rc::from("")
-            };
-            reader.reference(
-                references,
+            // The field path is the recorder's to write out, once a type.
+            let site = reader.site(
                 Target::Definition { kind: target, id },
-                (Role::Field { field: &field }, at.holder),
+                (Role::Field { field: "" }, at.holder),
                 value.span(),
             );
+            if !references.check_field(&site, (at.schema, field_type), at.path) {
+                reader.report(value.span(), Code::Reference, message(&site));
+            }
             true
         }
         FieldType::Json => true,
@@ -929,7 +937,7 @@ mod tests {
         let world =
             crate::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/basic"))
                 .expect("the fixture is valid");
-        let mut references = References::new(false);
+        let mut references = References::new(false, std::rc::Rc::default());
         references.render_layers_declared(&world.profile().render_layers);
         let proto = |id| Target::Definition { kind: "proto", id };
         let anchor = Target::Anchor {

@@ -44,6 +44,8 @@ terrain profile/transitions.jsonc "with": ["nope"]
   profile/transitions.jsonc 1233..1239 40:20 ref.unresolved no terrain "nope"
 terrain profile/transitions.jsonc "0": "nope"
   profile/transitions.jsonc 814..820 22:18 ref.unresolved no proto definition "nope"
+basic profile/profile.jsonc a render layer named zone as a ground layer
+  profile/profile.jsonc 266..272 7:30 ref.unresolved ground layer "zone" must be a render layer other than height or zone
 basic every proto
   planes/overworld/layers/0/0_0.jsonc 7149..7156 156:29 ref.unresolved no proto definition "xtree"
   planes/overworld/layers/0/0_0.jsonc 7214..7221 157:56 ref.unresolved no proto definition "xwall"

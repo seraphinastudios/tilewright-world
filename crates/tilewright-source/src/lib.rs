@@ -598,7 +598,11 @@ pub fn load_edited_in(
 ///
 /// Indexing costs memory in proportion to the references, about 36 bytes
 /// each plus their distinct strings, and some time to sort them; the
-/// other loads record nothing.
+/// other loads record nothing. Recording stops at the load's first
+/// diagnostic, as the load then fails, so a broken tree costs about what
+/// a plain load of it does. A tree with more references, distinct strings
+/// or holders than 32 bits number is refused with a `source.budget`
+/// diagnostic, which only an indexed load gives.
 ///
 /// ```no_run
 /// use tilewright_source::{LoadOptions, Overlay, SourceRoot, index::Target};
@@ -671,18 +675,30 @@ fn load_recording(
     }
     let mut diagnostics = Diagnostics::new(options.maximum_diagnostics);
     let mut tree = files::Tree::in_root(root.platform(), options, overlay, diagnostics.total());
-    let mut references = schema::References::new(record);
+    let mut references = schema::References::new(record, diagnostics.total());
     let world = load_tree(&mut tree, &mut references, &mut diagnostics);
     diagnostics.append(tree.take_diagnostics());
     match world {
-        Some(world) if diagnostics.is_empty() => Ok((
-            World {
-                source_digest: tree.digest(),
-                files: tree.take_files(),
-                ..world
-            },
-            references.into_recorder(),
-        )),
+        Some(world) if diagnostics.is_empty() => {
+            let recorder = references.into_recorder();
+            // An index that could not hold every reference is refused,
+            // never cut short.
+            if recorder.as_ref().is_some_and(index::Recorder::overflowed) {
+                return Err(vec![Diagnostic::file(
+                    ".",
+                    Code::Budget,
+                    "the tree has more references, strings or holders than an index can number",
+                )]);
+            }
+            Ok((
+                World {
+                    source_digest: tree.digest(),
+                    files: tree.take_files(),
+                    ..world
+                },
+                recorder,
+            ))
+        }
         _ => Err(diagnostics.finish()),
     }
 }

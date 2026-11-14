@@ -51,8 +51,21 @@ pub(crate) fn read_chunk(
         &["format", "plane", "layer", "chunk", "terrain", "objects"],
     )?;
     let mut ok = reader.format(root, "tilewright.chunk/1");
+    let key = (address.layer, address.cx, address.cy);
+    let holder = Holder::Chunk {
+        plane: address.plane,
+        chunk: key,
+    };
     let plane_value = reader.required(root, "plane")?;
-    if reader.string(plane_value)? != address.plane {
+    // The chunk's `plane` names the plane it belongs to, which its path
+    // must agree with.
+    if reader.string(plane_value)? == address.plane {
+        references.follow(&reader.site(
+            Target::Plane(address.plane),
+            (Role::ChunkPlane, holder),
+            plane_value.span(),
+        ));
+    } else {
         reader.report(
             plane_value.span(),
             Code::NameMismatch,
@@ -81,11 +94,6 @@ pub(crate) fn read_chunk(
         );
         ok = false;
     }
-    let key = (address.layer, address.cx, address.cy);
-    let holder = Holder::Chunk {
-        plane: address.plane,
-        chunk: key,
-    };
     let cells = usize::from(address.size) * usize::from(address.size);
     let mut chunk = Chunk {
         path: path.to_owned(),

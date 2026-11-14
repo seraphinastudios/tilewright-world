@@ -1619,20 +1619,37 @@ fn plan_within(
     )
 }
 
+/// Budgets of at most `read_bytes` read and `work` work, as a caller
+/// that tightens both makes them.
+fn budgets(read_bytes: u64, work: u64) -> Budgets {
+    Budgets::default()
+        .with_read_bytes(read_bytes)
+        .with_work(work)
+}
+
 #[test]
 fn budgets_only_tighten_the_limits() {
+    let default = Budgets::default();
     assert_eq!(
-        Budgets::default(),
-        Budgets::new(limits::READ_BYTES, limits::WORK)
+        (default.read_bytes(), default.work()),
+        (limits::READ_BYTES, limits::WORK)
     );
-    assert_eq!(Budgets::new(u64::MAX, u64::MAX), Budgets::default());
-    let tight = Budgets::new(limits::READ_BYTES - 1, 7);
+    assert_eq!(budgets(u64::MAX, u64::MAX), default);
+    let tight = budgets(limits::READ_BYTES - 1, 7);
     assert_eq!(
         (tight.read_bytes(), tight.work()),
         (limits::READ_BYTES - 1, 7)
     );
-    let mixed = Budgets::new(3, limits::WORK + 1);
+    let mixed = budgets(3, limits::WORK + 1);
     assert_eq!((mixed.read_bytes(), mixed.work()), (3, limits::WORK));
+    // Each sets its own budget and keeps the other.
+    let read = default.with_read_bytes(5);
+    assert_eq!((read.read_bytes(), read.work()), (5, limits::WORK));
+    let work = default.with_work(6);
+    assert_eq!((work.read_bytes(), work.work()), (limits::READ_BYTES, 6));
+    // A later call sets the budget again, still at most its limit.
+    assert_eq!(read.with_read_bytes(u64::MAX), default);
+    assert_eq!(work.with_work(limits::WORK + 1), default);
 }
 
 #[test]
@@ -1644,13 +1661,13 @@ fn tight_budgets_refuse_what_the_default_ones_plan() {
     );
     let planned = planned(root, &tx);
     assert_eq!(planned.budgets(), Budgets::default());
-    let read = plan_within(root, &tx, Budgets::new(64, limits::WORK)).unwrap_err();
+    let read = plan_within(root, &tx, budgets(64, limits::WORK)).unwrap_err();
     assert!(has(&read, "tx.limit", "64 bytes"), "{read:#?}");
-    let work = plan_within(root, &tx, Budgets::new(limits::READ_BYTES, 64)).unwrap_err();
+    let work = plan_within(root, &tx, budgets(limits::READ_BYTES, 64)).unwrap_err();
     assert!(has(&work, "tx.limit", "64 bytes of work"), "{work:#?}");
     // At what it needs, it plans, with the same result.
-    let within = plan_within(root, &tx, Budgets::new(1 << 20, 1 << 20)).unwrap();
-    assert_eq!(within.budgets(), Budgets::new(1 << 20, 1 << 20));
+    let within = plan_within(root, &tx, budgets(1 << 20, 1 << 20)).unwrap();
+    assert_eq!(within.budgets(), budgets(1 << 20, 1 << 20));
     assert_eq!(within.sealed(), planned.sealed());
 }
 
@@ -1667,7 +1684,7 @@ fn the_undo_check_keeps_the_budgets_of_its_plan() {
     let (least, _) = boundary(|| heavy(16), &tx, Budget::Work);
     let tree = heavy(16);
     let root = tree.path();
-    let below = plan_within(root, &tx, Budgets::new(limits::READ_BYTES, least - 1)).unwrap();
+    let below = plan_within(root, &tx, budgets(limits::READ_BYTES, least - 1)).unwrap();
     let found = below.check_undo().unwrap_err();
     assert!(
         has(
@@ -1677,7 +1694,7 @@ fn the_undo_check_keeps_the_budgets_of_its_plan() {
         ) && has(&found, "tx.limit", &format!("{} bytes of work", least - 1)),
         "{found:#?}"
     );
-    plan_within(root, &tx, Budgets::new(limits::READ_BYTES, least))
+    plan_within(root, &tx, budgets(limits::READ_BYTES, least))
         .unwrap()
         .check_undo()
         .unwrap();
@@ -1694,7 +1711,7 @@ fn what_plans_within_tighter_budgets_plans_the_same_within_the_default_ones() {
         let root = tree.path();
         let text = revisiting_transaction(&mut random);
         let tx = transaction(&text);
-        let budgets = Budgets::new(random.below(24 << 10), random.below(160 << 10));
+        let budgets = budgets(random.below(24 << 10), random.below(160 << 10));
         let Ok(tight) = plan_within(root, &tx, budgets) else {
             outcomes[0] += 1;
             continue;

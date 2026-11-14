@@ -21,13 +21,22 @@
 //! and neither is anything a game's own code reads from them. Nothing in
 //! the format references a stairwell or an object uid, so neither is
 //! ever a [`Target`].
+//!
+//! A declaration that names another item is a reference: a definition's
+//! `type` names its definition type, and a chunk's `plane` names its
+//! plane. An item's own identity, such as a plane's `id` or a
+//! definition's `id`, is the item rather than a reference to it, so an
+//! item's own files and identity are found from the [`World`](crate::World)
+//! (its key, [`Chunk::path`](crate::Chunk::path), its plane's
+//! directory), not from the index.
+//!
+//! An indexed load records nothing once the load has a problem, since it
+//! then returns diagnostics and no index, and it refuses, with a
+//! `source.budget` diagnostic, a tree whose references, strings or holders
+//! would not fit the index's 32-bit numbering.
 
-use std::{
-    cmp::Ordering,
-    collections::{HashMap, hash_map::Entry},
-    fmt,
-    ops::Range,
-};
+use crate::schema::{FieldPath, FieldType, Schema};
+use std::{cmp::Ordering, collections::HashMap, fmt, ops::Range, sync::Arc};
 
 /// A chunk's key in [`Plane::chunks`](crate::Plane::chunks):
 /// `(layer, cx, cy)`.
@@ -99,6 +108,8 @@ pub enum Role<'a> {
     GroundPalette { layer: &'a str },
     /// An entry of a chunk's zone grid palette.
     ZonePalette,
+    /// A chunk's `plane`, which names the plane the chunk belongs to.
+    ChunkPlane,
     /// An object's `proto`.
     Proto,
     /// An object's `layer`, to a render layer.
@@ -359,6 +370,7 @@ impl ReferenceIndex {
             RoleKind::DefaultZone => Role::DefaultZone,
             RoleKind::GroundPalette => Role::GroundPalette { layer: argument },
             RoleKind::ZonePalette => Role::ZonePalette,
+            RoleKind::ChunkPlane => Role::ChunkPlane,
             RoleKind::Proto => Role::Proto,
             RoleKind::Layer => Role::Layer,
             RoleKind::PortalPlane => Role::PortalPlane,
@@ -486,6 +498,7 @@ enum RoleKind {
     DefaultZone,
     GroundPalette,
     ZonePalette,
+    ChunkPlane,
     Proto,
     Layer,
     PortalPlane,
@@ -519,6 +532,7 @@ fn split_role(role: Role<'_>) -> (RoleKind, Argument<'_>) {
         Role::DefaultZone => (RoleKind::DefaultZone, Argument::None),
         Role::GroundPalette { layer } => (RoleKind::GroundPalette, Argument::Text(layer)),
         Role::ZonePalette => (RoleKind::ZonePalette, Argument::None),
+        Role::ChunkPlane => (RoleKind::ChunkPlane, Argument::None),
         Role::Proto => (RoleKind::Proto, Argument::None),
         Role::Layer => (RoleKind::Layer, Argument::None),
         Role::PortalPlane => (RoleKind::PortalPlane, Argument::None),
@@ -642,77 +656,194 @@ pub(crate) struct Site<'a> {
     pub end: usize,
 }
 
+/// Most references, distinct strings or holders an index holds: each is
+/// numbered by a `u32`, and `u32::MAX` is kept as a marker.
+const MAXIMUM_COUNT: u32 = u32::MAX - 1;
+
+#[cfg(test)]
+thread_local! {
+    /// References recorded on this thread, so tests can tell when a load
+    /// records and when it stops.
+    pub(crate) static RECORDED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// A lower count limit for the recorders a test makes on its thread.
+    pub(crate) static TEST_MAXIMUM_COUNT: std::cell::Cell<Option<u32>> =
+        const { std::cell::Cell::new(None) };
+}
+
 /// Collects the references of one load, interning their strings as it
-/// goes; [`Recorder::finish`] sorts them into a [`ReferenceIndex`].
-#[derive(Default)]
+/// goes; [`Recorder::finish`] sorts them into a [`ReferenceIndex`]. A
+/// reference that would not fit the index's packed fields makes it
+/// refuse instead ([`Recorder::overflowed`]): nothing is ever cut short.
 pub(crate) struct Recorder {
     symbols: HashMap<Box<str>, u32>,
     names: Vec<Box<str>>,
     holders: HashMap<HolderKey, u32>,
     holder_entries: Vec<HolderEntry>,
     records: Vec<Record>,
+    /// The interned field path of each `reference` field type a value had,
+    /// by the address of the schema that holds the type and of the type.
+    /// Each entry keeps its schema alive, so while the recorder lives no
+    /// other schema can take that address, and the types inside it, which
+    /// an `Arc` never moves or changes, keep theirs: a key cannot go stale.
+    fields: HashMap<(usize, usize), (Arc<Schema>, u32)>,
+    /// Most records, strings or holders.
+    maximum: u32,
+    /// Something did not fit, and nothing more is recorded.
+    overflowed: bool,
 }
 
-/// `u32` from a count or offset that a load's bounds keep far below it;
-/// saturates rather than fail.
+impl Default for Recorder {
+    fn default() -> Self {
+        #[cfg(test)]
+        let maximum = TEST_MAXIMUM_COUNT.get().unwrap_or(MAXIMUM_COUNT);
+        #[cfg(not(test))]
+        let maximum = MAXIMUM_COUNT;
+        Self {
+            symbols: HashMap::new(),
+            names: Vec::new(),
+            holders: HashMap::new(),
+            holder_entries: Vec::new(),
+            records: Vec::new(),
+            fields: HashMap::new(),
+            maximum,
+            overflowed: false,
+        }
+    }
+}
+
+/// `value` as a `u32` below `u32::MAX`, which is kept as a marker; `None`
+/// when it does not fit.
+pub(crate) fn packed(value: usize) -> Option<u32> {
+    u32::try_from(value)
+        .ok()
+        .filter(|value| *value <= MAXIMUM_COUNT)
+}
+
+/// `u32` from a count the recorder has kept within [`MAXIMUM_COUNT`].
 fn narrow(value: usize) -> u32 {
-    u32::try_from(value).unwrap_or(u32::MAX)
+    packed(value).unwrap_or(MAXIMUM_COUNT)
 }
 
 impl Recorder {
-    fn intern(&mut self, text: &str) -> u32 {
-        if let Some(symbol) = self.symbols.get(text) {
-            return *symbol;
-        }
-        let symbol = narrow(self.names.len());
-        self.names.push(text.into());
-        self.symbols.insert(text.into(), symbol);
-        symbol
+    /// Whether a reference did not fit, so the index is refused.
+    pub const fn overflowed(&self) -> bool {
+        self.overflowed
     }
 
-    /// Interns the strings that may be empty as symbol 0's string would
-    /// be read back: an absent identity is never looked up.
-    fn intern_part(&mut self, text: &str) -> u32 {
+    /// `value` packed, or `None` after noting that it did not fit.
+    fn fit(&mut self, value: Option<u32>) -> Option<u32> {
+        if value.is_none() {
+            self.overflowed = true;
+        }
+        value
+    }
+
+    /// The next number of a table of `length` entries.
+    fn next(&mut self, length: usize) -> Option<u32> {
+        let maximum = self.maximum;
+        self.fit(packed(length).filter(|next| *next < maximum))
+    }
+
+    fn intern(&mut self, text: &str) -> Option<u32> {
+        if let Some(symbol) = self.symbols.get(text) {
+            return Some(*symbol);
+        }
+        let symbol = self.next(self.names.len())?;
+        self.names.push(text.into());
+        self.symbols.insert(text.into(), symbol);
+        Some(symbol)
+    }
+
+    /// Interns a part that may be empty, which symbol 0, the empty string,
+    /// stands for.
+    fn intern_part(&mut self, text: &str) -> Option<u32> {
         if text.is_empty() {
-            0
+            Some(0)
         } else {
             self.intern(text)
         }
     }
 
     pub fn record(&mut self, site: &Site<'_>) {
+        let _ = self.try_record(site, None);
+    }
+
+    /// Records a value of the `reference` field type `field_type` of
+    /// `schema`, at field path `path`, which is written out and interned
+    /// only the first time a value of that type is recorded. `site`'s role
+    /// is [`Role::Field`]; its path is taken from here.
+    pub fn record_field(
+        &mut self,
+        site: &Site<'_>,
+        (schema, field_type): (&Arc<Schema>, &FieldType),
+        path: &FieldPath<'_>,
+    ) {
+        if self.overflowed {
+            return;
+        }
+        let key = (
+            Arc::as_ptr(schema).addr(),
+            std::ptr::from_ref(field_type).addr(),
+        );
+        let symbol = if let Some((_, symbol)) = self.fields.get(&key) {
+            *symbol
+        } else {
+            let Some(symbol) = self.intern(&path.render()) else {
+                return;
+            };
+            self.fields.insert(key, (Arc::clone(schema), symbol));
+            symbol
+        };
+        let _ = self.try_record(site, Some(symbol));
+    }
+
+    /// Records `site`, with `argument` as its role's symbol when given.
+    /// `None` when it did not fit, which refuses the index.
+    fn try_record(&mut self, site: &Site<'_>, argument: Option<u32>) -> Option<()> {
+        if self.overflowed {
+            return None;
+        }
         // Symbol 0 is the empty string, which absent parts name.
         if self.names.is_empty() {
-            self.intern("");
+            self.intern("")?;
         }
         let (kind, a, b) = split_target(site.target);
         let target = TargetKey {
             kind,
-            a: self.intern(a),
-            b: self.intern_part(b),
+            a: self.intern(a)?,
+            b: self.intern_part(b)?,
         };
-        let (role, argument) = split_role(site.role);
-        let argument = match argument {
-            Argument::None => 0,
-            Argument::Text(text) => self.intern(text),
-            Argument::Flag(flag) => u32::from(flag),
+        let (role, text) = split_role(site.role);
+        let argument = match (argument, text) {
+            (Some(symbol), _) => symbol,
+            (None, Argument::None) => 0,
+            (None, Argument::Text(text)) => self.intern(text)?,
+            (None, Argument::Flag(flag)) => u32::from(flag),
         };
         let (holder_kind, holder_a, holder_b, chunk, ordinal) = split_holder(site.holder);
         let key = HolderKey {
             kind: holder_kind,
-            a: self.intern_part(holder_a),
-            b: self.intern_part(holder_b),
+            a: self.intern_part(holder_a)?,
+            b: self.intern_part(holder_b)?,
             chunk,
         };
-        let file = self.intern(site.file);
-        let holder = match self.holders.entry(key) {
-            Entry::Occupied(entry) => *entry.get(),
-            Entry::Vacant(entry) => {
-                let position = narrow(self.holder_entries.len());
-                self.holder_entries.push(HolderEntry { key, file });
-                *entry.insert(position)
-            }
+        let file = self.intern(site.file)?;
+        let holder = if let Some(holder) = self.holders.get(&key) {
+            *holder
+        } else {
+            let position = self.next(self.holder_entries.len())?;
+            self.holder_entries.push(HolderEntry { key, file });
+            self.holders.insert(key, position);
+            position
         };
+        let ordinal = match ordinal {
+            None => NO_ORDINAL,
+            // An ordinal is below the marker, which means none.
+            Some(ordinal) => self.fit(packed(ordinal).filter(|o| *o < NO_ORDINAL))?,
+        };
+        let (start, end) = (packed(site.start), packed(site.end));
+        let (start, end) = (self.fit(start)?, self.fit(end)?);
+        self.next(self.records.len())?;
         self.records.push(Record {
             kind: target.kind,
             a: target.a,
@@ -720,10 +851,13 @@ impl Recorder {
             role,
             argument,
             holder,
-            ordinal: ordinal.map_or(NO_ORDINAL, |ordinal| narrow(ordinal).min(NO_ORDINAL - 1)),
-            start: narrow(site.start),
-            end: narrow(site.end),
+            ordinal,
+            start,
+            end,
         });
+        #[cfg(test)]
+        RECORDED.with(|recorded| recorded.set(recorded.get() + 1));
+        Some(())
     }
 
     /// The index: strings sorted, every symbol renumbered to match, and
@@ -897,6 +1031,47 @@ mod tests {
             start,
             end: start + 3,
         }
+    }
+
+    #[test]
+    fn a_value_is_packed_only_below_the_marker() {
+        use super::packed;
+        assert_eq!(packed(0), Some(0));
+        let largest = usize::try_from(u32::MAX - 1).unwrap();
+        assert_eq!(packed(largest), Some(u32::MAX - 1));
+        assert_eq!(packed(largest + 1), None);
+        assert_eq!(packed(usize::MAX), None);
+    }
+
+    #[test]
+    fn a_record_that_does_not_fit_refuses_the_index() {
+        let mut recorder = Recorder::default();
+        recorder.record(&Site {
+            start: usize::MAX,
+            ..site(Target::Plane("p"), Holder::Manifest, "world.jsonc", 0)
+        });
+        assert!(recorder.overflowed());
+        // Nothing more is recorded once one did not fit.
+        recorder.record(&site(
+            Target::Plane("p"),
+            Holder::Manifest,
+            "world.jsonc",
+            0,
+        ));
+        assert!(recorder.overflowed());
+        assert_eq!(recorder.finish().len(), 0);
+        let mut ordinal = Recorder::default();
+        ordinal.record(&site(
+            Target::Plane("p"),
+            Holder::Object {
+                plane: "p",
+                chunk: (0, 0, 0),
+                ordinal: usize::try_from(u32::MAX).unwrap(),
+            },
+            "c.jsonc",
+            0,
+        ));
+        assert!(ordinal.overflowed());
     }
 
     #[test]
