@@ -9,6 +9,6 @@
     "tilewright-diff",
     "tilewright-edit"
   ],
-  "private": ["tilewright-cli", "tilewright-pack-wasm"],
+  "private": ["tilewright-cli", "tilewright-mcp", "tilewright-pack-wasm"],
   "abandoned": []
 }

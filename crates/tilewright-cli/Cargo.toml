@@ -1,6 +1,6 @@
 [package]
 name = "tilewright-cli"
-description = "Command-line tools for Tilewright worlds: validate sources, compile and inspect content packs, compare IDs"
+description = "Command-line tools for Tilewright worlds: validate sources, compile and inspect content packs, compare IDs, serve read-only MCP queries"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,6 +17,7 @@ path = "src/main.rs"
 tilewright-diff.workspace = true
 tilewright-edit.workspace = true
 tilewright-jsonc.workspace = true
+tilewright-mcp.workspace = true
 tilewright-pack.workspace = true
 tilewright-source.workspace = true
 

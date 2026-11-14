@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 //! `tilewright`: validate world sources, compile packs, inspect them,
-//! compare the IDs of two worlds, and preview, rebase and apply
-//! transactions.
+//! compare the IDs of two worlds, preview, rebase and apply transactions,
+//! and serve read-only queries over a source tree to MCP clients.
 
 mod diff;
 mod tx;
@@ -24,6 +24,7 @@ const USAGE: &str = "usage:
   tilewright tx preview [--json] TRANSACTION ROOT
   tilewright tx rebase TRANSACTION ROOT OUTPUT
   tilewright tx apply [--unchecked-access] TRANSACTION ROOT INVERSE
+  tilewright mcp --root ROOT
   tilewright --version
 
 inspect verifies the pack. It stops once the chunks decode to more than
@@ -49,7 +50,12 @@ that. Each command refuses a transaction that could not be undone and
 redone within the limits of a transaction (TRANSACTIONS.md section 8.1),
 but for one: at the load's entry budget (1000000 entries), an undo, or the
 repair of an interrupted apply, can need one more entry for each directory
-the transaction made, and is then refused (section 9 says what to do).";
+the transaction made, and is then refused (section 9 says what to do).
+
+mcp serves read-only queries over the source tree ROOT to a Model Context
+Protocol client, over standard input and output (docs/MCP.md). It never
+writes; it loads ROOT at start and when the client calls its refresh tool,
+and it starts on a tree that does not load, whose diagnostics it serves.";
 
 fn main() -> ExitCode {
     // Paths need not be UTF-8, so arguments are read as OS strings.
@@ -61,6 +67,12 @@ fn main() -> ExitCode {
     {
         return diff::main(options);
     }
+    // `mcp` serves until its input ends.
+    if let [command, options @ ..] = arguments.as_slice()
+        && *command == "mcp"
+    {
+        return mcp(options);
+    }
     match run(&arguments) {
         Ok(output) => {
             print!("{output}");
@@ -71,6 +83,33 @@ fn main() -> ExitCode {
             if !message.is_empty() {
                 eprintln!("tilewright: {message}");
             }
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Runs the MCP server on `--root ROOT` over standard input and output.
+/// Diagnostics go to standard error; standard output carries only
+/// protocol messages.
+fn mcp(options: &[&OsStr]) -> ExitCode {
+    let [flag, root] = options else {
+        eprintln!("tilewright: {}", terminal_safe(USAGE));
+        return ExitCode::FAILURE;
+    };
+    if *flag != "--root" {
+        eprintln!("tilewright: {}", terminal_safe(USAGE));
+        return ExitCode::FAILURE;
+    }
+    // The server's version is the `--version` line's, without the name.
+    let version = version();
+    let version = version.trim_end().trim_start_matches("tilewright ");
+    let mut server = tilewright_mcp::Server::open(Path::new(root), version);
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    match server.serve(stdin.lock(), stdout.lock(), &mut std::io::stderr()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("tilewright: mcp: {}", field(&error.to_string()));
             ExitCode::FAILURE
         }
     }
@@ -126,23 +165,11 @@ fn terminal_safe(text: &str) -> String {
     )
 }
 
-/// Writes `text` as a JSON string with every control character escaped in
-/// JSON's `\u00XX` form, DEL and C1 controls included, so JSON output needs
-/// no further escaping to be safe for a terminal.
-fn json_string(text: &str, output: &mut String) {
-    output.push('"');
-    for character in text.chars() {
-        match character {
-            '"' => output.push_str("\\\""),
-            '\\' => output.push_str("\\\\"),
-            character if character.is_control() => {
-                let _ = write!(output, "\\u{:04x}", u32::from(character));
-            }
-            character => output.push(character),
-        }
-    }
-    output.push('"');
-}
+/// JSON strings escape every control character in JSON's `\u00XX` form,
+/// DEL and C1 controls included, so JSON output needs no further escaping
+/// to be safe for a terminal. The MCP server writes its strings the same
+/// way.
+use tilewright_mcp::json_string;
 
 /// Runs a command. Its human-readable output is also made
 /// [`terminal_safe`]; JSON output escapes control characters itself and is

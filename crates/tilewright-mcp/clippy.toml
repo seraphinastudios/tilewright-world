@@ -1,0 +1,50 @@
+# Clippy reads the first clippy.toml it finds from the crate's directory up,
+# so this file replaces the workspace's for this crate: the workspace's
+# settings are repeated here. The lint levels stay in the workspace's
+# Cargo.toml, whose `all = "deny"` makes the two lists below errors.
+doc-valid-idents = ["SQLite", "PostgreSQL", "WebAssembly", ".."]
+
+# The server is read-only by construction (docs/MCP.md): nothing in this
+# crate may write, create, rename, remove, lock or publish a file, start a
+# process or open a network connection. Tests that copy fixtures allow
+# these lints where they do so, and nowhere else.
+disallowed-methods = [
+  { path = "std::fs::write", reason = "the MCP server never writes" },
+  { path = "std::fs::copy", reason = "the MCP server never writes" },
+  { path = "std::fs::create_dir", reason = "the MCP server never writes" },
+  { path = "std::fs::create_dir_all", reason = "the MCP server never writes" },
+  { path = "std::fs::remove_file", reason = "the MCP server never writes" },
+  { path = "std::fs::remove_dir", reason = "the MCP server never writes" },
+  { path = "std::fs::remove_dir_all", reason = "the MCP server never writes" },
+  { path = "std::fs::rename", reason = "the MCP server never writes" },
+  { path = "std::fs::hard_link", reason = "the MCP server never writes" },
+  { path = "std::fs::set_permissions", reason = "the MCP server never writes" },
+  { path = "std::fs::File::create", reason = "the MCP server never writes" },
+  { path = "std::fs::File::create_new", reason = "the MCP server never writes" },
+  { path = "std::fs::File::options", reason = "the MCP server never writes" },
+  { path = "std::fs::OpenOptions::new", reason = "the MCP server never writes" },
+  { path = "std::process::Command::new", reason = "the MCP server starts no process" },
+  { path = "std::net::TcpStream::connect", reason = "the MCP server opens no connection" },
+  { path = "std::net::TcpListener::bind", reason = "the MCP server opens no connection" },
+  { path = "std::net::UdpSocket::bind", reason = "the MCP server opens no connection" },
+  { path = "tilewright_source::SourceRoot::directory", reason = "it can create directories and hands out a writable directory" },
+  { path = "tilewright_source::SourceRoot::make_directory", reason = "the MCP server never writes" },
+  { path = "tilewright_source::SourceRoot::lock", reason = "the MCP server never locks the tree" },
+  # The toolkit's publishing and writing entry points. tilewright-edit is
+  # not a dependency of this crate and tilewright-pack only one of
+  # tilewright-diff, so these cannot be called today; Clippy skips a path it
+  # cannot resolve, and these take effect if either becomes a dependency.
+  { path = "tilewright_edit::Plan::publish", reason = "the MCP server never publishes" },
+  { path = "tilewright_edit::Plan::publish_with", reason = "the MCP server never publishes" },
+  { path = "tilewright_edit::write_new", reason = "the MCP server never writes" },
+  { path = "tilewright_pack::write_pack", reason = "the MCP server never writes" },
+]
+disallowed-types = [
+  { path = "std::fs::OpenOptions", reason = "the MCP server never writes" },
+  { path = "std::process::Command", reason = "the MCP server starts no process" },
+  { path = "std::net::TcpStream", reason = "the MCP server opens no connection" },
+  { path = "std::net::TcpListener", reason = "the MCP server opens no connection" },
+  { path = "std::net::UdpSocket", reason = "the MCP server opens no connection" },
+  { path = "tilewright_source::SourceDirectory", reason = "it writes, renames and removes entries" },
+  { path = "tilewright_source::SourceLock", reason = "the MCP server never locks the tree" },
+]

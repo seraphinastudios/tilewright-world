@@ -4,6 +4,7 @@ members = [
   "crates/tilewright-diff",
   "crates/tilewright-edit",
   "crates/tilewright-jsonc",
+  "crates/tilewright-mcp",
   "crates/tilewright-pack",
   "crates/tilewright-pack-wasm",
   "crates/tilewright-source",
@@ -24,6 +25,8 @@ readme = "README.md"
 tilewright-diff = { path = "crates/tilewright-diff", version = "=0.2.0" }
 tilewright-edit = { path = "crates/tilewright-edit", version = "=0.2.0" }
 tilewright-jsonc = { path = "crates/tilewright-jsonc", version = "=0.2.0" }
+# Unpublished, so it has no version requirement.
+tilewright-mcp = { path = "crates/tilewright-mcp" }
 tilewright-pack = { path = "crates/tilewright-pack", version = "=0.2.0" }
 tilewright-source = { path = "crates/tilewright-source", version = "=0.2.0" }
 rustix = { version = "1.1.5", features = ["fs", "process"] }
