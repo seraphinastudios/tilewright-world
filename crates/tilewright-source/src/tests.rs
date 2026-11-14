@@ -10,6 +10,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod index;
+
 fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/basic")
 }

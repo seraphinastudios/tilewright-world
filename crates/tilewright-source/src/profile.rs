@@ -5,10 +5,11 @@
 
 use crate::diagnostic::Diagnostics;
 use crate::{
-    Code, Diagnostic, MAXIMUM_GROUND_LAYERS, MAXIMUM_LAYER_HEIGHT, Movement, Profile, Projection,
+    Code, MAXIMUM_GROUND_LAYERS, MAXIMUM_LAYER_HEIGHT, Movement, Profile, Projection,
     files::{Tree, is_jsonc_path},
+    index::{Holder, Role, Site, Target},
     read::Reader,
-    schema::{Schema, read_schema},
+    schema::{References, Schema, SchemaTarget, read_schema},
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -18,6 +19,7 @@ use std::{
 /// Reads `world.jsonc`: the profile path and the plane list.
 pub(crate) fn read_manifest(
     tree: &mut Tree<'_>,
+    references: &References,
     diagnostics: &mut Diagnostics,
 ) -> Option<(String, Vec<String>)> {
     let source = tree.document("world.jsonc")?;
@@ -34,35 +36,57 @@ pub(crate) fn read_manifest(
         );
         return None;
     }
-    let planes = reader.identifiers(reader.required(root, "planes")?)?;
+    references.follow(&reader.site(
+        Target::File(profile),
+        (Role::ManifestProfile, Holder::Manifest),
+        profile_value.span(),
+    ));
+    let planes_value = reader.required(root, "planes")?;
+    let planes = reader.identifiers(planes_value)?;
+    // Whether each plane's directory is there is the plane reading's to
+    // report.
+    for (plane, value) in planes
+        .iter()
+        .zip(planes_value.as_array().unwrap_or_default())
+    {
+        references.follow(&reader.site(
+            Target::Plane(plane),
+            (Role::ManifestPlane, Holder::Manifest),
+            value.span(),
+        ));
+    }
     format_ok.then(|| (profile.to_owned(), planes))
 }
 
 /// Whether every reference field of `schema` targets a declared definition
-/// type; reports each one that does not.
+/// type; reports each one that does not, on the schema as a whole.
 fn references_resolve(
     schema: &Schema,
-    type_names: &BTreeSet<String>,
+    targets: &[SchemaTarget],
+    references: &References,
     diagnostics: &mut Diagnostics,
 ) -> bool {
     let mut ok = true;
-    for (name, spec) in schema.fields() {
-        spec.field_type.targets(name, &mut |field, target| {
-            if !type_names.contains(target) {
-                diagnostics.push(Diagnostic::file(
-                    &schema.path,
-                    Code::Reference,
-                    format!("field \"{field}\" references unknown definition type \"{target}\""),
-                ));
-                ok = false;
-            }
-        });
+    for target in targets {
+        ok &= references.check_file(
+            &Site {
+                target: Target::DefinitionType(&target.target),
+                role: Role::SchemaTarget {
+                    field: &target.field,
+                },
+                holder: Holder::Schema { path: &schema.path },
+                file: &schema.path,
+                start: target.span.start,
+                end: target.span.end,
+            },
+            diagnostics,
+        );
     }
     ok
 }
 
 /// What a schema document is for.
-enum Role {
+enum Purpose {
     Definition(String),
     ObjectFields,
     ZoneProperties,
@@ -86,6 +110,7 @@ fn beside(profile: &str, relative: &str) -> String {
 pub(crate) fn read_profile(
     tree: &mut Tree<'_>,
     path: &str,
+    references: &mut References,
     diagnostics: &mut Diagnostics,
 ) -> Option<(Profile, Option<String>)> {
     let source = tree.document(path)?;
@@ -158,6 +183,7 @@ pub(crate) fn read_profile(
         return None;
     }
     let render_layers = reader.identifiers(render_value)?;
+    references.render_layers_declared(&render_layers);
     let ground_value = reader.required(root, "ground_layers")?;
     if ground_value
         .as_array()
@@ -172,11 +198,18 @@ pub(crate) fn read_profile(
     }
     let ground_layers = reader.identifiers(ground_value)?;
     for (index, layer) in ground_layers.iter().enumerate() {
-        if !render_layers.contains(layer) || ["height", "zone"].contains(&layer.as_str()) {
-            let span = ground_value
-                .as_array()
-                .and_then(|items| items.get(index))
-                .map_or(ground_value.span(), tilewright_jsonc::Value::span);
+        let span = ground_value
+            .as_array()
+            .and_then(|items| items.get(index))
+            .map_or(ground_value.span(), tilewright_jsonc::Value::span);
+        // A ground layer must be a render layer, and not one whose name a
+        // chunk's terrain keeps for its other grids; one message says both.
+        let resolves = references.check(&reader.site(
+            Target::RenderLayer(layer),
+            (Role::ProfileGroundLayer, Holder::Profile),
+            span,
+        ));
+        if !resolves || ["height", "zone"].contains(&layer.as_str()) {
             reader.report(
                 span,
                 Code::Reference,
@@ -199,7 +232,15 @@ pub(crate) fn read_profile(
     };
     let transitions = match root.get("transitions") {
         Some(value) => match reader.string(value) {
-            Some(text) if is_jsonc_path(text) => Some(beside(path, text)),
+            Some(text) if is_jsonc_path(text) => {
+                let resolved = beside(path, text);
+                references.follow(&reader.site(
+                    Target::File(&resolved),
+                    (Role::ProfileTransitions, Holder::Profile),
+                    value.span(),
+                ));
+                Some(resolved)
+            }
             Some(_) => {
                 reader.report(
                     value.span(),
@@ -252,7 +293,15 @@ pub(crate) fn read_profile(
             ok = false;
             continue;
         };
-        schema_paths.push((Role::Definition(member.key.clone()), beside(path, schema)));
+        let resolved = beside(path, schema);
+        if let Some(value) = entry.get("schema") {
+            references.follow(&reader.site(
+                Target::File(&resolved),
+                (Role::ProfileSchema, Holder::Profile),
+                value.span(),
+            ));
+        }
+        schema_paths.push((Purpose::Definition(member.key.clone()), resolved));
     }
     if !types_value
         .as_object()
@@ -265,9 +314,9 @@ pub(crate) fn read_profile(
         );
         ok = false;
     }
-    for (key, role) in [
-        ("object_fields", Role::ObjectFields),
-        ("zone_properties", Role::ZoneProperties),
+    for (key, purpose) in [
+        ("object_fields", Purpose::ObjectFields),
+        ("zone_properties", Purpose::ZoneProperties),
     ] {
         let Some(value) = reader.required(root, key) else {
             ok = false;
@@ -275,7 +324,13 @@ pub(crate) fn read_profile(
         };
         match reader.string(value) {
             Some(text) if is_jsonc_path(text) => {
-                schema_paths.push((role, beside(path, text)));
+                let resolved = beside(path, text);
+                references.follow(&reader.site(
+                    Target::File(&resolved),
+                    (Role::ProfileSchema, Holder::Profile),
+                    value.span(),
+                ));
+                schema_paths.push((purpose, resolved));
             }
             Some(_) => {
                 reader.report(
@@ -290,11 +345,12 @@ pub(crate) fn read_profile(
     }
     let type_names: BTreeSet<String> = schema_paths
         .iter()
-        .filter_map(|(role, _)| match role {
-            Role::Definition(kind) => Some(kind.clone()),
+        .filter_map(|(purpose, _)| match purpose {
+            Purpose::Definition(kind) => Some(kind.clone()),
             _ => None,
         })
         .collect();
+    references.profile_declared(&ground_layers, &type_names);
 
     // Each schema path is read and checked once; roles that name the same
     // path share one schema. `None` marks a schema that failed.
@@ -302,13 +358,15 @@ pub(crate) fn read_profile(
     let mut definition_types = BTreeMap::new();
     let mut object_fields = None;
     let mut zone_properties = None;
-    for (role, schema_path) in schema_paths {
+    for (purpose, schema_path) in schema_paths {
         let schema = if let Some(schema) = loaded.get(&schema_path) {
             schema.clone()
         } else {
             let schema = read_schema(tree, &schema_path, diagnostics)
-                .filter(|schema| references_resolve(schema, &type_names, diagnostics))
-                .map(Arc::new);
+                .filter(|(schema, targets)| {
+                    references_resolve(schema, targets, references, diagnostics)
+                })
+                .map(|(schema, _)| Arc::new(schema));
             loaded.insert(schema_path, schema.clone());
             schema
         };
@@ -316,12 +374,12 @@ pub(crate) fn read_profile(
             ok = false;
             continue;
         };
-        match role {
-            Role::Definition(kind) => {
+        match purpose {
+            Purpose::Definition(kind) => {
                 definition_types.insert(kind, schema);
             }
-            Role::ObjectFields => object_fields = Some(schema),
-            Role::ZoneProperties => zone_properties = Some(schema),
+            Purpose::ObjectFields => object_fields = Some(schema),
+            Purpose::ZoneProperties => zone_properties = Some(schema),
         }
     }
     let (Some(object_fields), Some(zone_properties)) = (object_fields, zone_properties) else {

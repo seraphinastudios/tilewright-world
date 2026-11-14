@@ -34,6 +34,7 @@ mod chunk;
 mod defs;
 mod diagnostic;
 mod files;
+pub mod index;
 mod plane;
 mod profile;
 mod read;
@@ -50,7 +51,8 @@ pub use access::{
 };
 use diagnostic::Diagnostics;
 pub use diagnostic::{Code, Diagnostic};
-pub use files::is_jsonc_path;
+pub use files::{SourceFile, is_jsonc_path};
+pub use index::ReferenceIndex;
 pub use read::{is_identifier, is_namespace};
 pub use schema::{FieldSpec, FieldType, MAXIMUM_FIELD_DEPTH, MAXIMUM_LIST_ITEMS, Schema};
 pub use transitions::{ResolvedChunk, TerrainSource, Transitions};
@@ -118,6 +120,7 @@ pub struct World {
     definitions: BTreeMap<(String, String), Definition>,
     object_uids: BTreeMap<String, ObjectLocation>,
     source_digest: [u8; 32],
+    files: BTreeMap<String, SourceFile>,
 }
 
 impl World {
@@ -142,6 +145,17 @@ impl World {
     #[must_use]
     pub const fn source_digest(&self) -> [u8; 32] {
         self.source_digest
+    }
+
+    /// Every file the load read, which [`World::source_digest`] covers, by
+    /// root-relative `/`-separated path, each with its length and SHA-256
+    /// as read. An overlay's files are listed as the overlay gave them. A
+    /// file the layout lets the loader ignore, such as one under
+    /// `profile/` that the profile does not name, is not read, so it is
+    /// not listed, and changing it does not change the digest.
+    #[must_use]
+    pub const fn files(&self) -> &BTreeMap<String, SourceFile> {
+        &self.files
     }
 
     /// Every object uid of the world, with where its object is. Uids are
@@ -567,6 +581,41 @@ pub fn load_edited_in(
     options: &LoadOptions,
     overlay: &Overlay,
 ) -> Result<World, Vec<Diagnostic>> {
+    load_recording(root, options, overlay, false).map(|(world, _)| world)
+}
+
+/// Loads the tree of an opened root as [`load_edited_in`] does, and also
+/// returns the index of its references: every reference the loader
+/// checks or follows, with its target, role, holder, file and span (see
+/// [`index`]). The world, and on failure the diagnostics, are those
+/// [`load_edited_in`] gives.
+///
+/// Indexing costs memory in proportion to the references, about 36 bytes
+/// each plus their distinct strings, and some time to sort them; the
+/// other loads record nothing.
+///
+/// # Errors
+/// Returns every diagnostic found, sorted by path and position.
+pub fn load_indexed_in(
+    root: &SourceRoot,
+    options: &LoadOptions,
+    overlay: &Overlay,
+) -> Result<(World, ReferenceIndex), Vec<Diagnostic>> {
+    load_recording(root, options, overlay, true).map(|(world, recorder)| {
+        (
+            world,
+            recorder.map(index::Recorder::finish).unwrap_or_default(),
+        )
+    })
+}
+
+/// Loads the tree, recording its references when `record` is set.
+fn load_recording(
+    root: &SourceRoot,
+    options: &LoadOptions,
+    overlay: &Overlay,
+    record: bool,
+) -> Result<(World, Option<index::Recorder>), Vec<Diagnostic>> {
     // At least one diagnostic is kept, so a failed load always says why.
     let options = &LoadOptions {
         limits: within_format(options.limits),
@@ -604,13 +653,18 @@ pub fn load_edited_in(
     }
     let mut diagnostics = Diagnostics::new(options.maximum_diagnostics);
     let mut tree = files::Tree::in_root(root.platform(), options, overlay, diagnostics.total());
-    let world = load_tree(&mut tree, &mut diagnostics);
+    let mut references = schema::References::new(record);
+    let world = load_tree(&mut tree, &mut references, &mut diagnostics);
     diagnostics.append(tree.take_diagnostics());
     match world {
-        Some(world) if diagnostics.is_empty() => Ok(World {
-            source_digest: tree.digest(),
-            ..world
-        }),
+        Some(world) if diagnostics.is_empty() => Ok((
+            World {
+                source_digest: tree.digest(),
+                files: tree.take_files(),
+                ..world
+            },
+            references.into_recorder(),
+        )),
         _ => Err(diagnostics.finish()),
     }
 }
@@ -633,20 +687,24 @@ fn within_format(limits: Limits) -> Limits {
     }
 }
 
-fn load_tree(tree: &mut files::Tree, diagnostics: &mut Diagnostics) -> Option<World> {
-    let (manifest_path, plane_ids) = profile::read_manifest(tree, diagnostics)?;
-    let (mut profile, transitions_path) = profile::read_profile(tree, &manifest_path, diagnostics)?;
-    let mut references = schema::References::new(&profile);
-    let definitions = defs::read_definitions(tree, &profile, &mut references, diagnostics);
+fn load_tree(
+    tree: &mut files::Tree,
+    references: &mut schema::References,
+    diagnostics: &mut Diagnostics,
+) -> Option<World> {
+    let (manifest_path, plane_ids) = profile::read_manifest(tree, references, diagnostics)?;
+    let (mut profile, transitions_path) =
+        profile::read_profile(tree, &manifest_path, references, diagnostics)?;
+    let definitions = defs::read_definitions(tree, &profile, references, diagnostics);
     // A transitions document that fails has reported why, so the load
     // fails with it.
     if let Some(path) = transitions_path {
         profile.transitions =
-            transitions::read_transitions(tree, &path, &profile, &references, diagnostics)
+            transitions::read_transitions(tree, &path, &profile, references, diagnostics)
                 .map(Arc::new);
     }
     let mut planes = BTreeMap::new();
-    for plane in plane::read_planes(tree, &profile, &plane_ids, &mut references, diagnostics) {
+    for plane in plane::read_planes(tree, &profile, &plane_ids, references, diagnostics) {
         planes.insert(plane.id.clone(), plane);
     }
     let object_uids = uid::index(&planes);
@@ -656,6 +714,7 @@ fn load_tree(tree: &mut files::Tree, diagnostics: &mut Diagnostics) -> Option<Wo
         definitions,
         object_uids,
         source_digest: [0; 32],
+        files: BTreeMap::new(),
     })
 }
 

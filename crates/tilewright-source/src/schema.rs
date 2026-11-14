@@ -5,12 +5,14 @@
 
 use crate::diagnostic::Diagnostics;
 use crate::{
-    Code, FieldValue, Plane, Profile,
+    Code, Diagnostic, FieldValue, Plane,
     files::Tree,
+    index::{Holder, Recorder, Role, Site, Target, message},
     read::{Reader, is_identifier},
     uid::Claims,
 };
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
@@ -123,24 +125,6 @@ pub enum FieldType {
     },
 }
 
-impl FieldType {
-    /// Calls `visit` with every reference target in this type, nested ones
-    /// included, and the dotted path of the field below this one that
-    /// holds it (`[]` stands for a list's items).
-    pub(crate) fn targets<'s>(&'s self, path: &str, visit: &mut impl FnMut(&str, &'s str)) {
-        match self {
-            Self::Reference { target } => visit(path, target),
-            Self::List { items, .. } => items.targets(&format!("{path}[]"), visit),
-            Self::Object { fields } => {
-                for (name, spec) in fields.fields() {
-                    spec.field_type.targets(&format!("{path}.{name}"), visit);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
 /// Whether `name` is a valid field name: `^[a-z][a-z0-9_]{0,63}$`.
 fn is_field_name(name: &str) -> bool {
     let bytes = name.as_bytes();
@@ -152,27 +136,46 @@ fn is_field_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_')
 }
 
-/// Reads a schema document at `path`.
+/// A `reference` field type of a schema: the field's path (names joined
+/// by `.`, `[]` for a list's items), its target type, and the span of
+/// the `target` value.
+pub(crate) struct SchemaTarget {
+    pub field: String,
+    pub target: String,
+    pub span: Span,
+}
+
+/// Reads a schema document at `path`, with its `reference` field types in
+/// declaration order, nested ones after the field that holds them.
 pub(crate) fn read_schema(
     tree: &mut Tree<'_>,
     path: &str,
     diagnostics: &mut Diagnostics,
-) -> Option<Schema> {
+) -> Option<(Schema, Vec<SchemaTarget>)> {
     let source = tree.document(path)?;
     let reader = Reader::new(&source, diagnostics);
     let root = reader.object(reader.root(), &["format", "fields"])?;
     let format_ok = reader.format(root, "tilewright.schema/1");
-    let schema = read_field_specs(&reader, reader.required(root, "fields")?, &path.into(), 0);
-    schema.filter(|_| format_ok)
+    let mut targets = Vec::new();
+    let schema = read_field_specs(
+        &reader,
+        reader.required(root, "fields")?,
+        &path.into(),
+        (0, ""),
+        &mut targets,
+    );
+    schema.filter(|_| format_ok).map(|schema| (schema, targets))
 }
 
 /// Reads a `fields` object of field specs. `depth` is the number of `list`
-/// and `object` types around it.
+/// and `object` types around it, and `field` the path of the field that
+/// holds it, empty at the top.
 fn read_field_specs<'a>(
     reader: &Reader<'a>,
     value: &'a Value,
     path: &Arc<str>,
-    depth: usize,
+    (depth, field): (usize, &str),
+    targets: &mut Vec<SchemaTarget>,
 ) -> Option<Schema> {
     let members = reader.members(value)?;
     let mut schema = Schema::new(Arc::clone(path));
@@ -188,7 +191,14 @@ fn read_field_specs<'a>(
             );
             ok = false;
         }
-        match read_spec(reader, &member.value, path, depth, true).filter(|_| named) {
+        let name = if field.is_empty() {
+            member.key.clone()
+        } else {
+            format!("{field}.{}", member.key)
+        };
+        match read_spec(reader, &member.value, path, (depth, &name), true, targets)
+            .filter(|_| named)
+        {
             Some((field_type, required)) => schema.push(
                 member.key.clone(),
                 FieldSpec {
@@ -204,14 +214,16 @@ fn read_field_specs<'a>(
 
 /// Reads one field spec: its type and whether it is required. List items
 /// are never missing, so they take no `required`: `takes_required` is
-/// `false` for them.
+/// `false` for them. `field` is the spec's path, which a `reference`
+/// type is collected in `targets` with.
 #[allow(clippy::too_many_lines)]
 fn read_spec<'a>(
     reader: &Reader<'a>,
     value: &'a Value,
     path: &Arc<str>,
-    depth: usize,
+    (depth, field): (usize, &str),
     takes_required: bool,
+    targets: &mut Vec<SchemaTarget>,
 ) -> Option<(FieldType, bool)> {
     if value.as_object().is_none() {
         reader.report(
@@ -326,10 +338,15 @@ fn read_spec<'a>(
                     values,
                 })
         }
-        Some("reference") => reader
-            .required(spec, "target")
-            .and_then(|target| reader.identifier(target))
-            .map(|target| FieldType::Reference { target }),
+        Some("reference") => reader.required(spec, "target").and_then(|value| {
+            let target = reader.identifier(value)?;
+            targets.push(SchemaTarget {
+                field: field.to_owned(),
+                target: target.clone(),
+                span: value.span(),
+            });
+            Some(FieldType::Reference { target })
+        }),
         Some("list") => {
             let count = |key, default| match spec.get(key) {
                 Some(value) => {
@@ -344,9 +361,17 @@ fn read_spec<'a>(
                 count("min_items", 0),
                 count("max_items", MAXIMUM_LIST_ITEMS),
             );
-            let items = reader
-                .required(spec, "items")
-                .and_then(|items| read_spec(reader, items, path, depth + 1, false));
+            let items = reader.required(spec, "items").and_then(|items| {
+                let items_field = format!("{field}[]");
+                read_spec(
+                    reader,
+                    items,
+                    path,
+                    (depth + 1, &items_field),
+                    false,
+                    targets,
+                )
+            });
             let bounds = ordered(
                 reader,
                 spec,
@@ -363,7 +388,7 @@ fn read_spec<'a>(
         }
         Some("object") => reader
             .required(spec, "fields")
-            .and_then(|fields| read_field_specs(reader, fields, path, depth + 1))
+            .and_then(|fields| read_field_specs(reader, fields, path, (depth + 1, field), targets))
             .map(|fields| FieldType::Object { fields }),
         _ => {
             reader.report(
@@ -410,52 +435,78 @@ fn read_values<'a>(reader: &Reader<'a>, value: &'a Value) -> Option<BTreeSet<Str
     ok.then_some(values)
 }
 
-/// What a reference names.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub(crate) enum Target {
-    Definition { kind: String, id: String },
-    Plane(String),
-    Anchor { plane: String, id: String },
-    RenderLayer(String),
-}
-
-impl Target {
-    /// The diagnostic message when the reference does not resolve.
-    pub fn message(&self) -> String {
-        match self {
-            Self::Definition { kind, id } => format!("no {kind} definition \"{id}\""),
-            Self::Plane(plane) => format!("no plane \"{plane}\""),
-            Self::Anchor { plane, id } => format!("no anchor \"{id}\" in plane \"{plane}\""),
-            Self::RenderLayer(layer) => {
-                format!("\"{layer}\" is not a render layer of the profile")
-            }
-        }
-    }
-}
-
 /// What references of one load may resolve to. Every target set is known
 /// before any reference to it is read, so each reference is checked as it
-/// is read and none is kept: render layers from the profile, definition keys
-/// from the `defs/` layout before any definition is parsed, and planes and
-/// their anchors before any chunk is read. It also holds the object uids
-/// claimed so far, so a duplicate is reported where it is read.
+/// is read: render layers, ground layers and definition types from the
+/// profile before its schemas are read, definition keys from the `defs/`
+/// layout before any definition is parsed, a plane's zones before its
+/// zone parents and default zone are checked, planes and their anchors
+/// before any chunk is read, and terrains before any transition. It also
+/// holds the object uids claimed so far, so a duplicate is reported where
+/// it is read.
+///
+/// Every reference the loader checks or follows goes through
+/// [`References::check`] or [`References::follow`], which also record it
+/// when the load builds a [`ReferenceIndex`](crate::ReferenceIndex).
 pub(crate) struct References {
     render_layers: BTreeSet<String>,
+    ground_layers: BTreeSet<String>,
+    definition_types: BTreeSet<String>,
     /// Definition IDs by type, from the file names under `defs/`.
     definitions: BTreeMap<String, BTreeSet<String>>,
     /// Anchor IDs by plane, for every plane that loaded.
     planes: BTreeMap<String, BTreeSet<String>>,
+    /// Zone IDs by plane, for every plane whose zones were read.
+    zones: BTreeMap<String, BTreeSet<String>>,
+    /// The terrains of the transitions document.
+    terrains: BTreeSet<String>,
     uids: Claims,
+    /// Present when the load records its references.
+    recorder: Option<RefCell<Recorder>>,
 }
 
 impl References {
-    pub fn new(profile: &Profile) -> Self {
+    /// The references of a load; `record` makes it keep them.
+    pub fn new(record: bool) -> Self {
         Self {
-            render_layers: profile.render_layers.iter().cloned().collect(),
+            render_layers: BTreeSet::new(),
+            ground_layers: BTreeSet::new(),
+            definition_types: BTreeSet::new(),
             definitions: BTreeMap::new(),
             planes: BTreeMap::new(),
+            zones: BTreeMap::new(),
+            terrains: BTreeSet::new(),
             uids: Claims::default(),
+            recorder: record.then(|| RefCell::new(Recorder::default())),
         }
+    }
+
+    /// Whether this load records its references, so that a caller builds
+    /// what only a record needs.
+    pub const fn records(&self) -> bool {
+        self.recorder.is_some()
+    }
+
+    /// The references recorded, if this load records them.
+    pub fn into_recorder(self) -> Option<Recorder> {
+        self.recorder.map(RefCell::into_inner)
+    }
+
+    /// Records the profile's render layers.
+    pub fn render_layers_declared<'n>(&mut self, layers: impl IntoIterator<Item = &'n String>) {
+        self.render_layers.extend(layers.into_iter().cloned());
+    }
+
+    /// Records the profile's ground layers and definition types.
+    pub fn profile_declared<'n>(
+        &mut self,
+        ground_layers: impl IntoIterator<Item = &'n String>,
+        definition_types: impl IntoIterator<Item = &'n String>,
+    ) {
+        self.ground_layers
+            .extend(ground_layers.into_iter().cloned());
+        self.definition_types
+            .extend(definition_types.into_iter().cloned());
     }
 
     /// Claims an object uid for an object of the chunk at `path`; see
@@ -471,6 +522,21 @@ impl References {
         }
     }
 
+    /// Records the zones of `plane` that read, before their parents and
+    /// the plane's default zone are checked.
+    pub fn zones_read<'z>(&mut self, plane: &str, zones: impl IntoIterator<Item = &'z String>) {
+        self.zones
+            .entry(plane.to_owned())
+            .or_default()
+            .extend(zones.into_iter().cloned());
+    }
+
+    /// Records the terrains of the transitions document, before any
+    /// transition is read.
+    pub fn terrains_declared<'t>(&mut self, terrains: impl IntoIterator<Item = &'t String>) {
+        self.terrains.extend(terrains.into_iter().cloned());
+    }
+
     /// Records a plane that loaded, with its anchors, before any chunk is
     /// read.
     pub fn plane_read(&mut self, plane: &Plane) {
@@ -478,10 +544,13 @@ impl References {
             .insert(plane.id.clone(), plane.anchors.keys().cloned().collect());
     }
 
-    /// Whether `target` resolves.
-    pub fn resolves(&self, target: &Target) -> bool {
-        match target {
+    /// Whether `target` resolves. A file always does here: whether it is
+    /// there is the reading's to report.
+    pub fn resolves(&self, target: &Target<'_>) -> bool {
+        match *target {
             Target::RenderLayer(layer) => self.render_layers.contains(layer),
+            Target::GroundLayer(layer) => self.ground_layers.contains(layer),
+            Target::DefinitionType(kind) => self.definition_types.contains(kind),
             Target::Definition { kind, id } => self
                 .definitions
                 .get(kind)
@@ -491,15 +560,73 @@ impl References {
                 .planes
                 .get(plane)
                 .is_some_and(|anchors| anchors.contains(id)),
+            Target::Zone { plane, id } => self
+                .zones
+                .get(plane)
+                .is_some_and(|zones| zones.contains(id)),
+            Target::Terrain(terrain) => self.terrains.contains(terrain),
+            Target::File(_) => true,
+        }
+    }
+
+    /// The one check of a reference: records it when this load records
+    /// references, and says whether it resolves. The caller reports one
+    /// that does not, with [`message`](crate::index::message).
+    pub fn check(&self, site: &Site<'_>) -> bool {
+        self.follow(site);
+        self.resolves(&site.target)
+    }
+
+    /// Records a reference that the layout, not a lookup, checks: a path
+    /// read as a document, a plane directory, a definition's directory.
+    pub fn follow(&self, site: &Site<'_>) {
+        if let Some(recorder) = &self.recorder {
+            recorder.borrow_mut().record(site);
+        }
+    }
+
+    /// Checks a reference whose problem is reported on its file as a
+    /// whole, without a position; returns whether it resolves.
+    pub fn check_file(&self, site: &Site<'_>, diagnostics: &mut Diagnostics) -> bool {
+        let resolves = self.check(site);
+        if !resolves {
+            diagnostics.push(Diagnostic::file(site.file, Code::Reference, message(site)));
+        }
+        resolves
+    }
+}
+
+/// Where a value is in a `fields` object, for the field path a recorded
+/// reference carries: built on the stack as values are checked, and
+/// written out only when a reference is recorded.
+#[derive(Clone, Copy)]
+pub(crate) enum FieldPath<'p> {
+    Root,
+    Field(&'p FieldPath<'p>, &'p str),
+    Items(&'p FieldPath<'p>),
+}
+
+impl FieldPath<'_> {
+    /// The path as [`Role::Field`](crate::index::Role::Field) documents
+    /// it: names joined by `.`, with `[]` for a list's items.
+    fn render(&self) -> String {
+        match self {
+            Self::Root => String::new(),
+            Self::Field(parent, name) => match parent.render() {
+                parent if parent.is_empty() => (*name).to_owned(),
+                parent => format!("{parent}.{name}"),
+            },
+            Self::Items(parent) => format!("{}[]", parent.render()),
         }
     }
 }
 
 /// Validates a `fields` object against `schema`. Missing required fields are
-/// reported at `owner`, the object holding `fields`.
+/// reported at `owner`, the object holding `fields`, and `holder` holds
+/// the references its values make.
 pub(crate) fn read_fields<'a>(
     reader: &Reader<'a>,
-    owner: &'a Value,
+    (owner, holder): (&'a Value, Holder<'_>),
     fields: Option<&'a Value>,
     schema: &Schema,
     references: &mut References,
@@ -509,12 +636,16 @@ pub(crate) fn read_fields<'a>(
         None => &[],
     };
     let mut output = Vec::with_capacity(members.len());
+    let at = Values {
+        holder,
+        path: &FieldPath::Root,
+    };
     let ok = check_members(
         reader,
         members,
         fields.unwrap_or(owner).span(),
         schema,
-        references,
+        (references, at),
         &mut |member, spec| {
             output.push((
                 member.key.clone(),
@@ -539,7 +670,7 @@ fn check_members<'a>(
     members: &'a [Member],
     owner: Span,
     schema: &Schema,
-    references: &mut References,
+    (references, at): (&mut References, Values<'_>),
     accept: &mut dyn FnMut(&'a Member, &FieldSpec),
 ) -> bool {
     let mut ok = true;
@@ -559,7 +690,9 @@ fn check_members<'a>(
         if spec.required {
             present.insert(position);
         }
-        if check_value(reader, &member.value, &spec.field_type, references) {
+        let path = FieldPath::Field(at.path, &member.key);
+        let at = Values { path: &path, ..at };
+        if check_value(reader, &member.value, &spec.field_type, (references, at)) {
             accept(member, spec);
         } else {
             ok = false;
@@ -628,6 +761,14 @@ fn typed_value(reader: &Reader<'_>, value: &Value, field_type: &FieldType) -> Fi
     }
 }
 
+/// Where the values being checked are: what holds their references, and
+/// the field path of the value.
+#[derive(Clone, Copy)]
+struct Values<'p> {
+    holder: Holder<'p>,
+    path: &'p FieldPath<'p>,
+}
+
 /// Checks that `value` has type `field_type`, reporting every problem in
 /// it, nested ones included. Recursion follows the type, whose nesting
 /// the schema bounds by [`MAXIMUM_FIELD_DEPTH`].
@@ -635,7 +776,7 @@ fn check_value<'a>(
     reader: &Reader<'a>,
     value: &'a Value,
     field_type: &FieldType,
-    references: &mut References,
+    (references, at): (&mut References, Values<'_>),
 ) -> bool {
     match field_type {
         FieldType::Boolean => reader.boolean(value).is_some(),
@@ -690,12 +831,16 @@ fn check_value<'a>(
                 );
                 return false;
             }
+            // The path is written out only for a reference that is kept.
+            let field = if references.records() {
+                at.path.render()
+            } else {
+                String::new()
+            };
             reader.reference(
                 references,
-                &Target::Definition {
-                    kind: target.clone(),
-                    id: id.to_owned(),
-                },
+                Target::Definition { kind: target, id },
+                (Role::Field { field: &field }, at.holder),
                 value.span(),
             );
             true
@@ -710,7 +855,7 @@ fn check_value<'a>(
             value,
             items,
             *minimum_items..=*maximum_items,
-            references,
+            (references, at),
         ),
         FieldType::Object { fields } => {
             let Some(members) = reader.members(value) else {
@@ -721,7 +866,7 @@ fn check_value<'a>(
                 members,
                 value.span(),
                 fields,
-                references,
+                (references, at),
                 &mut |_, _| {},
             )
         }
@@ -736,7 +881,7 @@ fn check_list<'a>(
     value: &'a Value,
     items: &FieldType,
     count: std::ops::RangeInclusive<usize>,
-    references: &mut References,
+    (references, at): (&mut References, Values<'_>),
 ) -> bool {
     let Some(elements) = reader.array(value) else {
         return false;
@@ -754,8 +899,10 @@ fn check_list<'a>(
             ),
         );
     }
+    let path = FieldPath::Items(at.path);
+    let at = Values { path: &path, ..at };
     for element in elements {
-        ok &= check_value(reader, element, items, references);
+        ok &= check_value(reader, element, items, (references, at));
     }
     ok
 }
@@ -770,17 +917,15 @@ mod tests {
         let world =
             crate::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/basic"))
                 .expect("the fixture is valid");
-        let mut references = References::new(world.profile());
-        let proto = |id: &str| Target::Definition {
-            kind: "proto".to_owned(),
-            id: id.to_owned(),
-        };
+        let mut references = References::new(false);
+        references.render_layers_declared(&world.profile().render_layers);
+        let proto = |id| Target::Definition { kind: "proto", id };
         let anchor = Target::Anchor {
-            plane: "overworld".to_owned(),
-            id: "village.well".to_owned(),
+            plane: "overworld",
+            id: "village.well",
         };
-        assert!(references.resolves(&Target::RenderLayer("wall".to_owned())));
-        assert!(!references.resolves(&Target::RenderLayer("roof".to_owned())));
+        assert!(references.resolves(&Target::RenderLayer("wall")));
+        assert!(!references.resolves(&Target::RenderLayer("roof")));
         assert!(!references.resolves(&proto("tree")));
         assert!(!references.resolves(&anchor));
         references.definitions_listed(world.definitions().keys().cloned());
@@ -788,7 +933,20 @@ mod tests {
         assert!(references.resolves(&proto("tree")));
         assert!(!references.resolves(&proto("missing")));
         assert!(references.resolves(&anchor));
-        assert!(references.resolves(&Target::Plane("overworld".to_owned())));
-        assert!(!references.resolves(&Target::Plane("vault".to_owned())));
+        assert!(references.resolves(&Target::Plane("overworld")));
+        assert!(!references.resolves(&Target::Plane("vault")));
+        assert!(!references.resolves(&Target::Zone {
+            plane: "overworld",
+            id: "village"
+        }));
+        references.zones_read("overworld", world.planes()["overworld"].zones.keys());
+        assert!(references.resolves(&Target::Zone {
+            plane: "overworld",
+            id: "village"
+        }));
+        assert!(!references.resolves(&Target::Zone {
+            plane: "vault",
+            id: "village"
+        }));
     }
 }
