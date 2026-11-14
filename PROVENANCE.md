@@ -105,6 +105,25 @@ never copied, adapted or used as a dependency.
   an environment matches any run of its workflow file. No
   implementation, tests or source text are copied or adapted.
 
+- **Model Context Protocol.** `crates/tilewright-mcp` and `docs/MCP.md`
+  implement MCP revision 2025-11-25 from its specification, consulted on
+  2026-11-14 at <https://modelcontextprotocol.io/specification/2025-11-25>:
+  the pages Overview (`basic/index`), Lifecycle (`basic/lifecycle`),
+  Transports (`basic/transports`, stdio), Ping, Cancellation
+  (`basic/utilities/*`), Tools (`server/tools`), Pagination
+  (`server/utilities/pagination`) and the Schema Reference (`schema`), whose
+  source is `docs/specification/2025-11-25` in
+  <https://github.com/modelcontextprotocol/modelcontextprotocol>, last
+  changed at revision `9850cae8923b0ee3d19a4476f1010b97aa161a55`. That
+  repository's `LICENSE` puts new specification contributions under
+  Apache-2.0 and earlier ones under MIT. The versioning page of revision
+  2026-07-28, which the site names current, was read for how a server of an
+  `initialize`-based revision is recognized by newer clients. JSON-RPC 2.0's
+  message rules and error codes are from <https://www.jsonrpc.org/specification>.
+  Only protocol facts (message shapes, method and field names, error codes)
+  are used; no specification text, schema file or SDK code is copied or
+  adapted, and the server and its tests are new MIT work.
+
 ## Owner publication API contract research
 
 The owner-first-publication work consults the primary crates.io OpenAPI
