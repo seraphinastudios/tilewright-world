@@ -428,56 +428,87 @@ fn previews_match_a_plan_with_either_line_ending() {
     }
 }
 
+/// Parses a structured result `preview_with` gave and checks it against
+/// the tool's output schema.
+fn checked_result(text: &str) -> Document {
+    let document = Document::parse(text, &Limits::default()).unwrap();
+    super::check_schema("preview_transaction", document.root(), &document);
+    document
+}
+
 #[test]
-fn the_undo_check_is_reported_with_the_plan() {
-    // A tree small enough for a test cannot make the undo check refuse a
-    // transaction under the library's limits, so the check is given here;
-    // what it refuses is reported as a refusal with the files planned.
-    let mut server = ready(&fixture("basic"));
+#[allow(clippy::disallowed_methods)]
+fn the_library_undo_check_runs_and_its_refusal_is_reported_with_the_plan() {
+    // A stroke over 479 chunks that adds 32 values to each palette: its
+    // undo removes each entry in a few lines, and the undo's own inverse
+    // would put each back in 16, past the 250,000 lines of a transaction.
+    // Too large for a 64 KiB request, so it is given to the production
+    // function directly, which runs the library's own undo check.
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("tree");
+    copy_tree(&fixture("basic"), &root);
+    for value in 0..32 {
+        std::fs::write(
+            root.join(format!("defs/proto/p{value:02}.jsonc")),
+            format!(
+                "{{\"format\": \"tilewright.def/1\", \"type\": \"proto\", \"id\": \"p{value:02}\", \"fields\": {{\"face\": \"p.png\", \"layer\": \"floor\"}}}}\n"
+            ),
+        )
+        .unwrap();
+    }
+    let layer = root.join("planes/overworld/layers/2");
+    std::fs::create_dir_all(&layer).unwrap();
+    let rows = vec![format!("        \"{}\"", "g".repeat(32)); 32].join(",\n");
+    let chunks = 479;
+    for cx in 0..chunks {
+        std::fs::write(
+            layer.join(format!("{cx}_0.jsonc")),
+            format!(
+                "{{\n  \"format\": \"tilewright.chunk/1\",\n  \"plane\": \"overworld\",\n  \"layer\": 2,\n  \"chunk\": [{cx}, 0],\n  \"terrain\": {{\n    \"floor\": {{\n      \"palette\": {{\"g\": \"grass\"}},\n      \"rows\": [\n{rows}\n      ]\n    }}\n  }}\n}}\n"
+            ),
+        )
+        .unwrap();
+    }
+    let cells: Vec<String> = (0..chunks)
+        .flat_map(|cx| {
+            (0..32).map(move |value| {
+                format!(
+                    "{{\"at\": [{}, 0], \"value\": \"p{value:02}\"}}",
+                    cx * 32 + value
+                )
+            })
+        })
+        .collect();
+    let text = transaction(&format!(
+        r#"{{"op": "terrain.set", "plane": "overworld", "layer": 2, "grid": "floor", "cells": [{}]}}"#,
+        cells.join(",")
+    ));
+    let server = ready(&root);
     let State::Valid(valid) = &server.snapshot.state else {
-        panic!("basic loads");
+        panic!("the painted tree loads");
     };
-    let text = orchard();
-    let problems = vec![Diagnostic {
-        path: NAME.to_owned(),
-        start: 0,
-        end: 0,
-        line: 0,
-        column: 0,
-        code: "tx.limit",
-        message: "the transaction could not be undone: its inverse would be refused: a limit; split the transaction".to_owned(),
-    }];
-    let given = crate::preview::preview_with(valid, &fixture("basic"), &text, false, |plan| {
-        assert!(!plan.files().is_empty());
-        Err(problems.clone())
-    })
-    .unwrap();
-    let document = Document::parse(given.as_str(), &Limits::default()).unwrap();
+    let given = crate::preview::preview(valid, &root, &text, false).unwrap();
+    let document = checked_result(&given);
     let page = document.root();
     assert_eq!(at(page, &["would_apply"]).as_bool(), Some(false));
     assert_eq!(at(page, &["refused_at"]).as_str(), Some("undo"));
     assert_eq!(at(page, &["undo_check"]).as_str(), Some("refused"));
-    assert_eq!(
-        refusals(page),
-        [(
-            NAME.to_owned(),
-            true,
-            "tx.limit".to_owned(),
-            problems[0].message.clone()
-        )]
+    let found = refusals(page);
+    assert!(
+        found.iter().any(|(path, own, code, message)| path == NAME
+            && *own
+            && code == "tx.limit"
+            && message.contains("could not be undone")),
+        "{found:?}"
     );
-    // The plan is still described.
-    assert_eq!(at(page, &["resulting_revision"]).kind(), "string");
-    check_files(page, &plan(&fixture("basic"), &text), false);
-    golden("basic-preview_transaction-undo-refused", &given);
-    // The check that runs is the library's, which passes these.
-    for text in [orchard(), remove_rename_delete()] {
-        let page = previewed(&mut server, &text, "");
-        assert_eq!(
-            at(structured(&page), &["undo_check"]).as_str(),
-            Some("passed")
-        );
-    }
+    // The plan is still described: its files and the revision it gives.
+    let planned = plan(&root, &text);
+    assert_eq!(
+        at(page, &["resulting_revision"]).as_str(),
+        Some(hex(&planned.world().source_digest()).as_str())
+    );
+    check_files(page, &planned, false);
+    assert_eq!(at(page, &["files_truncated"]).as_bool(), Some(true));
 }
 
 /// The text of a tool error.
@@ -855,7 +886,7 @@ fn a_preview_stays_within_the_byte_budget_as_sent() {
     let structured_text =
         crate::preview::preview_with(valid, &root, &text, true, |_| Err(long.clone())).unwrap();
     assert!(cost(&structured_text) + 1024 <= MAXIMUM_RESULT_BYTES);
-    let document = Document::parse(structured_text.as_str(), &Limits::default()).unwrap();
+    let document = checked_result(&structured_text);
     let page = document.root();
     assert_eq!(at(page, &["refusals_truncated"]).as_bool(), Some(true));
     assert_eq!(integer(at(page, &["refusals_total"])), MAXIMUM_REFUSALS);
@@ -882,7 +913,7 @@ fn a_preview_stays_within_the_byte_budget_as_sent() {
             Err(long.clone())
         })
         .unwrap();
-    let document = Document::parse(structured_text.as_str(), &Limits::default()).unwrap();
+    let document = checked_result(&structured_text);
     let page = document.root();
     assert_eq!(at(page, &["files_truncated"]).as_bool(), Some(false));
     assert_eq!(at(page, &["refusals_truncated"]).as_bool(), Some(true));
@@ -942,7 +973,7 @@ fn transaction_and_world_text_stays_in_typed_strings() {
         .unwrap();
     assert!(!structured_text.chars().any(char::is_control));
     assert!(!structured_text.contains('\u{2028}'));
-    let document = Document::parse(structured_text.as_str(), &Limits::default()).unwrap();
+    let document = checked_result(&structured_text);
     let item = at(document.root(), &["refusals", "0"]);
     assert_eq!(at(item, &["truncated"]).as_bool(), Some(true));
     assert_eq!(at(item, &["on_transaction"]).as_bool(), Some(false));
@@ -1258,4 +1289,106 @@ fn previews_leave_the_tree_and_its_directory_as_they_were() {
         drop(server);
         assert_eq!(listing(directory.path()), before, "{name}");
     }
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn files_the_loader_does_not_read_are_previewed_as_they_are_on_disk() {
+    // A file under profile/ that the profile does not name: a transaction
+    // may read and edit it, but the loader does not read it, so it is not
+    // part of the revision, and the preview reads it as it is at the call.
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("tree");
+    copy_tree(&fixture("basic"), &root);
+    let extra = root.join("profile/extra.jsonc");
+    std::fs::write(&extra, "{\"a\": 1}\n").unwrap();
+    let mut server = ready(&root);
+    let revision = server.revision().unwrap().to_owned();
+    assert_eq!(Some(revision.as_str()), ready(&fixture("basic")).revision());
+    let test = transaction(
+        r#"{"op": "test", "path": "profile/extra.jsonc", "pointer": ["a"], "value": 1}"#,
+    );
+    let page = previewed(&mut server, &test, "");
+    assert_eq!(
+        at(structured(&page), &["would_apply"]).as_bool(),
+        Some(true)
+    );
+    std::fs::write(&extra, "{\"a\": 2}\n").unwrap();
+    // The same snapshot now refuses the same transaction, at the same
+    // revision.
+    let (document, stage) = refused(&mut server, &test);
+    assert_eq!(stage, "plan");
+    let page = structured(&document);
+    assert_eq!(at(page, &["revision"]).as_str(), Some(revision.as_str()));
+    assert_eq!(refusals(page)[0].2, "tx.conflict");
+    // An edit of it changes a file and not the revision.
+    let edit = transaction(
+        r#"{"op": "set", "path": "profile/extra.jsonc", "pointer": ["a"], "value": 3}"#,
+    );
+    let page = previewed(&mut server, &edit, "");
+    let page = structured(&page);
+    assert_eq!(integer(at(page, &["files_changed"])), 1);
+    assert_eq!(
+        at(page, &["resulting_revision"]).as_str(),
+        Some(revision.as_str())
+    );
+    // And refresh finds no change.
+    let (_, document) = result(&mut server, "refresh", "{}");
+    assert_eq!(
+        at(structured(&document), &["changed"]).as_bool(),
+        Some(false)
+    );
+}
+
+#[test]
+fn refusal_spans_index_the_argument_as_sent() {
+    // Spacing, a key before the transaction, and an escape: the spans are
+    // in these bytes, not in a re-serialization of them.
+    let mut server = ready(&fixture("basic"));
+    let argument =
+        r#"{ "format" : "tilewright.transaction/1" , "operations" : [ {"op":"fr\u006fb "} ] }"#;
+    let (_, document) = result(
+        &mut server,
+        "preview_transaction",
+        &format!(r#"{{"excerpts":false,  "transaction"  :   {argument}  }}"#),
+    );
+    let page = structured(&document);
+    assert_eq!(at(page, &["refused_at"]).as_str(), Some("transaction"));
+    let item = at(page, &["refusals", "0"]);
+    let value = r#""fr\u006fb ""#;
+    let start = argument.find(value).unwrap();
+    assert_eq!(
+        (integer(at(item, &["start"])), integer(at(item, &["end"]))),
+        (start, start + value.len())
+    );
+    assert_eq!(
+        at(item, &["column"]).as_i64(),
+        Some(i64::try_from(start + 1).unwrap())
+    );
+}
+
+#[test]
+fn a_transaction_nests_as_deep_as_the_message_allows() {
+    // The message is parsed with depth 32, which leaves 26 nested arrays
+    // inside an operation's value: params, arguments, transaction,
+    // operations, the operation and the value take the rest.
+    let mut server = ready(&fixture("basic"));
+    let nested = |depth: usize| {
+        call(
+            7,
+            "preview_transaction",
+            &format!(
+                r#"{{"transaction":{{"format":"tilewright.transaction/1","operations":[{{"op":"set","path":"world.jsonc","pointer":["x"],"value":{}1{}}}]}}}}"#,
+                "[".repeat(depth),
+                "]".repeat(depth)
+            ),
+        )
+    };
+    let replies = send(&mut server, &[&nested(26), &nested(27)]);
+    let deepest = parse(&replies[0]);
+    assert!(deepest.root().get("result").is_some(), "{}", replies[0]);
+    assert_eq!(
+        super::error_of(&replies[1]),
+        (-32700, "jsonc.depth_limit".to_owned())
+    );
 }

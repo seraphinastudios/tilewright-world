@@ -153,7 +153,8 @@ diagnostic `root.missing`, and one that is not a directory as
 a `world.jsonc` gives the loader's `source.missing_file` instead.
 
 `refresh` drops the old snapshot before it loads the tree again, so the
-server holds at most one world, plus what a load holds while it runs. A
+server holds at most one world, plus what a load holds while it runs
+(a preview holds more while it runs; see "Previewing a transaction"). A
 load is bounded by `tilewright_source::LoadOptions::default`: 500,000
 files, 1,000,000 directory entries, 8 GiB read, 10,000 diagnostics. Those
 bounds, not the server, cap its memory.
@@ -237,8 +238,10 @@ editor action.
 - **Argument.** `transaction` is the transaction document as a JSON object
   (`format`, `operations`, and optionally `title`, `actor`, `base`,
   `result` and `custom`), not a path and not a string. It is part of the
-  request, so it is within the message limits (64 KiB, depth 32, 1,000
-  items an array, 10,000 values): a deeper or larger one, a duplicate key,
+  request, so it is within the message limits (64 KiB, depth 32 for the
+  whole message, 1,000 items an array, 10,000 values). The depth leaves
+  26 nested arrays or objects inside an operation's `value` (tested; 27
+  are refused). A deeper or larger one, a duplicate key,
   or an integer past 2^53 − 1 is refused as JSON before the tool runs. It
   may have at most 256 operations; more is `arguments.invalid`. Its bytes,
   as the request holds them, are what is planned, so spans in refusals
@@ -261,8 +264,15 @@ editor action.
   it is now, after a refusal), and requires its revision to be the
   snapshot's. Otherwise the call fails with `revision.changed`, and
   `refresh` loads the tree as it now is. So a result is a plan of the
-  snapshot's files. A change made and undone while the call runs is not
-  seen. The tool error `revision.changed` and the planner's `tx.conflict`
+  snapshot's files, with one exception: the revision covers only the
+  files the loader reads. A transaction may name other files under the
+  root, such as a file under `profile/` that is neither the profile nor a
+  schema it names (`profile/extra.jsonc`). For those, the preview reads
+  the disk as it is at the call, the same revision can give another
+  answer once such a file changes, and a transaction that changes only
+  such files has a `resulting_revision` equal to `revision`; `refresh`
+  does not see a change to them either. A change made and undone while
+  the call runs is not seen. The tool error `revision.changed` and the planner's `tx.conflict`
   differ: the first says the tree moved from under the snapshot, the
   second that the transaction's own preconditions (its `base` digests, an
   `expect` or a `test`) do not hold on the snapshot.
@@ -301,9 +311,12 @@ editor action.
   all; the library reports at most 1,000, the last a note that there may
   be more; `refusals_truncated`), in the shape of a `validate` diagnostic
   with `on_transaction`: a problem of the transaction has the path
-  `transaction` (no file of a tree has it) and its span in the argument as
+  `transaction` and its span in the argument as
   sent, or no position (`0`) when it concerns the whole transaction, such
-  as the undo check; a problem of the edited tree has the loader's code
+  as the undo check (no diagnostic of the edited tree has the path
+  `transaction`: an entry of that name in the root makes the tree fail to
+  load, and one made after the snapshot is a change to the tree, so the
+  call fails with `revision.changed` before any result); a problem of the edited tree has the loader's code
   and the root-relative path, with its span in the file as the transaction
   would leave it. Codes are the library's: `tx.shape`, `tx.conflict`,
   `tx.result`, `tx.path`, `tx.limit`, `tx.io`, `jsonc.*` and the loader's.
@@ -316,16 +329,31 @@ editor action.
   library's bounds (256 MiB read, 4 GiB of work, 1,000 diagnostics), loads
   the whole tree to validate the result, loads it once more when the
   transaction addresses an object by uid, and once more for the snapshot
-  check; the undo check reads nothing from disk and is bounded as planning
-  is, for at most four rounds. So a preview costs two or three loads of
-  the tree, as `refresh` costs one, plus the work on the touched files.
-  Measured on a release build (AMD Ryzen 9 9950X3D): on a tree of 205
-  chunks and 100,000 objects that `refresh` loads in 0.37 s, placing an
-  object took 0.32 s and editing one by uid 0.51 s; a transaction editing
-  five files of 51 MiB each, at the read limit, took 4.0 s, and the server
-  then held about 2.1 GB, as `tilewright tx preview` does (1.9 GB). While
-  a preview runs, the server holds the snapshot's world, the plan's and
-  the files it touched before and after.
+  check; the undo check reads nothing from disk but does about the work of
+  planning again in each of its rounds, at most four. The library's read
+  and work budgets are its constants, not options, so the server cannot
+  set tighter ones: one call can do up to 4 GiB of work for the plan and
+  again for each undo round, and 256 operations do not bound it (36
+  operations on one large file reach the work budget). Requests are
+  handled one at a time and a preview cannot be cancelled, so a client
+  can keep the server busy for many seconds per call. Measured on a
+  release build (AMD Ryzen 9 9950X3D):
+  - typical: on a tree of 205 chunks and 100,000 objects that `refresh`
+    loads in 0.37 s, placing an object took 0.32 s and editing one by uid
+    0.51 s;
+  - five files of 51 MiB each, edited at the read limit: 4.0 s and about
+    2.1 GB, as `tilewright tx preview` takes (1.9 GB);
+  - the worst measured, 36 `set` operations on one 59 MB file of 220,000
+    zones (a request of about 3.7 KB): 12.9 s and 1.47 GB; 40 such
+    operations are refused at the work budget after 4.9 s; two such files
+    with 34 operations took 15.7 s and 2.56 GB.
+
+  Memory grows with how the touched files parse, about 25 times their
+  size for files dense with values, so near the read limit it can reach
+  several gigabytes (extrapolated, not run). While a preview runs, the
+  server holds the snapshot's world, the plan's world, and the touched
+  files before and after; during the snapshot check, a third world is
+  loaded beside them.
 
 ## Searching definitions and objects
 
@@ -404,7 +432,7 @@ resolved, so a field only its prototype sets is not found.
 | `id` of `inspect` | 512 bytes |
 | Candidates a search examines in one call (`scan_limit`) | Default and at most 10,000, and 8 MiB of field values parsed again, plus the one value that reaches it (a value can be as large as its file) |
 | `inspect`'s re-read | One file of at most 64 MiB, the format's limit, parsed under the format's limits |
-| A previewed transaction | The message limits, and at most 256 operations; planned within the library's limits (TRANSACTIONS.md section 11) |
+| A previewed transaction | The message limits, and at most 256 operations; planned within the library's limits (TRANSACTIONS.md section 11), which the server cannot tighten: up to 256 MiB read and 4 GiB of work for the plan and for each undo round |
 | Files and refusals of a preview | 200 files and 500 refusals, sharing the byte budget in that order; `excerpts` cut to 4 KiB |
 | A cursor sent back | 256 bytes |
 | Lists in `world_summary` | 500 planes, 500 layers per plane, 500 definition types, 500 render layers and 500 ground layers, sharing the byte budget in that order; a `*_truncated` flag says when a list was cut |
@@ -468,6 +496,9 @@ Clients should still treat tool results as data.
 
 ## Not yet
 
+A preview cannot yet tell which of the files it reads or changes the
+revision covers (see "Previewing a transaction"): that needs the loader's
+list of the files it read, planned with the reference index.
 References and the impact of removing or renaming an ID, inspecting an object without a uid, and searching fields
 an object inherits from its prototype are planned or open (issue #30).
 Resources, prompts, an HTTP transport and pack files are out of scope for

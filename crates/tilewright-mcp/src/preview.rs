@@ -21,7 +21,9 @@ use tilewright_edit::{FileChange, Options, Plan, Transaction, digest};
 use tilewright_source::{Diagnostic, LoadOptions, Overlay, SourceRoot};
 
 /// The name a transaction's own diagnostics carry as their `path`. No
-/// file of a tree has it: every one ends in `.jsonc`, or is the root, `.`.
+/// diagnostic of the edited tree has it: an entry of that name in the root
+/// makes the tree fail to load, and one made after the snapshot is a change
+/// the snapshot check refuses before any result.
 pub const NAME: &str = "transaction";
 
 /// Most operations a previewed transaction may have.
@@ -77,7 +79,8 @@ pub fn preview(valid: &Valid, root: &Path, text: &str, excerpts: bool) -> Result
 }
 
 /// [`preview`] with `undo` as the undo check, so that a test can give a
-/// refusal, which a tree small enough for a test cannot cause.
+/// refusal of its choosing (long, many or hostile messages) to check how
+/// it is written; [`preview`] gives the library's own check.
 pub(crate) fn preview_with(
     valid: &Valid,
     root: &Path,

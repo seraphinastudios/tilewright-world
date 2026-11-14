@@ -140,28 +140,37 @@ fn result(server: &mut Server, tool: &str, arguments: &str) -> (String, Document
         // The text content is the structured result, serialized.
         assert_eq!(text, document.text(structured.span()));
         // And it conforms to the tool's output schema.
-        let schemas =
-            Document::parse(format!("{{{}}}", crate::tools::list()), &Limits::default()).unwrap();
-        let schema = at(schemas.root(), &["tools"])
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|entry| entry.get("name").and_then(Value::as_str) == Some(tool))
-            .map(|entry| at(entry, &["outputSchema"]))
-            .unwrap();
-        if let Err(problem) = conforms(schema, structured) {
-            panic!("{tool}: {problem}: {}", document.text(structured.span()));
-        }
+        check_schema(tool, structured, &document);
     } else {
         assert!(!text.contains('\n'), "{text}");
     }
     (reply, document)
 }
 
+/// Panics unless `value`, a structured result of `tool` in `document`,
+/// conforms to the tool's output schema.
+fn check_schema(tool: &str, value: &Value, document: &Document) {
+    let schemas =
+        Document::parse(format!("{{{}}}", crate::tools::list()), &Limits::default()).unwrap();
+    let schema = at(schemas.root(), &["tools"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry.get("name").and_then(Value::as_str) == Some(tool))
+        .map(|entry| at(entry, &["outputSchema"]))
+        .unwrap();
+    if let Err(problem) = conforms(schema, value) {
+        panic!("{tool}: {problem}: {}", document.text(value.span()));
+    }
+}
+
 /// Whether `value` conforms to `schema`, as far as this server's output
 /// schemas use JSON Schema: `type` (a name or a list of names), `enum`,
 /// `properties`, `required`, `items`, `minItems`, `maxItems` and the one
-/// `pattern` they use, 64 lowercase hex digits.
+/// `pattern` they use, 64 lowercase hex digits. Strictly: an object whose
+/// schema lists `properties` may hold no other member, as if the schema
+/// said `additionalProperties: false`, so a field the schema does not
+/// declare is found.
 fn conforms(schema: &Value, value: &Value) -> Result<(), String> {
     let kind = match value {
         Value::Null { .. } => "null",
@@ -223,6 +232,11 @@ fn conforms(schema: &Value, value: &Value) -> Result<(), String> {
             }
         }
         if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+            for member in value.as_object().unwrap() {
+                if !properties.iter().any(|declared| declared.key == member.key) {
+                    return Err(format!("{} is not declared", member.key));
+                }
+            }
             for member in properties {
                 if let Some(found) = value.get(&member.key) {
                     conforms(&member.value, found)
@@ -278,6 +292,7 @@ fn the_schema_check_finds_what_does_not_conform() {
         r#"{"a":null,"b":[1,2,3]}"#.to_owned(),
         r#"{"a":null,"b":[1.5]}"#.to_owned(),
         r#"{"a":null,"b":[],"c":"z"}"#.to_owned(),
+        r#"{"a":null,"b":[],"d":1}"#.to_owned(),
         "[]".to_owned(),
     ] {
         assert!(check(&wrong).is_err(), "{wrong}");
