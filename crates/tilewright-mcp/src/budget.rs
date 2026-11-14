@@ -145,6 +145,98 @@ pub fn page_within<T>(
     page
 }
 
+/// The `scan_limit` of a search that gives none, and the largest it may
+/// give: the most candidates one call examines.
+pub const MAXIMUM_SCAN: usize = 10_000;
+/// Most bytes of `list`, `object` and `json` field values a search parses
+/// again in one call to match scalars inside them. A call stops after the
+/// candidate that reaches it, so it parses at most this plus one value.
+pub const MAXIMUM_SCAN_JSON_BYTES: usize = 8 * 1024 * 1024;
+
+/// The work a search has done in one call.
+#[derive(Debug, Default)]
+pub struct Work {
+    /// Bytes of field values parsed again.
+    pub json_bytes: usize,
+}
+
+/// One page of a search: like a [`Page`], and the candidates examined.
+#[derive(Debug)]
+pub struct ScanPage {
+    pub page: Page,
+    /// Candidates examined in this call.
+    pub scanned: usize,
+    /// Whether the call stopped at its scan budget, before `limit` matches
+    /// and before the byte budget.
+    pub stopped_by_scan: bool,
+    /// Whether the candidates ended before `offset`: a cursor past the end.
+    pub past_end: bool,
+}
+
+/// Examines `candidates` (all of them, the call resuming at `offset`) one
+/// by one with `matches`, writing each match, until `limit` matches, the
+/// byte budget ([`PAGE_BYTES`]), `scan_limit` candidates or
+/// [`MAXIMUM_SCAN_JSON_BYTES`] of parsed field values. `next` is then the
+/// offset of the first candidate not examined, or of the match that did not
+/// fit, so paging on returns every match exactly once.
+pub fn scan<T, M>(
+    candidates: impl Iterator<Item = T>,
+    offset: usize,
+    limit: usize,
+    scan_limit: usize,
+    mut matches: impl FnMut(&T, &mut Work) -> Option<M>,
+    mut write: impl FnMut(&mut Output, &T, M),
+) -> ScanPage {
+    let mut result = ScanPage {
+        page: Page {
+            items: String::from("["),
+            cost: cost("[]"),
+            returned: 0,
+            cut_strings: 0,
+            next: None,
+            stopped_by_bytes: false,
+        },
+        scanned: 0,
+        stopped_by_scan: false,
+        past_end: offset > 0,
+    };
+    let mut work = Work::default();
+    let page = &mut result.page;
+    for (index, candidate) in candidates.enumerate().skip(offset) {
+        result.past_end = false;
+        if page.returned == limit {
+            page.next = Some(index);
+            break;
+        }
+        if result.scanned == scan_limit || work.json_bytes >= MAXIMUM_SCAN_JSON_BYTES {
+            page.next = Some(index);
+            result.stopped_by_scan = true;
+            break;
+        }
+        result.scanned += 1;
+        let Some(found) = matches(&candidate, &mut work) else {
+            continue;
+        };
+        let mut output = Output::default();
+        write(&mut output, &candidate, found);
+        let item_cost = cost(&output.text) + usize::from(page.returned > 0) * cost(",");
+        if page.cost + item_cost > PAGE_BYTES {
+            page.next = Some(index);
+            page.stopped_by_bytes = true;
+            break;
+        }
+        if page.returned > 0 {
+            page.items.push(',');
+        }
+        page.items.push_str(&output.text);
+        page.cost += item_cost;
+        page.cut_strings += output.cut_strings;
+        page.returned += 1;
+    }
+    result.page.items.push(']');
+    result
+}
+
 /// Why a cursor was refused.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CursorError {
