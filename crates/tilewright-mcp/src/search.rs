@@ -10,6 +10,7 @@
 //! definition or object: an object's prototype's fields are not resolved.
 
 use crate::budget::{self, Output, ScanPage, Work};
+use crate::snapshot::ChunkCounts;
 use std::fmt::Write as _;
 use tilewright_jsonc::{Document, Limits, Value};
 use tilewright_source::{Chunk, Definition, FieldValue, Object, World};
@@ -230,6 +231,7 @@ pub fn definitions<'w>(
     };
     budget::scan(
         candidates,
+        0,
         offset,
         limit,
         scan_limit,
@@ -275,7 +277,25 @@ pub struct Placed<'w> {
     /// The uid of the object that carries it, if it has one.
     carried_by: Option<&'w str>,
     /// Its index in the chunk's objects, then in each inventory down to it.
-    position: Vec<usize>,
+    position: Position,
+}
+
+/// Most steps of a position: a top-level object and the 16 inventories the
+/// format nests at most (`docs/spec/FORMAT.md` section 7).
+const MAXIMUM_POSITION: usize = 17;
+
+/// An object's position, held without allocating, since every candidate a
+/// search walks past has one.
+#[derive(Clone, Copy)]
+struct Position {
+    steps: [usize; MAXIMUM_POSITION],
+    length: usize,
+}
+
+impl Position {
+    fn steps(&self) -> &[usize] {
+        &self.steps[..self.length]
+    }
 }
 
 /// The objects of one chunk, depth first, each object before its
@@ -312,7 +332,15 @@ impl<'w> Iterator for Walk<'w> {
                     self.origin[1] + i128::from(y),
                 ];
             }
-            let position = self.levels.iter().map(|(_, _, next)| next - 1).collect();
+            let mut position = Position {
+                steps: [0; MAXIMUM_POSITION],
+                length: 0,
+            };
+            // A loaded world nests no deeper than a position holds.
+            for ((_, _, next), step) in self.levels.iter().zip(&mut position.steps) {
+                *step = next - 1;
+                position.length += 1;
+            }
             if self.carried && !object.inventory.is_empty() {
                 self.levels.push((object.inventory.iter(), Some(object), 0));
             }
@@ -339,14 +367,14 @@ fn chunk_meets(origin: [i128; 2], size: u16, bbox: [i64; 4]) -> bool {
         && origin[1] + size > i128::from(bbox[1])
 }
 
-/// The candidates of a query: the objects of each plane by ID, each chunk
-/// by layer, then x, then y, and in each chunk depth first. Planes, layers
-/// and chunks outside `plane`, `layer` and `bbox` are passed over without
-/// being walked.
-fn candidates<'w>(
+/// The chunks a query walks, in order, with their candidate counts:
+/// those of each plane by ID, each chunk by layer, then x, then y, less
+/// those outside `plane`, `layer` and `bbox`.
+fn chunks<'w>(
     world: &'w World,
+    counts: &'w ChunkCounts,
     query: &'w ObjectQuery<'_>,
-) -> impl Iterator<Item = Placed<'w>> + 'w {
+) -> impl Iterator<Item = (&'w str, i32, [i128; 2], &'w Chunk, usize)> + 'w {
     world
         .planes()
         .iter()
@@ -361,31 +389,65 @@ fn candidates<'w>(
                 ),
                 None => Box::new(plane.chunks.iter()),
             };
-            chunks.filter_map(move |(&(layer, cx, cy), chunk)| {
+            let plane_counts = counts.get(id.as_str());
+            chunks.filter_map(move |(key, chunk)| {
+                let &(layer, cx, cy) = key;
                 let origin = [
                     i128::from(cx) * i128::from(size),
                     i128::from(cy) * i128::from(size),
                 ];
+                let count = if query.carried {
+                    plane_counts
+                        .and_then(|counts| counts.get(key).copied())
+                        .unwrap_or_else(|| chunk.depth_first().count())
+                } else {
+                    chunk.objects.len()
+                };
                 query
                     .bbox
                     .is_none_or(|bbox| chunk_meets(origin, size, bbox))
-                    .then(|| Walk {
-                        plane: id,
-                        chunk,
-                        layer,
-                        origin,
-                        carried: query.carried,
-                        levels: vec![(chunk.objects.iter(), None, 0)],
-                        tile: origin,
-                    })
+                    .then_some((id.as_str(), layer, origin, chunk, count))
             })
         })
-        .flatten()
+}
+
+/// The candidates of a query from the chunk that holds the candidate at
+/// `offset`, and the index of the first of them: the chunks before it are
+/// passed over by their counts, without being walked. In each chunk the
+/// objects come depth first.
+fn candidates<'w>(
+    world: &'w World,
+    counts: &'w ChunkCounts,
+    query: &'w ObjectQuery<'_>,
+    offset: usize,
+) -> (usize, impl Iterator<Item = Placed<'w>> + 'w) {
+    let mut first = 0;
+    let mut passed = 0;
+    for (_, _, _, _, count) in chunks(world, counts, query) {
+        if first + count > offset {
+            break;
+        }
+        first += count;
+        passed += 1;
+    }
+    let walks = chunks(world, counts, query).skip(passed).flat_map(
+        move |(plane, layer, origin, chunk, _)| Walk {
+            plane,
+            chunk,
+            layer,
+            origin,
+            carried: query.carried,
+            levels: vec![(chunk.objects.iter(), None, 0)],
+            tile: origin,
+        },
+    );
+    (first, walks)
 }
 
 /// One page of `search_objects`.
 pub fn objects<'w>(
     world: &'w World,
+    counts: &'w ChunkCounts,
     query: &'w ObjectQuery<'_>,
     offset: usize,
     limit: usize,
@@ -419,8 +481,10 @@ pub fn objects<'w>(
             None => Some(None),
         }
     };
+    let (first, candidates) = candidates(world, counts, query, offset);
     budget::scan(
-        candidates(world, query),
+        candidates,
+        first,
         offset,
         limit,
         scan_limit,
@@ -456,7 +520,7 @@ pub fn objects<'w>(
             output.raw(",\"path\":");
             output.string(&placed.chunk.path);
             output.raw(",\"position\":[");
-            for (index, step) in placed.position.iter().enumerate() {
+            for (index, step) in placed.position.steps().iter().enumerate() {
                 if index > 0 {
                     output.raw(",");
                 }

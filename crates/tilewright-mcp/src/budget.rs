@@ -12,7 +12,7 @@
 //! cursor names the tool, the arguments and the snapshot it was issued
 //! for, and the offset of the next item.
 
-use crate::json::{clip, json_string};
+use crate::json::{clip, escaped, json_string};
 
 /// The `limit` of a call that gives none.
 pub const DEFAULT_LIMIT: usize = 50;
@@ -39,15 +39,15 @@ pub const ENVELOPE_BYTES: usize = 8192;
 pub const PAGE_BYTES: usize = MAXIMUM_RESULT_BYTES - ENVELOPE_BYTES;
 
 /// What `json` costs once sent: as written, and again as a JSON string in
-/// the text copy, where `"` and `\\` take two bytes and a control
-/// character six.
+/// the text copy, where `"` and `\\` take two bytes, and a control
+/// character, U+2028 and U+2029 six.
 pub fn cost(json: &str) -> usize {
     json.len()
         + json
             .chars()
             .map(|character| match character {
                 '"' | '\\' => 2,
-                character if character.is_control() => 6,
+                character if escaped(character) => 6,
                 character => character.len_utf8(),
             })
             .sum::<usize>()
@@ -173,7 +173,8 @@ pub struct ScanPage {
     pub past_end: bool,
 }
 
-/// Examines `candidates` (all of them, the call resuming at `offset`) one
+/// Examines `candidates` (those from index `first`, the call resuming at
+/// `offset`, which is at least `first`) one
 /// by one with `matches`, writing each match, until `limit` matches, the
 /// byte budget ([`PAGE_BYTES`]), `scan_limit` candidates or
 /// [`MAXIMUM_SCAN_JSON_BYTES`] of parsed field values. `next` is then the
@@ -181,6 +182,7 @@ pub struct ScanPage {
 /// fit, so paging on returns every match exactly once.
 pub fn scan<T, M>(
     candidates: impl Iterator<Item = T>,
+    first: usize,
     offset: usize,
     limit: usize,
     scan_limit: usize,
@@ -202,7 +204,8 @@ pub fn scan<T, M>(
     };
     let mut work = Work::default();
     let page = &mut result.page;
-    for (index, candidate) in candidates.enumerate().skip(offset) {
+    let skipped = candidates.skip(offset.saturating_sub(first));
+    for (index, candidate) in (offset.max(first)..).zip(skipped) {
         result.past_end = false;
         if page.returned == limit {
             page.next = Some(index);
@@ -417,5 +420,60 @@ mod tests {
             output.raw(&item.to_string());
         });
         assert_eq!((page.items.as_str(), page.next), ("[]", None));
+    }
+
+    #[test]
+    fn a_scan_stops_at_its_json_budget_and_resumes() {
+        let mebibyte = 1024 * 1024;
+        let page = |offset| {
+            scan(
+                0..100,
+                0,
+                offset,
+                MAXIMUM_LIMIT,
+                MAXIMUM_SCAN,
+                |_, work| {
+                    work.json_bytes += mebibyte;
+                    Some(())
+                },
+                |output, item, ()| output.raw(&item.to_string()),
+            )
+        };
+        let first = page(0);
+        assert_eq!(MAXIMUM_SCAN_JSON_BYTES, 8 * mebibyte);
+        assert_eq!(first.scanned, 8);
+        assert!(first.stopped_by_scan && !first.page.stopped_by_bytes);
+        assert_eq!(first.page.next, Some(8));
+        assert_eq!(first.page.items, "[0,1,2,3,4,5,6,7]");
+        let second = page(8);
+        assert_eq!(second.page.items, "[8,9,10,11,12,13,14,15]");
+        assert_eq!(second.page.next, Some(16));
+        // Candidates from a later first index resume at the same place.
+        let later = scan(
+            8..100,
+            8,
+            8,
+            MAXIMUM_LIMIT,
+            3,
+            |_, _| Some(()),
+            |output, item, ()| output.raw(&item.to_string()),
+        );
+        assert_eq!(
+            (later.page.items.as_str(), later.page.next),
+            ("[8,9,10]", Some(11))
+        );
+        assert!(!later.past_end);
+    }
+
+    #[test]
+    fn separators_cost_what_they_are_sent_as() {
+        let page = page(0..1, 0, 1, |output, _| {
+            output.string("a\u{2028}b\u{2029}\u{7}\"");
+        });
+        assert_eq!(page.items, "[\"a\\u2028b\\u2029\\u0007\\\"\"]");
+        assert_eq!(cost(&page.items), page.cost);
+        let mut text = String::new();
+        json_string(&page.items, &mut text);
+        assert_eq!(page.cost, page.items.len() + text.len() - 2);
     }
 }

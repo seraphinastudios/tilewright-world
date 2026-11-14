@@ -55,8 +55,10 @@ modern.
   or an integer. Batches (JSON arrays) are not part of JSON-RPC as the
   revision uses it and are refused. A response sent to the server, whatever
   its ID, is ignored.
-- Replies escape every control character, DEL and C1 included, so no value
-  can break a line or reach a terminal as a control sequence.
+- Replies escape every control character, DEL and C1 included, and the
+  line and paragraph separators U+2028 and U+2029, which some line
+  splitters break at, so no value can break a line or reach a terminal as
+  a control sequence.
 
 ### Errors
 
@@ -89,7 +91,7 @@ A tool that is called correctly but cannot answer returns a result with
 | `cursor.invalid` | A cursor not issued for this tool and these arguments, or past the end |
 | `cursor.stale` | A cursor issued for another revision of the tree |
 | `ids.unavailable` | The world holds more than 1,000,000 IDs |
-| `revision.changed` | The `revision` argument is not the snapshot's revision; the text ends with the current revision, or says the tree does not load. From `inspect`, also: the item's file no longer holds the snapshot's item, so the tree changed on disk; call `refresh` |
+| `revision.changed` | The `revision` argument is not the snapshot's revision: the tree was loaded again since, or the revision was never this snapshot's; the text ends with the current revision, or says the tree does not load, so the snapshot has none. From `inspect`, also: the item's file no longer holds the snapshot's item, so the tree changed on disk; call `refresh` |
 | `item.not_found` | `inspect` of an ID the snapshot does not hold |
 
 ## Tools
@@ -125,7 +127,8 @@ not at that revision, the call fails with `revision.changed`, whose text
 ends with the current revision. A tree that does not load has no
 revision, so any `revision` given fails then, `validate`'s included,
 with text that says so; `validate` without one still answers. Arguments
-are checked first, then `revision`, then whether the tree loads. The
+are checked first (for `inspect`, the shape of its `id` too), then
+`revision`, then whether the tree loads. The
 `revision` is not part of a cursor's arguments: a cursor is bound to its
 snapshot already. The
 server starts on such a tree, and on a root that does not exist, so that a
@@ -177,8 +180,8 @@ plane's `zones.jsonc`, `anchors.jsonc` or `stairwells.jsonc`, or the
 object's chunk. It reads it through the same no-follow access layer as a
 load, with ROOT opened afresh, and parses it with the strict JSONC parser
 under the format's limits, as a load does. In it, the item is the whole
-document, the first entry of the list with the item's `id` (the one a load
-keeps), or, for an object, the entry its position names: an index into
+document, the first entry of the list with the item's `id` (a list that
+repeats an ID does not load), or, for an object, the entry its position names: an index into
 the chunk's `objects`, then into each `inventory` down to it, so an
 inventory entry's span is its own.
 
@@ -187,8 +190,10 @@ The result gives:
 - `path`, root-relative;
 - `span`: `start` and `end`, byte offsets of the item's value in the file
   as read now (end exclusive; leading comments and spacing not included),
-  and `start_line`, `start_column`, `end_line`, `end_column`, 1-based, in
-  characters, lines ended by LF, as diagnostics count them. A file checked
+  and `start_line`, `start_column`, `end_line`, `end_column`, 1-based,
+  lines ended by LF and columns counted in characters (Unicode scalar
+  values, not bytes and not the UTF-16 units some editors count), as
+  diagnostics count them. A file checked
   out with CR LF line endings has other byte offsets than an LF one, and
   the same lines and columns;
 - `value`: the item's JSON as the file holds it, members in source order
@@ -235,7 +240,10 @@ resolved, so a field only its prototype sets is not found.
   value with such a string inside. Matching is by bytes, case-sensitive.
 - **`search_definitions`.** Candidates are the definitions sorted by type,
   then ID, by bytes; `type` keeps one type. Without `field`, `equals` (a
-  string) and `contains` match the definition's ID, without its type.
+  string) and `contains` match the definition's ID without its type, as
+  in `chest` for `proto/chest`; a `/` in them is refused with
+  `arguments.invalid`, since no such ID holds one: give the type as
+  `type`.
 - **`search_objects`.** Candidates are the objects of each plane in ID
   order, each chunk in (layer, x, y) order, and each chunk's objects depth
   first: an object, then its inventory entries, then the next object.
@@ -256,17 +264,29 @@ resolved, so a field only its prototype sets is not found.
   or `json`) and `value` for the field matched, or nulls; a `json` value is
   the field's canonical JSON as a string, cut like any string.
 - **Scan budget.** A call examines at most `scan_limit` candidates (default
-  and maximum 10,000), and stops after the candidate that takes it past
-  8 MiB of list, object and JSON values parsed again for matching. Then
+  and maximum 10,000), and stops after the candidate that brings it to
+  8 MiB of list, object and JSON values parsed again for matching, so it
+  parses at most 8 MiB plus that one value, which can be as large as its
+  file. Then
   `scan_budget_reached` is true and `next_cursor` resumes at the first
   candidate not examined, so a page can hold fewer than `limit` matches, or
   none, and still have a next page. This is apart from `limit` and from the
   byte budget (`byte_budget_reached`), after which the cursor resumes at the
   match that did not fit. `offset` is the candidate the page started at,
   and `scanned` how many it examined. Paging on returns every match exactly
-  once. Resuming walks the candidates before the cursor's offset without
-  examining them, which is bounded by the world, as `world_summary`'s object
-  count is. A search does not count its matches, so it gives no `total`.
+  once. A search does not count its matches, so it gives no `total`.
+- **Cost of resuming.** A call resumes by passing over the candidates
+  before its cursor's offset without examining them: whole chunks by their
+  object counts, which the snapshot keeps, and the objects of the chunk the
+  offset falls in one by one; `search_definitions` passes over the
+  definitions one by one. One call stays cheap, but paging through a whole
+  large world costs time that grows with the square of the pages within a
+  chunk or definition list. Measured on a release build (AMD Ryzen 9
+  9950X3D) on a world of ten chunks of 100,000 objects each: a filter that
+  matches nothing pages through the 1,000,000 candidates in 101 calls and
+  0.07 s, the slowest call 1.3 ms; matching every object, 2,001 calls and
+  2.5 s at `limit` 500, and 20,001 calls and 9.6 s at `limit` 50, the
+  slowest call under 5 ms.
 
 ## Limits
 
@@ -279,7 +299,7 @@ resolved, so a field only its prototype sets is not found.
 | One string value | 4 KiB before escaping, cut at a character boundary; `truncated_strings` counts the strings cut, and each diagnostic says whether it was cut |
 | `prefix`, `contains`, `scope`, `type`, `field`, `equals` (a string), `plane`, `proto`, `uid_prefix` | 256 bytes |
 | `id` of `inspect` | 512 bytes |
-| Candidates a search examines in one call (`scan_limit`) | Default and at most 10,000, and 8 MiB of field values parsed again |
+| Candidates a search examines in one call (`scan_limit`) | Default and at most 10,000, and 8 MiB of field values parsed again, plus the one value that reaches it (a value can be as large as its file) |
 | `inspect`'s re-read | One file of at most 64 MiB, the format's limit, parsed under the format's limits |
 | A cursor sent back | 256 bytes |
 | Lists in `world_summary` | 500 planes, 500 layers per plane, 500 definition types, 500 render layers and 500 ground layers, sharing the byte budget in that order; a `*_truncated` flag says when a list was cut |
@@ -315,7 +335,9 @@ instructions to a language model. The server keeps every value read from
 the world inside a typed field, in the structured result and in its
 serialized text copy alike: as a JSON string, or, for `inspect`'s
 `value`, as the item's own JSON, whose strings are escaped like any
-other. The instructions `server/discover`
+other. Unicode format characters, such as the bidirectional controls,
+are valid JSON data and are sent as they are: a client that displays
+results to people should show them safely. The instructions `server/discover`
 gives and every tool description say that results are world data and not
 instructions, and the text of a tool error is written by the server.
 Clients should still treat tool results as data.

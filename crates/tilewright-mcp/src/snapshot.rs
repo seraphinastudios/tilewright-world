@@ -5,7 +5,7 @@
 //! snapshot and names its revision; `refresh` replaces it.
 
 use crate::json::{fingerprint, hex};
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 use tilewright_source::{Diagnostic, LoadOptions, Overlay, SourceRoot, World};
 
 /// One load of the tree.
@@ -30,7 +30,13 @@ pub struct Valid {
     /// The world's IDs by kind, or `None` when it has more than an ID
     /// snapshot holds (`tilewright_diff::DEFAULT_MAXIMUM_IDS`).
     pub ids: Option<tilewright_diff::Snapshot>,
+    /// Each chunk's object count, inventory entries included, by plane and
+    /// chunk key, so a search resuming past a chunk need not walk it.
+    pub chunk_objects: ChunkCounts,
 }
+
+/// Object counts by plane ID, then chunk key.
+pub type ChunkCounts = BTreeMap<String, BTreeMap<(i32, i64, i64), usize>>;
 
 impl Snapshot {
     /// Loads the tree at `root`, with the bounds `tilewright validate`
@@ -75,12 +81,25 @@ impl Snapshot {
                     &tilewright_diff::Limits::default(),
                 )
                 .ok();
+                let chunk_objects = world
+                    .planes()
+                    .iter()
+                    .map(|(id, plane)| {
+                        let counts = plane
+                            .chunks
+                            .iter()
+                            .map(|(key, chunk)| (*key, chunk.depth_first().count()))
+                            .collect();
+                        (id.clone(), counts)
+                    })
+                    .collect();
                 Self {
                     binding: revision.clone(),
                     state: State::Valid(Box::new(Valid {
                         world,
                         revision,
                         ids,
+                        chunk_objects,
                     })),
                 }
             }

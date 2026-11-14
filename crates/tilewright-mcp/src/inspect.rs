@@ -57,6 +57,19 @@ enum Item<'w> {
     },
 }
 
+/// Whether `id` has the shape the IDs of `kind` have: `owner/name` with
+/// both parts non-empty for a definition, zone, anchor or stairwell; any
+/// string for a plane or object (render layers are not items).
+pub fn well_formed(kind: Kind, id: &str) -> bool {
+    match kind {
+        Kind::Definition | Kind::Zone | Kind::Anchor | Kind::Stairwell => id
+            .split_once('/')
+            .is_some_and(|(owner, name)| !owner.is_empty() && !name.is_empty()),
+        Kind::Plane | Kind::Object => true,
+        Kind::RenderLayer => false,
+    }
+}
+
 /// The item of `kind` named `id` in `world`, and the root-relative path of
 /// its file.
 fn find<'w>(world: &'w World, kind: Kind, id: &'w str) -> Result<(String, Item<'w>), Failure> {

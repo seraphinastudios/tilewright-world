@@ -415,6 +415,16 @@ fn inspect_checks_its_arguments() {
         let (_, document) = result(&mut server, "inspect", arguments);
         assert_eq!(tool_error(&document), "arguments.invalid", "{arguments}");
     }
+    // The ID's shape is checked before the revision.
+    let (_, document) = result(
+        &mut server,
+        "inspect",
+        &format!(
+            r#"{{"kind":"zone","id":"island","revision":"{}"}}"#,
+            "0".repeat(64)
+        ),
+    );
+    assert_eq!(tool_error(&document), "arguments.invalid");
     let long = "a".repeat(513);
     assert_eq!(
         inspect_error(&mut server, "plane", &long),
@@ -943,6 +953,8 @@ fn search_arguments_are_checked() {
     let mut server = ready(&fixture("basic"));
     for (tool, arguments) in [
         ("search_definitions", r#"{"equals":1}"#),
+        ("search_definitions", r#"{"equals":"proto/chest"}"#),
+        ("search_definitions", r#"{"type":"proto","contains":"/"}"#),
         ("search_definitions", r#"{"equals":"a","contains":"a"}"#),
         ("search_definitions", r#"{"field":"x","equals":[1]}"#),
         ("search_definitions", r#"{"field":"x","equals":{}}"#),
@@ -1087,8 +1099,7 @@ fn a_revision_argument_fails_once_the_snapshot_moved() {
         );
         assert_eq!(tool_error(&document), "revision.changed", "{tool}");
         assert!(
-            text(&document)
-                .ends_with("the tree does not load now, so there is no current revision")
+            text(&document).ends_with("the tree does not load, so the snapshot has no revision")
         );
     }
     let (reply, _) = result(&mut server, "validate", "{}");
@@ -1108,9 +1119,15 @@ fn the_new_tools_need_a_tree_that_loads() {
         assert_eq!(tool_error(&document), "tree.invalid");
         golden(&format!("invalid-{tool}"), &reply);
     }
-    // Arguments are checked first.
-    let (_, document) = result(&mut server, "inspect", r#"{"kind":"plane"}"#);
-    assert_eq!(tool_error(&document), "arguments.invalid");
+    // Arguments are checked first, the ID's shape included.
+    for arguments in [
+        r#"{"kind":"plane"}"#,
+        r#"{"kind":"zone","id":"island"}"#,
+        r#"{"kind":"definition","id":"proto/"}"#,
+    ] {
+        let (_, document) = result(&mut server, "inspect", arguments);
+        assert_eq!(tool_error(&document), "arguments.invalid", "{arguments}");
+    }
 }
 
 #[test]
@@ -1331,4 +1348,247 @@ fn the_new_tools_leave_the_tree_as_it_was() {
     let before = super::listing(directory.path());
     every_new_tool(&mut server);
     assert_eq!(super::listing(directory.path()), before);
+}
+
+#[test]
+#[allow(clippy::disallowed_methods, clippy::too_many_lines)]
+fn inspect_compares_every_value_kept_for_anchors_and_objects() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().to_path_buf();
+    copy_tree(&fixture("basic"), &root);
+    let rewrite = |path: &str, from: &str, to: &str| {
+        let path = root.join(path);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches(from).count(), 1, "{from}");
+        std::fs::write(&path, text.replacen(from, to, 1)).unwrap();
+    };
+    // A number field for objects, set on the ruined wall, and a uid for
+    // the object with a portal and custom data.
+    rewrite(
+        "profile/schema/object-fields.jsonc",
+        "\"tags\":",
+        "\"speed\": {\"type\": \"number\"},\n    \"tags\":",
+    );
+    let chunk = "planes/overworld/layers/0/0_0.jsonc";
+    rewrite(
+        chunk,
+        "\"name\": \"Old wall\",",
+        "\"name\": \"Old wall\", \"speed\": 1.5,",
+    );
+    rewrite(
+        chunk,
+        "{\"at\": [3, 3], \"proto\": \"stairs_down\"",
+        "{\"uid\": \"gate\", \"at\": [3, 3], \"proto\": \"stairs_down\"",
+    );
+    let mut server = ready(&root);
+    assert!(server.revision().is_some(), "the edited copy loads");
+    // Each change is refused, and undoing it makes the item the
+    // snapshot's again.
+    for (path, kind, id, from, to) in [
+        (
+            chunk,
+            "object",
+            "gate",
+            "{\"reviewed\": true}",
+            "{\"reviewed\": false}",
+        ),
+        (
+            chunk,
+            "object",
+            "gate",
+            "\"layer\": 0, \"at\": [1, 1]",
+            "\"layer\": 0, \"at\": [2, 2]",
+        ),
+        (
+            chunk,
+            "object",
+            "gate",
+            "{\"plane\": \"vault\", \"layer\"",
+            "{\"layer\"",
+        ),
+        (
+            chunk,
+            "object",
+            "ruin.north_wall",
+            "\"speed\": 1.5",
+            "\"speed\": 2.5",
+        ),
+        (
+            "planes/overworld/anchors.jsonc",
+            "anchor",
+            "overworld/village.well",
+            "\"id\": \"village.well\", \"layer\": 0",
+            "\"id\": \"village.well\", \"layer\": 1",
+        ),
+    ] {
+        inspect_start(&mut server, kind, id);
+        rewrite(path, from, to);
+        assert_eq!(
+            inspect_error(&mut server, kind, id),
+            "revision.changed",
+            "{to}"
+        );
+        rewrite(path, to, from);
+        inspect_start(&mut server, kind, id);
+    }
+    // A number spelled otherwise is the same value: the snapshot's item,
+    // as the file spells it now.
+    rewrite(chunk, "\"speed\": 1.5", "\"speed\": 15e-1");
+    let (reply, document) = result(
+        &mut server,
+        "inspect",
+        &inspect_arguments("object", "ruin.north_wall"),
+    );
+    assert!(reply.contains("\"speed\":15e-1"), "{reply}");
+    assert_eq!(
+        at(structured(&document), &["value", "fields", "speed"]).as_f64(),
+        Some(1.5)
+    );
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn columns_count_characters_not_bytes() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    copy_tree(&fixture("basic"), root);
+    let path = root.join("planes/overworld/zones.jsonc");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let before = "{\"id\": \"village\", ";
+    assert_eq!(text.matches(before).count(), 1);
+    // A zone before it on its line, named in characters of two to four
+    // bytes, one of them two UTF-16 units.
+    std::fs::write(
+        &path,
+        text.replacen(
+            before,
+            &format!("{{\"id\": \"x\", \"name\": \"日本語😀\"}}, {before}"),
+            1,
+        ),
+    )
+    .unwrap();
+    let mut server = ready(root);
+    let (_, document) = result(
+        &mut server,
+        "inspect",
+        &inspect_arguments("zone", "overworld/village"),
+    );
+    let span = at(structured(&document), &["span"]);
+    let start = usize::try_from(at(span, &["start"]).as_i64().unwrap()).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    let line_start = text[..start].rfind('\n').unwrap() + 1;
+    let column = at(span, &["start_column"]).as_i64().unwrap();
+    let before = &text[line_start..start];
+    assert!(before.contains('😀'));
+    assert_eq!(column, i64::try_from(before.chars().count()).unwrap() + 1);
+    assert_ne!(
+        column,
+        i64::try_from(before.len()).unwrap() + 1,
+        "not bytes"
+    );
+    assert_ne!(
+        column,
+        i64::try_from(before.encode_utf16().count()).unwrap() + 1,
+        "not UTF-16 units"
+    );
+    assert_eq!(line_and_column(&text, start).1, column);
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn small_cases_on_a_generated_tree() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    copy_tree(&fixture("basic"), root);
+    let proto = |id: &str, fields: &str| {
+        std::fs::write(
+            root.join(format!("defs/proto/{id}.jsonc")),
+            format!(
+                r#"{{"format": "tilewright.def/1", "type": "proto", "id": "{id}", "fields": {{"face": "f.png", "layer": "item"{fields}}}}}"#
+            ),
+        )
+        .unwrap();
+    };
+    // A key past the string cap, first in a small value.
+    proto(
+        "long_key",
+        &format!(r#", "footprint": {{"{}": 1, "a": "b"}}"#, "k".repeat(5000)),
+    );
+    // Numbers spelled with a fraction inside a JSON value.
+    proto("fraction", r#", "footprint": [[2.0], {"k": 3.5}]"#);
+    // Line and paragraph separators in a string.
+    proto("separators", ", \"footprint\": \"a\u{2028}b\u{2029}c\"");
+    // An object at a chunk's first tile.
+    let vault = root.join("planes/vault/layers/0/0_0.jsonc");
+    let text = std::fs::read_to_string(&vault).unwrap();
+    assert_eq!(text.matches("\"objects\": [").count(), 1);
+    std::fs::write(
+        &vault,
+        text.replacen(
+            "\"objects\": [",
+            "\"objects\": [{\"at\": [0, 0], \"proto\": \"coin\"}, ",
+            1,
+        ),
+    )
+    .unwrap();
+    let mut server = ready(root);
+    assert!(server.revision().is_some(), "the generated tree loads");
+
+    let (_, document) = result(
+        &mut server,
+        "inspect",
+        &inspect_arguments("definition", "proto/long_key"),
+    );
+    let item = structured(&document);
+    assert_eq!(at(item, &["value_truncated"]).as_bool(), Some(true));
+    assert_eq!(
+        at(item, &["value", "fields", "footprint"])
+            .as_object()
+            .map(<[_]>::len),
+        Some(0),
+        "the value stops before the long key"
+    );
+
+    // An integer matches a number spelled with a fraction, at any depth.
+    for equals in ["2", "2.0", "3.5"] {
+        let (_, document) = result(
+            &mut server,
+            "search_definitions",
+            &format!(r#"{{"field":"footprint","equals":{equals}}}"#),
+        );
+        let found = at(structured(&document), &["definitions"])
+            .as_array()
+            .unwrap();
+        assert_eq!(found.len(), 1, "{equals}");
+        assert_eq!(at(&found[0], &["id"]).as_str(), Some("fraction"));
+    }
+
+    // The separators are escaped, and the value is the same string.
+    let replies = send(
+        &mut server,
+        &[&call(
+            7,
+            "inspect",
+            &inspect_arguments("definition", "proto/separators"),
+        )],
+    );
+    assert!(!replies[0].contains(['\u{2028}', '\u{2029}']));
+    assert!(replies[0].contains("a\\u2028b\\u2029c"));
+    let document = parse(&replies[0]);
+    assert_eq!(
+        at(structured(&document), &["value", "fields", "footprint"]).as_str(),
+        Some("a\u{2028}b\u{2029}c")
+    );
+
+    // A bounding box whose far corner is a chunk's origin keeps the
+    // chunk's first column and row.
+    for bbox in ["[-5,-5,0,0]", "[0,0,0,0]", "[-40,-40,0,0]"] {
+        let (_, document) = result(
+            &mut server,
+            "search_objects",
+            &format!(r#"{{"plane":"vault","bbox":{bbox}}}"#),
+        );
+        let found = at(structured(&document), &["objects"]).as_array().unwrap();
+        assert_eq!(found.len(), 1, "{bbox}");
+    }
 }
