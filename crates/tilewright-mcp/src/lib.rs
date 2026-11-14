@@ -38,6 +38,7 @@
 mod budget;
 mod inspect;
 mod json;
+mod preview;
 mod search;
 mod snapshot;
 mod tools;
@@ -305,7 +306,9 @@ impl Server {
         // ignored, as are all others.
         let id = id?;
         Some(
-            match checked.and_then(|(method, params)| self.request(method, params)) {
+            match checked
+                .and_then(|(method, params)| self.request(method, params, document.source()))
+            {
                 Ok(fields) => {
                     let mut reply = String::from("{\"jsonrpc\":\"2.0\",\"id\":");
                     id.write(&mut reply);
@@ -321,8 +324,14 @@ impl Server {
         )
     }
 
-    /// The fields of a request's result, after `resultType`.
-    fn request(&mut self, method: &str, params: Option<&Value>) -> Result<String, Failure> {
+    /// The fields of a request's result, after `resultType`. `source` is
+    /// the message's text, which the spans of `params` index.
+    fn request(
+        &mut self,
+        method: &str,
+        params: Option<&Value>,
+        source: &str,
+    ) -> Result<String, Failure> {
         match method {
             "server/discover" | "tools/list" | "tools/call" => {}
             // The handshake of the revisions before this one. The revision
@@ -411,7 +420,13 @@ impl Server {
                     "tool.unknown",
                     "unknown tool: tools/list names the tools of this server",
                 ))?;
-                Ok(tools::call(tool, arguments, &mut self.snapshot, &self.root))
+                Ok(tools::call(
+                    tool,
+                    arguments,
+                    source,
+                    &mut self.snapshot,
+                    &self.root,
+                ))
             }
         }
     }

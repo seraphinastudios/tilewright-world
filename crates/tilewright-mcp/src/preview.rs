@@ -1,0 +1,371 @@
+// Copyright 2026 Seraphina Studios
+// SPDX-License-Identifier: MIT
+
+//! `preview_transaction`: a transaction carried out in memory on the tree,
+//! as `tilewright tx preview` carries it out, and reported within the byte
+//! budget (docs/MCP.md, "Previewing a transaction").
+//!
+//! Planning reads the tree on disk, not the snapshot, which keeps no file
+//! text. So after planning the server loads the tree again, with the files
+//! the plan read laid over it as it read them, and requires that tree to
+//! be at the snapshot's revision: then the plan was made on the snapshot's
+//! files. Nothing is written, locked or published: the plan is dropped.
+
+use crate::{
+    budget::{self, Output, PAGE_BYTES},
+    json::hex,
+    snapshot::Valid,
+};
+use std::{fmt::Write as _, path::Path};
+use tilewright_edit::{FileChange, Options, Plan, Transaction, digest};
+use tilewright_source::{Diagnostic, LoadOptions, Overlay, SourceRoot};
+
+/// The name a transaction's own diagnostics carry as their `path`. No
+/// file of a tree has it: every one ends in `.jsonc`, or is the root, `.`.
+pub const NAME: &str = "transaction";
+
+/// Most operations a previewed transaction may have.
+pub const MAXIMUM_OPERATIONS: usize = 256;
+/// Most changed files a result lists; `files_changed` counts them all.
+pub const MAXIMUM_FILES: usize = 200;
+/// Most refusals a result lists; `refusals_total` counts them all, which
+/// the library caps at 1,000, the last a note that there may be more.
+pub const MAXIMUM_REFUSALS: usize = 500;
+
+/// The tree on disk is not at the snapshot's revision, with the files the
+/// plan read as it read them: the plan was not made on the snapshot.
+#[derive(Debug, Eq, PartialEq)]
+pub struct Drift;
+
+/// Where a transaction was refused.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Stage {
+    /// The transaction document: `jsonc.*` or `tx.shape`.
+    Transaction,
+    /// Carrying it out, its preconditions, or validating the result.
+    Plan,
+    /// The undo check.
+    Undo,
+}
+
+impl Stage {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Transaction => "transaction",
+            Self::Plan => "plan",
+            Self::Undo => "undo",
+        }
+    }
+}
+
+/// What was found, before it is written.
+struct Report<'p> {
+    refused_at: Option<Stage>,
+    operations: Option<usize>,
+    plan: Option<&'p Plan>,
+    undo: &'static str,
+    refusals: &'p [Diagnostic],
+}
+
+/// Previews the transaction whose text is `text` (the argument as the
+/// request holds it) on the tree at `root`, which must be the snapshot's.
+///
+/// # Errors
+/// [`Drift`] when the tree on disk is not the snapshot's.
+pub fn preview(valid: &Valid, root: &Path, text: &str, excerpts: bool) -> Result<String, Drift> {
+    preview_with(valid, root, text, excerpts, Plan::check_undo)
+}
+
+/// [`preview`] with `undo` as the undo check, so that a test can give a
+/// refusal, which a tree small enough for a test cannot cause.
+pub(crate) fn preview_with(
+    valid: &Valid,
+    root: &Path,
+    text: &str,
+    excerpts: bool,
+    undo: impl FnOnce(&Plan) -> Result<(), Vec<Diagnostic>>,
+) -> Result<String, Drift> {
+    let transaction = match Transaction::parse(NAME, text) {
+        Ok(transaction) => transaction,
+        // The document alone is wrong: the tree was not read.
+        Err(problems) => {
+            return Ok(write(
+                valid,
+                &Report {
+                    refused_at: Some(Stage::Transaction),
+                    operations: None,
+                    plan: None,
+                    undo: "not_run",
+                    refusals: &problems,
+                },
+                excerpts,
+            ));
+        }
+    };
+    // One handle for planning and the check after it, opened afresh as
+    // every load of the snapshot is.
+    let source = SourceRoot::new(root);
+    let planned = tilewright_edit::plan_in(&source, &transaction, &Options::default());
+    let overlay: Overlay = match &planned {
+        Ok(plan) => plan
+            .files()
+            .iter()
+            .map(|file| (file.path.clone(), file.before.clone()))
+            .collect(),
+        // A refusal may come from a file that changed since the snapshot,
+        // so the tree as it is now must be the snapshot's.
+        Err(_) => Overlay::new(),
+    };
+    let unchanged = tilewright_source::load_edited_in(&source, &LoadOptions::default(), &overlay)
+        .is_ok_and(|world| hex(&world.source_digest()) == valid.revision);
+    if !unchanged {
+        return Err(Drift);
+    }
+    let operations = Some(transaction.len());
+    Ok(match &planned {
+        Err(problems) => write(
+            valid,
+            &Report {
+                refused_at: Some(Stage::Plan),
+                operations,
+                plan: None,
+                undo: "not_run",
+                refusals: problems,
+            },
+            excerpts,
+        ),
+        Ok(plan) => {
+            let undone = undo(plan);
+            let (refused_at, undo, refusals) = match &undone {
+                Ok(()) => (None, "passed", &[][..]),
+                Err(problems) => (Some(Stage::Undo), "refused", problems.as_slice()),
+            };
+            write(
+                valid,
+                &Report {
+                    refused_at,
+                    operations,
+                    plan: Some(plan),
+                    undo,
+                    refusals,
+                },
+                excerpts,
+            )
+        }
+    })
+}
+
+/// `"null"` or the JSON of a lowercase hex SHA-256 of `text`.
+fn sha256(text: Option<&str>) -> String {
+    digest(text).map_or_else(
+        || "null".to_owned(),
+        |digest| format!("\"{}\"", hex(&digest)),
+    )
+}
+
+/// `"null"` or the byte length of `text`.
+fn size(text: Option<&str>) -> String {
+    text.map_or_else(|| "null".to_owned(), |text| text.len().to_string())
+}
+
+/// The smallest byte range of `after` that holds every change from
+/// `before`, both ends on character boundaries, and how many bytes of
+/// `before` it replaces: `(start, end, removed)`.
+pub fn changed_range(before: &str, after: &str) -> (usize, usize, usize) {
+    let (old, new) = (before.as_bytes(), after.as_bytes());
+    let mut prefix = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+    // The same bytes before `prefix` in both, so a boundary of one is a
+    // boundary of the other.
+    while !after.is_char_boundary(prefix) {
+        prefix -= 1;
+    }
+    let room = old.len().min(new.len()) - prefix;
+    let mut suffix = old
+        .iter()
+        .rev()
+        .zip(new.iter().rev())
+        .take(room)
+        .take_while(|(a, b)| a == b)
+        .count();
+    while !after.is_char_boundary(new.len() - suffix) {
+        suffix -= 1;
+    }
+    (prefix, new.len() - suffix, old.len() - suffix - prefix)
+}
+
+/// One changed file.
+fn file_item(output: &mut Output, file: &FileChange, excerpts: bool) {
+    let change = match (&file.before, &file.after) {
+        (None, _) => "created",
+        (_, None) => "deleted",
+        _ => "modified",
+    };
+    output.raw("{\"path\":");
+    output.string(&file.path);
+    let (before, after) = (file.before.as_deref(), file.after.as_deref());
+    let _ = write!(
+        output.text,
+        ",\"change\":\"{change}\",\"before_bytes\":{},\"after_bytes\":{},\"before_sha256\":{},\"after_sha256\":{},\"changed\":",
+        size(before),
+        size(after),
+        sha256(before),
+        sha256(after),
+    );
+    let Some(after) = after else {
+        output.raw("null,\"excerpt\":null,\"excerpt_truncated\":false}");
+        return;
+    };
+    let (start, end, removed) = changed_range(before.unwrap_or(""), after);
+    let (start_line, start_column) = crate::inspect::position(after, start);
+    let (end_line, end_column) = crate::inspect::position(after, end);
+    let _ = write!(
+        output.text,
+        "{{\"start\":{start},\"end\":{end},\"start_line\":{start_line},\"start_column\":{start_column},\"end_line\":{end_line},\"end_column\":{end_column},\"removed_bytes\":{removed}}},\"excerpt\":"
+    );
+    let cut = if excerpts {
+        output.string(&after[start..end])
+    } else {
+        output.raw("null");
+        false
+    };
+    let _ = write!(output.text, ",\"excerpt_truncated\":{cut}}}");
+}
+
+/// One refusal, in the shape of a `validate` diagnostic.
+fn refusal_item(output: &mut Output, diagnostic: &Diagnostic) {
+    output.raw("{\"path\":");
+    let path = output.string(&diagnostic.path);
+    let _ = write!(
+        output.text,
+        ",\"on_transaction\":{},\"start\":{},\"end\":{},\"line\":{},\"column\":{},\"code\":",
+        diagnostic.path == NAME,
+        diagnostic.start,
+        diagnostic.end,
+        diagnostic.line,
+        diagnostic.column
+    );
+    output.string(diagnostic.code);
+    output.raw(",\"message\":");
+    let message = output.string(&diagnostic.message);
+    let _ = write!(output.text, ",\"truncated\":{}}}", path || message);
+}
+
+/// The structured result.
+fn write(valid: &Valid, report: &Report<'_>, excerpts: bool) -> String {
+    let changed: Vec<&FileChange> = report
+        .plan
+        .map(|plan| {
+            plan.files()
+                .iter()
+                .filter(|file| file.is_changed())
+                .collect()
+        })
+        .unwrap_or_default();
+    let consulted = report
+        .plan
+        .map_or(0, |plan| plan.files().len() - changed.len());
+    let mut output = Output::default();
+    output.raw("{\"revision\":");
+    output.string(&valid.revision);
+    let _ = write!(
+        output.text,
+        ",\"would_apply\":{},\"refused_at\":",
+        report.refused_at.is_none()
+    );
+    match report.refused_at {
+        Some(stage) => {
+            output.string(stage.as_str());
+        }
+        None => output.raw("null"),
+    }
+    let _ = write!(
+        output.text,
+        ",\"operations\":{},\"resulting_revision\":",
+        report
+            .operations
+            .map_or_else(|| "null".to_owned(), |count| count.to_string())
+    );
+    match report.plan {
+        Some(plan) => {
+            output.string(&hex(&plan.world().source_digest()));
+        }
+        None => output.raw("null"),
+    }
+    let _ = write!(
+        output.text,
+        ",\"undo_check\":\"{}\",\"files_changed\":{},\"files_consulted\":{consulted}",
+        report.undo,
+        changed.len()
+    );
+    // The two lists share the byte budget, files first; the fields after
+    // them are small.
+    let budget = PAGE_BYTES.saturating_sub(budget::cost(&output.text));
+    let files = budget::page_within(changed.iter(), 0, MAXIMUM_FILES, budget, |output, file| {
+        file_item(output, file, excerpts);
+    });
+    let refusals = budget::page_within(
+        report.refusals.iter(),
+        0,
+        MAXIMUM_REFUSALS,
+        budget.saturating_sub(files.cost),
+        refusal_item,
+    );
+    let _ = write!(
+        output.text,
+        ",\"files\":{},\"files_truncated\":{},\"refusals_total\":{},\"refusals\":{},\"refusals_truncated\":{},\"byte_budget_reached\":{},\"truncated_strings\":{}}}",
+        files.items,
+        files.next.is_some(),
+        report.refusals.len(),
+        refusals.items,
+        refusals.next.is_some(),
+        files.stopped_by_bytes || refusals.stopped_by_bytes,
+        output.cut_strings + files.cut_strings + refusals.cut_strings
+    );
+    output.text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::changed_range;
+
+    #[test]
+    fn the_changed_range_is_the_smallest_on_character_boundaries() {
+        for (before, after, expected) in [
+            ("abc", "abc", (3, 3, 0)),
+            ("", "abc", (0, 3, 0)),
+            ("abc", "", (0, 0, 3)),
+            ("abcdef", "abXYef", (2, 4, 2)),
+            ("abcdef", "abef", (2, 2, 2)),
+            ("abef", "abcdef", (2, 4, 0)),
+            // A repeat can be read as inserted at either end; the range is
+            // still as small as can be.
+            ("aa", "aaa", (2, 3, 0)),
+            ("xay", "xaay", (2, 3, 0)),
+            // Multibyte characters that share leading or trailing bytes:
+            // é is C3 A9, è C3 A8; ä is C3 A4, ¤ C2 A4.
+            ("aé", "aè", (1, 3, 2)),
+            ("äb", "¤b", (0, 2, 2)),
+            ("日本", "日木", (3, 6, 3)),
+        ] {
+            assert_eq!(
+                changed_range(before, after),
+                expected,
+                "{before:?} -> {after:?}"
+            );
+            let (start, end, removed) = expected;
+            // The range, put back, gives the new text, and the old text
+            // around it is the same.
+            let suffix = after.len() - end;
+            assert_eq!(
+                format!(
+                    "{}{}{}",
+                    &before[..start],
+                    &after[start..end],
+                    &before[start + removed..]
+                ),
+                after
+            );
+            assert_eq!(before.len() - start - removed, suffix);
+        }
+    }
+}
