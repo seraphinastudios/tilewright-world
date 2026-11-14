@@ -826,6 +826,9 @@ fn object_keys(items: &[String]) -> Vec<String> {
 /// carried, its tile, and itself.
 type Found = (String, i32, String, bool, [i64; 2], Object);
 
+/// A test of which found objects a search should match.
+type FoundTest = Box<dyn Fn(&Found) -> bool>;
+
 #[test]
 #[allow(clippy::too_many_lines)]
 fn search_objects_filters_and_pages() {
@@ -1591,4 +1594,289 @@ fn small_cases_on_a_generated_tree() {
         let found = at(structured(&document), &["objects"]).as_array().unwrap();
         assert_eq!(found.len(), 1, "{bbox}");
     }
+}
+
+#[allow(clippy::disallowed_methods)]
+/// A copy of `fixtures/basic` with vault chunks of up to four objects,
+/// some with inventories, before and after other chunks, and a chain of
+/// inventories as deep as the format allows.
+fn skipping_tree(root: &Path) {
+    copy_tree(&fixture("basic"), root);
+    let mut serial = 0;
+    let uid = |serial: &mut usize, with: bool| {
+        *serial += 1;
+        if with {
+            format!("\"uid\": \"d.{serial}\", ")
+        } else {
+            String::new()
+        }
+    };
+    // Vault chunks of 0 to 4 top-level objects, some with inventories.
+    for cx in -2i64..=2 {
+        for cy in 0i64..=1 {
+            if cx == 0 && cy == 0 {
+                continue;
+            }
+            let n = usize::try_from((cx + 2) * 2 + cy).unwrap() % 5;
+            let mut objects = Vec::new();
+            for i in 0..n {
+                let inv = if i % 2 == 1 {
+                    let a = uid(&mut serial, true);
+                    let b = uid(&mut serial, false);
+                    format!(
+                        ", \"inventory\": [{{{a}\"proto\": \"coin\", \"fields\": {{\"count\": {}}}}}, {{{b}\"proto\": \"coin\", \"inventory\": [{{\"proto\": \"coin\"}}]}}]",
+                        i + 1
+                    )
+                } else {
+                    String::new()
+                };
+                let u = uid(&mut serial, i % 3 != 2);
+                objects.push(format!(
+                    "{{{u}\"at\": [{}, {}], \"proto\": \"{}\", \"fields\": {{\"count\": {}}}{inv}}}",
+                    i * 7 % 32,
+                    (i * 13 + 31) % 32,
+                    if i % 2 == 0 { "coin" } else { "chest" },
+                    (i % 3) + 1
+                ));
+            }
+            std::fs::write(
+                root.join(format!("planes/vault/layers/0/{cx}_{cy}.jsonc")),
+                format!(
+                    "{{\"format\": \"tilewright.chunk/1\", \"plane\": \"vault\", \"layer\": 0, \"chunk\": [{cx}, {cy}], \"terrain\": {{\"floor\": {{\"palette\": {{\"c\": \"cave_floor\"}}, \"fill\": \"c\"}}}}, \"objects\": [{}]}}",
+                    objects.join(", ")
+                ),
+            )
+            .unwrap();
+        }
+    }
+    // A chain 16 inventories deep, the format's maximum.
+    let mut chain = String::from("{\"uid\": \"deep.16\", \"proto\": \"coin\"}");
+    for depth in (0..16).rev() {
+        let at = if depth == 0 { "\"at\": [3, 3], " } else { "" };
+        chain = format!(
+            "{{\"uid\": \"deep.{depth}\", {at}\"proto\": \"chest\", \"inventory\": [{chain}, {{\"proto\": \"coin\"}}]}}"
+        );
+    }
+    std::fs::write(
+        root.join("planes/vault/layers/0/3_3.jsonc"),
+        format!(
+            "{{\"format\": \"tilewright.chunk/1\", \"plane\": \"vault\", \"layer\": 0, \"chunk\": [3, 3], \"terrain\": {{\"floor\": {{\"palette\": {{\"c\": \"cave_floor\"}}, \"fill\": \"c\"}}}}, \"objects\": [{chain}, {{\"at\": [0, 0], \"proto\": \"coin\"}}]}}"
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn resuming_past_chunks_matches_a_walk_of_every_object() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    skipping_tree(root);
+    let mut server = ready(root);
+    if server.revision().is_none() {
+        let (_, document) = result(&mut server, "validate", "{}");
+        panic!("{}", document.canonical(document.root()));
+    }
+    let world = tilewright_source::load(root).unwrap();
+    let mut every: Vec<Found> = Vec::new();
+    for (id, plane) in world.planes() {
+        for (&(layer, cx, cy), chunk) in &plane.chunks {
+            let size = i64::from(plane.chunk_size);
+            every.extend(
+                walk(id, layer, [cx * size, cy * size], chunk)
+                    .into_iter()
+                    .map(|(key, carried, tile, object)| {
+                        (id.clone(), layer, key, carried, tile, object)
+                    }),
+            );
+        }
+    }
+    assert!(every.len() > 60, "{}", every.len());
+    let deepest = every
+        .iter()
+        .find(|entry| entry.5.uid.as_deref() == Some("deep.16"))
+        .unwrap();
+    assert!(
+        deepest
+            .2
+            .contains("[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]"),
+        "{}",
+        deepest.2
+    );
+    // The deepest entry has a position of 17 steps, the most a position
+    // holds, and the search gives all of them.
+    let (_, document) = result(&mut server, "search_objects", r#"{"uid_prefix":"deep.16"}"#);
+    assert_eq!(
+        at(structured(&document), &["objects", "0", "position"])
+            .as_array()
+            .map(<[_]>::len),
+        Some(17)
+    );
+    let count = |object: &Object| {
+        object
+            .fields
+            .iter()
+            .find(|(name, _)| name == "count")
+            .map(|(_, value)| value.clone())
+    };
+    let cases: Vec<(&str, FoundTest)> = vec![
+        ("{}", Box::new(|_| true)),
+        (r#"{"carried":false}"#, Box::new(|e| !e.3)),
+        (r#"{"plane":"vault"}"#, Box::new(|e| e.0 == "vault")),
+        (
+            r#"{"plane":"vault","carried":false}"#,
+            Box::new(|e| e.0 == "vault" && !e.3),
+        ),
+        (r#"{"layer":0}"#, Box::new(|e| e.1 == 0)),
+        (
+            r#"{"layer":0,"carried":false}"#,
+            Box::new(|e| e.1 == 0 && !e.3),
+        ),
+        (
+            r#"{"bbox":[-40,10,40,40]}"#,
+            Box::new(|e| (-40..=40).contains(&e.4[0]) && (10..=40).contains(&e.4[1])),
+        ),
+        (
+            r#"{"bbox":[-40,10,40,40],"carried":false}"#,
+            Box::new(|e| !e.3 && (-40..=40).contains(&e.4[0]) && (10..=40).contains(&e.4[1])),
+        ),
+        (
+            r#"{"plane":"vault","bbox":[0,0,31,31]}"#,
+            Box::new(|e| {
+                e.0 == "vault" && (0..=31).contains(&e.4[0]) && (0..=31).contains(&e.4[1])
+            }),
+        ),
+        (
+            r#"{"plane":"vault","bbox":[96,96,127,127]}"#,
+            Box::new(|e| {
+                e.0 == "vault" && (96..=127).contains(&e.4[0]) && (96..=127).contains(&e.4[1])
+            }),
+        ),
+        (r#"{"proto":"coin"}"#, Box::new(|e| e.5.proto == "coin")),
+        (
+            r#"{"proto":"coin","carried":false}"#,
+            Box::new(|e| e.5.proto == "coin" && !e.3),
+        ),
+        (
+            r#"{"uid_prefix":"d."}"#,
+            Box::new(|e| e.5.uid.as_deref().is_some_and(|u| u.starts_with("d."))),
+        ),
+        (
+            r#"{"uid_prefix":"deep."}"#,
+            Box::new(|e| e.5.uid.as_deref().is_some_and(|u| u.starts_with("deep."))),
+        ),
+        (
+            r#"{"field":"count"}"#,
+            Box::new(move |e| count(&e.5).is_some()),
+        ),
+        (
+            r#"{"field":"count","equals":2}"#,
+            Box::new(move |e| count(&e.5) == Some(FieldValue::Integer(2))),
+        ),
+        (
+            r#"{"field":"count","equals":2,"carried":false,"plane":"vault"}"#,
+            Box::new(move |e| {
+                !e.3 && e.0 == "vault" && count(&e.5) == Some(FieldValue::Integer(2))
+            }),
+        ),
+        (r#"{"layer":7}"#, Box::new(|_| false)),
+    ];
+    for (arguments, test) in &cases {
+        let expected: Vec<String> = every
+            .iter()
+            .filter(|e| test(e))
+            .map(|e| e.2.clone())
+            .collect();
+        let (all, pages, _) = exhaust_search(
+            &mut server,
+            "search_objects",
+            arguments,
+            "objects",
+            500,
+            10_000,
+        );
+        assert_eq!(pages, 1);
+        assert_eq!(object_keys(&all), expected, "{arguments}");
+        for limit in 1..=3 {
+            for scan_limit in 1..=3 {
+                let (collected, _, _) = exhaust_search(
+                    &mut server,
+                    "search_objects",
+                    arguments,
+                    "objects",
+                    limit,
+                    scan_limit,
+                );
+                assert_eq!(collected, all, "{arguments} {limit} {scan_limit}");
+            }
+        }
+    }
+    // Every offset is a resumable cursor that lands on the right candidate.
+    let (_, document) = result(
+        &mut server,
+        "search_objects",
+        r#"{"limit":1,"scan_limit":1}"#,
+    );
+    let next = at(structured(&document), &["next_cursor"])
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let base = next.rsplit_once('.').unwrap().0.to_owned();
+    let total = every.len();
+    for (offset, entry) in every.iter().enumerate().skip(1) {
+        let (_, document) = result(
+            &mut server,
+            "search_objects",
+            &format!(r#"{{"limit":1,"scan_limit":1,"cursor":"{base}.{offset}"}}"#),
+        );
+        let page = structured(&document);
+        let items: Vec<String> = at(page, &["objects"])
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| document.canonical(v))
+            .collect();
+        assert_eq!(
+            object_keys(&items),
+            vec![entry.2.clone()],
+            "offset {offset}"
+        );
+    }
+    for offset in [total, total + 1, usize::MAX - 1] {
+        let (_, document) = result(
+            &mut server,
+            "search_objects",
+            &format!(r#"{{"limit":1,"scan_limit":1,"cursor":"{base}.{offset}"}}"#),
+        );
+        assert_eq!(tool_error(&document), "cursor.invalid", "offset {offset}");
+    }
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn inventories_nest_at_most_sixteen_deep() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    copy_tree(&fixture("basic"), root);
+    let mut chain = String::from("{\"proto\": \"coin\"}");
+    for depth in (0..17).rev() {
+        let at = if depth == 0 { "\"at\": [3, 3], " } else { "" };
+        chain = format!("{{{at}\"proto\": \"chest\", \"inventory\": [{chain}]}}");
+    }
+    std::fs::write(
+        root.join("planes/vault/layers/0/3_3.jsonc"),
+        format!(
+            "{{\"format\": \"tilewright.chunk/1\", \"plane\": \"vault\", \"layer\": 0, \"chunk\": [3, 3], \"terrain\": {{\"floor\": {{\"palette\": {{\"c\": \"cave_floor\"}}, \"fill\": \"c\"}}}}, \"objects\": [{chain}]}}"
+        ),
+    )
+    .unwrap();
+    // One level past the most a position holds: if the format ever allows
+    // it, this test fails, and search.rs's MAXIMUM_POSITION must grow.
+    let mut server = ready(root);
+    assert!(server.revision().is_none());
+    let (_, document) = result(&mut server, "validate", "{}");
+    assert_eq!(
+        at(structured(&document), &["diagnostics", "0", "code"]).as_str(),
+        Some("shape.range")
+    );
 }
