@@ -5,7 +5,7 @@ go 1.26.0
 toolchain go1.27.2
 
 require (
-	github.com/klauspost/compress v1.20.3
+	github.com/klauspost/compress v1.20.4
 	modernc.org/sqlite v1.62.0
 )
 
