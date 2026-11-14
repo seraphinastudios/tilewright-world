@@ -239,6 +239,14 @@ fn every_request_names_a_supported_version() {
             assert_eq!(at(error, &["data", "requested"]).as_str(), Some(requested));
         }
     }
+    // An unsupported version is refused as such even without the
+    // capabilities the request also needs.
+    let line = r#"{"jsonrpc":"2.0","id":5,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2025-11-25"}}}"#;
+    let replies = send(&mut server, &[line]);
+    assert_eq!(
+        at(parse(&replies[0]).root(), &["error", "code"]).as_i64(),
+        Some(-32022)
+    );
     // The required fields of _meta.
     for params in [
         "",
@@ -1242,4 +1250,153 @@ fn arbitrary_input_never_panics_and_gets_only_replies() {
             assert!(replies <= input.split(|byte| *byte == b'\n').count());
         }
     }
+}
+
+#[test]
+fn the_cap_does_not_count_the_newline_or_a_cr_before_it() {
+    let mut server = ready(&fixture("basic"));
+    let message = |length: usize| {
+        let line = request("1", "server/discover", "");
+        format!("{line}{}", " ".repeat(length - line.len()))
+    };
+    for (length, ending, accepted) in [
+        (MAXIMUM_MESSAGE_BYTES - 1, "\n", true),
+        (MAXIMUM_MESSAGE_BYTES, "\n", true),
+        (MAXIMUM_MESSAGE_BYTES + 1, "\n", false),
+        (MAXIMUM_MESSAGE_BYTES - 1, "\r\n", true),
+        (MAXIMUM_MESSAGE_BYTES, "\r\n", true),
+        (MAXIMUM_MESSAGE_BYTES + 1, "\r\n", false),
+        // The last line, without its newline.
+        (MAXIMUM_MESSAGE_BYTES, "", true),
+        (MAXIMUM_MESSAGE_BYTES + 1, "", false),
+        (MAXIMUM_MESSAGE_BYTES, "\r", true),
+    ] {
+        for capacity in [1, 4096, 1 << 20] {
+            let input = format!("{}{ending}", message(length));
+            let mut output = Vec::new();
+            server
+                .serve(
+                    BufReader::with_capacity(capacity, Cursor::new(input.as_bytes())),
+                    &mut output,
+                    &mut std::io::sink(),
+                )
+                .unwrap();
+            let output = String::from_utf8(output).unwrap();
+            assert_eq!(output.lines().count(), 1, "{length} {ending:?}");
+            let document = parse(output.trim_end());
+            assert_eq!(
+                document.root().get("result").is_some(),
+                accepted,
+                "{length} {ending:?} {capacity}"
+            );
+            if !accepted {
+                assert_eq!(error_of(output.trim_end()).1, "request.too_large");
+            }
+        }
+    }
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn a_page_stops_at_the_byte_budget_as_sent() {
+    // 600 definitions that do not parse, each with a long name, so that
+    // 500 of their diagnostics are more than one page holds once both
+    // copies of the result are counted.
+    let directory = tempfile::tempdir().unwrap();
+    copy_tree(&fixture("basic"), directory.path());
+    for index in 0..600 {
+        let name = format!("{index:03}{}", "q".repeat(120));
+        std::fs::write(
+            directory.path().join(format!("defs/proto/{name}.jsonc")),
+            "{\"a\": \"\\\\\\\"\",",
+        )
+        .unwrap();
+    }
+    let mut server = ready(directory.path());
+    let replies = send(&mut server, &[&call(7, "validate", r#"{"limit":500}"#)]);
+    let reply = &replies[0];
+    let document = parse(reply);
+    let page = at(at(document.root(), &["result"]), &["structuredContent"]);
+    assert!(at(page, &["total"]).as_i64().unwrap() >= 600);
+    assert_eq!(at(page, &["byte_budget_reached"]).as_bool(), Some(true));
+    let returned = at(page, &["diagnostics"]).as_array().unwrap().len();
+    assert!(returned > 0 && returned < 500, "{returned}");
+    // The reply line as sent, `result` and all.
+    assert!(reply.len() <= MAXIMUM_RESULT_BYTES, "{}", reply.len());
+    assert!(
+        reply.len() > MAXIMUM_RESULT_BYTES * 3 / 4,
+        "{}",
+        reply.len()
+    );
+    // The rest is reachable.
+    let (all, _) = exhaust(&mut server, "validate", "{}", "diagnostics", 500);
+    assert_eq!(
+        all.len(),
+        usize::try_from(at(page, &["total"]).as_i64().unwrap()).unwrap()
+    );
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn world_summary_caps_planes_and_layers() {
+    // 520 planes besides the fixture's, and 520 layers in one of them:
+    // each past the cap of 500.
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    copy_tree(&fixture("basic"), root);
+    let mut planes = String::from(r#""overworld", "vault""#);
+    for index in 0..520 {
+        let id = format!("z{index:03}");
+        let _ = write!(planes, r#", "{id}""#);
+        std::fs::create_dir_all(root.join(format!("planes/{id}"))).unwrap();
+        std::fs::write(
+            root.join(format!("planes/{id}/plane.jsonc")),
+            format!(
+                r#"{{"format": "tilewright.plane/1", "id": "{id}", "kind": "instanced", "chunk_size": 32}}"#
+            ),
+        )
+        .unwrap();
+    }
+    let world = std::fs::read_to_string(root.join("world.jsonc")).unwrap();
+    std::fs::write(
+        root.join("world.jsonc"),
+        world.replace(
+            r#""planes": ["overworld", "vault"]"#,
+            &format!(r#""planes": [{planes}]"#),
+        ),
+    )
+    .unwrap();
+    for layer in 1..=520 {
+        std::fs::create_dir_all(root.join(format!("planes/vault/layers/{layer}"))).unwrap();
+        std::fs::write(
+            root.join(format!("planes/vault/layers/{layer}/0_0.jsonc")),
+            format!(
+                r#"{{"format": "tilewright.chunk/1", "plane": "vault", "layer": {layer}, "chunk": [0, 0], "terrain": {{"floor": {{"palette": {{"c": "cave_floor"}}, "fill": "c"}}}}}}"#
+            ),
+        )
+        .unwrap();
+    }
+    let mut server = ready(root);
+    assert!(server.revision().is_some(), "the generated tree loads");
+    let (_, document) = result(&mut server, "world_summary", "{}");
+    let summary = structured(&document);
+    assert_eq!(at(summary, &["planes_truncated"]).as_bool(), Some(true));
+    let planes = at(summary, &["planes"]).as_array().unwrap();
+    assert_eq!(planes.len(), crate::MAXIMUM_LIMIT);
+    let vault = planes
+        .iter()
+        .find(|plane| at(plane, &["id"]).as_str() == Some("vault"))
+        .expect("vault sorts among the first 500 planes");
+    assert_eq!(at(vault, &["chunks"]).as_i64(), Some(521));
+    assert_eq!(at(vault, &["layers_truncated"]).as_bool(), Some(true));
+    assert_eq!(
+        at(vault, &["layers"]).as_array().unwrap().len(),
+        crate::MAXIMUM_LIMIT
+    );
+    assert_eq!(
+        at(summary, &["definition_types_truncated"]).as_bool(),
+        Some(false)
+    );
+    let (ids, _) = exhaust(&mut server, "search_ids", r#"{"kind":"plane"}"#, "ids", 500);
+    assert_eq!(ids.len(), 522);
 }

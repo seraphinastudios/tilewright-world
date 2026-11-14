@@ -28,6 +28,11 @@ disallowed-methods = [
   { path = "std::fs::File::set_modified", reason = "the MCP server never writes" },
   { path = "std::fs::File::set_times", reason = "the MCP server never writes" },
   { path = "std::fs::File::set_len", reason = "the MCP server never writes" },
+  { path = "std::fs::File::lock", reason = "the MCP server never locks a file" },
+  { path = "std::fs::File::lock_shared", reason = "the MCP server never locks a file" },
+  { path = "std::fs::File::try_lock", reason = "the MCP server never locks a file" },
+  { path = "std::fs::File::try_lock_shared", reason = "the MCP server never locks a file" },
+  { path = "std::fs::File::unlock", reason = "the MCP server never locks a file" },
   # Platform modules: each resolves only where it exists, so the Unix ones
   # are checked on Linux and macOS and the Windows ones on Windows
   # (`allow-invalid` keeps the others from warning there).

@@ -151,7 +151,7 @@ keeps its cursors.
 
 | Limit | Value |
 | --- | --- |
-| One message, its newline not counted | 64 KiB. A longer line is refused without being kept, and reading goes on at the next newline |
+| One message, its newline and a CR before it not counted | 64 KiB. A longer line is refused without being kept, and reading goes on at the next newline |
 | JSON in one message | Depth 32, 10,000 values, 1,000 array items, 128 keys per object, strings of 16 KiB, numbers of 32 bytes, no comments |
 | Items per page (`limit`) | Default 50, at most 500 |
 | A tool call's `result` as sent | 256 KiB, counting the structured result and its text copy together, and the fields around them. A page stops before the item that would pass it and says so with `byte_budget_reached`. One item costs at most 128 KiB, both copies counted, so a page always holds its first item |

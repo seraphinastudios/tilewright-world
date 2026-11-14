@@ -66,8 +66,9 @@ const CAPABILITIES_KEY: &str = "io.modelcontextprotocol/clientCapabilities";
 /// hour bounds how long a client keeps them across an upgrade.
 const TTL_MS: u32 = 3_600_000;
 
-/// Most bytes of one message, its newline not counted. A longer line is
-/// refused without being kept, and reading goes on at the next newline.
+/// Most bytes of one message, its newline and a CR before it not counted.
+/// A longer line is refused without being kept, and reading goes on at the
+/// next newline.
 pub const MAXIMUM_MESSAGE_BYTES: usize = 64 * 1024;
 
 /// The parser's limits for one message: JSON on one line, without
@@ -351,9 +352,8 @@ impl Server {
             .get(VERSION_KEY)
             .and_then(Value::as_str)
             .ok_or_else(|| missing.clone())?;
-        meta.get(CAPABILITIES_KEY)
-            .and_then(Value::as_object)
-            .ok_or_else(|| missing.clone())?;
+        // An unsupported version is refused as such whatever else the
+        // request lacks: the revision's rule for it has no condition.
         if version != PROTOCOL_VERSION {
             return Err(Failure {
                 code: ErrorCode::UnsupportedProtocolVersion,
@@ -361,6 +361,9 @@ impl Server {
                 data: Data::Unsupported(version.to_owned()),
             });
         }
+        meta.get(CAPABILITIES_KEY)
+            .and_then(Value::as_object)
+            .ok_or_else(|| missing.clone())?;
         match method {
             "server/discover" => {
                 let mut fields = String::from("\"supportedVersions\":");
@@ -481,11 +484,14 @@ enum Line {
     End,
 }
 
-/// Reads the next line into `line`, keeping at most `maximum` bytes: a
-/// longer line is read on to its newline without being kept. The last line
-/// may lack a newline.
+/// Reads the next line into `line`, keeping at most `maximum` bytes, not
+/// counting a CR that ends it: a longer line is read on to its newline
+/// without being kept. The last line may lack a newline.
 fn read_line(input: &mut impl BufRead, line: &mut Vec<u8>, maximum: usize) -> io::Result<Line> {
     line.clear();
+    // One byte more is kept, in case it is the CR of a CR LF.
+    let kept = maximum + 1;
+    let fits = |line: &Vec<u8>| line.len() <= maximum || line.last() == Some(&b'\r');
     let mut too_long = false;
     loop {
         let available = match input.fill_buf() {
@@ -494,7 +500,7 @@ fn read_line(input: &mut impl BufRead, line: &mut Vec<u8>, maximum: usize) -> io
             Err(error) => return Err(error),
         };
         if available.is_empty() {
-            return Ok(if too_long {
+            return Ok(if too_long || !fits(line) {
                 Line::TooLong
             } else if line.is_empty() {
                 Line::End
@@ -507,7 +513,7 @@ fn read_line(input: &mut impl BufRead, line: &mut Vec<u8>, maximum: usize) -> io
             None => (available, None),
         };
         if !too_long {
-            if line.len() + part.len() > maximum {
+            if line.len() + part.len() > kept {
                 too_long = true;
                 line.clear();
             } else {
@@ -517,7 +523,7 @@ fn read_line(input: &mut impl BufRead, line: &mut Vec<u8>, maximum: usize) -> io
         let used = end.unwrap_or(part.len());
         input.consume(used);
         if end.is_some() {
-            return Ok(if too_long {
+            return Ok(if too_long || !fits(line) {
                 Line::TooLong
             } else {
                 Line::Message
