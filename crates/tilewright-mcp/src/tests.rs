@@ -381,7 +381,7 @@ fn malformed_messages_are_refused() {
     let discover = request("1", "server/discover", "");
     let tools_list_cursor = request("1", "tools/list", r#""cursor":"x""#);
     let tools_call = request("1", "tools/call", "");
-    let tools_call_inspect = request("1", "tools/call", r#""name":"inspect""#);
+    let tools_call_unknown = request("1", "tools/call", r#""name":"preview_transaction""#);
     let tools_call_arguments = request("1", "tools/call", r#""name":"validate","arguments":[]"#);
     let duplicate = discover.replacen("\"id\":1,", "\"id\":1,\"id\":2,", 1);
     let trailing = format!("{},}}", &discover[..discover.len() - 1]);
@@ -427,7 +427,7 @@ fn malformed_messages_are_refused() {
             "method.unknown",
         ),
         (&tools_call, -32602, "params.name"),
-        (&tools_call_inspect, -32602, "tool.unknown"),
+        (&tools_call_unknown, -32602, "tool.unknown"),
         (&tools_call_arguments, -32602, "params.arguments"),
         (&tools_list_cursor, -32602, "cursor.invalid"),
     ];
@@ -532,9 +532,24 @@ fn tools_list_describes_read_only_tools() {
         .collect();
     assert_eq!(
         names,
-        ["world_summary", "validate", "search_ids", "refresh"]
+        [
+            "world_summary",
+            "validate",
+            "search_ids",
+            "search_definitions",
+            "search_objects",
+            "inspect",
+            "refresh"
+        ]
     );
     for tool in tools {
+        // Every read tool takes a revision; refresh moves the snapshot.
+        assert_eq!(
+            at(tool, &["inputSchema", "properties"])
+                .get("revision")
+                .is_some(),
+            at(tool, &["name"]).as_str() != Some("refresh")
+        );
         let annotations = at(tool, &["annotations"]);
         assert_eq!(at(annotations, &["readOnlyHint"]).as_bool(), Some(true));
         assert_eq!(at(annotations, &["destructiveHint"]).as_bool(), Some(false));
@@ -1062,6 +1077,7 @@ fn every_tool(server: &mut Server) {
             2,
         );
     }
+    read::every_new_tool(server);
     let replies = send(
         server,
         &[
@@ -1189,6 +1205,21 @@ fn arbitrary_input_never_panics_and_gets_only_replies() {
             r#"{"kind":"zone","prefix":"over","limit":1}"#,
         ),
         &call(6, "refresh", "{}"),
+        &call(
+            8,
+            "inspect",
+            r#"{"kind":"object","id":"village.chest","revision":"2ae46b1363c68613d1bb144fea68497d5515d7261cd43817c44e7de5bf59a020"}"#,
+        ),
+        &call(
+            9,
+            "search_definitions",
+            r#"{"type":"loot","field":"entries","equals":5,"limit":1,"scan_limit":1}"#,
+        ),
+        &call(
+            10,
+            "search_objects",
+            r#"{"plane":"overworld","layer":0,"bbox":[-5,0,9,9],"carried":false,"field":"count","contains":"x"}"#,
+        ),
     ]
     .map(str::to_owned);
     let tree = invalid_tree();
@@ -1400,3 +1431,5 @@ fn world_summary_caps_planes_and_layers() {
     let (ids, _) = exhaust(&mut server, "search_ids", r#"{"kind":"plane"}"#, "ids", 500);
     assert_eq!(ids.len(), 522);
 }
+
+mod read;

@@ -36,7 +36,9 @@
 //! ```
 
 mod budget;
+mod inspect;
 mod json;
+mod search;
 mod snapshot;
 mod tools;
 
