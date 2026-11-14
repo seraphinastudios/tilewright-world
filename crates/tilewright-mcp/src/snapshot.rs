@@ -5,6 +5,7 @@
 //! snapshot and names its revision; `refresh` replaces it.
 
 use crate::json::{fingerprint, hex};
+use std::path::Path;
 use tilewright_source::{Diagnostic, LoadOptions, Overlay, SourceRoot, World};
 
 /// One load of the tree.
@@ -32,10 +33,41 @@ pub struct Valid {
 }
 
 impl Snapshot {
-    /// Loads the tree of `root`, with the bounds `tilewright validate` uses.
-    /// Loading only reads.
-    pub fn load(root: &SourceRoot) -> Self {
-        match tilewright_source::load_edited_in(root, &LoadOptions::default(), &Overlay::new()) {
+    /// Loads the tree at `root`, with the bounds `tilewright validate`
+    /// uses. Loading only reads. The root is opened afresh each time, so a
+    /// root created, replaced or repaired since the last load is the one
+    /// read, on every platform; a root that is missing, or not a
+    /// directory, is reported as such.
+    pub fn load(root: &Path) -> Self {
+        let problem = match std::fs::metadata(root) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some((
+                "root.missing",
+                "the root directory does not exist: create it, then call refresh",
+            )),
+            Ok(metadata) if !metadata.is_dir() => Some((
+                "root.not_directory",
+                "the root is not a directory: replace it with the tree, then call refresh",
+            )),
+            // Anything else, the load reports in its own words.
+            _ => None,
+        };
+        let loaded = match problem {
+            Some((code, message)) => Err(vec![Diagnostic {
+                path: ".".to_owned(),
+                start: 0,
+                end: 0,
+                line: 0,
+                column: 0,
+                code,
+                message: message.to_owned(),
+            }]),
+            None => tilewright_source::load_edited_in(
+                &SourceRoot::new(root),
+                &LoadOptions::default(),
+                &Overlay::new(),
+            ),
+        };
+        match loaded {
             Ok(world) => {
                 let revision = hex(&world.source_digest());
                 let ids = tilewright_diff::Snapshot::from_world(
@@ -75,6 +107,15 @@ impl Snapshot {
                     state: State::Invalid(diagnostics),
                 }
             }
+        }
+    }
+
+    /// A snapshot that holds nothing, to stand in while the tree loads
+    /// again, so that two worlds are never held at once.
+    pub fn empty() -> Self {
+        Self {
+            binding: String::new(),
+            state: State::Invalid(Vec::new()),
         }
     }
 

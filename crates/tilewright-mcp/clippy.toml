@@ -5,9 +5,11 @@
 doc-valid-idents = ["SQLite", "PostgreSQL", "WebAssembly", ".."]
 
 # The server is read-only by construction (docs/MCP.md): nothing in this
-# crate may write, create, rename, remove, lock or publish a file, start a
-# process or open a network connection. Tests that copy fixtures allow
-# these lints where they do so, and nowhere else.
+# crate may write, create, rename, remove, lock or publish a file, change
+# its permissions, owner or times, start a process or open a connection.
+# Tests that copy or change fixtures allow these lints where they do so,
+# and nowhere else. This is a list, checked by a lint, not a proof: what
+# it leaves out, the read-only tests are there to catch.
 disallowed-methods = [
   { path = "std::fs::write", reason = "the MCP server never writes" },
   { path = "std::fs::copy", reason = "the MCP server never writes" },
@@ -19,6 +21,27 @@ disallowed-methods = [
   { path = "std::fs::rename", reason = "the MCP server never writes" },
   { path = "std::fs::hard_link", reason = "the MCP server never writes" },
   { path = "std::fs::set_permissions", reason = "the MCP server never writes" },
+  { path = "std::fs::soft_link", reason = "the MCP server never writes" },
+  { path = "std::fs::DirBuilder::new", reason = "the MCP server never writes" },
+  { path = "std::fs::DirBuilder::create", reason = "the MCP server never writes" },
+  { path = "std::fs::File::set_permissions", reason = "the MCP server never writes" },
+  { path = "std::fs::File::set_modified", reason = "the MCP server never writes" },
+  { path = "std::fs::File::set_times", reason = "the MCP server never writes" },
+  { path = "std::fs::File::set_len", reason = "the MCP server never writes" },
+  # Platform modules: each resolves only where it exists, so the Unix ones
+  # are checked on Linux and macOS and the Windows ones on Windows
+  # (`allow-invalid` keeps the others from warning there).
+  { path = "std::os::unix::fs::symlink", reason = "the MCP server never writes", allow-invalid = true },
+  { path = "std::os::unix::fs::chown", reason = "the MCP server never writes", allow-invalid = true },
+  { path = "std::os::unix::fs::lchown", reason = "the MCP server never writes", allow-invalid = true },
+  { path = "std::os::unix::fs::fchown", reason = "the MCP server never writes", allow-invalid = true },
+  { path = "std::os::unix::fs::chroot", reason = "the MCP server never changes its root", allow-invalid = true },
+  { path = "std::os::unix::net::UnixStream::connect", reason = "the MCP server opens no connection", allow-invalid = true },
+  { path = "std::os::unix::net::UnixListener::bind", reason = "the MCP server opens no connection", allow-invalid = true },
+  { path = "std::os::unix::net::UnixDatagram::bind", reason = "the MCP server opens no connection", allow-invalid = true },
+  { path = "std::os::unix::net::UnixDatagram::unbound", reason = "the MCP server opens no connection", allow-invalid = true },
+  { path = "std::os::windows::fs::symlink_file", reason = "the MCP server never writes", allow-invalid = true },
+  { path = "std::os::windows::fs::symlink_dir", reason = "the MCP server never writes", allow-invalid = true },
   { path = "std::fs::File::create", reason = "the MCP server never writes" },
   { path = "std::fs::File::create_new", reason = "the MCP server never writes" },
   { path = "std::fs::File::options", reason = "the MCP server never writes" },
@@ -32,15 +55,19 @@ disallowed-methods = [
   { path = "tilewright_source::SourceRoot::lock", reason = "the MCP server never locks the tree" },
   # The toolkit's publishing and writing entry points. tilewright-edit is
   # not a dependency of this crate and tilewright-pack only one of
-  # tilewright-diff, so these cannot be called today; Clippy skips a path it
-  # cannot resolve, and these take effect if either becomes a dependency.
-  { path = "tilewright_edit::Plan::publish", reason = "the MCP server never publishes" },
-  { path = "tilewright_edit::Plan::publish_with", reason = "the MCP server never publishes" },
-  { path = "tilewright_edit::write_new", reason = "the MCP server never writes" },
-  { path = "tilewright_pack::write_pack", reason = "the MCP server never writes" },
+  # tilewright-diff, so these cannot be called today and do not resolve;
+  # they take effect if either becomes a dependency.
+  { path = "tilewright_edit::Plan::publish", reason = "the MCP server never publishes", allow-invalid = true },
+  { path = "tilewright_edit::Plan::publish_with", reason = "the MCP server never publishes", allow-invalid = true },
+  { path = "tilewright_edit::write_new", reason = "the MCP server never writes", allow-invalid = true },
+  { path = "tilewright_pack::write_pack", reason = "the MCP server never writes", allow-invalid = true },
 ]
 disallowed-types = [
   { path = "std::fs::OpenOptions", reason = "the MCP server never writes" },
+  { path = "std::fs::DirBuilder", reason = "the MCP server never writes" },
+  { path = "std::os::unix::net::UnixStream", reason = "the MCP server opens no connection", allow-invalid = true },
+  { path = "std::os::unix::net::UnixListener", reason = "the MCP server opens no connection", allow-invalid = true },
+  { path = "std::os::unix::net::UnixDatagram", reason = "the MCP server opens no connection", allow-invalid = true },
   { path = "std::process::Command", reason = "the MCP server starts no process" },
   { path = "std::net::TcpStream", reason = "the MCP server opens no connection" },
   { path = "std::net::TcpListener", reason = "the MCP server opens no connection" },

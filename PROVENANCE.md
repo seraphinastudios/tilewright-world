@@ -106,23 +106,26 @@ never copied, adapted or used as a dependency.
   implementation, tests or source text are copied or adapted.
 
 - **Model Context Protocol.** `crates/tilewright-mcp` and `docs/MCP.md`
-  implement MCP revision 2025-11-25 from its specification, consulted on
-  2026-11-14 at <https://modelcontextprotocol.io/specification/2025-11-25>:
-  the pages Overview (`basic/index`), Lifecycle (`basic/lifecycle`),
-  Transports (`basic/transports`, stdio), Ping, Cancellation
-  (`basic/utilities/*`), Tools (`server/tools`), Pagination
-  (`server/utilities/pagination`) and the Schema Reference (`schema`), whose
-  source is `docs/specification/2025-11-25` in
+  implement MCP revision 2026-07-28 from its specification, consulted on
+  2026-11-14 at <https://modelcontextprotocol.io/specification/2026-07-28>:
+  the pages Overview (`basic/index`, messages, error codes, `_meta` and
+  statelessness), Versioning and Compatibility (`basic/versioning`), stdio
+  (`basic/transports/stdio`, with its backward-compatibility section),
+  Cancellation (`basic/patterns/cancellation`), Discovery
+  (`server/discover`), Tools (`server/tools`), Pagination
+  (`server/utilities/pagination`), Caching (`server/utilities/caching`),
+  the Key Changes page (`changelog`) and the Schema Reference (`schema`),
+  whose source is `docs/specification/2026-07-28` in
   <https://github.com/modelcontextprotocol/modelcontextprotocol>, last
-  changed at revision `9850cae8923b0ee3d19a4476f1010b97aa161a55`. That
+  changed at revision `38353251fab3bdeead03dd8283b9e66076ce1a7f`. That
   repository's `LICENSE` puts new specification contributions under
-  Apache-2.0 and earlier ones under MIT. The versioning page of revision
-  2026-07-28, which the site names current, was read for how a server of an
-  `initialize`-based revision is recognized by newer clients. JSON-RPC 2.0's
-  message rules and error codes are from <https://www.jsonrpc.org/specification>.
-  Only protocol facts (message shapes, method and field names, error codes)
-  are used; no specification text, schema file or SDK code is copied or
-  adapted, and the server and its tests are new MIT work.
+  Apache-2.0 and earlier ones under MIT. Revision 2025-11-25, at
+  revision `9850cae8923b0ee3d19a4476f1010b97aa161a55` of the same
+  repository, was read for what changed. JSON-RPC 2.0's message rules and
+  error codes are from <https://www.jsonrpc.org/specification>. Only
+  protocol facts (message shapes, method, field and `_meta` key names,
+  error codes) are used; no specification text, schema file or SDK code is
+  copied or adapted, and the server and its tests are new MIT work.
 
 ## Owner publication API contract research
 

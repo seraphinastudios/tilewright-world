@@ -12,15 +12,18 @@ escapes control characters, newlines included, in every untrusted value it
 prints, so content from a source or pack cannot send escape sequences to the
 terminal or add lines to the output.
 
-`tilewright mcp` (docs/MCP.md) reads one source tree for an MCP client and
-never writes: it takes no path from the client, and its crate refuses every
-function that writes, locks, publishes, starts a process or opens a
-connection. Its requests are bounded (64 KiB a line, the strict JSONC
-parser with tight limits) and its replies escape every control character.
-Values read from the world reach the client only inside typed fields of
-structured results, which the server says are world data, not
-instructions; a client that hands results to a language model still has to
-treat them as untrusted.
+`tilewright mcp` (docs/MCP.md) reads one source tree for an MCP client: it
+takes no path from the client, and nothing it does writes. That is
+enforced by a list and by tests, not proven: a lint in its crate refuses
+the std and toolkit functions it lists that write, lock, publish, change
+permissions, owners or times, start a process or open a connection, and
+its tests require every tool to leave copies of the fixtures with the same
+entries, bytes, permissions and modification times. Its requests are
+bounded (64 KiB a line, the strict JSONC parser with tight limits) and its
+replies escape every control character. Values read from the world reach
+the client only as JSON strings inside typed fields of results, which the
+server says are world data, not instructions; a client that hands results
+to a language model still has to treat them as untrusted.
 
 Loading a source tree never follows a symbolic link beneath its root (on
 Windows, any reparse point, junctions included). The root path itself is

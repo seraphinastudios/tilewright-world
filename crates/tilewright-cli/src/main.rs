@@ -53,9 +53,13 @@ repair of an interrupted apply, can need one more entry for each directory
 the transaction made, and is then refused (section 9 says what to do).
 
 mcp serves read-only queries over the source tree ROOT to a Model Context
-Protocol client, over standard input and output (docs/MCP.md). It never
-writes; it loads ROOT at start and when the client calls its refresh tool,
-and it starts on a tree that does not load, whose diagnostics it serves.";
+Protocol client, over standard input and output (docs/MCP.md). It speaks
+MCP revision 2026-07-28 only: clients that speak only 2025-11-25 or an
+earlier revision cannot connect. It never writes; it loads ROOT at start
+and when the client calls its refresh tool, opening ROOT afresh each time,
+and it starts on a tree that does not load, or a ROOT that does not exist,
+whose diagnostics it serves. It exits when its input ends, or quietly
+with status 0 when its output is closed.";
 
 fn main() -> ExitCode {
     // Paths need not be UTF-8, so arguments are read as OS strings.
@@ -92,12 +96,17 @@ fn main() -> ExitCode {
 /// Diagnostics go to standard error; standard output carries only
 /// protocol messages.
 fn mcp(options: &[&OsStr]) -> ExitCode {
+    use std::io::Write as _;
+    // Standard error may be closed too: nothing written there may panic.
+    let note = |text: &str| {
+        let _ = writeln!(std::io::stderr(), "tilewright: {text}");
+    };
     let [flag, root] = options else {
-        eprintln!("tilewright: {}", terminal_safe(USAGE));
+        note(&terminal_safe(USAGE));
         return ExitCode::FAILURE;
     };
     if *flag != "--root" {
-        eprintln!("tilewright: {}", terminal_safe(USAGE));
+        note(&terminal_safe(USAGE));
         return ExitCode::FAILURE;
     }
     // The server's version is the `--version` line's, without the name.
@@ -108,8 +117,11 @@ fn mcp(options: &[&OsStr]) -> ExitCode {
     let stdout = std::io::stdout();
     match server.serve(stdin.lock(), stdout.lock(), &mut std::io::stderr()) {
         Ok(()) => ExitCode::SUCCESS,
+        // The client closed its end: that ends the session as closing our
+        // input does.
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("tilewright: mcp: {}", field(&error.to_string()));
+            note(&format!("mcp: {}", field(&error.to_string())));
             ExitCode::FAILURE
         }
     }

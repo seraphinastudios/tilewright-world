@@ -43,18 +43,21 @@ cargo run --locked --quiet --package tilewright-cli -- compile fixtures/terrain 
 terrain=$(find "${first}/terrain" -name '*.twpack')
 cmp "${terrain}" "${second}/terrain/$(basename "${terrain}")"
 
-# The MCP server answers initialize and tools/list on the fixture, and its
-# standard output holds those two replies and nothing else (docs/MCP.md).
+# The MCP server answers server/discover and tools/list on the fixture, and
+# its standard output holds those two replies and nothing else
+# (docs/MCP.md). It speaks MCP revision 2026-07-28, whose requests carry
+# their protocol version in _meta.
+meta='"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}'
 mcp=$(printf '%s\n' \
-  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"validate.sh","version":"1"}}}' \
-  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
-  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' |
+  '{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{'"${meta}"'}}' \
+  '{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{'"${meta}"'}}' |
   cargo run --locked --quiet --package tilewright-cli -- mcp --root fixtures/basic)
 mcp_lines=()
 while IFS= read -r line; do mcp_lines+=("${line}"); done <<<"${mcp}"
 if [[ ${#mcp_lines[@]} -ne 2 ||
-  ${mcp_lines[0]} != '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25",'* ||
-  ${mcp_lines[1]} != '{"jsonrpc":"2.0","id":2,"result":{"tools":['*'"name":"search_ids"'* ]]; then
+  ${mcp_lines[0]} != '{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],'* ||
+  ${mcp_lines[1]} != '{"jsonrpc":"2.0","id":2,"result":{"resultType":"complete","tools":['*'"name":"search_ids"'* ]]; then
   printf 'tools/validate.sh: unexpected MCP replies:\n%s\n' "${mcp}" >&2
   exit 1
 fi

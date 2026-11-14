@@ -4,13 +4,15 @@
 //! A read-only Model Context Protocol server over one Tilewright world
 //! source tree, run by `tilewright mcp --root <tree>` (docs/MCP.md).
 //!
-//! It implements MCP revision 2025-11-25 over the stdio transport:
-//! newline-delimited JSON-RPC 2.0 messages on standard input and output,
-//! handled one at a time. Requests are read with the toolkit's strict JSONC
-//! parser under tight limits, with comments refused, and every reply is
-//! written by hand with every control character escaped. The tree is loaded
-//! once at start, and again by the `refresh` tool; every result names the
-//! revision it was computed at.
+//! It implements MCP revision 2026-07-28, and only that revision, over the
+//! stdio transport: newline-delimited JSON-RPC 2.0 messages on standard
+//! input and output, handled one at a time. The revision is stateless:
+//! there is no `initialize` handshake, and every request names its protocol
+//! version in `params._meta`. Requests are read with the toolkit's strict
+//! JSONC parser under tight limits, with comments refused, and every reply
+//! is written by hand with every control character escaped. The tree is
+//! loaded once at start, and again by the `refresh` tool; every result
+//! names the revision it was computed at.
 //!
 //! Nothing here writes, creates, locks or publishes, starts a process or
 //! opens a connection: `clippy.toml` refuses the functions that could, and
@@ -22,18 +24,15 @@
 //! let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/basic");
 //! let mut server = tilewright_mcp::Server::open(&root, "0.0.0");
 //! let input = concat!(
-//!     r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"example","version":"1"}}}"#,
-//!     "\n",
-//!     r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
-//!     "\n",
-//!     r#"{"jsonrpc":"2.0","id":2,"method":"ping"}"#,
+//!     r#"{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"#,
+//!     r#""io.modelcontextprotocol/protocolVersion":"2026-07-28","#,
+//!     r#""io.modelcontextprotocol/clientCapabilities":{}}}}"#,
 //!     "\n",
 //! );
 //! let mut output = Vec::new();
 //! server.serve(Cursor::new(input), &mut output, &mut std::io::sink()).unwrap();
 //! let output = String::from_utf8(output).unwrap();
-//! assert_eq!(output.lines().count(), 2);
-//! assert_eq!(output.lines().last(), Some(r#"{"jsonrpc":"2.0","id":2,"result":{}}"#));
+//! assert!(output.starts_with(r#"{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28"]"#));
 //! ```
 
 mod budget;
@@ -50,14 +49,22 @@ use snapshot::Snapshot;
 use std::{
     fmt::Write as _,
     io::{self, BufRead, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 use tilewright_jsonc::{Document, Limits, Value};
-use tilewright_source::SourceRoot;
 
-/// The MCP revision this server implements, and the only one it answers
-/// `initialize` with.
-pub const PROTOCOL_VERSION: &str = "2025-11-25";
+/// The MCP revision this server implements, and the only one it serves.
+pub const PROTOCOL_VERSION: &str = "2026-07-28";
+
+/// The `_meta` key of a request's protocol version.
+const VERSION_KEY: &str = "io.modelcontextprotocol/protocolVersion";
+/// The `_meta` key of a request's client capabilities.
+const CAPABILITIES_KEY: &str = "io.modelcontextprotocol/clientCapabilities";
+
+/// How long, in milliseconds, a client may keep the `server/discover` and
+/// `tools/list` results: they do not change while the server runs, and an
+/// hour bounds how long a client keeps them across an upgrade.
+const TTL_MS: u32 = 3_600_000;
 
 /// Most bytes of one message, its newline not counted. A longer line is
 /// refused without being kept, and reading goes on at the next newline.
@@ -79,15 +86,15 @@ const MESSAGE_LIMITS: Limits = Limits {
     max_line_bytes: MAXIMUM_MESSAGE_BYTES,
 };
 
-/// JSON-RPC 2.0's error codes, and one of the range it leaves to servers.
+/// The error codes this server sends: JSON-RPC 2.0's, and the revision's
+/// own for an unsupported protocol version.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ErrorCode {
     Parse,
     InvalidRequest,
     MethodNotFound,
     InvalidParams,
-    /// A request other than `initialize` or `ping` before `initialize`.
-    NotInitialized,
+    UnsupportedProtocolVersion,
 }
 
 impl ErrorCode {
@@ -97,25 +104,36 @@ impl ErrorCode {
             Self::InvalidRequest => -32600,
             Self::MethodNotFound => -32601,
             Self::InvalidParams => -32602,
-            Self::NotInitialized => -32000,
+            Self::UnsupportedProtocolVersion => -32022,
         }
     }
 }
 
-/// A JSON-RPC error reply: its code, a fixed message, and a stable code of
-/// this server's for `data.code`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// What an error reply's `data` holds.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Data {
+    /// `{"code": ...}`: a stable code of this server's.
+    Reason(&'static str),
+    /// `{"code": ..., "supported": [...]}`, for a method of the revisions
+    /// before this one, such as `initialize`.
+    Legacy(&'static str),
+    /// The revision's `{"supported": [...], "requested": ...}`.
+    Unsupported(String),
+}
+
+/// A JSON-RPC error reply: its code, a fixed message, and its data.
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct Failure {
     code: ErrorCode,
     message: &'static str,
-    reason: &'static str,
+    data: Data,
 }
 
 const fn failure(code: ErrorCode, reason: &'static str, message: &'static str) -> Failure {
     Failure {
         code,
         message,
-        reason,
+        data: Data::Reason(reason),
     }
 }
 
@@ -137,28 +155,28 @@ impl Id {
     }
 }
 
-/// The MCP server: the tree's snapshot and the session's state.
+/// The MCP server: the root it serves, and the tree's snapshot.
 pub struct Server {
-    root: SourceRoot,
-    version: String,
+    root: PathBuf,
+    /// The `io.modelcontextprotocol/serverInfo` object.
+    info: String,
     snapshot: Snapshot,
-    /// Whether `initialize` was answered.
-    initialized: bool,
 }
 
 impl Server {
-    /// Opens the tree at `root` and loads it. A tree that does not load
-    /// still makes a server, whose `validate` tool reports why. `version`
-    /// is the server's version for `initialize`.
+    /// Loads the tree at `root`. A tree that does not load, or a root that
+    /// does not exist, still makes a server, whose `validate` tool reports
+    /// why. `version` is the server's version for its `serverInfo`.
     #[must_use]
     pub fn open(root: &Path, version: &str) -> Self {
-        let root = SourceRoot::new(root);
-        let snapshot = Snapshot::load(&root);
+        let mut info =
+            String::from("{\"name\":\"tilewright\",\"title\":\"Tilewright world\",\"version\":");
+        json_string(version, &mut info);
+        info.push('}');
         Self {
-            root,
-            version: version.to_owned(),
-            snapshot,
-            initialized: false,
+            root: root.to_path_buf(),
+            info,
+            snapshot: Snapshot::load(root),
         }
     }
 
@@ -192,7 +210,7 @@ impl Server {
                     );
                     Some(error_reply(
                         None,
-                        failure(
+                        &failure(
                             ErrorCode::InvalidRequest,
                             "request.too_large",
                             "the message is longer than the server reads (64 KiB)",
@@ -219,7 +237,7 @@ impl Server {
         let parse_error = |reason| {
             Some(error_reply(
                 None,
-                failure(ErrorCode::Parse, reason, "the message is not valid JSON"),
+                &failure(ErrorCode::Parse, reason, "the message is not valid JSON"),
             ))
         };
         let Ok(text) = std::str::from_utf8(line) else {
@@ -230,14 +248,20 @@ impl Server {
             Err(error) => return parse_error(error.code.as_str()),
         };
         let invalid = |reason, message| failure(ErrorCode::InvalidRequest, reason, message);
-        let Some(_) = document.root().as_object() else {
-            // Including an array: revision 2025-11-25 has no batches.
+        let root = document.root();
+        if root.as_object().is_none() {
+            // Including an array: the revision has no batches.
             return Some(error_reply(
                 None,
-                invalid("request.not_object", "a message must be a JSON object"),
+                &invalid("request.not_object", "a message must be a JSON object"),
             ));
-        };
-        let root = document.root();
+        }
+        let method = root.get("method");
+        // A response, whatever its ID: this server sends no requests, so
+        // there is nothing to answer it with.
+        if method.is_none() && (root.get("result").is_some() || root.get("error").is_some()) {
+            return None;
+        }
         let id = match root.get("id") {
             None => None,
             Some(Value::Integer { value, .. }) => Some(Id::Integer(*value)),
@@ -245,19 +269,13 @@ impl Server {
             Some(_) => {
                 return Some(error_reply(
                     None,
-                    invalid(
+                    &invalid(
                         "request.id",
                         "a request ID must be a string or an integer, and not null",
                     ),
                 ));
             }
         };
-        let method = root.get("method");
-        // A response: this server sends no requests, so there is nothing to
-        // answer it with.
-        if method.is_none() && (root.get("result").is_some() || root.get("error").is_some()) {
-            return None;
-        }
         let checked = (|| {
             if root.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
                 return Err(invalid("request.jsonrpc", "jsonrpc must be \"2.0\""));
@@ -278,69 +296,95 @@ impl Server {
             };
             Ok((method, params))
         })();
-        let Some(id) = id else {
-            // A notification is never answered, not even when it is wrong.
-            if let Ok((method, _)) = checked {
-                self.notify(method);
-            }
-            return None;
-        };
+        // A notification is never answered, not even when it is wrong.
+        // `notifications/cancelled` can only name a request already
+        // answered, as requests are handled one at a time, so it is
+        // ignored, as are all others.
+        let id = id?;
         Some(
             match checked.and_then(|(method, params)| self.request(method, params)) {
-                Ok(result) => {
+                Ok(fields) => {
                     let mut reply = String::from("{\"jsonrpc\":\"2.0\",\"id\":");
                     id.write(&mut reply);
-                    reply.push_str(",\"result\":");
-                    reply.push_str(&result);
-                    reply.push('}');
+                    reply.push_str(",\"result\":{\"resultType\":\"complete\",");
+                    reply.push_str(&fields);
+                    reply.push_str(",\"_meta\":{\"io.modelcontextprotocol/serverInfo\":");
+                    reply.push_str(&self.info);
+                    reply.push_str("}}}");
                     reply
                 }
-                Err(failure) => error_reply(Some(&id), failure),
+                Err(failure) => error_reply(Some(&id), &failure),
             },
         )
     }
 
-    fn notify(&mut self, method: &str) {
-        // `notifications/initialized` needs nothing more: requests are
-        // served once `initialize` is answered. `notifications/cancelled`
-        // can only name a request already answered, as requests are
-        // handled one at a time, so it is ignored, as are all others.
-        let _ = (self, method);
-    }
-
+    /// The fields of a request's result, after `resultType`.
     fn request(&mut self, method: &str, params: Option<&Value>) -> Result<String, Failure> {
-        let ready = || {
-            if self.initialized {
-                Ok(())
-            } else {
-                Err(failure(
-                    ErrorCode::NotInitialized,
-                    "session.not_initialized",
-                    "the server is not initialized: send initialize first",
-                ))
-            }
-        };
         match method {
-            "initialize" => self.initialize(params),
-            "ping" => Ok("{}".to_owned()),
+            "server/discover" | "tools/list" | "tools/call" => {}
+            // The handshake of the revisions before this one. The revision
+            // leaves the code to the server and asks it to name the
+            // versions it supports.
+            "initialize" => {
+                return Err(Failure {
+                    code: ErrorCode::MethodNotFound,
+                    message: "this server implements MCP revision 2026-07-28 only, which has no initialize: send each request with its protocol version in params._meta",
+                    data: Data::Legacy("method.legacy"),
+                });
+            }
+            _ => {
+                return Err(failure(
+                    ErrorCode::MethodNotFound,
+                    "method.unknown",
+                    "this server does not have that method",
+                ));
+            }
+        }
+        let missing = failure(
+            ErrorCode::InvalidParams,
+            "params.meta",
+            "every request needs params._meta with io.modelcontextprotocol/protocolVersion and io.modelcontextprotocol/clientCapabilities",
+        );
+        let params = params.ok_or_else(|| missing.clone())?;
+        let meta = params.get("_meta").ok_or_else(|| missing.clone())?;
+        let version = meta
+            .get(VERSION_KEY)
+            .and_then(Value::as_str)
+            .ok_or_else(|| missing.clone())?;
+        meta.get(CAPABILITIES_KEY)
+            .and_then(Value::as_object)
+            .ok_or_else(|| missing.clone())?;
+        if version != PROTOCOL_VERSION {
+            return Err(Failure {
+                code: ErrorCode::UnsupportedProtocolVersion,
+                message: "Unsupported protocol version",
+                data: Data::Unsupported(version.to_owned()),
+            });
+        }
+        match method {
+            "server/discover" => {
+                let mut fields = String::from("\"supportedVersions\":");
+                fields.push_str(&supported());
+                fields.push_str(
+                    ",\"capabilities\":{\"tools\":{\"listChanged\":false}},\"instructions\":",
+                );
+                json_string(tools::INSTRUCTIONS, &mut fields);
+                let _ = write!(fields, ",\"ttlMs\":{TTL_MS},\"cacheScope\":\"public\"");
+                Ok(fields)
+            }
             "tools/list" => {
-                ready()?;
-                if params.and_then(|params| params.get("cursor")).is_some() {
+                if params.get("cursor").is_some() {
                     return Err(failure(
                         ErrorCode::InvalidParams,
                         "cursor.invalid",
                         "this server lists every tool on one page and issues no cursor for tools/list",
                     ));
                 }
-                Ok(tools::list())
+                let mut fields = tools::list();
+                let _ = write!(fields, ",\"ttlMs\":{TTL_MS},\"cacheScope\":\"public\"");
+                Ok(fields)
             }
-            "tools/call" => {
-                ready()?;
-                let params = params.ok_or(failure(
-                    ErrorCode::InvalidParams,
-                    "params.missing",
-                    "tools/call needs params",
-                ))?;
+            _ => {
                 let name = params.get("name").and_then(Value::as_str).ok_or(failure(
                     ErrorCode::InvalidParams,
                     "params.name",
@@ -364,54 +408,7 @@ impl Server {
                 ))?;
                 Ok(tools::call(tool, arguments, &mut self.snapshot, &self.root))
             }
-            _ => Err(failure(
-                ErrorCode::MethodNotFound,
-                "method.unknown",
-                "this server does not have that method",
-            )),
         }
-    }
-
-    fn initialize(&mut self, params: Option<&Value>) -> Result<String, Failure> {
-        if self.initialized {
-            return Err(failure(
-                ErrorCode::InvalidRequest,
-                "session.initialized",
-                "the server is already initialized",
-            ));
-        }
-        let invalid = failure(
-            ErrorCode::InvalidParams,
-            "params.initialize",
-            "initialize needs protocolVersion, capabilities and clientInfo with its name and version",
-        );
-        let params = params.ok_or(invalid)?;
-        // The version the client asked for is not used: the answer is the
-        // one revision this server implements, the same when it asked for
-        // it, and otherwise the client decides whether to go on.
-        params
-            .get("protocolVersion")
-            .and_then(Value::as_str)
-            .ok_or(invalid)?;
-        params
-            .get("capabilities")
-            .and_then(Value::as_object)
-            .ok_or(invalid)?;
-        let client = params.get("clientInfo").ok_or(invalid)?;
-        for field in ["name", "version"] {
-            client.get(field).and_then(Value::as_str).ok_or(invalid)?;
-        }
-        self.initialized = true;
-        let mut result = String::from("{\"protocolVersion\":");
-        json_string(PROTOCOL_VERSION, &mut result);
-        result.push_str(
-            ",\"capabilities\":{\"tools\":{\"listChanged\":false}},\"serverInfo\":{\"name\":\"tilewright\",\"title\":\"Tilewright world\",\"version\":",
-        );
-        json_string(&self.version, &mut result);
-        result.push_str("},\"instructions\":");
-        json_string(tools::INSTRUCTIONS, &mut result);
-        result.push('}');
-        Ok(result)
     }
 
     /// One line on the snapshot for the log.
@@ -426,10 +423,18 @@ impl Server {
     }
 }
 
-fn error_reply(id: Option<&Id>, failure: Failure) -> String {
+/// The versions this server supports, as a JSON array.
+fn supported() -> String {
+    let mut output = String::from("[");
+    json_string(PROTOCOL_VERSION, &mut output);
+    output.push(']');
+    output
+}
+
+fn error_reply(id: Option<&Id>, failure: &Failure) -> String {
     let mut reply = String::from("{\"jsonrpc\":\"2.0\",");
-    // An ID that could not be read is left out, as the revision's error
-    // response allows.
+    // An ID that could not be read is left out: the revision's error
+    // response has an optional ID that is a string or a number, never null.
     if let Some(id) = id {
         reply.push_str("\"id\":");
         id.write(&mut reply);
@@ -441,8 +446,26 @@ fn error_reply(id: Option<&Id>, failure: Failure) -> String {
         failure.code.number()
     );
     json_string(failure.message, &mut reply);
-    reply.push_str(",\"data\":{\"code\":");
-    json_string(failure.reason, &mut reply);
+    reply.push_str(",\"data\":{");
+    match &failure.data {
+        Data::Reason(reason) => {
+            reply.push_str("\"code\":");
+            json_string(reason, &mut reply);
+        }
+        Data::Legacy(reason) => {
+            reply.push_str("\"code\":");
+            json_string(reason, &mut reply);
+            reply.push_str(",\"supported\":");
+            reply.push_str(&supported());
+        }
+        Data::Unsupported(requested) => {
+            reply.push_str("\"supported\":");
+            reply.push_str(&supported());
+            reply.push_str(",\"requested\":");
+            // The client's own value, cut so a reply stays small.
+            json_string(json::clip(requested, 256).0, &mut reply);
+        }
+    }
     reply.push_str("}}}");
     reply
 }
