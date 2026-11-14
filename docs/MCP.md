@@ -91,7 +91,7 @@ A tool that is called correctly but cannot answer returns a result with
 | `cursor.invalid` | A cursor not issued for this tool and these arguments, or past the end |
 | `cursor.stale` | A cursor issued for another revision of the tree |
 | `ids.unavailable` | The world holds more than 1,000,000 IDs |
-| `revision.changed` | The `revision` argument is not the snapshot's revision: the tree was loaded again since, or the revision was never this snapshot's; the text ends with the current revision, or says the tree does not load, so the snapshot has none. From `inspect`, also: the item's file no longer holds the snapshot's item, so the tree changed on disk; call `refresh` |
+| `revision.changed` | The `revision` argument is not the snapshot's revision: the tree was loaded again since, or the revision was never this snapshot's; the text ends with the current revision, or says the tree does not load, so the snapshot has none. From `inspect`, also: the item's file no longer holds the snapshot's item, so the tree changed on disk; call `refresh`. From `preview_transaction`, also: the tree on disk is no longer at the snapshot's revision, so the plan would not be the snapshot's; call `refresh` |
 | `item.not_found` | `inspect` of an ID the snapshot does not hold |
 
 ## Tools
@@ -114,6 +114,7 @@ which is the item's JSON.
 | `search_definitions` | `type`, `field`, `equals`, `contains`, `limit`, `scan_limit`, `cursor`, `revision` | A page of `definitions`, each with `type`, `id`, `path` and the matched `field`, `value_kind` and `value`; see "Searching definitions and objects" |
 | `search_objects` | `plane`, `layer`, `bbox`, `proto`, `uid_prefix`, `carried`, `field`, `equals`, `contains`, `limit`, `scan_limit`, `cursor`, `revision` | A page of `objects`, each with `uid`, `plane`, `layer`, `tile`, `proto`, `carried`, `carried_by`, `path`, `position` and the matched field; see "Searching definitions and objects" |
 | `inspect` | `kind` and `id` (both required), `revision` | One item: its `path`, its `span` in that file, and its `value`; see "Inspecting an item" |
+| `preview_transaction` | `transaction` (required), `excerpts`, `revision` | Whether the transaction `would_apply`, the files it would change with their sizes, digests and changed spans, the `resulting_revision`, the undo check and the refusals; see "Previewing a transaction" |
 | `refresh` | none | Reloads the tree: its `revision`, `valid`, the diagnostic count, the `previous_revision`, and whether it `changed` |
 
 Every result carries `revision`, the lowercase hex source digest that
@@ -127,8 +128,9 @@ not at that revision, the call fails with `revision.changed`, whose text
 ends with the current revision. A tree that does not load has no
 revision, so any `revision` given fails then, `validate`'s included,
 with text that says so; `validate` without one still answers. Arguments
-are checked first (for `inspect`, the shape of its `id` too), then
-`revision`, then whether the tree loads. The
+are checked first (for `inspect`, the shape of its `id` too; for
+`preview_transaction`, that `transaction` is an object of at most 256
+operations), then `revision`, then whether the tree loads. The
 `revision` is not part of a cursor's arguments: a cursor is bound to its
 snapshot already. The
 server starts on such a tree, and on a root that does not exist, so that a
@@ -151,7 +153,8 @@ diagnostic `root.missing`, and one that is not a directory as
 a `world.jsonc` gives the loader's `source.missing_file` instead.
 
 `refresh` drops the old snapshot before it loads the tree again, so the
-server holds at most one world, plus what a load holds while it runs. A
+server holds at most one world, plus what a load holds while it runs
+(a preview holds more while it runs; see "Previewing a transaction"). A
 load is bounded by `tilewright_source::LoadOptions::default`: 500,000
 files, 1,000,000 directory entries, 8 GiB read, 10,000 diagnostics. Those
 bounds, not the server, cap its memory.
@@ -223,6 +226,134 @@ bytes elsewhere: in spacing and comments, inside the item too, or in its
 other items; and for an anchor or object, in how the same values are
 spelled (`1.0` for `1`, or `"z": 0` written out). The check does not
 prove the rest of the file or of the tree unchanged: only `refresh` does.
+
+## Previewing a transaction
+
+`preview_transaction` carries a transaction out in memory, as
+`tilewright tx preview` does (docs/spec/TRANSACTIONS.md), and reports it.
+Nothing is written, locked or published: the plan is dropped when the call
+returns. Applying a transaction stays a reviewed `tilewright tx apply` or
+editor action.
+
+- **Argument.** `transaction` is the transaction document as a JSON object
+  (`format`, `operations`, and optionally `title`, `actor`, `base`,
+  `result` and `custom`), not a path and not a string. It is part of the
+  request, so it is within the message limits (64 KiB, depth 32 for the
+  whole message, 1,000 items an array, 10,000 values). The depth leaves
+  26 nested arrays or objects inside an operation's `value` (tested; 27
+  are refused). A deeper or larger one, a duplicate key,
+  or an integer past 2^53 − 1 is refused as JSON before the tool runs. It
+  may have at most 256 operations; more is `arguments.invalid`. Its bytes,
+  as the request holds them, are what is planned, so spans in refusals
+  index them. `excerpts` (default `false`) adds each file's changed text.
+- **Order.** The arguments are checked, then `revision`, then whether the
+  snapshot loads (`tree.invalid` otherwise). Then the document is read as
+  a transaction: a document that is not one (`jsonc.*`, `tx.shape`) is
+  refused there, with `refused_at: "transaction"`, without reading the
+  tree. Otherwise it is planned on the tree with the library's
+  `plan_in`: every precondition (the `base` digests, `expect` and `test`
+  values, cell expectations, what each operation needs), the library's
+  limits, and validation of the tree it would leave. A failure is
+  `refused_at: "plan"`. A plan is then given the library's undo check
+  (`Plan::check_undo`, section 8.1), as `tilewright tx preview` does; a
+  refusal there is `refused_at: "undo"`, and the plan's files and resulting
+  revision are still reported.
+- **The snapshot.** The library plans on the tree on disk; the snapshot
+  keeps no file text. So after planning, the server loads the tree again,
+  with the files the plan read laid over it as it read them (the tree as
+  it is now, after a refusal), and requires its revision to be the
+  snapshot's. Otherwise the call fails with `revision.changed`, and
+  `refresh` loads the tree as it now is. So a result is a plan of the
+  snapshot's files, with one exception: the revision covers only the
+  files the loader reads. A transaction may name other files under the
+  root, such as a file under `profile/` that is neither the profile nor a
+  schema it names (`profile/extra.jsonc`). For those, the preview reads
+  the disk as it is at the call, the same revision can give another
+  answer once such a file changes, and a transaction that changes only
+  such files has a `resulting_revision` equal to `revision`; `refresh`
+  does not see a change to them either. A change made and undone while
+  the call runs is not seen. The tool error `revision.changed` and the planner's `tx.conflict`
+  differ: the first says the tree moved from under the snapshot, the
+  second that the transaction's own preconditions (its `base` digests, an
+  `expect` or a `test`) do not hold on the snapshot.
+- **What it guarantees.** A preview is a plan against the snapshot, not a
+  promise that applying the transaction later succeeds: the tree can
+  change before then, applying checks every precondition again, and
+  publishing can be refused for reasons of its own (permissions, file
+  systems whose access it cannot check, a staging name in the way;
+  TRANSACTIONS.md section 9), none of which a preview checks.
+- **Result.** `would_apply` is true when nothing refused it. `refused_at`
+  is `null`, `"transaction"`, `"plan"` or `"undo"`. `operations` is the
+  transaction's operation count (`null` when it is not a transaction).
+  `resulting_revision` is the source digest the tree would have, from the
+  validating load that planning makes anyway, so it costs nothing more
+  (`null` when planning failed). `undo_check` is `passed`, `refused` or
+  `not_run`. `files_changed` counts the files it would create, modify or
+  delete, and `files_consulted` those it read or checked but leaves as
+  they are.
+- **Files.** `files` lists the changed files in path order, at most 200
+  (`files_truncated`), each with its root-relative `path`; `change`
+  (`created`, `modified` or `deleted`); `before_bytes` and `after_bytes`;
+  `before_sha256` and `after_sha256`, the lowercase hex SHA-256 of the
+  bytes, as `base` and `result` record them (each `null` where the file is
+  absent); and `changed`, the smallest byte range of the new text that
+  holds every change: `start` and `end` (end exclusive) and `start_line`,
+  `start_column`, `end_line` and `end_column`, counted as `inspect`
+  counts them, and `removed_bytes`, the length of the old text it
+  replaces. A created file's range is the whole file; a deleted file has
+  `changed: null`. The range is one range: edits far apart in a file give
+  a range that covers what lies between them.
+- **Excerpts.** By default no file text is returned, only sizes, digests
+  and ranges. With `excerpts: true`, `excerpt` is the new text of the
+  changed range as a JSON string, cut to 4 KiB (`excerpt_truncated`), and
+  counted in the byte budget like any value.
+- **Refusals.** `refusals` lists at most 500 (`refusals_total` counts them
+  all; the library reports at most 1,000, the last a note that there may
+  be more; `refusals_truncated`), in the shape of a `validate` diagnostic
+  with `on_transaction`: a problem of the transaction has the path
+  `transaction` and its span in the argument as
+  sent, or no position (`0`) when it concerns the whole transaction, such
+  as the undo check (no diagnostic of the edited tree has the path
+  `transaction`: an entry of that name in the root makes the tree fail to
+  load, and one made after the snapshot is a change to the tree, so the
+  call fails with `revision.changed` before any result); a problem of the edited tree has the loader's code
+  and the root-relative path, with its span in the file as the transaction
+  would leave it. Codes are the library's: `tx.shape`, `tx.conflict`,
+  `tx.result`, `tx.path`, `tx.limit`, `tx.io`, `jsonc.*` and the loader's.
+  There is no cursor: a preview is not paged, since paging would plan the
+  transaction again.
+- **Budget.** The files come first and the refusals share what they leave
+  of the byte budget; `byte_budget_reached` says either list stopped
+  there. `truncated_strings` counts every string cut.
+- **Cost.** A call reads the files the transaction touches, within the
+  library's bounds (256 MiB read, 4 GiB of work, 1,000 diagnostics), loads
+  the whole tree to validate the result, loads it once more when the
+  transaction addresses an object by uid, and once more for the snapshot
+  check; the undo check reads nothing from disk but does about the work of
+  planning again in each of its rounds, at most four. The library's read
+  and work budgets are its constants, not options, so the server cannot
+  set tighter ones: one call can do up to 4 GiB of work for the plan and
+  again for each undo round, and 256 operations do not bound it (36
+  operations on one large file reach the work budget). Requests are
+  handled one at a time and a preview cannot be cancelled, so a client
+  can keep the server busy for many seconds per call. Measured on a
+  release build (AMD Ryzen 9 9950X3D):
+  - typical: on a tree of 205 chunks and 100,000 objects that `refresh`
+    loads in 0.37 s, placing an object took 0.32 s and editing one by uid
+    0.51 s;
+  - five files of 51 MiB each, edited at the read limit: 4.0 s and about
+    2.1 GB, as `tilewright tx preview` takes (1.9 GB);
+  - the worst measured, 36 `set` operations on one 59 MB file of 220,000
+    zones (a request of about 3.7 KB): 12.9 s and 1.47 GB; 40 such
+    operations are refused at the work budget after 4.9 s; two such files
+    with 34 operations took 15.7 s and 2.56 GB.
+
+  Memory grows with how the touched files parse, about 25 times their
+  size for files dense with values, so near the read limit it can reach
+  several gigabytes (extrapolated, not run). While a preview runs, the
+  server holds the snapshot's world, the plan's world, and the touched
+  files before and after; during the snapshot check, a third world is
+  loaded beside them.
 
 ## Searching definitions and objects
 
@@ -301,6 +432,8 @@ resolved, so a field only its prototype sets is not found.
 | `id` of `inspect` | 512 bytes |
 | Candidates a search examines in one call (`scan_limit`) | Default and at most 10,000, and 8 MiB of field values parsed again, plus the one value that reaches it (a value can be as large as its file) |
 | `inspect`'s re-read | One file of at most 64 MiB, the format's limit, parsed under the format's limits |
+| A previewed transaction | The message limits, and at most 256 operations; planned within the library's limits (TRANSACTIONS.md section 11), which the server cannot tighten: up to 256 MiB read and 4 GiB of work for the plan and for each undo round |
+| Files and refusals of a preview | 200 files and 500 refusals, sharing the byte budget in that order; `excerpts` cut to 4 KiB |
 | A cursor sent back | 256 bytes |
 | Lists in `world_summary` | 500 planes, 500 layers per plane, 500 definition types, 500 render layers and 500 ground layers, sharing the byte budget in that order; a `*_truncated` flag says when a list was cut |
 
@@ -314,18 +447,33 @@ to load as `tilewright validate` takes.
   read through the toolkit's no-follow access layer (`SourceRoot`).
   `inspect` reads its one file again through it too, with
   `SourceRoot::read`, which opens the file read-only and follows no link.
+  `preview_transaction` takes the transaction itself, not a path; the
+  paths in it are the library's to confine (`tx.path` for one it may not
+  touch, a link included), and planning reads through the same layer.
 - The crate calls nothing that writes, creates, renames, removes or locks
   a file, changes its permissions, owner or times, publishes a transaction,
   starts a process or opens a network or local socket. Its `clippy.toml`
   makes each such std function and type it lists, and the access layer's
   writing and locking entry points, an error in it; each entry was checked
-  to be flagged where its platform has it. `tilewright-edit`, which
-  publishes transactions, is not a dependency. That is a list checked by a
-  lint, not a proof: something it leaves out is caught only by the tests.
+  to be flagged where its platform has it. `tilewright-edit` is a
+  dependency for planning, which only reads; its publishing entry points
+  (`Plan::publish`, `Plan::publish_with`, `Plan::unchecked_access`,
+  `write_new`, and the `PublishOptions`, `Published` and `PublishError`
+  types) are on the list, and must resolve, so a rename in the library
+  fails the lint rather than dropping the entry. What the library itself
+  calls is not checked by this crate's lint: that planning reads only is
+  the library's contract (TRANSACTIONS.md section 6), and the tests check
+  it. That is a list checked by a lint, not a proof: something it leaves
+  out is caught only by the tests.
 - Its tests run every tool, through every page, on copies of
   `fixtures/basic` and `fixtures/terrain` and require each copy to be as it
   was: the same entries, each file's bytes, and every entry's permissions
   and modification time. On Unix they do so on a copy made unwritable too.
+  The previews among them are accepted, refused and malformed
+  transactions, and a test of hostile transactions (paths out of the
+  root, links, unknown operations, deep and malformed values) runs on a
+  tree in a directory of its own and requires that directory unchanged
+  too, so nothing is made beside the root either.
 
 ## World data is not instructions
 
@@ -335,7 +483,11 @@ instructions to a language model. The server keeps every value read from
 the world inside a typed field, in the structured result and in its
 serialized text copy alike: as a JSON string, or, for `inspect`'s
 `value`, as the item's own JSON, whose strings are escaped like any
-other. Unicode format characters, such as the bidirectional controls,
+other. A transaction is client input, and the library's refusal messages
+quote values from it and from the world (an identifier, a key, a cell's
+value): they are returned only as the `message` strings of `refusals`,
+like a diagnostic's, and never in the text of a tool error, which the
+server writes. Unicode format characters, such as the bidirectional controls,
 are valid JSON data and are sent as they are: a client that displays
 results to people should show them safely. The instructions `server/discover`
 gives and every tool description say that results are world data and not
@@ -344,8 +496,10 @@ Clients should still treat tool results as data.
 
 ## Not yet
 
-Previewing a transaction, references and the impact of removing or
-renaming an ID, inspecting an object without a uid, and searching fields
+A preview cannot yet tell which of the files it reads or changes the
+revision covers (see "Previewing a transaction"): that needs the loader's
+list of the files it read, planned with the reference index.
+References and the impact of removing or renaming an ID, inspecting an object without a uid, and searching fields
 an object inherits from its prototype are planned or open (issue #30).
 Resources, prompts, an HTTP transport and pack files are out of scope for
 now.

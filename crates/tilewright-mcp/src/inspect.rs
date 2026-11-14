@@ -315,7 +315,7 @@ fn same_object(document: &Document, value: &Value, object: &Object) -> bool {
 }
 
 /// A 1-based line and column, in characters, as diagnostics give them.
-fn position(text: &str, offset: usize) -> (usize, usize) {
+pub(crate) fn position(text: &str, offset: usize) -> (usize, usize) {
     let before = &text[..offset];
     let line = before.bytes().filter(|byte| *byte == b'\n').count() + 1;
     let start = before.rfind('\n').map_or(0, |newline| newline + 1);

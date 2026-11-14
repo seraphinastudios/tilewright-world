@@ -111,7 +111,7 @@ fn golden_inspect_and_search_results_on_both_fixtures() {
 
 /// The 1-based line and column, in characters, of `offset` in `text`,
 /// counted another way than the server counts them.
-fn line_and_column(text: &str, offset: usize) -> (i64, i64) {
+pub(super) fn line_and_column(text: &str, offset: usize) -> (i64, i64) {
     let (mut line, mut column) = (1, 1);
     for (index, character) in text.char_indices() {
         if index == offset {
@@ -184,7 +184,7 @@ fn inspect_everything(root: &Path) -> Vec<(String, String, i64, i64, i64, i64)> 
 /// A copy of `from` in `to` whose text files end their lines in CR LF, as
 /// a Windows checkout that converts line endings has them.
 #[allow(clippy::disallowed_methods)]
-fn crlf_copy(from: &Path, to: &Path) {
+pub(super) fn crlf_copy(from: &Path, to: &Path) {
     std::fs::create_dir_all(to).unwrap();
     for entry in std::fs::read_dir(from).unwrap() {
         let entry = entry.unwrap();

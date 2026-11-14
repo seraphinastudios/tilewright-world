@@ -58,13 +58,17 @@ disallowed-methods = [
   { path = "tilewright_source::SourceRoot::directory", reason = "it can create directories and hands out a writable directory" },
   { path = "tilewright_source::SourceRoot::make_directory", reason = "the MCP server never writes" },
   { path = "tilewright_source::SourceRoot::lock", reason = "the MCP server never locks the tree" },
-  # The toolkit's publishing and writing entry points. tilewright-edit is
-  # not a dependency of this crate and tilewright-pack only one of
-  # tilewright-diff, so these cannot be called today and do not resolve;
-  # they take effect if either becomes a dependency.
-  { path = "tilewright_edit::Plan::publish", reason = "the MCP server never publishes", allow-invalid = true },
-  { path = "tilewright_edit::Plan::publish_with", reason = "the MCP server never publishes", allow-invalid = true },
-  { path = "tilewright_edit::write_new", reason = "the MCP server never writes", allow-invalid = true },
+  # The toolkit's publishing and writing entry points. preview_transaction
+  # plans with tilewright-edit, whose planning only reads; these are its
+  # functions that write, lock or ask whether publishing may go ahead, and
+  # they must resolve (no allow-invalid), so a rename shows here. Only
+  # tilewright-diff depends on tilewright-pack, so write_pack cannot be
+  # called today and does not resolve; it takes effect if it becomes a
+  # dependency.
+  { path = "tilewright_edit::Plan::publish", reason = "the MCP server never publishes" },
+  { path = "tilewright_edit::Plan::publish_with", reason = "the MCP server never publishes" },
+  { path = "tilewright_edit::Plan::unchecked_access", reason = "the MCP server never publishes, so never asks whether it may" },
+  { path = "tilewright_edit::write_new", reason = "the MCP server never writes" },
   { path = "tilewright_pack::write_pack", reason = "the MCP server never writes", allow-invalid = true },
 ]
 disallowed-types = [
@@ -79,4 +83,7 @@ disallowed-types = [
   { path = "std::net::UdpSocket", reason = "the MCP server opens no connection" },
   { path = "tilewright_source::SourceDirectory", reason = "it writes, renames and removes entries" },
   { path = "tilewright_source::SourceLock", reason = "the MCP server never locks the tree" },
+  { path = "tilewright_edit::PublishOptions", reason = "the MCP server never publishes" },
+  { path = "tilewright_edit::Published", reason = "the MCP server never publishes" },
+  { path = "tilewright_edit::PublishError", reason = "the MCP server never publishes" },
 ]
