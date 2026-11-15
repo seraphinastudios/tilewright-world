@@ -174,10 +174,29 @@ fn owned(id: &str) -> Option<(&str, &str)> {
         .filter(|(owner, name)| is_identifier(owner) && is_identifier(name))
 }
 
+/// A chunk's path split into its plane and key, when it is written as a
+/// load gives it, `planes/<plane>/layers/<layer>/<x>_<y>.jsonc`.
+fn chunk_path(path: &str) -> Option<(&str, ChunkKey)> {
+    let rest = path.strip_prefix("planes/")?;
+    let (plane, rest) = rest.split_once("/layers/")?;
+    let (layer, name) = rest.split_once('/')?;
+    let (x, y) = name.strip_suffix(".jsonc")?.split_once('_')?;
+    let key = (layer.parse().ok()?, x.parse().ok()?, y.parse().ok()?);
+    is_identifier(plane).then_some((plane, key))
+}
+
+/// Whether `path` is a path a file of a tree can have: a safe relative
+/// path ending in `.jsonc`, or a chunk's, whose layer and coordinates may
+/// be negative.
+fn is_path(path: &str) -> bool {
+    path.len() <= 1024 && (is_jsonc_path(path) || chunk_path(path).is_some())
+}
+
 /// `id` as an item of `kind`, when it is written as IDs of that kind are.
 pub fn address<'a>(kind: ItemKind, id: &'a str) -> Option<Address<'a>> {
     let one = |make: fn(&'a str) -> Address<'a>| is_identifier(id).then(|| make(id));
     let path = |make: fn(&'a str) -> Address<'a>| is_jsonc_path(id).then(|| make(id));
+    let file = |make: fn(&'a str) -> Address<'a>| is_path(id).then(|| make(id));
     match kind {
         ItemKind::Anchor => owned(id).map(|(plane, id)| Address::Anchor { plane, id }),
         ItemKind::Zone => owned(id).map(|(plane, id)| Address::Zone { plane, id }),
@@ -188,8 +207,10 @@ pub fn address<'a>(kind: ItemKind, id: &'a str) -> Option<Address<'a>> {
         ItemKind::RenderLayer => one(Address::RenderLayer),
         ItemKind::GroundLayer => one(Address::GroundLayer),
         ItemKind::Terrain => one(Address::Terrain),
-        ItemKind::File => path(Address::File),
-        ItemKind::Chunk => path(Address::Chunk),
+        ItemKind::File => file(Address::File),
+        ItemKind::Chunk => {
+            (id.len() <= 1024 && chunk_path(id).is_some()).then_some(Address::Chunk(id))
+        }
         ItemKind::Profile => path(Address::Profile),
         ItemKind::Schema => path(Address::Schema),
         ItemKind::Transitions => path(Address::Transitions),
@@ -203,7 +224,8 @@ pub fn address<'a>(kind: ItemKind, id: &'a str) -> Option<Address<'a>> {
                     && ordinal.bytes().all(|byte| byte.is_ascii_digit())
                     && (ordinal.len() == 1 || !ordinal.starts_with('0'));
                 let ordinal = digits.then(|| ordinal.parse().ok()).flatten()?;
-                is_jsonc_path(chunk).then_some(Address::ObjectAt { chunk, ordinal })
+                (chunk.len() <= 1024 && chunk_path(chunk).is_some())
+                    .then_some(Address::ObjectAt { chunk, ordinal })
             }
         },
     }
@@ -212,11 +234,7 @@ pub fn address<'a>(kind: ItemKind, id: &'a str) -> Option<Address<'a>> {
 /// The chunk whose path is `path`, with its plane and key: the path a
 /// load gives it, `planes/<plane>/layers/<layer>/<x>_<y>.jsonc`.
 fn chunk<'w>(world: &'w World, path: &str) -> Option<(&'w str, ChunkKey, &'w Chunk)> {
-    let rest = path.strip_prefix("planes/")?;
-    let (plane, rest) = rest.split_once("/layers/")?;
-    let (layer, name) = rest.split_once('/')?;
-    let (x, y) = name.strip_suffix(".jsonc")?.split_once('_')?;
-    let key = (layer.parse().ok()?, x.parse().ok()?, y.parse().ok()?);
+    let (plane, key) = chunk_path(path)?;
     let (plane, found) = world.planes().get_key_value(plane)?;
     let chunk = found.chunks.get(&key)?;
     // Another spelling of the same numbers is not the chunk's path.

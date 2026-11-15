@@ -1240,6 +1240,7 @@ fn every_tool(server: &mut Server) {
         );
     }
     read::every_new_tool(server);
+    references::every_reference_tool(server);
     preview::every_preview(server);
     let replies = send(
         server,
@@ -1350,6 +1351,7 @@ fn only_replies(output: &[u8]) -> usize {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn arbitrary_input_never_panics_and_gets_only_replies() {
     let valid = [
         &request("1", "server/discover", ""),
@@ -1382,6 +1384,16 @@ fn arbitrary_input_never_panics_and_gets_only_replies() {
             10,
             "search_objects",
             r#"{"plane":"overworld","layer":0,"bbox":[-5,0,9,9],"carried":false,"field":"count","contains":"x"}"#,
+        ),
+        &call(
+            12,
+            "references",
+            r#"{"kind":"object","id":"planes/overworld/layers/0/0_0.jsonc#8","direction":"from","roles":["proto","portal_plane"],"limit":1,"scan_limit":2}"#,
+        ),
+        &call(
+            13,
+            "impact",
+            r#"{"kind":"zone","id":"overworld/island","action":"rename","to":"overworld/isle","limit":1}"#,
         ),
         &call(
             11,
@@ -1603,3 +1615,4 @@ fn world_summary_caps_planes_and_layers() {
 mod impact;
 mod preview;
 mod read;
+mod references;
