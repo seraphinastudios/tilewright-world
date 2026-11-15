@@ -58,6 +58,7 @@ disallowed-methods = [
   { path = "tilewright_source::SourceRoot::directory", reason = "it can create directories and hands out a writable directory" },
   { path = "tilewright_source::SourceRoot::make_directory", reason = "the MCP server never writes" },
   { path = "tilewright_source::SourceRoot::lock", reason = "the MCP server never locks the tree" },
+  { path = "tilewright_source::SourceDirectory::create", reason = "the MCP server never writes" },
   # The toolkit's publishing and writing entry points. preview_transaction
   # plans with tilewright-edit, whose planning only reads; these are its
   # functions that write, lock or ask whether publishing may go ahead, and

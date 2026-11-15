@@ -117,6 +117,18 @@ just before the first rename, but as with verifying packs, applying
 transactions in a tree that others can write to is not supported: such a
 writer could swap a file between a check and its use.
 
+For tools that write a file a user named and must never replace one,
+`SourceDirectory::create` in `tilewright-source` makes a new file through
+the same confinement with an exclusive create, which fails if anything is
+at the name (a link, dangling or not, included) and follows nothing. It
+never removes or replaces an entry, on success or on error, unlike
+`SourceDirectory::write`, which removes whatever is at the name first. If
+writing fails after the file was made, on Unix it is removed only while the
+entry at the name is still that file (same device and inode), which leaves a
+short window, between that check and the removal, that POSIX cannot close;
+on Windows, where std cannot tell that by path, the file is never removed
+and the error says a partly written file may be left.
+
 A pack's file name digest is checked against the file at its path, so the
 check binds to the path. Packs are content-addressed files opened from
 directories the caller controls; verifying packs in a directory others can
