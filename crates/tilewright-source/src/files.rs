@@ -789,6 +789,40 @@ pub(crate) fn join(directory: &str, name: &str) -> String {
     }
 }
 
+/// A step a test runs inside a create.
+#[cfg(test)]
+pub(crate) type Hook = Box<dyn FnMut() -> std::io::Result<()>>;
+
+#[cfg(test)]
+thread_local! {
+    /// What a create on this thread does right after it made its file,
+    /// before writing it, for tests: fail, or change the directory as
+    /// another process could meanwhile.
+    pub(crate) static AFTER_CREATE: std::cell::RefCell<Option<Hook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The error a portable create's open fails with on this thread, for
+    /// tests, instead of opening anything: Windows has errors other than
+    /// "already exists" for a name that is taken.
+    pub(crate) static OPEN_FAILS: std::cell::Cell<Option<std::io::ErrorKind>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// This thread's [`OPEN_FAILS`].
+#[cfg(test)]
+pub(crate) fn open_fails() -> Option<std::io::ErrorKind> {
+    OPEN_FAILS.with(std::cell::Cell::get)
+}
+
+/// Runs this thread's [`AFTER_CREATE`], if it has one.
+#[cfg(test)]
+pub(crate) fn after_create() -> std::io::Result<()> {
+    AFTER_CREATE.with(|hook| hook.borrow_mut().as_mut().map_or(Ok(()), |hook| hook()))
+}
+
 /// Both access implementations refuse links themselves, at the component
 /// where they occur, rather than relying on an earlier check.
 #[cfg(all(test, unix))]
@@ -978,6 +1012,298 @@ mod tests {
     write_tests!(beneath_writes_beneath_the_root, beneath);
     write_tests!(portable_writes_beneath_the_root, portable);
 
+    /// Everything about an entry a create must leave as it was, not
+    /// following it: its kind, identity, links, mode, size, times, and its
+    /// bytes, link target or entries.
+    fn snapshot(path: &std::path::Path) -> String {
+        use std::os::unix::fs::MetadataExt as _;
+        let metadata = fs::symlink_metadata(path).unwrap();
+        let content = if metadata.file_type().is_symlink() {
+            format!("-> {}", fs::read_link(path).unwrap().display())
+        } else if metadata.is_dir() {
+            let mut names: Vec<_> = fs::read_dir(path)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            names.sort();
+            format!("{names:?}")
+        } else if metadata.is_file() {
+            format!("{:?}", fs::read(path).unwrap())
+        } else {
+            String::new()
+        };
+        format!(
+            "{:?} {} {} {} {:o} {} {} {} {} {content}",
+            metadata.file_type(),
+            metadata.dev(),
+            metadata.ino(),
+            metadata.nlink(),
+            metadata.mode(),
+            metadata.len(),
+            metadata.mtime(),
+            metadata.mtime_nsec(),
+            metadata.ctime_nsec(),
+        )
+    }
+
+    /// Whether a create refused because something was at the name.
+    fn already_there<T: std::fmt::Debug>(result: Result<T, Refused>) -> bool {
+        type Inner = dyn std::error::Error + Send + Sync;
+        match result {
+            Err(Refused::Io(error)) => {
+                error.kind() == std::io::ErrorKind::AlreadyExists
+                    && error
+                        .get_ref()
+                        .is_some_and(Inner::is::<crate::access::AlreadyThere>)
+            }
+            other => panic!("expected something already there, got {other:?}"),
+        }
+    }
+
+    /// Whether a create's error says its file may be left.
+    fn left(error: &std::io::Error) -> bool {
+        type Inner = dyn std::error::Error + Send + Sync;
+        error
+            .get_ref()
+            .is_some_and(Inner::is::<crate::access::LeftBehind>)
+    }
+
+    /// Sets this thread's hook inside creates until it is dropped.
+    struct Hooked;
+
+    impl Hooked {
+        fn new(hook: impl FnMut() -> std::io::Result<()> + 'static) -> Self {
+            super::AFTER_CREATE.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+            Self
+        }
+    }
+
+    impl Drop for Hooked {
+        fn drop(&mut self) {
+            super::AFTER_CREATE.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+
+    macro_rules! create_tests {
+        ($name:ident, $module:ident) => {
+            #[test]
+            fn $name() {
+                use std::os::unix::fs::PermissionsExt as _;
+                let directory = tree();
+                let root = super::$module::Root::new(directory.path());
+                let dir = root.directory(&["dir"], false).unwrap();
+                let at = |name: &str| directory.path().join("dir").join(name);
+
+                // A new file has exactly the bytes and the access asked for.
+                dir.create("new", None, b"bytes").unwrap();
+                assert_eq!(fs::read(at("new")).unwrap(), b"bytes");
+                fs::set_permissions(at("file.jsonc"), fs::Permissions::from_mode(0o640)).unwrap();
+                let like = dir.access("file.jsonc").unwrap().unwrap();
+                dir.create("moded", Some(&like), b"").unwrap();
+                assert_eq!(fs::read(at("moded")).unwrap(), b"");
+                assert_eq!(
+                    fs::metadata(at("moded")).unwrap().permissions().mode() & 0o7777,
+                    0o640
+                );
+
+                // Nothing already at the name is removed, replaced, followed
+                // or written through: a file, a hard link to one outside,
+                // directories empty or not, links to a file, a directory or
+                // nothing (outside the tree), and a FIFO.
+                let outside = tempfile::tempdir().unwrap();
+                let target = outside.path().join("target");
+                fs::write(&target, "outside").unwrap();
+                fs::create_dir(outside.path().join("elsewhere")).unwrap();
+                fs::write(at("file"), "keep").unwrap();
+                fs::hard_link(&target, at("hard")).unwrap();
+                fs::create_dir(at("empty")).unwrap();
+                fs::create_dir(at("full")).unwrap();
+                fs::write(at("full/inside"), "kept").unwrap();
+                symlink(&target, at("to-file")).unwrap();
+                symlink(outside.path().join("elsewhere"), at("to-directory")).unwrap();
+                symlink(outside.path().join("nothing"), at("dangling")).unwrap();
+                symlink("file", at("relative")).unwrap();
+                let fifo = std::process::Command::new("mkfifo")
+                    .arg(at("fifo"))
+                    .status()
+                    .unwrap();
+                assert!(fifo.success());
+                let names = [
+                    "new",
+                    "file",
+                    "hard",
+                    "empty",
+                    "full",
+                    "to-file",
+                    "to-directory",
+                    "dangling",
+                    "relative",
+                    "fifo",
+                    "file-link.jsonc",
+                ];
+                let before: Vec<String> = names.iter().map(|name| snapshot(&at(name))).collect();
+                let outside_before = snapshot(outside.path());
+                for name in names {
+                    assert!(already_there(dir.create(name, None, b"x")), "{name}");
+                    assert!(already_there(dir.create(name, Some(&like), b"x")), "{name}");
+                }
+                let after: Vec<String> = names.iter().map(|name| snapshot(&at(name))).collect();
+                assert_eq!(before, after);
+                assert_eq!(snapshot(outside.path()), outside_before);
+                assert_eq!(fs::read_to_string(&target).unwrap(), "outside");
+                assert!(!outside.path().join("nothing").exists());
+
+                // Through a link to a directory nothing is made either.
+                assert_eq!(link(root.directory(&["link"], false)), "link");
+            }
+        };
+    }
+
+    macro_rules! create_failure_tests {
+        ($name:ident, $module:ident, $removes:expr) => {
+            #[test]
+            fn $name() {
+                use std::os::unix::fs::PermissionsExt as _;
+                let directory = tree();
+                let root = super::$module::Root::new(directory.path());
+                let dir = root.directory(&["dir"], false).unwrap();
+                let at = |name: &str| directory.path().join("dir").join(name);
+                fs::set_permissions(at("file.jsonc"), fs::Permissions::from_mode(0o640)).unwrap();
+                let like = dir.access("file.jsonc").unwrap().unwrap();
+
+                // A create that fails after making its file removes the
+                // file only if that is still what is at the name (Unix,
+                // beneath), or never (portable), and says when it may be
+                // left.
+                {
+                    let _hooked = Hooked::new(|| Err(std::io::ErrorKind::StorageFull.into()));
+                    let failed = dir.create("failed", None, b"x");
+                    let Err(Refused::Io(error)) = failed else {
+                        panic!("expected a failure, got {failed:?}");
+                    };
+                    assert_eq!(error.kind(), std::io::ErrorKind::StorageFull);
+                    let removes: bool = $removes;
+                    assert_eq!(at("failed").exists(), !removes);
+                    assert_eq!(error.to_string().contains("may be left"), !removes);
+                    assert_eq!(left(&error), !removes);
+                }
+                {
+                    // Another process renames the new file away and puts its
+                    // own at the name, then the create fails; that file
+                    // survives the cleanup.
+                    let (moved, name) = (at("moved"), at("swapped"));
+                    let _hooked = Hooked::new(move || {
+                        fs::rename(&name, &moved)?;
+                        fs::write(&name, "someone else's")?;
+                        Err(std::io::ErrorKind::StorageFull.into())
+                    });
+                    let failed = dir.create("swapped", None, b"x");
+                    let Err(Refused::Io(error)) = failed else {
+                        panic!("expected a failure, got {failed:?}");
+                    };
+                    assert!(error.to_string().contains("may be left"), "{error}");
+                    assert!(left(&error));
+                    assert_eq!(fs::read_to_string(at("swapped")).unwrap(), "someone else's");
+                    assert!(at("moved").exists());
+                }
+                {
+                    // So does a link it puts there to the new file, now
+                    // moved: the cleanup does not follow it.
+                    let (moved, name) = (at("moved-ours"), at("linked"));
+                    let _hooked = Hooked::new(move || {
+                        fs::rename(&name, &moved)?;
+                        symlink("moved-ours", &name)?;
+                        Err(std::io::ErrorKind::StorageFull.into())
+                    });
+                    let failed = dir.create("linked", None, b"x");
+                    let Err(Refused::Io(error)) = failed else {
+                        panic!("expected a failure, got {failed:?}");
+                    };
+                    assert!(left(&error), "{error}");
+                    let linked = fs::symlink_metadata(at("linked")).unwrap();
+                    assert!(linked.file_type().is_symlink());
+                    assert!(at("moved-ours").is_file());
+                }
+
+                // The file is made with its final mode only when it has no
+                // access of its own: with access, it is its owner's alone
+                // until written, as the hook, before any byte, sees.
+                fs::File::create(at("reference")).unwrap();
+                let default = fs::metadata(at("reference")).unwrap().permissions().mode() & 0o7777;
+                assert_ne!(default, 0o600, "a umask that hides the difference");
+                for (name, access, expected) in [
+                    ("mode-default", None, default),
+                    ("mode-owner", Some(like), 0o600),
+                ] {
+                    let seen = std::rc::Rc::new(std::cell::Cell::new(None));
+                    let (path, found) = (at(name), seen.clone());
+                    let _hooked = Hooked::new(move || {
+                        let metadata = fs::symlink_metadata(&path)?;
+                        found.set(Some((
+                            metadata.permissions().mode() & 0o7777,
+                            metadata.len(),
+                        )));
+                        Ok(())
+                    });
+                    dir.create(name, access.as_ref(), b"x").unwrap();
+                    assert_eq!(seen.get(), Some((expected, 0)), "{name}");
+                }
+            }
+        };
+    }
+
+    create_tests!(beneath_creates_only_new_files, beneath);
+    create_tests!(portable_creates_only_new_files, portable);
+    create_failure_tests!(beneath_removes_only_the_file_it_made, beneath, true);
+    create_failure_tests!(portable_never_removes_the_file_it_made, portable, false);
+
+    /// Whether a result is a create's refusal of a taken name.
+    fn taken(result: &Result<(), Refused>) -> bool {
+        type Inner = dyn std::error::Error + Send + Sync;
+        matches!(result, Err(Refused::Io(error))
+            if error.get_ref().is_some_and(Inner::is::<crate::access::AlreadyThere>))
+    }
+
+    /// A portable create whose open fails says the name is taken only when
+    /// something is at it.
+    #[test]
+    fn a_portable_create_that_cannot_open_is_taken_only_if_something_is_there() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tree();
+        let root = super::portable::Root::new(directory.path());
+        let dir = root.directory(&["dir"], false).unwrap();
+        // An error other than "already exists", as Windows gives for some
+        // taken names.
+        super::OPEN_FAILS.with(|fails| fails.set(Some(std::io::ErrorKind::PermissionDenied)));
+        let free = dir.create("free", None, b"x");
+        let held = dir.create("file.jsonc", None, b"x");
+        super::OPEN_FAILS.with(|fails| fails.set(None));
+        assert!(
+            matches!(&free, Err(Refused::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied),
+            "{free:?}"
+        );
+        assert!(!taken(&free));
+        assert!(taken(&held), "{held:?}");
+        // Real failures with nothing at the name: a directory removed
+        // since it was opened, and one that cannot be written.
+        fs::create_dir(directory.path().join("gone")).unwrap();
+        let gone = root.directory(&["gone"], false).unwrap();
+        fs::remove_dir(directory.path().join("gone")).unwrap();
+        let missing = gone.create("x", None, b"x");
+        assert!(missing.is_err() && !taken(&missing), "{missing:?}");
+        if rustix::process::geteuid().as_raw() != 0 {
+            let locked = directory.path().join("locked");
+            fs::create_dir(&locked).unwrap();
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+            let refused = root
+                .directory(&["locked"], false)
+                .unwrap()
+                .create("x", None, b"x");
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(refused.is_err() && !taken(&refused), "{refused:?}");
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn a_written_file_with_access_has_no_inherited_access_control_list() {
@@ -1025,6 +1351,16 @@ mod tests {
             fs::metadata(&written).unwrap().permissions().mode() & 0o777,
             0o640
         );
+        // So has a created one.
+        dir.create("created", Some(&access), b"x").unwrap();
+        assert_eq!(
+            rustix::fs::getxattr(
+                dir_path.join("created"),
+                "system.posix_acl_access",
+                &mut [0_u8; 0][..]
+            ),
+            Err(rustix::io::Errno::NODATA)
+        );
         // Without access, the file has what the directory gives it.
         dir.write("default", None, b"x").unwrap();
         assert!(
@@ -1071,6 +1407,30 @@ mod tests {
         assert!(dir.write("new", Some(&labelled), b"secret").is_err());
         assert!(!directory.path().join("dir/new").exists());
         dir.write("new", Some(&unlabelled), b"x").unwrap();
+        // So is a created one, which is removed, being still the file made.
+        let refused = dir.create("created", Some(&labelled), b"secret");
+        assert!(
+            matches!(&refused, Err(Refused::Io(error)) if !error.to_string().contains("may be left"))
+        );
+        assert!(!directory.path().join("dir/created").exists());
+        dir.create("created", Some(&unlabelled), b"x").unwrap();
+        // The labels are checked before a byte is written: a file moved
+        // away as it is made, so that it is left, is still empty.
+        let (made, moved) = (
+            directory.path().join("dir/labelled"),
+            directory.path().join("dir/moved-labelled"),
+        );
+        let moving = moved.clone();
+        super::AFTER_CREATE.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || fs::rename(&made, &moving)));
+        });
+        let refused = dir.create("labelled", Some(&labelled), b"secret");
+        super::AFTER_CREATE.with(|slot| *slot.borrow_mut() = None);
+        assert!(
+            matches!(&refused, Err(Refused::Io(error)) if left(error)),
+            "{refused:?}"
+        );
+        assert_eq!(fs::read(&moved).unwrap(), b"");
         // So is a directory.
         label(
             &directory.path().join("dir"),
@@ -1471,5 +1831,187 @@ mod windows_tests {
         fs::write(&lock_file, "someone's").unwrap();
         assert!(matches!(root.lock(), Err(Refused::Io(_))));
         assert_eq!(fs::read_to_string(&lock_file).unwrap(), "someone's");
+    }
+
+    /// Everything about an entry a create must leave as it was, not
+    /// following it: attributes, size, times, and a file's bytes or a
+    /// directory's entries (a reparse point's metadata alone).
+    fn snapshot(path: &Path) -> String {
+        use std::os::windows::fs::MetadataExt as _;
+        let metadata = fs::symlink_metadata(path).unwrap();
+        let reparse = metadata.file_attributes() & 0x400 != 0;
+        let content = if reparse {
+            String::new()
+        } else if metadata.is_dir() {
+            let mut names: Vec<_> = fs::read_dir(path)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            names.sort();
+            format!("{names:?}")
+        } else {
+            format!("{:?}", fs::read(path).unwrap())
+        };
+        format!(
+            "{:x} {} {} {} {content}",
+            metadata.file_attributes(),
+            metadata.file_size(),
+            metadata.creation_time(),
+            metadata.last_write_time(),
+        )
+    }
+
+    fn already_there(result: Result<(), Refused>) -> bool {
+        type Inner = dyn std::error::Error + Send + Sync;
+        match result {
+            Err(Refused::Io(error)) => {
+                error.kind() == std::io::ErrorKind::AlreadyExists
+                    && error
+                        .get_ref()
+                        .is_some_and(Inner::is::<crate::access::AlreadyThere>)
+            }
+            other => panic!("expected something already there, got {other:?}"),
+        }
+    }
+
+    fn hook(hook: impl FnMut() -> std::io::Result<()> + 'static) {
+        super::AFTER_CREATE.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    fn unhook() {
+        super::AFTER_CREATE.with(|slot| *slot.borrow_mut() = None);
+    }
+
+    #[test]
+    fn a_create_never_replaces_or_removes_an_entry() {
+        let directory = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let at = |name: &str| directory.path().join(name);
+        let root = Root::new(directory.path());
+        let base = root.directory(&[], false).unwrap();
+
+        // A new file has exactly the bytes asked for, and read-only access
+        // makes it read-only.
+        base.create("new", None, b"bytes").unwrap();
+        assert_eq!(fs::read(at("new")).unwrap(), b"bytes");
+        let read_only = crate::Access {
+            mode: 0o444,
+            user: 0,
+            group: 0,
+            control: [0; 32],
+        };
+        base.create("read-only", Some(&read_only), b"x").unwrap();
+        assert!(
+            fs::metadata(at("read-only"))
+                .unwrap()
+                .permissions()
+                .readonly()
+        );
+
+        // Nothing at the name is removed, replaced or followed: a file,
+        // directories empty or not, a junction to a directory outside, a
+        // junction to nothing, and a symbolic link to a file outside.
+        fs::write(at("file"), "keep").unwrap();
+        fs::create_dir(at("empty")).unwrap();
+        fs::create_dir(at("full")).unwrap();
+        fs::write(at("full/inside"), "kept").unwrap();
+        fs::create_dir(outside.path().join("elsewhere")).unwrap();
+        junction(&at("junction"), &outside.path().join("elsewhere"));
+        fs::create_dir(outside.path().join("gone")).unwrap();
+        junction(&at("dangling"), &outside.path().join("gone"));
+        fs::remove_dir(outside.path().join("gone")).unwrap();
+        let target = outside.path().join("target");
+        fs::write(&target, "outside").unwrap();
+        let mut names = vec![
+            "new",
+            "read-only",
+            "file",
+            "empty",
+            "full",
+            "junction",
+            "dangling",
+        ];
+        // Symbolic links need a privilege the hosted runners have.
+        let linked = std::os::windows::fs::symlink_file(&target, at("to-file")).is_ok();
+        assert!(
+            linked || std::env::var_os("CI").is_none(),
+            "symlink_file failed on CI"
+        );
+        if linked {
+            names.push("to-file");
+        }
+        let before: Vec<String> = names.iter().map(|name| snapshot(&at(name))).collect();
+        for name in &names {
+            assert!(already_there(base.create(name, None, b"x")), "{name}");
+            assert!(
+                already_there(base.create(name, Some(&read_only), b"x")),
+                "{name}"
+            );
+        }
+        let after: Vec<String> = names.iter().map(|name| snapshot(&at(name))).collect();
+        assert_eq!(before, after);
+        assert_eq!(fs::read_to_string(&target).unwrap(), "outside");
+        assert!(!outside.path().join("gone").exists());
+        assert_eq!(
+            fs::read_dir(outside.path().join("elsewhere"))
+                .unwrap()
+                .count(),
+            0
+        );
+
+        // A create that fails after making its file never removes it, and
+        // says it may be left.
+        hook(|| Err(std::io::ErrorKind::StorageFull.into()));
+        let failed = base.create("failed", None, b"x");
+        unhook();
+        let Err(Refused::Io(error)) = failed else {
+            panic!("expected a failure, got {failed:?}");
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::StorageFull);
+        assert!(error.to_string().contains("may be left"), "{error}");
+        assert!(at("failed").exists());
+        // Nor what another process put at the name meanwhile.
+        let (moved, name) = (at("moved"), at("swapped"));
+        hook(move || {
+            fs::rename(&name, &moved)?;
+            fs::write(&name, "someone else's")?;
+            Err(std::io::ErrorKind::StorageFull.into())
+        });
+        let failed = base.create("swapped", None, b"x");
+        unhook();
+        assert!(matches!(failed, Err(Refused::Io(_))), "{failed:?}");
+        assert_eq!(fs::read_to_string(at("swapped")).unwrap(), "someone else's");
+        assert!(at("moved").exists());
+    }
+
+    /// An open that fails says the name is taken only when something is at
+    /// it: with an error other than "already exists", and with the directory
+    /// removed since it was opened.
+    #[test]
+    fn a_create_that_cannot_open_is_taken_only_if_something_is_there() {
+        type Inner = dyn std::error::Error + Send + Sync;
+        let directory = tempfile::tempdir().unwrap();
+        let at = |name: &str| directory.path().join(name);
+        let root = Root::new(directory.path());
+        let base = root.directory(&[], false).unwrap();
+        fs::write(at("file"), "keep").unwrap();
+        super::OPEN_FAILS.with(|fails| fails.set(Some(std::io::ErrorKind::PermissionDenied)));
+        let free = base.create("free", None, b"x");
+        let held = base.create("file", None, b"x");
+        super::OPEN_FAILS.with(|fails| fails.set(None));
+        let taken = |result: &Result<(), Refused>| {
+            matches!(result, Err(Refused::Io(error))
+                if error.get_ref().is_some_and(Inner::is::<crate::access::AlreadyThere>))
+        };
+        assert!(
+            matches!(&free, Err(Refused::Io(_))) && !taken(&free),
+            "{free:?}"
+        );
+        assert!(taken(&held), "{held:?}");
+        fs::create_dir(at("gone")).unwrap();
+        let gone = root.directory(&["gone"], false).unwrap();
+        fs::remove_dir(at("gone")).unwrap();
+        let missing = gone.create("x", None, b"x");
+        assert!(missing.is_err() && !taken(&missing), "{missing:?}");
     }
 }
