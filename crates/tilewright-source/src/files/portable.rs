@@ -402,7 +402,12 @@ impl Directory {
             const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
             options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
         }
-        let mut file = match options.open(&path) {
+        #[cfg(test)]
+        let opened =
+            super::open_fails().map_or_else(|| options.open(&path), |kind| Err(kind.into()));
+        #[cfg(not(test))]
+        let opened = options.open(&path);
+        let mut file = match opened {
             Ok(file) => file,
             Err(error) if error.kind() == ErrorKind::AlreadyExists => {
                 return Err(Refused::Io(crate::access::already_there()));

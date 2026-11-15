@@ -88,6 +88,18 @@ impl AccessError {
         matches!(self, Self::Io(_, error) if error.kind() == std::io::ErrorKind::AlreadyExists
             && error.get_ref().is_some_and(Inner::is::<AlreadyThere>))
     }
+
+    /// Whether this is [`SourceDirectory::create`] failing after it made
+    /// its file and not removing it, so that the file, partly written, may
+    /// be left at the name: always on Windows, and on Unix where the entry
+    /// at the name could not be told to be still that file. It is an
+    /// [`AccessError::Io`] of the failure's own kind. When `create` fails
+    /// otherwise, nothing it made is left.
+    #[must_use]
+    pub fn may_be_left(&self) -> bool {
+        type Inner = dyn std::error::Error + Send + Sync;
+        matches!(self, Self::Io(_, error) if error.get_ref().is_some_and(Inner::is::<LeftBehind>))
+    }
 }
 
 /// Something already at the name a file is created as; see
@@ -109,7 +121,8 @@ pub(crate) fn already_there() -> std::io::Error {
 }
 
 /// A failed creation whose file, partly written, was not removed, since it
-/// could not be told to be still the one created at the name.
+/// could not be told to be still the one created at the name; see
+/// [`AccessError::may_be_left`].
 #[derive(Debug)]
 pub(crate) struct LeftBehind(std::io::Error);
 
@@ -508,8 +521,10 @@ impl SourceDirectory {
     ///   the error is [`AccessError::Io`] of kind
     ///   [`AlreadyExists`](std::io::ErrorKind::AlreadyExists), and
     ///   [`AccessError::already_exists`] says so.
-    /// - Nothing that was at the name, or comes to be there, is removed,
-    ///   replaced or written through, on success or on any error.
+    /// - Nothing that was at the name before the call is removed, replaced
+    ///   or written through, on success or on any error. Something another
+    ///   process puts at the name while a create is failing is removed
+    ///   only in the Unix window below; on Windows nothing is removed.
     /// - All of `bytes` is written and the file is synced (`fsync`; on
     ///   macOS `F_FULLFSYNC`, as std syncs) before it succeeds. As with
     ///   [`write`](Self::write), the directory is not synced: call
@@ -522,15 +537,16 @@ impl SourceDirectory {
     ///   the file it made: same device and inode as the open file, read
     ///   without following a link. However many links the file has, the
     ///   name is still that file's, so removing it removes no one else's
-    ///   data. Between that check and the removal (`unlinkat`) another
-    ///   process that renames a file over the name can still have its file
-    ///   removed; POSIX has no call that removes a name only if it is a
-    ///   given file, so this short window cannot be closed. Where the file
-    ///   is not removed, the error says it may be left.
+    ///   data. Between that check and the removal (`unlinkat`), a window
+    ///   of the order of a microsecond, another process that renames a
+    ///   file over the name, over the new file, has its file removed; that
+    ///   is the only file at risk. POSIX has no call that removes a name
+    ///   only if it is a given file, so this window cannot be closed. Where
+    ///   the file is not removed, [`AccessError::may_be_left`] says so.
     /// - On Windows the file is never removed: std gives no way to tell the
     ///   entry at a path is the file it made, so a partly written file may
-    ///   be left at the name, and the error says so. Removing it is the
-    ///   caller's choice.
+    ///   be left at the name, and [`AccessError::may_be_left`] says so.
+    ///   Removing it is the caller's choice.
     ///
     /// What it cannot promise: on Unix the directory is the one this
     /// handle opened, but a process that can change an ancestor can move

@@ -121,13 +121,15 @@ For tools that write a file a user named and must never replace one,
 `SourceDirectory::create` in `tilewright-source` makes a new file through
 the same confinement with an exclusive create, which fails if anything is
 at the name (a link, dangling or not, included) and follows nothing. It
-never removes or replaces an entry, on success or on error, unlike
-`SourceDirectory::write`, which removes whatever is at the name first. If
-writing fails after the file was made, on Unix it is removed only while the
-entry at the name is still that file (same device and inode), which leaves a
-short window, between that check and the removal, that POSIX cannot close;
-on Windows, where std cannot tell that by path, the file is never removed
-and the error says a partly written file may be left.
+never removes or replaces an entry that was there before the call, on
+success or on error, unlike `SourceDirectory::write`, which removes whatever
+is at the name first. If writing fails after the file was made, on Unix it
+is removed only while the entry at the name is still that file (same device
+and inode). That leaves a window of the order of a microsecond, between that
+check and the removal, which POSIX cannot close: the only file at risk is
+one another process renames over the new file in it. On Windows, where std
+cannot tell that by path, the file is never removed. Either way, where the
+file may be left, partly written, `AccessError::may_be_left` says so.
 
 A pack's file name digest is checked against the file at its path, so the
 check binds to the path. Packs are content-addressed files opened from

@@ -120,3 +120,70 @@ fn of_creates_racing_for_a_name_exactly_one_wins() {
     // Nothing else was made or left.
     assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 8);
 }
+
+/// Fails every create on this thread right after it made its file, after
+/// running `meanwhile`, until dropped.
+struct Failing;
+
+impl Failing {
+    fn new(mut meanwhile: impl FnMut() -> std::io::Result<()> + 'static) -> Self {
+        crate::files::AFTER_CREATE.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                meanwhile()?;
+                Err(std::io::ErrorKind::StorageFull.into())
+            }));
+        });
+        Self
+    }
+}
+
+impl Drop for Failing {
+    fn drop(&mut self) {
+        crate::files::AFTER_CREATE.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+#[test]
+fn a_failed_create_says_whether_its_file_may_be_left() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = SourceRoot::new(directory.path());
+    let dir = root.directory("", false).unwrap().unwrap();
+    let at = |name: &str| directory.path().join(name);
+
+    // A refusal and a bad name leave nothing.
+    fs::write(at("taken"), "keep").unwrap();
+    let taken = dir.create("taken", None, b"x").unwrap_err();
+    assert!(taken.already_exists() && !taken.may_be_left());
+    assert!(!dir.create("a/b", None, b"x").unwrap_err().may_be_left());
+    assert!(!AccessError::Locked.may_be_left());
+    assert!(!AccessError::pending_removal("x").may_be_left());
+
+    // A failure after the file was made: on Unix it is removed, being still
+    // the file made; on Windows it is never removed. Either way the error
+    // keeps its kind, and says which.
+    let failed = {
+        let _failing = Failing::new(|| Ok(()));
+        dir.create("failed", None, b"x").unwrap_err()
+    };
+    assert!(
+        matches!(&failed, AccessError::Io(path, error)
+            if path == "failed" && error.kind() == std::io::ErrorKind::StorageFull),
+        "{failed}"
+    );
+    assert!(!failed.already_exists());
+    assert_eq!(failed.may_be_left(), cfg!(windows), "{failed}");
+    assert_eq!(at("failed").exists(), cfg!(windows));
+
+    // Where another process replaced it at the name meanwhile, its file
+    // stays, and the error says the file made may be left.
+    let swapped = {
+        let (name, moved) = (at("swapped"), at("moved"));
+        let _failing = Failing::new(move || {
+            fs::rename(&name, &moved)?;
+            fs::write(&name, "someone else's")
+        });
+        dir.create("swapped", None, b"x").unwrap_err()
+    };
+    assert!(swapped.may_be_left(), "{swapped}");
+    assert_eq!(fs::read_to_string(at("swapped")).unwrap(), "someone else's");
+}
