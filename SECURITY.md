@@ -15,8 +15,8 @@ terminal or add lines to the output.
 `tilewright mcp` (docs/MCP.md) reads one source tree for an MCP client: it
 takes no path from the client, and nothing it does writes. It previews a
 transaction the client sends by planning it in memory with
-`tilewright-edit`, as `tilewright tx preview` does, and never publishes
-it; the transaction's paths are confined as when it is applied. That is
+`tilewright-edit`, as `tilewright tx preview` does but within tighter read
+and work budgets, and never publishes it; the transaction's paths are confined as when it is applied. That is
 enforced by a list and by tests, not proven: a lint in its crate refuses
 the std and toolkit functions it lists that write, lock, publish, change
 permissions, owners or times, start a process or open a connection, and

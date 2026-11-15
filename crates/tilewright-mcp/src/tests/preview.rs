@@ -114,10 +114,13 @@ fn check_files(page: &Value, plan: &Plan, excerpts: bool) {
         integer(at(page, &["files_consulted"])),
         plan.files().len() - changed.len()
     );
+    // Every file these previews touch is one the loader reads.
+    assert_eq!(at(page, &["outside_revision"]).as_bool(), Some(false));
     let items = at(page, &["files"]).as_array().unwrap();
     assert_eq!(items.len(), changed.len().min(MAXIMUM_FILES));
     for (item, file) in items.iter().zip(&changed) {
         assert_eq!(at(item, &["path"]).as_str(), Some(file.path.as_str()));
+        assert_eq!(at(item, &["in_revision"]).as_bool(), Some(true));
         let expected = match (&file.before, &file.after) {
             (None, _) => "created",
             (_, None) => "deleted",
@@ -811,6 +814,7 @@ fn files_and_refusals_are_capped() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn a_preview_stays_within_the_byte_budget_as_sent() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("tree");
@@ -884,7 +888,10 @@ fn a_preview_stays_within_the_byte_budget_as_sent() {
         })
         .collect();
     let structured_text =
-        crate::preview::preview_with(valid, &root, &text, true, |_| Err(long.clone())).unwrap();
+        crate::preview::preview_with(valid, &root, &text, true, crate::preview::budgets(), |_| {
+            Err(long.clone())
+        })
+        .unwrap();
     assert!(cost(&structured_text) + 1024 <= MAXIMUM_RESULT_BYTES);
     let document = checked_result(&structured_text);
     let page = document.root();
@@ -908,11 +915,15 @@ fn a_preview_stays_within_the_byte_budget_as_sent() {
     let State::Valid(valid) = &basic.snapshot.state else {
         panic!("basic loads");
     };
-    let structured_text =
-        crate::preview::preview_with(valid, &fixture("basic"), &orchard(), false, |_| {
-            Err(long.clone())
-        })
-        .unwrap();
+    let structured_text = crate::preview::preview_with(
+        valid,
+        &fixture("basic"),
+        &orchard(),
+        false,
+        crate::preview::budgets(),
+        |_| Err(long.clone()),
+    )
+    .unwrap();
     let document = checked_result(&structured_text);
     let page = document.root();
     assert_eq!(at(page, &["files_truncated"]).as_bool(), Some(false));
@@ -966,11 +977,15 @@ fn transaction_and_world_text_stays_in_typed_strings() {
         code: "tx.conflict",
         message: message.clone(),
     }];
-    let structured_text =
-        crate::preview::preview_with(valid, &fixture("basic"), &orchard(), false, |_| {
-            Err(problems.clone())
-        })
-        .unwrap();
+    let structured_text = crate::preview::preview_with(
+        valid,
+        &fixture("basic"),
+        &orchard(),
+        false,
+        crate::preview::budgets(),
+        |_| Err(problems.clone()),
+    )
+    .unwrap();
     assert!(!structured_text.chars().any(char::is_control));
     assert!(!structured_text.contains('\u{2028}'));
     let document = checked_result(&structured_text);
@@ -1291,9 +1306,24 @@ fn previews_leave_the_tree_and_its_directory_as_they_were() {
     }
 }
 
+/// The `in_revision` of each file a preview lists, by path.
+fn in_revision(page: &Value) -> Vec<(String, bool)> {
+    at(page, &["files"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| {
+            (
+                at(item, &["path"]).as_str().unwrap().to_owned(),
+                at(item, &["in_revision"]).as_bool().unwrap(),
+            )
+        })
+        .collect()
+}
+
 #[test]
-#[allow(clippy::disallowed_methods)]
-fn files_the_loader_does_not_read_are_previewed_as_they_are_on_disk() {
+#[allow(clippy::disallowed_methods, clippy::too_many_lines)]
+fn files_outside_the_revision_are_marked() {
     // A file under profile/ that the profile does not name: a transaction
     // may read and edit it, but the loader does not read it, so it is not
     // part of the revision, and the preview reads it as it is at the call.
@@ -1305,23 +1335,31 @@ fn files_the_loader_does_not_read_are_previewed_as_they_are_on_disk() {
     let mut server = ready(&root);
     let revision = server.revision().unwrap().to_owned();
     assert_eq!(Some(revision.as_str()), ready(&fixture("basic")).revision());
+    let State::Valid(valid) = &server.snapshot.state else {
+        panic!("the tree loads");
+    };
+    assert!(!valid.world.files().contains_key("profile/extra.jsonc"));
+    assert!(valid.world.files().contains_key("defs/proto/coin.jsonc"));
     let test = transaction(
         r#"{"op": "test", "path": "profile/extra.jsonc", "pointer": ["a"], "value": 1}"#,
     );
     let page = previewed(&mut server, &test, "");
-    assert_eq!(
-        at(structured(&page), &["would_apply"]).as_bool(),
-        Some(true)
-    );
+    let page = structured(&page);
+    assert_eq!(at(page, &["would_apply"]).as_bool(), Some(true));
+    // Read, not changed: no file listed, and still outside.
+    assert_eq!(integer(at(page, &["files_consulted"])), 1);
+    assert!(in_revision(page).is_empty());
+    assert_eq!(at(page, &["outside_revision"]).as_bool(), Some(true));
     std::fs::write(&extra, "{\"a\": 2}\n").unwrap();
     // The same snapshot now refuses the same transaction, at the same
-    // revision.
+    // revision; a refused plan does not say which files it read.
     let (document, stage) = refused(&mut server, &test);
     assert_eq!(stage, "plan");
     let page = structured(&document);
     assert_eq!(at(page, &["revision"]).as_str(), Some(revision.as_str()));
     assert_eq!(refusals(page)[0].2, "tx.conflict");
-    // An edit of it changes a file and not the revision.
+    assert_eq!(at(page, &["outside_revision"]).kind(), "null");
+    // An edit of it changes a file and not the revision, and says so.
     let edit = transaction(
         r#"{"op": "set", "path": "profile/extra.jsonc", "pointer": ["a"], "value": 3}"#,
     );
@@ -1332,12 +1370,175 @@ fn files_the_loader_does_not_read_are_previewed_as_they_are_on_disk() {
         at(page, &["resulting_revision"]).as_str(),
         Some(revision.as_str())
     );
+    assert_eq!(
+        in_revision(page),
+        [("profile/extra.jsonc".to_owned(), false)]
+    );
+    assert_eq!(at(page, &["outside_revision"]).as_bool(), Some(true));
+    // Beside a file of the revision, each is marked for itself.
+    let both = transaction(
+        r#"{"op": "set", "path": "profile/extra.jsonc", "pointer": ["a"], "value": 3},
+        {"op": "set", "path": "defs/proto/coin.jsonc", "pointer": ["fields", "face"], "value": "coin2.png"}"#,
+    );
+    let page = previewed(&mut server, &both, "");
+    let page = structured(&page);
+    assert_eq!(
+        in_revision(page),
+        [
+            ("defs/proto/coin.jsonc".to_owned(), true),
+            ("profile/extra.jsonc".to_owned(), false)
+        ]
+    );
+    assert_eq!(at(page, &["outside_revision"]).as_bool(), Some(true));
+    // A created file is in the revision when the load of the tree the
+    // transaction leaves reads it, and outside it otherwise.
+    let created = transaction(
+        r#"{"op": "document.create", "path": "profile/other.jsonc", "document": {"a": 1}},
+        {"op": "document.create", "path": "defs/proto/reed.jsonc", "document": {"format": "tilewright.def/1", "type": "proto", "id": "reed", "fields": {"face": "reed.png", "layer": "floor"}}}"#,
+    );
+    let page = previewed(&mut server, &created, "");
+    let page = structured(&page);
+    assert_eq!(at(page, &["would_apply"]).as_bool(), Some(true));
+    assert_eq!(
+        in_revision(page),
+        [
+            ("defs/proto/reed.jsonc".to_owned(), true),
+            ("profile/other.jsonc".to_owned(), false)
+        ]
+    );
+    assert_eq!(at(page, &["outside_revision"]).as_bool(), Some(true));
+    // Deleting a file outside: marked too.
+    let deleted = transaction(r#"{"op": "document.delete", "path": "profile/extra.jsonc"}"#);
+    let page = previewed(&mut server, &deleted, "");
+    assert_eq!(
+        in_revision(structured(&page)),
+        [("profile/extra.jsonc".to_owned(), false)]
+    );
     // And refresh finds no change.
     let (_, document) = result(&mut server, "refresh", "{}");
     assert_eq!(
         at(structured(&document), &["changed"]).as_bool(),
         Some(false)
     );
+}
+
+/// A JSON document of `{"a": 1}` padded with spacing to `bytes` bytes,
+/// in lines the format allows.
+fn padded(bytes: usize) -> String {
+    let head = "{\"a\": 1";
+    let line = 1 << 20;
+    let mut text = String::with_capacity(bytes);
+    text.push_str(head);
+    while text.len() + 2 < bytes {
+        text.push('\n');
+        let room = (bytes - 2 - text.len()).min(line - 1);
+        text.extend(std::iter::repeat_n(' ', room));
+    }
+    text.push_str("\n}");
+    assert_eq!(text.len(), bytes);
+    text
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn previews_plan_within_the_servers_budgets() {
+    use crate::preview::{READ_BYTES, WORK, budgets};
+    use tilewright_edit::limits;
+    // The budgets docs/MCP.md states, each below the library's.
+    assert_eq!((READ_BYTES, WORK), (64 << 20, 512 << 20));
+    const { assert!(READ_BYTES < limits::READ_BYTES && WORK < limits::WORK) };
+    assert_eq!(
+        (budgets().read_bytes(), budgets().work()),
+        (READ_BYTES, WORK)
+    );
+    let mebibyte: usize = 1 << 20;
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("tree");
+    copy_tree(&fixture("basic"), &root);
+    // Files the loader does not read, so the tree loads as fast as basic.
+    for (name, mebibytes) in [("a", 40), ("b", 23), ("c", 25)] {
+        std::fs::write(
+            root.join(format!("profile/{name}.jsonc")),
+            padded(mebibytes * mebibyte),
+        )
+        .unwrap();
+    }
+    let mut server = ready(&root);
+    let page = |server: &mut Server, names: &[&str], repeat: usize| {
+        let operations: Vec<String> = names
+            .iter()
+            .flat_map(|name| {
+                std::iter::repeat_n(
+                    format!(
+                        r#"{{"op": "test", "path": "profile/{name}.jsonc", "pointer": ["a"], "value": 1}}"#
+                    ),
+                    repeat,
+                )
+            })
+            .collect();
+        let text = transaction(&operations.join(","));
+        let document = previewed(server, &text, "");
+        (text, document)
+    };
+    let check = |document: &Document, accepted: bool| {
+        let page = structured(document);
+        assert_eq!(at(page, &["would_apply"]).as_bool(), Some(accepted));
+        assert_eq!(
+            at(page, &["server_budget_reached"]).as_bool(),
+            Some(!accepted)
+        );
+        assert_eq!(
+            integer(at(page, &["server_budgets", "read_bytes"])),
+            usize::try_from(READ_BYTES).unwrap()
+        );
+        assert_eq!(
+            integer(at(page, &["server_budgets", "work"])),
+            usize::try_from(WORK).unwrap()
+        );
+        if !accepted {
+            let refusals = refusals(page);
+            assert_eq!(refusals[0].2, "tx.limit", "{refusals:?}");
+        }
+    };
+    // 63 MiB read: just inside; 65 MiB: just outside the server's read
+    // budget, and well inside the library's.
+    let (_, inside) = page(&mut server, &["a", "b"], 1);
+    check(&inside, true);
+    let (outside_text, outside) = page(&mut server, &["a", "c"], 1);
+    check(&outside, false);
+    assert!(
+        refusals(structured(&outside))[0]
+            .3
+            .contains("67108864 bytes")
+    );
+    // `tilewright tx apply` plans within the library's budgets, which
+    // accept it.
+    let transaction = Transaction::parse(NAME, &outside_text).unwrap();
+    assert!(tilewright_edit::plan(&root, &transaction, &Options::default()).is_ok());
+    // Work: each operation costs the document it reads. Twenty readings of
+    // 25 MiB are just inside 512 MiB, and twenty-one just outside.
+    let (_, inside) = page(&mut server, &["c"], 20);
+    check(&inside, true);
+    let (outside_text, outside) = page(&mut server, &["c"], 21);
+    check(&outside, false);
+    assert!(
+        refusals(structured(&outside))[0]
+            .3
+            .contains("536870912 bytes of work")
+    );
+    let transaction = Transaction::parse(NAME, &outside_text).unwrap();
+    assert!(tilewright_edit::plan(&root, &transaction, &Options::default()).is_ok());
+    // A refusal at a limit that is not a budget is not the server's.
+    let steps = vec!["\"x\""; tilewright_edit::limits::POINTER + 1].join(",");
+    let (document, _) = refused(
+        &mut server,
+        &self::transaction(&format!(
+            r#"{{"op": "set", "path": "world.jsonc", "pointer": [{steps}], "value": 1}}"#
+        )),
+    );
+    let page = structured(&document);
+    assert_eq!(refusals(page)[0].2, "tx.limit");
+    assert_eq!(at(page, &["server_budget_reached"]).as_bool(), Some(false));
 }
 
 #[test]
@@ -1391,4 +1592,59 @@ fn a_transaction_nests_as_deep_as_the_message_allows() {
         super::error_of(&replies[1]),
         (-32700, "jsonc.depth_limit".to_owned())
     );
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn a_library_limit_at_the_same_number_is_not_the_servers_budget() {
+    // The library refuses an inverse of more than the format's 64 MiB, the
+    // same number as the server's read budget: moving a large object back
+    // and forth makes one, while reading about 2 MB.
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("tree");
+    copy_tree(&fixture("basic"), &root);
+    let blob = "x".repeat(900_000);
+    std::fs::write(
+        root.join("planes/overworld/layers/0/2_0.jsonc"),
+        format!(
+            "{{\"format\": \"tilewright.chunk/1\", \"plane\": \"overworld\", \"layer\": 0, \"chunk\": [2, 0], \"objects\": [\n{{\"uid\": \"big\", \"at\": [0, 0], \"proto\": \"chest\", \"custom\": {{\"example.org\": {{\"blob\": \"{blob}\"}}}}}}\n]}}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("planes/overworld/layers/0/3_0.jsonc"),
+        "{\"format\": \"tilewright.chunk/1\", \"plane\": \"overworld\", \"layer\": 0, \"chunk\": [3, 0], \"objects\": [{\"at\": [0, 0], \"proto\": \"tree\"}]}\n",
+    )
+    .unwrap();
+    let mut operations = vec![
+        r#"{"op": "object.insert", "plane": "overworld", "layer": 0, "at": [127, 31], "object": {"proto": "coin"}}"#.to_owned(),
+    ];
+    for step in 0..90 {
+        let x = if step % 2 == 0 {
+            96 + (step / 2) % 32
+        } else {
+            65 + (step / 2) % 31
+        };
+        operations.push(format!(
+            r#"{{"op": "object.move", "uid": "big", "expect": {{"proto": "chest"}}, "to": {{"at": [{x}, 0]}}}}"#
+        ));
+    }
+    let text = transaction(&operations.join(","));
+    let mut server = ready(&root);
+    let (document, stage) = refused(&mut server, &text);
+    assert_eq!(stage, "plan");
+    let page = structured(&document);
+    let refusals = refusals(page);
+    assert_eq!(refusals[0].2, "tx.limit");
+    assert!(
+        refusals[0]
+            .3
+            .contains("inverse would hold more than 67108864 bytes"),
+        "{refusals:?}"
+    );
+    assert_eq!(at(page, &["server_budget_reached"]).as_bool(), Some(false));
+    // tx apply's own plan refuses it the same way.
+    let transaction = Transaction::parse(NAME, &text).unwrap();
+    let library = tilewright_edit::plan(&root, &transaction, &Options::default()).unwrap_err();
+    assert!(library[0].message.contains("inverse would hold more than"));
 }

@@ -6,7 +6,7 @@
 
 use crate::json::{fingerprint, hex};
 use std::{collections::BTreeMap, path::Path};
-use tilewright_source::{Diagnostic, LoadOptions, Overlay, SourceRoot, World};
+use tilewright_source::{Diagnostic, LoadOptions, Overlay, ReferenceIndex, SourceRoot, World};
 
 /// One load of the tree.
 pub struct Snapshot {
@@ -25,6 +25,11 @@ pub enum State {
 
 pub struct Valid {
     pub world: World,
+    /// The references of the world, from the same load, or `None` when the
+    /// indexed load refused the tree as too large to number while a plain
+    /// load of it succeeds: then `references` and `impact` fail with
+    /// `index.unavailable`, and every other tool answers as usual.
+    pub index: Option<ReferenceIndex>,
     /// The lowercase hex `source_digest`.
     pub revision: String,
     /// The world's IDs by kind, or `None` when it has more than an ID
@@ -34,6 +39,9 @@ pub struct Valid {
     /// chunk key, so a search resuming past a chunk need not walk it.
     pub chunk_objects: ChunkCounts,
 }
+
+/// The code of a load's budget diagnostic.
+const BUDGET: &str = tilewright_source::Code::Budget.as_str();
 
 /// Object counts by plane ID, then chunk key.
 pub type ChunkCounts = BTreeMap<String, BTreeMap<(i32, i64, i64), usize>>;
@@ -45,6 +53,18 @@ impl Snapshot {
     /// read, on every platform; a root that is missing, or not a
     /// directory, is reported as such.
     pub fn load(root: &Path) -> Self {
+        Self::load_with(root, |source| {
+            tilewright_source::load_indexed_in(source, &LoadOptions::default(), &Overlay::new())
+        })
+    }
+
+    /// [`Snapshot::load`] with `indexed` as the indexed load, so that a
+    /// test can give the refusal of a tree too large to index, which no
+    /// test-sized tree gets from the library.
+    pub(crate) fn load_with(
+        root: &Path,
+        indexed: impl FnOnce(&SourceRoot) -> Result<(World, ReferenceIndex), Vec<Diagnostic>>,
+    ) -> Self {
         let problem = match std::fs::metadata(root) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some((
                 "root.missing",
@@ -57,8 +77,8 @@ impl Snapshot {
             // Anything else, the load reports in its own words.
             _ => None,
         };
-        let loaded = match problem {
-            Some((code, message)) => Err(vec![Diagnostic {
+        let loaded = if let Some((code, message)) = problem {
+            Err(vec![Diagnostic {
                 path: ".".to_owned(),
                 start: 0,
                 end: 0,
@@ -66,15 +86,31 @@ impl Snapshot {
                 column: 0,
                 code,
                 message: message.to_owned(),
-            }]),
-            None => tilewright_source::load_edited_in(
-                &SourceRoot::new(root),
-                &LoadOptions::default(),
-                &Overlay::new(),
-            ),
+            }])
+        } else {
+            let source = SourceRoot::new(root);
+            match indexed(&source) {
+                Ok((world, index)) => Ok((world, Some(index))),
+                // An indexed load refuses, with one `source.budget`
+                // diagnostic at `.`, a tree whose references are too many
+                // to number, which a plain load may still load. A load
+                // past its own budgets stops with one at the file or
+                // directory it reached, and its notes at `.` never come
+                // alone, so neither is loaded again: any other failure is
+                // the plain load's own.
+                Err(diagnostics) if matches!(diagnostics.as_slice(), [only] if only.code == BUDGET && only.path == ".") => {
+                    tilewright_source::load_edited_in(
+                        &source,
+                        &LoadOptions::default(),
+                        &Overlay::new(),
+                    )
+                    .map(|world| (world, None))
+                }
+                Err(diagnostics) => Err(diagnostics),
+            }
         };
         match loaded {
-            Ok(world) => {
+            Ok((world, index)) => {
                 let revision = hex(&world.source_digest());
                 let ids = tilewright_diff::Snapshot::from_world(
                     &world,
@@ -97,6 +133,7 @@ impl Snapshot {
                     binding: revision.clone(),
                     state: State::Valid(Box::new(Valid {
                         world,
+                        index,
                         revision,
                         ids,
                         chunk_objects,
