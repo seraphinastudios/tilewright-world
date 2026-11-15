@@ -666,11 +666,11 @@ fn impact_gives_the_cascade_the_allowance_and_whether_a_name_is_free() {
     );
     assert_eq!(
         impact_member(&mut server, remove, "diff_allowance"),
-        r#"{"list":"remove","entry":{"kind":"plane","id":"vault"}}"#
+        r#"{"list":"remove","entries":[{"kind":"plane","id":"vault"}],"entries_total":1,"entries_truncated":false}"#
     );
     assert_eq!(
         impact_member(&mut server, rename, "diff_allowance"),
-        r#"{"list":"rename","entry":{"kind":"plane","from":"vault","to":"crypt"}}"#
+        r#"{"list":"rename","entries":[{"kind":"plane","from":"vault","to":"crypt"}],"entries_total":1,"entries_truncated":false}"#
     );
     assert_eq!(impact_member(&mut server, rename, "to_free"), "true");
     assert_eq!(impact_member(&mut server, remove, "to_free"), "null");
@@ -693,32 +693,32 @@ fn impact_gives_the_cascade_the_allowance_and_whether_a_name_is_free() {
         (
             r#"{"kind":"definition","id":"proto/chest","action":"remove"}"#,
             r#"["defs/proto/chest.jsonc"]"#,
-            r#"{"list":"remove","entry":{"kind":"definition","id":"proto/chest"}}"#,
+            r#"{"list":"remove","entries":[{"kind":"definition","id":"proto/chest"}],"entries_total":1,"entries_truncated":false}"#,
         ),
         (
             r#"{"kind":"zone","id":"vault/hall","action":"rename","to":"vault/corridor"}"#,
             r#"["planes/vault/zones.jsonc"]"#,
-            r#"{"list":"rename","entry":{"kind":"zone","from":"vault/hall","to":"vault/corridor"}}"#,
+            r#"{"list":"rename","entries":[{"kind":"zone","from":"vault/hall","to":"vault/corridor"}],"entries_total":1,"entries_truncated":false}"#,
         ),
         (
             r#"{"kind":"anchor","id":"vault/door","action":"remove"}"#,
             r#"["planes/vault/anchors.jsonc"]"#,
-            r#"{"list":"remove","entry":{"kind":"anchor","id":"vault/door"}}"#,
+            r#"{"list":"remove","entries":[{"kind":"anchor","id":"vault/door"}],"entries_total":1,"entries_truncated":false}"#,
         ),
         (
             r#"{"kind":"stairwell","id":"overworld/cave.chute","action":"remove"}"#,
             r#"["planes/overworld/stairwells.jsonc"]"#,
-            r#"{"list":"remove","entry":{"kind":"stairwell","id":"overworld/cave.chute"}}"#,
+            r#"{"list":"remove","entries":[{"kind":"stairwell","id":"overworld/cave.chute"}],"entries_total":1,"entries_truncated":false}"#,
         ),
         (
             r#"{"kind":"object","id":"vault.key","action":"rename","to":"vault.key2"}"#,
             r#"["planes/vault/layers/0/0_0.jsonc"]"#,
-            r#"{"list":"rename","entry":{"kind":"object","from":"vault.key","to":"vault.key2"}}"#,
+            r#"{"list":"rename","entries":[{"kind":"object","from":"vault.key","to":"vault.key2"}],"entries_total":1,"entries_truncated":false}"#,
         ),
         (
             r#"{"kind":"render_layer","id":"item","action":"remove"}"#,
             r#"["profile/profile.jsonc"]"#,
-            r#"{"list":"remove","entry":{"kind":"render_layer","id":"item"}}"#,
+            r#"{"list":"remove","entries":[{"kind":"render_layer","id":"item"}],"entries_total":1,"entries_truncated":false}"#,
         ),
     ] {
         assert_eq!(
@@ -733,6 +733,22 @@ fn impact_gives_the_cascade_the_allowance_and_whether_a_name_is_free() {
         assert_eq!(impact_member(&mut server, arguments, "cascade"), "null");
         assert_eq!(impact_member(&mut server, arguments, "exists"), "true");
     }
+    // An object removed takes what it carries, each uid with its own
+    // allowlist entry; a rename changes only its own uid.
+    let lamp = r#"{"kind":"object","id":"vault.lamp","action":"remove"}"#;
+    assert_eq!(
+        impact_member(&mut server, lamp, "carried"),
+        r#"[{"uid":"vault.key","proto":"coin","depth":1},{"uid":null,"proto":"coin","depth":1},{"uid":"vault.gem","proto":"coin","depth":2}]"#
+    );
+    assert_eq!(impact_member(&mut server, lamp, "carried_total"), "3");
+    assert_eq!(
+        impact_member(&mut server, lamp, "diff_allowance"),
+        r#"{"list":"remove","entries":[{"kind":"object","id":"vault.lamp"},{"kind":"object","id":"vault.key"},{"kind":"object","id":"vault.gem"}],"entries_total":3,"entries_truncated":false}"#
+    );
+    assert_eq!(impact_member(&mut server, lamp, "breaking_total"), "0");
+    let renamed = r#"{"kind":"object","id":"vault.lamp","action":"rename","to":"vault.torch"}"#;
+    assert_eq!(impact_member(&mut server, renamed, "carried"), "null");
+    assert_eq!(impact_member(&mut server, renamed, "carried_total"), "null");
     // What the snapshot does not hold breaks nothing and has no files.
     let missing = r#"{"kind":"definition","id":"proto/nothing","action":"remove"}"#;
     assert_eq!(impact_member(&mut server, missing, "exists"), "false");
@@ -1250,4 +1266,204 @@ pub(super) fn every_reference_tool(server: &mut Server) {
         )],
     );
     assert!(replies[0].contains("\"isError\":false"));
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn an_object_carrying_many_is_listed_within_its_caps() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("tree");
+    copy_tree(&fixture("basic"), &root);
+    let carried = crate::references::MAXIMUM_CARRIED + 20;
+    let items: Vec<String> = (0..carried)
+        .map(|index| format!(r#"{{"uid": "bag.item{index}", "proto": "coin"}}"#))
+        .collect();
+    std::fs::write(
+        root.join("planes/overworld/layers/0/1_0.jsonc"),
+        format!(
+            r#"{{"format": "tilewright.chunk/1", "plane": "overworld", "layer": 0, "chunk": [1, 0], "objects": [{{"uid": "bag", "at": [0, 0], "proto": "chest", "inventory": [{}]}}]}}"#,
+            items.join(",")
+        ),
+    )
+    .unwrap();
+    let mut server = ready(&root);
+    let arguments = r#"{"kind":"object","id":"bag","action":"remove"}"#;
+    let total = carried.to_string();
+    assert_eq!(
+        impact_member(&mut server, arguments, "carried_total"),
+        total
+    );
+    assert_eq!(
+        impact_member(&mut server, arguments, "carried_truncated"),
+        "true"
+    );
+    let (_, document) = result(&mut server, "impact", arguments);
+    let page = structured(&document);
+    assert_eq!(
+        at(page, &["carried"]).as_array().unwrap().len(),
+        crate::references::MAXIMUM_CARRIED
+    );
+    let allowance = at(page, &["diff_allowance"]);
+    assert_eq!(
+        at(allowance, &["entries"]).as_array().unwrap().len(),
+        crate::references::MAXIMUM_CARRIED
+    );
+    assert_eq!(
+        at(allowance, &["entries_total"]).as_i64(),
+        Some(i64::try_from(carried + 1).unwrap())
+    );
+    assert_eq!(at(allowance, &["entries_truncated"]).as_bool(), Some(true));
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn rules_that_are_not_references_are_not_impact() {
+    // FORMAT.md section 13: an outside transition without `with` draws onto
+    // the terrains before it, of which there must be one. Removing the
+    // first terrain breaks that rule, which is not a reference: impact
+    // predicts nothing, says so in not_covered, and the tree no longer
+    // loads.
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("tree");
+    copy_tree(&fixture("terrain"), &root);
+    let first = r#"{"id": "sandy", "protos": ["sand"]}"#;
+    let transitions = |first: &str| {
+        format!(
+            r#"{{"format": "tilewright.transitions/1", "layer": "floor", "terrains": [{first}
+  {{"id": "grassy", "protos": ["grass"], "transitions": [{{"draw": "outside", "model": "sides", "layer": "edge", "tiles": {{"1": "sand_n"}}}}]}}
+]}}"#
+        )
+    };
+    std::fs::write(
+        root.join("profile/transitions.jsonc"),
+        transitions(&format!("{first},")),
+    )
+    .unwrap();
+    tilewright_source::load(&root).expect("the tree loads");
+    let mut server = ready(&root);
+    let arguments = r#"{"kind":"terrain","id":"sandy","action":"remove"}"#;
+    assert_eq!(impact_member(&mut server, arguments, "breaking_total"), "0");
+    let not_covered = impact_member(&mut server, arguments, "not_covered");
+    assert!(not_covered.contains("Rules of the format that are not references are not checked"));
+    assert!(not_covered.contains("preview_transaction"));
+    std::fs::write(root.join("profile/transitions.jsonc"), transitions("")).unwrap();
+    let diagnostics = tilewright_source::load(&root).unwrap_err();
+    assert!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code != "ref.unresolved"),
+        "{diagnostics:?}"
+    );
+    assert_eq!(diagnostics[0].code, "shape.missing_key", "{diagnostics:?}");
+}
+
+#[test]
+fn a_load_past_its_own_budget_is_not_loaded_again() {
+    // One budget diagnostic that is not the index's refusal at `.`, as a
+    // load past its own budgets gives at the file it reached: the tree's
+    // own failure, served as it is, without a second load.
+    let own = Diagnostic {
+        path: "planes/overworld/layers/0/0_0.jsonc".to_owned(),
+        start: 0,
+        end: 0,
+        line: 0,
+        column: 0,
+        code: "source.budget",
+        message: "the load read more than its budget".to_owned(),
+    };
+    let snapshot = Snapshot::load_with(&fixture("basic"), |_| Err(vec![own.clone()]));
+    assert_eq!(snapshot.revision(), None);
+    assert_eq!(snapshot.diagnostics(), [own]);
+}
+
+/// The input schema of `tool`, as `tools/list` gives it.
+fn input_schema(tool: &str) -> Document {
+    let schemas =
+        Document::parse(format!("{{{}}}", crate::tools::list()), &Limits::default()).unwrap();
+    let schema = at(schemas.root(), &["tools"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry.get("name").and_then(Value::as_str) == Some(tool))
+        .map(|entry| schemas.canonical(at(entry, &["inputSchema"])))
+        .unwrap();
+    Document::parse(schema, &Limits::default()).unwrap()
+}
+
+#[test]
+fn the_input_schemas_state_the_rules_the_server_checks() {
+    let mut server = ready(&fixture("basic"));
+    let accepted = |server: &mut Server, tool: &str, arguments: &str| {
+        let (reply, _) = result(server, tool, arguments);
+        reply.contains("\"isError\":false")
+    };
+    // scan_limit only with roles, and no default a client would send.
+    let schema = input_schema("references");
+    assert_eq!(
+        schema.canonical(at(schema.root(), &["dependentRequired"])),
+        r#"{"scan_limit":["roles"]}"#
+    );
+    assert!(
+        at(schema.root(), &["properties", "scan_limit"])
+            .get("default")
+            .is_none()
+    );
+    let base = r#""kind":"plane","id":"overworld""#;
+    assert!(!accepted(
+        &mut server,
+        "references",
+        &format!(r#"{{{base},"scan_limit":5}}"#)
+    ));
+    assert!(accepted(
+        &mut server,
+        "references",
+        &format!(r#"{{{base},"scan_limit":5,"roles":["proto"]}}"#)
+    ));
+    // to exactly when action is rename.
+    let schema = input_schema("impact");
+    assert_eq!(
+        schema.canonical(at(schema.root(), &["if"])),
+        r#"{"properties":{"action":{"const":"rename"}},"required":["action"]}"#
+    );
+    assert_eq!(
+        schema.canonical(at(schema.root(), &["then"])),
+        r#"{"required":["to"]}"#
+    );
+    assert_eq!(
+        schema.canonical(at(schema.root(), &["else"])),
+        r#"{"not":{"required":["to"]}}"#
+    );
+    let base = r#""kind":"plane","id":"vault""#;
+    for (rest, ok) in [
+        (r#""action":"rename","to":"crypt""#, true),
+        (r#""action":"rename""#, false),
+        (r#""action":"remove""#, true),
+        (r#""action":"remove","to":"crypt""#, false),
+    ] {
+        assert_eq!(
+            accepted(&mut server, "impact", &format!("{{{base},{rest}}}")),
+            ok,
+            "{rest}"
+        );
+    }
+    // Every default a schema of these tools states is accepted as sent.
+    for (tool, base) in [
+        ("references", r#""kind":"plane","id":"overworld""#),
+        ("impact", r#""kind":"plane","id":"vault","action":"remove""#),
+    ] {
+        let schema = input_schema(tool);
+        for member in at(schema.root(), &["properties"]).as_object().unwrap() {
+            if let Some(default) = member.value.get("default") {
+                let arguments = format!(
+                    r#"{{{base},"{}":{}}}"#,
+                    member.key,
+                    schema.canonical(default)
+                );
+                assert!(
+                    accepted(&mut server, tool, &arguments),
+                    "{tool} {arguments}"
+                );
+            }
+        }
+    }
 }

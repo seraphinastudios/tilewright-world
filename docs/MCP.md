@@ -184,11 +184,13 @@ Memory is the process's peak, which includes what recording holds while
 the index is sorted. A tree with more references, distinct strings or
 holders than the index's 32-bit numbering holds (about four billion, far
 past what the load's bounds let a tree reach) is refused by the indexed
-load with one `source.budget` diagnostic. The server then loads the tree
-again without an index and serves it: `references` and `impact` fail with
-`index.unavailable`, every other tool answers, and the revision is the
-same. Any other failure of the indexed load is the tree's own, the plain
-load's diagnostics, and is not loaded again. The library's refusal cannot
+load with one `source.budget` diagnostic at `.`. Then, and only then, the
+server loads the tree again without an index and serves it: `references`
+and `impact` fail with `index.unavailable`, every other tool answers, and
+the revision is the same. Any other failure of the indexed load is the
+tree's own, the plain load's diagnostics, and is not loaded again; that
+includes a load past its own budgets, which stops with one
+`source.budget` at the file or directory it reached. The library's refusal cannot
 be reached by a tree a test can build, so the tests give the server that
 refusal through a hook in the snapshot's load and check the fallback.
 
@@ -375,25 +377,45 @@ whether the snapshot holds the item; one it does not hold breaks nothing.
 **What it guarantees.** A world that loads has every reference resolved,
 and each reference names exactly one item. So taking an item away breaks
 exactly the references that name it, and nothing else of the format's
-references: those are the `breaking` references. For a removal, the
+references: for a removal, those are the `breaking` references, and
+`breaking_total` counts the references that would no longer resolve. The
 references the item holds itself go with it and are not listed (a plane's
-chunks naming the plane, a definition naming itself). For a plane they
-include the references from outside it to its anchors (portals that name
-the plane). Its zones are named only from its own files, which go with it.
-For a rename, every reference that names the item must be written anew:
-for a plane, the manifest's entry, each of its chunks' `plane`, and every
-portal that names the plane, its own included; the references to its
-zones and to its anchors from its own portals that omit their plane name
-the plane only implicitly, so they survive (`surviving_implicit` counts
-those portals). It is a statement about the format's references only:
-`not_covered` says, in fixed text, what is not seen. The tests carry out
-every removal and rename of every item of each kind on both fixtures and
-a generated tree (218 cases), by rewriting copies of the files: the
-loader's `ref.unresolved` diagnostics, and for a plane removed the
+chunks naming the plane, a definition naming itself); so do the objects
+an object carries, whose own references go with them and which nothing
+names (`carried`). For a plane they include the references from outside it
+to its anchors (portals that name the plane). Its zones are named only
+from its own files, which go with it.
+
+For a rename, `breaking` lists the values that must be written anew, and
+`breaking_total` counts them: each is necessary, and together they
+suffice. For a plane they are the manifest's entry, each of its chunks'
+`plane`, and every portal's `plane` that names it, its own included. A
+portal that names the plane and an anchor is one value, its `plane`,
+though until that is rewritten its anchor reference does not resolve
+either, so the loader reports two problems for it. The references to the
+plane's zones, and to its anchors from its own portals that omit their
+plane, name it only implicitly, so they survive (`surviving_implicit`
+counts those portals).
+
+It is a statement about the format's references only: `not_covered` says,
+in fixed text, what is not seen, and that rules of the format that are not
+references are not checked either (a list that must not be empty, a
+transition that needs a terrain before it); `preview_transaction` of the
+change says whether the tree still loads.
+
+The tests carry out every removal and rename of every item of each kind on
+both fixtures and a generated tree (236 cases, 367 predicted references),
+by rewriting copies of the files. For every case but a plane's rename,
+the loader's `ref.unresolved` diagnostics, and for a plane removed the
 manifest entry's missing `plane.jsonc`, are the predicted references one
 to one (at a reference's span, at its palette's grid, or on its file),
-with no diagnostic of any other code; and a rename with exactly the
-predicted references rewritten loads cleanly.
+with no diagnostic of any other code. A plane renamed alone is not
+reached by the loader (its directory is not the one the manifest lists),
+so for renames the tests check that the tree with exactly the predicted
+values rewritten loads cleanly and that leaving any one of them as it was
+does not (191 such loads). Where the changed tree loads, `tilewright
+diff` with exactly the `diff_allowance` entries accepts the change, and
+without any one of them refuses it (149 cases).
 
 **Result.**
 
@@ -413,15 +435,26 @@ predicted references rewritten loads cleanly.
   document for a terrain. At most 100 (`own_files_total`,
   `own_files_truncated`), sharing the byte budget: they take at most a
   quarter of it, before the breaking references.
-- `diff_allowance`: the allowlist entry `tilewright diff` needs to accept
-  the change (DIFF.md section 4), as `{"list": "remove", "entry": {"kind",
-  "id"}}` or `{"list": "rename", "entry": {"kind", "from", "to"}}`, for
-  the kinds it compares (anchor, definition, object, plane, render layer,
-  stairwell, zone), else null. One entry for a plane covers its zones,
-  anchors, stairwells and, when removed, its objects' uids.
+- `carried`, for an object removed, else null: the objects it carries, at
+  any depth, depth first, each with its `uid` (or null), `proto` and
+  `depth` (1 for one it carries itself); at most 100 (`carried_total`,
+  `carried_truncated`). They go with it; nothing names them.
+- `diff_allowance`: the allowlist entries `tilewright diff` needs to
+  accept the change (DIFF.md section 4), as `{"list": "remove" or
+  "rename", "entries": [...], "entries_total", "entries_truncated"}`,
+  each entry `{"kind", "id"}` or `{"kind", "from", "to"}`, for the kinds
+  it compares (anchor, definition, object, plane, render layer,
+  stairwell, zone), else null. An object removed needs one entry for its
+  uid and one for each uid it carries; at most 100 are listed. One entry
+  for a plane covers its zones, anchors and stairwells, and, when it is
+  removed, its objects' uids, by DIFF.md's rules for a plane's entry.
+  `carried` and the entries each take at most an eighth of the byte
+  budget, before the breaking references.
 - `not_covered`: fixed text saying that names inside `json` and `custom`
-  values and in game code, saves or scripts are not seen, and that the
-  format names no stairwell and no object uid.
+  values and in game code, saves or scripts are not seen, that the format
+  names no stairwell and no object uid, and that rules of the format that
+  are not references are not checked, with `preview_transaction` to see
+  whether the tree still loads.
 
 A render layer that is also a ground layer is refused with
 `impact.not_covered`: removing or renaming it changes the ground layer
@@ -555,8 +588,15 @@ editor action.
   transaction the server refuses for cost**; the tests check both sides of
   each budget, and that the library accepts what the server refuses. A
   `tx.limit` at another limit (operations, files, a pointer's steps, the
-  format's 64 MiB a file) is not the server's: `server_budget_reached` is
-  false.
+  format's 64 MiB a file, the 64 MiB an inverse may hold) is not the
+  server's: `server_budget_reached` is false. The library gives no
+  structured kind of limit, so the server tells its budgets' refusals
+  apart by the library's message text: the whole phrase it writes for
+  each budget ("the touched files hold more than N bytes", "needs more
+  than N bytes of work") with the server's N, never a number alone, as
+  the read budget's 64 MiB is also the inverse limit's. The tests pin that
+  wording on both sides of each budget, for the inverse limit, and for the
+  undo rounds' messages, so a change in the library's text fails them.
 - **Cost.** A call reads the files the transaction touches, within those
   budgets and the library's other bounds (1,000 diagnostics), loads the
   whole tree to validate the result, loads it once more when the
@@ -739,6 +779,9 @@ also a ground layer, or a file: removing or renaming one changes what the
 layout ties to its name (the `defs/` directory of a type, the keys of
 chunks' terrain grids, a document's path), which are not all references
 of the index. `references` lists what the index records for each.
+`server_budget_reached` reads the library's message text; a structured
+kind of limit on the library's refusals would make it exact, and needs a
+library addition (a candidate for the next library release).
 `inspect` could check its re-read file against the snapshot's per-file
 digest (`World::files`), which is stronger than comparing the item; it
 still compares the item. Inspecting an object without a uid, and

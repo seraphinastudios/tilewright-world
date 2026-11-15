@@ -1593,3 +1593,58 @@ fn a_transaction_nests_as_deep_as_the_message_allows() {
         (-32700, "jsonc.depth_limit".to_owned())
     );
 }
+
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn a_library_limit_at_the_same_number_is_not_the_servers_budget() {
+    // The library refuses an inverse of more than the format's 64 MiB, the
+    // same number as the server's read budget: moving a large object back
+    // and forth makes one, while reading about 2 MB.
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("tree");
+    copy_tree(&fixture("basic"), &root);
+    let blob = "x".repeat(900_000);
+    std::fs::write(
+        root.join("planes/overworld/layers/0/2_0.jsonc"),
+        format!(
+            "{{\"format\": \"tilewright.chunk/1\", \"plane\": \"overworld\", \"layer\": 0, \"chunk\": [2, 0], \"objects\": [\n{{\"uid\": \"big\", \"at\": [0, 0], \"proto\": \"chest\", \"custom\": {{\"example.org\": {{\"blob\": \"{blob}\"}}}}}}\n]}}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("planes/overworld/layers/0/3_0.jsonc"),
+        "{\"format\": \"tilewright.chunk/1\", \"plane\": \"overworld\", \"layer\": 0, \"chunk\": [3, 0], \"objects\": [{\"at\": [0, 0], \"proto\": \"tree\"}]}\n",
+    )
+    .unwrap();
+    let mut operations = vec![
+        r#"{"op": "object.insert", "plane": "overworld", "layer": 0, "at": [127, 31], "object": {"proto": "coin"}}"#.to_owned(),
+    ];
+    for step in 0..90 {
+        let x = if step % 2 == 0 {
+            96 + (step / 2) % 32
+        } else {
+            65 + (step / 2) % 31
+        };
+        operations.push(format!(
+            r#"{{"op": "object.move", "uid": "big", "expect": {{"proto": "chest"}}, "to": {{"at": [{x}, 0]}}}}"#
+        ));
+    }
+    let text = transaction(&operations.join(","));
+    let mut server = ready(&root);
+    let (document, stage) = refused(&mut server, &text);
+    assert_eq!(stage, "plan");
+    let page = structured(&document);
+    let refusals = refusals(page);
+    assert_eq!(refusals[0].2, "tx.limit");
+    assert!(
+        refusals[0]
+            .3
+            .contains("inverse would hold more than 67108864 bytes"),
+        "{refusals:?}"
+    );
+    assert_eq!(at(page, &["server_budget_reached"]).as_bool(), Some(false));
+    // tx apply's own plan refuses it the same way.
+    let transaction = Transaction::parse(NAME, &text).unwrap();
+    let library = tilewright_edit::plan(&root, &transaction, &Options::default()).unwrap_err();
+    assert!(library[0].message.contains("inverse would hold more than"));
+}

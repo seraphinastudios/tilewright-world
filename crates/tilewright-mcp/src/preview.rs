@@ -51,18 +51,27 @@ pub fn budgets() -> Budgets {
         .with_work(WORK)
 }
 
-/// Whether `diagnostic` is a refusal at the server's read or work budget:
-/// a `tx.limit` that names one of them, as the library's refusals at a
-/// budget do. The library's own budgets are larger, so its refusals at
-/// them never name these.
+/// Whether `diagnostic` is a refusal at the server's read or work budget.
+///
+/// The library gives no structured kind of limit, so this reads its
+/// message text: a `tx.limit` whose message holds the library's whole
+/// phrase for a refusal at the read budget ("the touched files hold more
+/// than N bytes") or the work budget ("needs more than N bytes of work"),
+/// with the server's N, as `tilewright-edit` 0.2.1 words them; an undo
+/// round quotes the same phrase after its own words. A bare number is not
+/// enough: the read budget is the format's 64 MiB, which the library's
+/// fixed limit on an inverse's size also names. The library's own budgets
+/// are larger, so its refusals at them never match. Tests pin the wording
+/// on both sides of each budget and for the inverse limit, so a change in
+/// the library's text fails them rather than silently turning this off.
 fn at_server_budget(diagnostic: &Diagnostic, budgets: Budgets) -> bool {
+    let read = format!(
+        "the touched files hold more than {} bytes",
+        budgets.read_bytes()
+    );
+    let work = format!("needs more than {} bytes of work", budgets.work());
     diagnostic.code == tilewright_edit::Code::Limit.as_str()
-        && (diagnostic
-            .message
-            .contains(&format!("hold more than {} bytes", budgets.read_bytes()))
-            || diagnostic
-                .message
-                .contains(&format!("more than {} bytes of work", budgets.work())))
+        && (diagnostic.message.contains(&read) || diagnostic.message.contains(&work))
 }
 
 /// The tree on disk is not at the snapshot's revision, with the files the
@@ -396,7 +405,64 @@ fn write(valid: &Valid, report: &Report<'_>, excerpts: bool) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::changed_range;
+    use super::{at_server_budget, budgets, changed_range};
+    use tilewright_source::Diagnostic;
+
+    #[test]
+    fn only_the_servers_budgets_are_the_servers() {
+        let refusal = |code: &'static str, message: &str| Diagnostic {
+            path: "transaction".to_owned(),
+            start: 0,
+            end: 0,
+            line: 0,
+            column: 0,
+            code,
+            message: message.to_owned(),
+        };
+        let undo = "the transaction could not be undone: its inverse would be refused: ";
+        for (message, expected) in [
+            ("the touched files hold more than 67108864 bytes", true),
+            (
+                "the transaction needs more than 536870912 bytes of work: its operations, the documents each reads, and its edits",
+                true,
+            ),
+            // The library's fixed limit on an inverse's size names the
+            // same number as the server's read budget.
+            (
+                "the inverse would hold more than 67108864 bytes; split the transaction",
+                false,
+            ),
+            // The library's own budgets.
+            ("the touched files hold more than 268435456 bytes", false),
+            (
+                "the transaction needs more than 4294967296 bytes of work: its operations",
+                false,
+            ),
+            ("67108864 bytes", false),
+        ] {
+            assert_eq!(
+                at_server_budget(&refusal("tx.limit", message), budgets()),
+                expected,
+                "{message}"
+            );
+            // An undo round quotes the round's refusal after its own words.
+            assert_eq!(
+                at_server_budget(
+                    &refusal(
+                        "tx.limit",
+                        &format!("{undo}{message}; split the transaction")
+                    ),
+                    budgets()
+                ),
+                expected,
+                "undo: {message}"
+            );
+            assert!(!at_server_budget(
+                &refusal("tx.conflict", message),
+                budgets()
+            ));
+        }
+    }
 
     #[test]
     fn the_changed_range_is_the_smallest_on_character_boundaries() {

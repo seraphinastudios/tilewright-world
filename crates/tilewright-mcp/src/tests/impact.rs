@@ -458,6 +458,43 @@ pub(super) fn generated(root: &Path) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
     };
+    // A recipe that names itself, and a third plane that nothing outside
+    // it names, with an entry of every kind and carried uids.
+    write(
+        "profile/schema/recipe.jsonc",
+        r#"{"format": "tilewright.schema/1", "fields": {"output": {"type": "reference", "target": "proto", "required": true}, "next": {"type": "reference", "target": "recipe"}, "ingredients": {"type": "list", "required": true, "min_items": 1, "items": {"type": "object", "fields": {"item": {"type": "reference", "target": "proto", "required": true}, "count": {"type": "integer", "min": 1, "required": true}}}}}}"#,
+    );
+    write(
+        "defs/recipe/chest.jsonc",
+        r#"{"format": "tilewright.def/1", "type": "recipe", "id": "chest", "fields": {"output": "chest", "next": "chest", "ingredients": [{"item": "wall", "count": 2}]}}"#,
+    );
+    write(
+        "world.jsonc",
+        r#"{"format": "tilewright.world/1", "profile": "profile/profile.jsonc", "planes": ["overworld", "vault", "attic"]}"#,
+    );
+    write(
+        "planes/attic/plane.jsonc",
+        r#"{"format": "tilewright.plane/1", "id": "attic", "kind": "instanced", "chunk_size": 32, "default_zone": "loft"}"#,
+    );
+    write(
+        "planes/attic/zones.jsonc",
+        r#"{"format": "tilewright.zones/1", "zones": [{"id": "loft"}, {"id": "nook", "parent": "loft"}]}"#,
+    );
+    write(
+        "planes/attic/anchors.jsonc",
+        r#"{"format": "tilewright.anchors/1", "anchors": [{"id": "hatch", "layer": 0, "at": [1, 1]}]}"#,
+    );
+    write(
+        "planes/attic/stairwells.jsonc",
+        r#"{"format": "tilewright.stairwells/1", "stairwells": [{"id": "ladder", "steps": [{"layer": 0, "at": [4, 4], "proto": "stairs_up"}, {"layer": 1, "at": [4, 4], "proto": "stairs_down"}]}]}"#,
+    );
+    write(
+        "planes/attic/layers/0/0_0.jsonc",
+        r#"{"format": "tilewright.chunk/1", "plane": "attic", "layer": 0, "chunk": [0, 0], "objects": [
+    {"uid": "attic.trunk", "at": [2, 2], "proto": "chest", "inventory": [{"uid": "attic.doll", "proto": "coin"}, {"proto": "coin"}]},
+    {"at": [3, 3], "proto": "stairs_up", "portal": {"anchor": "hatch"}}
+  ]}"#,
+    );
     write(
         "planes/vault/plane.jsonc",
         r#"{"format": "tilewright.plane/1", "id": "vault", "kind": "instanced", "chunk_size": 32, "default_zone": "keep"}"#,
@@ -485,7 +522,8 @@ pub(super) fn generated(root: &Path) {
     {"at": [2, 2], "proto": "stairs_up", "portal": {"anchor": "door"}},
     {"at": [3, 2], "proto": "stairs_up", "portal": {"plane": "vault", "anchor": "hatch"}},
     {"at": [4, 2], "proto": "stairs_up", "portal": {"plane": "overworld", "anchor": "village.well"}},
-    {"uid": "vault.lamp", "at": [5, 5], "proto": "coin", "layer": "item", "inventory": [{"uid": "vault.key", "proto": "coin"}, {"proto": "coin", "inventory": [{"uid": "vault.gem", "proto": "coin"}]}]}
+    {"uid": "vault.lamp", "at": [5, 5], "proto": "coin", "layer": "item", "inventory": [{"uid": "vault.key", "proto": "coin"}, {"proto": "coin", "inventory": [{"uid": "vault.gem", "proto": "coin"}]}]},
+    {"at": [6, 6], "proto": "chest", "inventory": [{"uid": "vault.deep", "proto": "chest", "inventory": [{"proto": "chest", "inventory": [{"proto": "chest", "inventory": [{"uid": "vault.deeper", "proto": "coin"}]}]}]}]}
   ]
 }
 "#
@@ -508,20 +546,114 @@ pub(super) fn generated(root: &Path) {
     );
 }
 
-/// The differential on the tree at `root`; returns how many cases and
-/// predicted references it checked, and the roles it met.
+/// What the differential checked.
+#[derive(Default)]
+struct Checked {
+    cases: usize,
+    sites: usize,
+    roles: BTreeMap<String, usize>,
+    /// Loads of a rename with one predicted reference left as it was.
+    left_out: usize,
+    /// Allowances proven sufficient and minimal with `tilewright diff`.
+    allowances: usize,
+    /// Predicted references by case.
+    by_case: BTreeMap<String, usize>,
+    /// The cases whose allowance was checked.
+    allowed: std::collections::BTreeSet<String>,
+}
+
+/// Removes `plane`'s entry from the manifest of the tree at `root`.
 #[allow(clippy::disallowed_methods)]
-fn differential(root: &Path) -> (usize, usize, BTreeMap<String, usize>) {
+fn unlist(root: &Path, plane: &str) {
+    let path = "world.jsonc";
+    let index = document(root, path)
+        .root()
+        .get("planes")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|item| item.as_str() == Some(plane))
+        .unwrap();
+    let mut edits = Edits::new();
+    edits.insert(
+        path.to_owned(),
+        vec![(
+            removal(root, path, &[Segment::Key("planes")], index).0,
+            removal(root, path, &[Segment::Key("planes")], index).1,
+            String::new(),
+        )],
+    );
+    apply_edits(root, &edits);
+}
+
+/// Whether `tilewright diff` of `old` and `new` reports a removal or
+/// rename it does not allow, with `entries` of `list` as the allowlist.
+/// This is the comparison `tilewright diff --allow` makes.
+fn breaking_with(old: &Path, new: &Path, list: &str, entries: &[String]) -> bool {
+    let limits = tilewright_diff::Limits::default();
+    let old = tilewright_diff::load(old, &limits).unwrap();
+    let new = tilewright_diff::load(new, &limits).unwrap();
+    let allowlist = tilewright_diff::Allowlist::parse(&format!(
+        r#"{{"format": "tilewright.diff-allow/1", "{list}": [{}]}}"#,
+        entries.join(",")
+    ))
+    .unwrap();
+    tilewright_diff::diff(&old, &new, &allowlist).breaking()
+}
+
+/// Checks that the allowance `impact` gave in `first` (its first page)
+/// is what `tilewright diff` needs to accept the change from `old` to
+/// `new`: with every entry nothing breaks, and without any one of them
+/// something does. Returns whether there was an allowance to check.
+fn allowance_is_exact(case: &Case, first: &str, old: &Path, new: &Path) -> bool {
+    let document = Document::parse(first, &Limits::default()).unwrap();
+    let allowance = document.root().get("diff_allowance").unwrap();
+    if allowance.as_object().is_none() {
+        return false;
+    }
+    let list = allowance.get("list").unwrap().as_str().unwrap();
+    let entries: Vec<String> = allowance
+        .get("entries")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| document.text(entry.span()).to_owned())
+        .collect();
+    assert_eq!(
+        allowance.get("entries_truncated").unwrap().as_bool(),
+        Some(false)
+    );
+    assert!(
+        !breaking_with(old, new, list, &entries),
+        "{case:?}: tilewright diff refuses the change with {entries:?}"
+    );
+    for left_out in 0..entries.len() {
+        let mut fewer = entries.clone();
+        fewer.remove(left_out);
+        assert!(
+            breaking_with(old, new, list, &fewer),
+            "{case:?}: tilewright diff accepts the change without {}",
+            entries[left_out]
+        );
+    }
+    true
+}
+
+/// The differential on the tree at `root`.
+#[allow(clippy::disallowed_methods)]
+fn differential(root: &Path, checked: &mut Checked) {
     let world = tilewright_source::load(root).expect("the tree loads");
     let mut server = ready(root);
-    let mut checked = (0, 0, BTreeMap::new());
     for case in cases(&world) {
-        let (sites, _) = predicted(&mut server, &case.arguments());
+        let (sites, first) = predicted(&mut server, &case.arguments());
         for site in &sites {
-            *checked.2.entry(site.role.clone()).or_default() += 1;
+            *checked.roles.entry(site.role.clone()).or_default() += 1;
         }
-        checked.0 += 1;
-        checked.1 += sites.len();
+        checked.cases += 1;
+        checked.sites += sites.len();
+        checked.by_case.insert(case.arguments(), sites.len());
         // The change alone: what breaks is what was predicted.
         let directory = tempfile::tempdir().unwrap();
         let copy = directory.path().join("tree");
@@ -531,25 +663,72 @@ fn differential(root: &Path) -> (usize, usize, BTreeMap<String, usize>) {
         let plane_rename = case.kind == "plane" && case.to.is_some();
         if !plane_rename {
             // A renamed plane's directory is not the one the manifest
-            // lists, so the loader does not reach its chunks; only the
-            // full rename below is checked for it.
+            // lists, so the loader does not reach its chunks; a plane
+            // rename is checked below, by its rewrite loading and by each
+            // predicted value being needed.
             let diagnostics = tilewright_source::load(&copy).err().unwrap_or_default();
-            one_to_one(&case, &shifted, &diagnostics, &|path| path.to_owned());
+            // A renamed definition's file moves, with what it holds.
+            let (from, to) = match (case.kind, &case.to) {
+                ("definition", Some(to)) => (
+                    format!("defs/{}.jsonc", case.id),
+                    format!("defs/{to}.jsonc"),
+                ),
+                _ => (String::new(), String::new()),
+            };
+            let moved = |path: &str| {
+                if path == from {
+                    to.clone()
+                } else {
+                    path.to_owned()
+                }
+            };
+            one_to_one(&case, &shifted, &diagnostics, &moved);
         }
-        // A rename with every predicted reference rewritten loads cleanly.
-        if case.to.is_some() {
+        if case.to.is_none() {
+            // A removal that breaks nothing loads; so does a plane's whose
+            // only breaking reference is its manifest entry, once that goes
+            // too. Then tilewright diff needs exactly the allowance given.
+            if case.kind == "plane" && sites.iter().all(|site| site.role == "manifest_plane") {
+                unlist(&copy, &case.id);
+            }
+            if tilewright_source::load(&copy).is_ok()
+                && allowance_is_exact(&case, &first, root, &copy)
+            {
+                checked.allowances += 1;
+                checked.allowed.insert(case.arguments());
+            }
+            continue;
+        }
+        // A rename with every predicted reference rewritten loads cleanly,
+        // and needs exactly the allowance given.
+        let directory = tempfile::tempdir().unwrap();
+        let copy = directory.path().join("tree");
+        copy_tree(root, &copy);
+        apply(&copy, &world, &case, &sites);
+        if let Err(diagnostics) = tilewright_source::load(&copy) {
+            panic!("{case:?}: rewritten as predicted, the tree does not load: {diagnostics:#?}");
+        }
+        if allowance_is_exact(&case, &first, root, &copy) {
+            checked.allowances += 1;
+            checked.allowed.insert(case.arguments());
+        }
+        // Each predicted reference is needed: left as it was, the tree
+        // does not load.
+        for left_out in 0..sites.len() {
+            let mut rest = sites.clone();
+            rest.remove(left_out);
             let directory = tempfile::tempdir().unwrap();
             let copy = directory.path().join("tree");
             copy_tree(root, &copy);
-            apply(&copy, &world, &case, &sites);
-            if let Err(diagnostics) = tilewright_source::load(&copy) {
-                panic!(
-                    "{case:?}: rewritten as predicted, the tree does not load: {diagnostics:#?}"
-                );
-            }
+            apply(&copy, &world, &case, &rest);
+            assert!(
+                tilewright_source::load(&copy).is_err(),
+                "{case:?}: the tree loads without rewriting {:?}",
+                sites[left_out]
+            );
+            checked.left_out += 1;
         }
     }
-    checked
 }
 
 #[test]
@@ -557,19 +736,25 @@ fn removing_or_renaming_breaks_exactly_the_predicted_references() {
     let directory = tempfile::tempdir().unwrap();
     let rich = directory.path().join("rich");
     generated(&rich);
-    let mut roles: BTreeMap<String, usize> = BTreeMap::new();
-    let mut total = (0, 0);
+    let mut checked = Checked::default();
     for root in [fixture("basic"), fixture("terrain"), rich] {
-        let (cases, sites, met) = differential(&root);
-        total.0 += cases;
-        total.1 += sites;
-        for (role, count) in met {
-            *roles.entry(role).or_default() += count;
-        }
+        differential(&root, &mut checked);
     }
-    // Not vacuous: many cases, many references, and every role an item of
-    // these kinds can be named by.
-    assert!(total.0 >= 150 && total.1 >= 300, "{total:?}");
+    eprintln!(
+        "impact differential: {} cases, {} predicted references, {} left-one-out loads, {} allowances, roles {:?}",
+        checked.cases, checked.sites, checked.left_out, checked.allowances, checked.roles
+    );
+    // Not vacuous: the exact sizes, and every role an item of these kinds
+    // can be named by.
+    assert_eq!(
+        (
+            checked.cases,
+            checked.sites,
+            checked.left_out,
+            checked.allowances
+        ),
+        EXPECTED
+    );
     for role in [
         "manifest_plane",
         "field",
@@ -588,12 +773,39 @@ fn removing_or_renaming_breaks_exactly_the_predicted_references() {
         "transition_tile",
     ] {
         assert!(
-            roles.get(role).is_some_and(|count| *count >= 1),
-            "{role}: {roles:?}"
+            checked.roles.get(role).is_some_and(|count| *count >= 1),
+            "{role}: {:?}",
+            checked.roles
         );
     }
-    eprintln!(
-        "impact differential: {} cases, {} predicted references, roles {roles:?}",
-        total.0, total.1
+    let count = |arguments: &str| checked.by_case[arguments];
+    // A definition that names itself: its removal takes that reference
+    // with it; its rename must rewrite it.
+    assert_eq!(
+        count(
+            r#"{"kind":"definition","id":"recipe/chest","action":"rename","to":"recipe/chest-renamed"}"#
+        ),
+        count(r#"{"kind":"definition","id":"recipe/chest","action":"remove"}"#) + 1
+    );
+    // Removals that take more IDs with them: an object with carried uids
+    // (one entry each), and a plane with zones, anchors, a stairwell and
+    // objects (one entry covers them, as DIFF.md section 4 says).
+    for arguments in [
+        r#"{"kind":"object","id":"vault.lamp","action":"remove"}"#,
+        r#"{"kind":"object","id":"vault.deep","action":"remove"}"#,
+        r#"{"kind":"object","id":"attic.trunk","action":"remove"}"#,
+        r#"{"kind":"plane","id":"attic","action":"remove"}"#,
+        r#"{"kind":"plane","id":"attic","action":"rename","to":"attic-renamed"}"#,
+    ] {
+        assert!(checked.allowed.contains(arguments), "{arguments}");
+    }
+    // A zone in the middle of a parent chain: its child's parent breaks.
+    assert_eq!(
+        count(r#"{"kind":"zone","id":"vault/hall","action":"remove"}"#),
+        2
     );
 }
+
+/// Cases, predicted references, left-one-out loads and allowances the
+/// differential checks.
+const EXPECTED: (usize, usize, usize, usize) = (236, 367, 191, 149);

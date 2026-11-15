@@ -836,6 +836,43 @@ pub fn own_files<'w>(
     }
 }
 
+/// An object another carries, at any depth of its inventory.
+pub struct Carried<'w> {
+    pub uid: Option<&'w str>,
+    pub proto: &'w str,
+    /// 1 for an object the item carries itself, 2 for one that object
+    /// carries, and so on.
+    pub depth: usize,
+}
+
+/// Most carried objects, and most allowlist entries, an `impact` result
+/// lists.
+pub const MAXIMUM_CARRIED: usize = 100;
+
+/// Every object the object with `uid` carries, depth first: what goes
+/// with it when it is removed.
+pub fn carried<'w>(world: &'w World, uid: &str) -> Vec<Carried<'w>> {
+    fn walk<'w>(
+        objects: &'w [tilewright_source::Object],
+        depth: usize,
+        found: &mut Vec<Carried<'w>>,
+    ) {
+        for object in objects {
+            found.push(Carried {
+                uid: object.uid.as_deref(),
+                proto: &object.proto,
+                depth,
+            });
+            walk(&object.inventory, depth + 1, found);
+        }
+    }
+    let mut found = Vec::new();
+    if let Some(object) = world.object(uid) {
+        walk(&object.inventory, 1, &mut found);
+    }
+    found
+}
+
 /// The kind `tilewright diff` names the item's IDs with, when it has one.
 pub fn diff_kind(kind: ItemKind) -> Option<tilewright_diff::Kind> {
     use tilewright_diff::Kind;
@@ -852,7 +889,7 @@ pub fn diff_kind(kind: ItemKind) -> Option<tilewright_diff::Kind> {
 }
 
 /// What `impact` says it does not see, the same for every item.
-pub const NOT_COVERED: &str = "Only the references the world format defines are covered: names written inside json field values and custom objects, and anything game code, saves or scripts keep, are not seen; nothing in the format references a stairwell or an object uid, so none breaks here, though a game's own data may keep them.";
+pub const NOT_COVERED: &str = "Only the references the world format defines are covered: names written inside json field values and custom objects, and anything game code, saves or scripts keep, are not seen; nothing in the format references a stairwell or an object uid, so none breaks here, though a game's own data may keep them. Rules of the format that are not references are not checked either, such as a list that must not be empty or a transition that needs a terrain before it: to see whether the tree still loads after the change, preview it with preview_transaction.";
 
 /// Writes the page of `references` from `offset` within `budget`, and
 /// returns it.

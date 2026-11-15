@@ -92,12 +92,13 @@ impl Snapshot {
             match indexed(&source) {
                 Ok((world, index)) => Ok((world, Some(index))),
                 // An indexed load refuses, with one `source.budget`
-                // diagnostic, a tree whose references are too many to
-                // number, which a plain load may still load; a load's
-                // own budget diagnostic it gives again. Any other
-                // failure is the plain load's own, so it is not loaded
-                // again.
-                Err(diagnostics) if matches!(diagnostics.as_slice(), [only] if only.code == BUDGET) => {
+                // diagnostic at `.`, a tree whose references are too many
+                // to number, which a plain load may still load. A load
+                // past its own budgets stops with one at the file or
+                // directory it reached, and its notes at `.` never come
+                // alone, so neither is loaded again: any other failure is
+                // the plain load's own.
+                Err(diagnostics) if matches!(diagnostics.as_slice(), [only] if only.code == BUDGET && only.path == ".") => {
                     tilewright_source::load_edited_in(
                         &source,
                         &LoadOptions::default(),
