@@ -693,6 +693,8 @@ fn tools_list_describes_read_only_tools() {
             "search_definitions",
             "search_objects",
             "inspect",
+            "references",
+            "impact",
             "preview_transaction",
             "refresh"
         ]
@@ -1598,5 +1600,6 @@ fn world_summary_caps_planes_and_layers() {
     assert_eq!(ids.len(), 522);
 }
 
+mod impact;
 mod preview;
 mod read;
