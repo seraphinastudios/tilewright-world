@@ -964,6 +964,25 @@ fn arguments_are_checked_before_the_revision_and_the_tree() {
     };
     assert!(error(&mut server, &"a".repeat(2048)).contains("is not written as IDs"));
     assert!(error(&mut server, &"a".repeat(2049)).contains("at most 2048 bytes"));
+    // Documents exist when the manifest or profile names them.
+    for (kind, id, exists) in [
+        ("schema", "profile/schema/loot.jsonc", true),
+        ("schema", "profile/schema/none.jsonc", false),
+        ("schema", "profile/profile.jsonc", false),
+        ("profile", "profile/profile.jsonc", true),
+        ("profile", "profile/schema/loot.jsonc", false),
+        ("transitions", "profile/transitions.jsonc", false),
+    ] {
+        let text = answer(
+            &mut server,
+            "references",
+            &format!(r#"{{"kind":"{kind}","id":"{id}","direction":"from"}}"#),
+        );
+        assert!(
+            text.contains(&format!(r#""exists":{exists}"#)),
+            "{kind} {id}: {text}"
+        );
+    }
     // A chunk path, whose layer and coordinates may be negative, is one.
     let text = answer(
         &mut server,

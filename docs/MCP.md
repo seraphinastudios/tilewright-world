@@ -321,7 +321,10 @@ schema, the transitions document.
 - **Order.** The index's: the references to an item in source order, by
   file path, then byte span; the references an item holds in source order
   too. Both are binary searches in the index, so a call costs what it
-  returns, whatever the world's size. `total` counts every reference to
+  returns, whatever the world's size, except that an object's uid,
+  position and carrier are found by walking its chunk's objects up to it,
+  once for each chunk a page meets, and `impact` counts the references it
+  pages through (for a plane removed, those of each anchor too). `total` counts every reference to
   or from the item; `offset` is the position the page starts at.
 - **Items.** Each item has `role` (one of `manifest_profile`,
   `manifest_plane`, `profile_ground_layer`, `profile_schema`,
@@ -648,7 +651,10 @@ schema, the transitions document.
 - **Order.** The index's: the references to an item in source order, by
   file path, then byte span; the references an item holds in source order
   too. Both are binary searches in the index, so a call costs what it
-  returns, whatever the world's size. `total` counts every reference to
+  returns, whatever the world's size, except that an object's uid,
+  position and carrier are found by walking its chunk's objects up to it,
+  once for each chunk a page meets, and `impact` counts the references it
+  pages through (for a plane removed, those of each anchor too). `total` counts every reference to
   or from the item; `offset` is the position the page starts at.
 - **Items.** Each item has `role` (one of `manifest_profile`,
   `manifest_plane`, `profile_ground_layer`, `profile_schema`,
