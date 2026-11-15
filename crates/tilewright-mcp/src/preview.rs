@@ -61,7 +61,11 @@ pub fn budgets() -> Budgets {
 /// round quotes the same phrase after its own words. A bare number is not
 /// enough: the read budget is the format's 64 MiB, which the library's
 /// fixed limit on an inverse's size also names. The library's own budgets
-/// are larger, so its refusals at them never match. Tests pin the wording
+/// are larger, so its refusals at them never match. One refusal this
+/// cannot tell apart: a file past the format's 64 MiB read after another
+/// file, which the library reports in the read budget's words because the
+/// allowance left is then below the per-file limit; `tilewright tx apply`
+/// refuses it too (docs/MCP.md, "Budgets"). Tests pin the wording
 /// on both sides of each budget and for the inverse limit, so a change in
 /// the library's text fails them rather than silently turning this off.
 fn at_server_budget(diagnostic: &Diagnostic, budgets: Budgets) -> bool {

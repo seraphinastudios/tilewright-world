@@ -100,7 +100,11 @@ A tool that is called correctly but cannot answer returns a result with
 
 Every tool is marked read-only, non-destructive, idempotent and closed
 world in its annotations, and has an input and an output schema;
-`tools/list` gives them in a fixed order. A successful result has
+`tools/list` gives them in a fixed order. The input schemas of
+`references` and `impact` use `dependentRequired` and top-level
+`if`/`then`/`else`, valid JSON Schema 2020-12; no MCP client product was
+tested with them, and a host that converts tool schemas to a narrower
+subset may need them relaxed (the server checks both rules itself). A successful result has
 `structuredContent`, which conforms to the output schema, and, as its text
 content, the same JSON serialized, as the revision says a tool with
 structured content should, so that a client that passes only the text to
@@ -445,7 +449,15 @@ without any one of them refuses it (149 cases).
   each entry `{"kind", "id"}` or `{"kind", "from", "to"}`, for the kinds
   it compares (anchor, definition, object, plane, render layer,
   stairwell, zone), else null. An object removed needs one entry for its
-  uid and one for each uid it carries; at most 100 are listed. One entry
+  uid and one for each uid it carries; at most 100 are listed. When
+  `entries_truncated` or `carried_truncated` is true, the allowance is
+  incomplete: find the rest with `search_objects` with the object's
+  `plane`, its `layer` and a `bbox` of its tile (carried objects are at
+  their carrier's tile; `carried` true, the default), and keep the items
+  whose `position` starts with the object's own position, which
+  `search_objects` gives for it too; `carried_by` names only a carrier
+  that has a uid, so it does not find everything under carriers without
+  one. One entry
   for a plane covers its zones, anchors and stairwells, and, when it is
   removed, its objects' uids, by DIFF.md's rules for a plane's entry.
   `carried` and the entries each take at most an eighth of the byte
@@ -589,7 +601,14 @@ editor action.
   each budget, and that the library accepts what the server refuses. A
   `tx.limit` at another limit (operations, files, a pointer's steps, the
   format's 64 MiB a file, the 64 MiB an inverse may hold) is not the
-  server's: `server_budget_reached` is false. The library gives no
+  server's: `server_budget_reached` is false, with one exception. A file
+  past the format's 64 MiB that is read after another file is refused by
+  the library in its read budget's words (the server's read budget and
+  the per-file limit are the same 64 MiB, so once any file is read the
+  allowance left is the smaller), and then `server_budget_reached` is
+  true, though `tilewright tx apply` refuses that transaction too. Only a
+  file the loader does not read can be that large in a tree that loads. A
+  test pins this (ignored by default, as it writes a 70 MiB file). The library gives no
   structured kind of limit, so the server tells its budgets' refusals
   apart by the library's message text: the whole phrase it writes for
   each budget ("the touched files hold more than N bytes", "needs more
@@ -779,6 +798,7 @@ also a ground layer, or a file: removing or renaming one changes what the
 layout ties to its name (the `defs/` directory of a type, the keys of
 chunks' terrain grids, a document's path), which are not all references
 of the index. `references` lists what the index records for each.
+A cursor on `impact`'s `carried` and allowance entries, past their 100.
 `server_budget_reached` reads the library's message text; a structured
 kind of limit on the library's refusals would make it exact, and needs a
 library addition (a candidate for the next library release).

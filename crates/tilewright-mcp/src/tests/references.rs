@@ -1313,6 +1313,30 @@ fn an_object_carrying_many_is_listed_within_its_caps() {
         Some(i64::try_from(carried + 1).unwrap())
     );
     assert_eq!(at(allowance, &["entries_truncated"]).as_bool(), Some(true));
+    // The rest are found as docs/MCP.md says: search_objects at the
+    // carrier's plane, layer and tile, keeping the items whose position
+    // starts with the carrier's.
+    let (_, document) = result(
+        &mut server,
+        "search_objects",
+        r#"{"plane":"overworld","layer":0,"bbox":[32,0,32,0],"carried":true,"limit":500}"#,
+    );
+    let page = structured(&document);
+    let inside: Vec<&Value> = at(page, &["objects"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| {
+            let position = at(item, &["position"]).as_array().unwrap();
+            position.len() > 1 && position[0].as_i64() == Some(0)
+        })
+        .collect();
+    assert_eq!(inside.len(), carried);
+    assert!(
+        inside
+            .iter()
+            .all(|item| at(item, &["carried_by"]).as_str() == Some("bag"))
+    );
 }
 
 #[test]
@@ -1466,4 +1490,48 @@ fn the_input_schemas_state_the_rules_the_server_checks() {
             }
         }
     }
+}
+
+/// A file past the format's 64 MiB, read after another file, is refused by
+/// the library in its read budget's words, so `server_budget_reached` is
+/// true for it too, though `tilewright tx apply` refuses it as well
+/// (docs/MCP.md, "Budgets"). Ignored by default: it writes a 70 MiB file.
+/// Run with `cargo test -p tilewright-mcp -- --ignored`.
+#[test]
+#[ignore = "writes a 70 MiB file"]
+#[allow(clippy::disallowed_methods)]
+fn a_file_past_the_format_limit_read_second_reads_as_the_read_budget() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("tree");
+    copy_tree(&fixture("basic"), &root);
+    std::fs::write(root.join("profile/small.jsonc"), "{\"a\": 1}\n").unwrap();
+    let mut huge = String::from("{\"a\": 1");
+    while huge.len() < 70 << 20 {
+        huge.push('\n');
+        huge.push_str(&" ".repeat((1 << 20) - 1));
+    }
+    huge.push_str("\n}");
+    std::fs::write(root.join("profile/huge.jsonc"), huge).unwrap();
+    let mut server = ready(&root);
+    let test =
+        |path: &str| format!(r#"{{"op": "test", "path": "{path}", "pointer": ["a"], "value": 1}}"#);
+    let reached = |server: &mut Server, operations: &str| {
+        let arguments = format!(
+            r#"{{"transaction":{{"format": "tilewright.transaction/1", "operations": [{operations}]}}}}"#
+        );
+        let (_, document) = result(server, "preview_transaction", &arguments);
+        let page = structured(&document);
+        assert_eq!(at(page, &["would_apply"]).as_bool(), Some(false));
+        at(page, &["server_budget_reached"]).as_bool().unwrap()
+    };
+    // Alone, the library says the file is too large: not the server's.
+    assert!(!reached(&mut server, &test("profile/huge.jsonc")));
+    // After another file, it says the touched files hold more than the
+    // read budget.
+    let both = format!(
+        "{},{}",
+        test("profile/small.jsonc"),
+        test("profile/huge.jsonc")
+    );
+    assert!(reached(&mut server, &both));
 }
