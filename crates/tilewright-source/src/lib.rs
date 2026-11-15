@@ -14,6 +14,12 @@
 //! variant tiles from painted terrain; [`Transitions::resolve_chunk`] is the
 //! one resolver the compiler, editors and other tools share.
 //!
+//! [`load_indexed_in`] also returns a [`ReferenceIndex`]: every reference
+//! the loader checks, such as an object's prototype or a zone's parent,
+//! with what it names, what holds it and its byte span, for finding what
+//! names something before it is removed or renamed ([`index`]). A
+//! [`World`] lists the files its revision covers ([`World::files`]).
+//!
 //! The root path is resolved as the caller gives it and may be a link;
 //! nothing beneath it is followed. On Unix every path component beneath the
 //! root is opened through its parent directory's handle without following
@@ -34,6 +40,7 @@ mod chunk;
 mod defs;
 mod diagnostic;
 mod files;
+pub mod index;
 mod plane;
 mod profile;
 mod read;
@@ -50,7 +57,8 @@ pub use access::{
 };
 use diagnostic::Diagnostics;
 pub use diagnostic::{Code, Diagnostic};
-pub use files::is_jsonc_path;
+pub use files::{SourceFile, is_jsonc_path};
+pub use index::ReferenceIndex;
 pub use read::{is_identifier, is_namespace};
 pub use schema::{FieldSpec, FieldType, MAXIMUM_FIELD_DEPTH, MAXIMUM_LIST_ITEMS, Schema};
 pub use transitions::{ResolvedChunk, TerrainSource, Transitions};
@@ -102,8 +110,8 @@ impl Default for LoadOptions {
 
 /// A validated world source tree.
 ///
-/// A `World` can only be produced by [`load`] or [`load_with`], so every one
-/// has passed validation; its parts are read through accessors and cannot be
+/// A `World` can only be produced by a load, such as [`load`] or
+/// [`load_with`], so every one has passed validation; its parts are read through accessors and cannot be
 /// changed in place.
 ///
 /// ```compile_fail
@@ -118,6 +126,7 @@ pub struct World {
     definitions: BTreeMap<(String, String), Definition>,
     object_uids: BTreeMap<String, ObjectLocation>,
     source_digest: [u8; 32],
+    files: BTreeMap<String, SourceFile>,
 }
 
 impl World {
@@ -142,6 +151,17 @@ impl World {
     #[must_use]
     pub const fn source_digest(&self) -> [u8; 32] {
         self.source_digest
+    }
+
+    /// Every file the load read, which [`World::source_digest`] covers, by
+    /// root-relative `/`-separated path, each with its length and SHA-256
+    /// as read. An overlay's files are listed as the overlay gave them. A
+    /// file the layout lets the loader ignore, such as one under
+    /// `profile/` that the profile does not name, is not read, so it is
+    /// not listed, and changing it does not change the digest.
+    #[must_use]
+    pub const fn files(&self) -> &BTreeMap<String, SourceFile> {
+        &self.files
     }
 
     /// Every object uid of the world, with where its object is. Uids are
@@ -567,6 +587,61 @@ pub fn load_edited_in(
     options: &LoadOptions,
     overlay: &Overlay,
 ) -> Result<World, Vec<Diagnostic>> {
+    load_recording(root, options, overlay, false).map(|(world, _)| world)
+}
+
+/// Loads the tree of an opened root as [`load_edited_in`] does, and also
+/// returns the index of its references: every reference the loader
+/// checks or follows, with its target, role, holder, file and span (see
+/// [`index`]). The world, and on failure the diagnostics, are those
+/// [`load_edited_in`] gives, with one exception: a tree whose index would
+/// be too large to number is refused (see below).
+///
+/// Indexing costs memory in proportion to the references, about 36 bytes
+/// each plus their distinct strings, and some time to sort them; the
+/// other loads record nothing. Recording stops at the load's first
+/// diagnostic, as the load then fails, so a broken tree costs about what
+/// a plain load of it does. A tree with more references, distinct strings
+/// or holders than 32 bits number is refused with a `source.budget`
+/// diagnostic, which only an indexed load gives.
+///
+/// ```no_run
+/// use tilewright_source::{LoadOptions, Overlay, SourceRoot, index::Target};
+///
+/// let root = SourceRoot::new(std::path::Path::new("content"));
+/// let (_, index) = tilewright_source::load_indexed_in(&root, &LoadOptions::default(), &Overlay::new())
+///     .map_err(|diagnostics| diagnostics.len())?;
+/// for reference in index.to(Target::Definition { kind: "proto", id: "tree" }) {
+///     println!("{} {:?} {:?}", reference.file(), reference.span(), reference.role());
+/// }
+/// # Ok::<(), usize>(())
+/// ```
+///
+/// # Errors
+/// Returns every diagnostic found, sorted by path and position, as
+/// [`load_edited_in`] does; or, for a tree that otherwise loads but whose
+/// references, distinct strings or holders are too many to number, one
+/// `source.budget` diagnostic at `.`.
+pub fn load_indexed_in(
+    root: &SourceRoot,
+    options: &LoadOptions,
+    overlay: &Overlay,
+) -> Result<(World, ReferenceIndex), Vec<Diagnostic>> {
+    load_recording(root, options, overlay, true).map(|(world, recorder)| {
+        (
+            world,
+            recorder.map(index::Recorder::finish).unwrap_or_default(),
+        )
+    })
+}
+
+/// Loads the tree, recording its references when `record` is set.
+fn load_recording(
+    root: &SourceRoot,
+    options: &LoadOptions,
+    overlay: &Overlay,
+    record: bool,
+) -> Result<(World, Option<index::Recorder>), Vec<Diagnostic>> {
     // At least one diagnostic is kept, so a failed load always says why.
     let options = &LoadOptions {
         limits: within_format(options.limits),
@@ -604,13 +679,30 @@ pub fn load_edited_in(
     }
     let mut diagnostics = Diagnostics::new(options.maximum_diagnostics);
     let mut tree = files::Tree::in_root(root.platform(), options, overlay, diagnostics.total());
-    let world = load_tree(&mut tree, &mut diagnostics);
+    let mut references = schema::References::new(record, diagnostics.total());
+    let world = load_tree(&mut tree, &mut references, &mut diagnostics);
     diagnostics.append(tree.take_diagnostics());
     match world {
-        Some(world) if diagnostics.is_empty() => Ok(World {
-            source_digest: tree.digest(),
-            ..world
-        }),
+        Some(world) if diagnostics.is_empty() => {
+            let recorder = references.into_recorder();
+            // An index that could not hold every reference is refused,
+            // never cut short.
+            if recorder.as_ref().is_some_and(index::Recorder::overflowed) {
+                return Err(vec![Diagnostic::file(
+                    ".",
+                    Code::Budget,
+                    "the tree has more references, strings or holders than an index can number",
+                )]);
+            }
+            Ok((
+                World {
+                    source_digest: tree.digest(),
+                    files: tree.take_files(),
+                    ..world
+                },
+                recorder,
+            ))
+        }
         _ => Err(diagnostics.finish()),
     }
 }
@@ -633,20 +725,24 @@ fn within_format(limits: Limits) -> Limits {
     }
 }
 
-fn load_tree(tree: &mut files::Tree, diagnostics: &mut Diagnostics) -> Option<World> {
-    let (manifest_path, plane_ids) = profile::read_manifest(tree, diagnostics)?;
-    let (mut profile, transitions_path) = profile::read_profile(tree, &manifest_path, diagnostics)?;
-    let mut references = schema::References::new(&profile);
-    let definitions = defs::read_definitions(tree, &profile, &mut references, diagnostics);
+fn load_tree(
+    tree: &mut files::Tree,
+    references: &mut schema::References,
+    diagnostics: &mut Diagnostics,
+) -> Option<World> {
+    let (manifest_path, plane_ids) = profile::read_manifest(tree, references, diagnostics)?;
+    let (mut profile, transitions_path) =
+        profile::read_profile(tree, &manifest_path, references, diagnostics)?;
+    let definitions = defs::read_definitions(tree, &profile, references, diagnostics);
     // A transitions document that fails has reported why, so the load
     // fails with it.
     if let Some(path) = transitions_path {
         profile.transitions =
-            transitions::read_transitions(tree, &path, &profile, &references, diagnostics)
+            transitions::read_transitions(tree, &path, &profile, references, diagnostics)
                 .map(Arc::new);
     }
     let mut planes = BTreeMap::new();
-    for plane in plane::read_planes(tree, &profile, &plane_ids, &mut references, diagnostics) {
+    for plane in plane::read_planes(tree, &profile, &plane_ids, references, diagnostics) {
         planes.insert(plane.id.clone(), plane);
     }
     let object_uids = uid::index(&planes);
@@ -656,6 +752,7 @@ fn load_tree(tree: &mut files::Tree, diagnostics: &mut Diagnostics) -> Option<Wo
         definitions,
         object_uids,
         source_digest: [0; 32],
+        files: BTreeMap::new(),
     })
 }
 

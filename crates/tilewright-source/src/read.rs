@@ -9,7 +9,8 @@ use crate::{
     Code, Diagnostic, FieldValue,
     diagnostic::Positions,
     files::Source,
-    schema::{References, Target},
+    index::{Holder, Role, Site, Target, message},
+    schema::References,
 };
 use std::{
     cell::{OnceCell, RefCell},
@@ -64,10 +65,51 @@ impl<'a> Reader<'a> {
             .get_or_init(|| Positions::new(self.source.document.source()))
     }
 
-    /// Reports a reference that does not resolve.
-    pub fn reference(&self, references: &References, target: &Target, span: Span) {
-        if !references.resolves(target) {
-            self.report(span, Code::Reference, target.message());
+    /// Checks a reference of this document at `span`, reporting it there
+    /// when it does not resolve; returns whether it resolves.
+    pub fn reference(
+        &self,
+        references: &References,
+        target: Target<'_>,
+        site: (Role<'_>, Holder<'_>),
+        span: Span,
+    ) -> bool {
+        self.reference_reported_at(references, target, site, span, span)
+    }
+
+    /// Checks a reference of this document at `span` as
+    /// [`Reader::reference`] does, reporting it at `report` instead, as
+    /// for a palette entry, which is reported at its grid.
+    pub fn reference_reported_at(
+        &self,
+        references: &References,
+        target: Target<'_>,
+        (role, holder): (Role<'_>, Holder<'_>),
+        span: Span,
+        report: Span,
+    ) -> bool {
+        let site = self.site(target, (role, holder), span);
+        let resolves = references.check(&site);
+        if !resolves {
+            self.report(report, Code::Reference, message(&site));
+        }
+        resolves
+    }
+
+    /// A reference of this document at `span`.
+    pub fn site<'s>(
+        &'s self,
+        target: Target<'s>,
+        (role, holder): (Role<'s>, Holder<'s>),
+        span: Span,
+    ) -> Site<'s> {
+        Site {
+            target,
+            role,
+            holder,
+            file: &self.source.path,
+            start: span.start,
+            end: span.end,
         }
     }
 

@@ -7,6 +7,7 @@ use crate::diagnostic::Diagnostics;
 use crate::{
     Code, Definition, Diagnostic, Profile,
     files::{EntryKind, Tree, ignored, join},
+    index::{Holder, Role, Target},
     read::{Reader, is_identifier},
     schema::{References, read_fields},
 };
@@ -77,8 +78,21 @@ pub(crate) fn read_definitions(
             continue;
         };
         let mut ok = reader.format(root, "tilewright.def/1");
+        let holder = Holder::Definition {
+            kind: &kind,
+            id: &id,
+        };
         for (key, expected) in [("type", kind.as_str()), ("id", id.as_str())] {
             match reader.required(root, key) {
+                // A definition's type is the directory it is in, which the
+                // layout checks is a declared type; its `type` says so.
+                Some(value) if value.as_str() == Some(expected) && key == "type" => {
+                    references.follow(&reader.site(
+                        Target::DefinitionType(&kind),
+                        (Role::DefinitionType, holder),
+                        value.span(),
+                    ));
+                }
                 Some(value) if value.as_str() == Some(expected) => {}
                 Some(value) => {
                     reader.report(
@@ -91,7 +105,13 @@ pub(crate) fn read_definitions(
                 None => ok = false,
             }
         }
-        let fields = read_fields(&reader, root, root.get("fields"), schema, references);
+        let fields = read_fields(
+            &reader,
+            (root, holder),
+            root.get("fields"),
+            schema,
+            references,
+        );
         reader.custom(root);
         if let (true, Some(fields)) = (ok, fields) {
             definitions.insert(

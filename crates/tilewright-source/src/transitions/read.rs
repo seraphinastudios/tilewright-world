@@ -12,42 +12,53 @@ use crate::diagnostic::Diagnostics;
 use crate::{
     Code, Profile,
     files::Tree,
+    index::{Holder, Role, Target},
     read::Reader,
-    schema::{References, Target},
+    schema::References,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use tilewright_jsonc::Value;
 
-/// The index of the ground layer `value` names.
-fn ground_layer<'a>(reader: &Reader<'a>, profile: &Profile, value: &'a Value) -> Option<usize> {
+/// The index of the ground layer `value` names, as `role`.
+fn ground_layer<'a>(
+    reader: &Reader<'a>,
+    (profile, references): (&Profile, &References),
+    role: Role<'_>,
+    value: &'a Value,
+) -> Option<usize> {
     let name = reader.identifier(value)?;
-    let index = profile
+    let resolves = reader.reference(
+        references,
+        Target::GroundLayer(&name),
+        (role, Holder::Transitions),
+        value.span(),
+    );
+    profile
         .ground_layers
         .iter()
-        .position(|layer| *layer == name);
-    if index.is_none() {
-        reader.report(
-            value.span(),
-            Code::Reference,
-            format!("\"{name}\" is not a ground layer of the profile"),
-        );
-    }
-    index
+        .position(|layer| *layer == name)
+        .filter(|_| resolves)
 }
 
-/// A `proto` definition named by `value`.
-fn proto<'a>(reader: &Reader<'a>, references: &References, value: &'a Value) -> Option<String> {
+/// A `proto` definition named by `value`, as `role`.
+fn proto<'a>(
+    reader: &Reader<'a>,
+    references: &References,
+    role: Role<'_>,
+    value: &'a Value,
+) -> Option<String> {
     let id = reader.identifier(value)?;
-    let target = Target::Definition {
-        kind: "proto".to_owned(),
-        id: id.clone(),
-    };
-    if references.resolves(&target) {
-        Some(id)
-    } else {
-        reader.report(value.span(), Code::Reference, target.message());
-        None
-    }
+    reader
+        .reference(
+            references,
+            Target::Definition {
+                kind: "proto",
+                id: &id,
+            },
+            (role, Holder::Transitions),
+            value.span(),
+        )
+        .then_some(id)
 }
 
 /// Whether `count` items are within `minimum..=maximum`; reports a list
@@ -101,7 +112,7 @@ fn read_variant<'a>(
 ) -> Option<Variant> {
     match value {
         Value::String { .. } => Some(Variant {
-            proto: proto(reader, references, value)?,
+            proto: proto(reader, references, Role::TransitionTile, value)?,
             weight: 1,
         }),
         Value::Object { .. } => {
@@ -114,7 +125,7 @@ fn read_variant<'a>(
                 None => Some(1),
             };
             Some(Variant {
-                proto: proto(reader, references, proto_value?)?,
+                proto: proto(reader, references, Role::TransitionTile, proto_value?)?,
                 weight: weight?,
             })
         }
@@ -244,7 +255,12 @@ fn read_transition<'a>(
         ok = false;
     }
     let layer = reader.required(entry, "layer").and_then(|value| {
-        let layer = ground_layer(reader, profile, value)?;
+        let layer = ground_layer(
+            reader,
+            (profile, references),
+            Role::TransitionLayer,
+            value,
+        )?;
         if Some(layer) == terrains.terrain_layer {
             reader.report(
                 value.span(),
@@ -273,6 +289,15 @@ fn read_transition<'a>(
                         ok = false;
                         continue;
                     };
+                    if !reader.reference(
+                        references,
+                        Target::Terrain(&name),
+                        (Role::TransitionBlend, Holder::Transitions),
+                        item.span(),
+                    ) {
+                        ok = false;
+                        continue;
+                    }
                     match terrains.ids.get(&name) {
                         Some(&index) if index == terrain => {
                             reader.report(
@@ -287,14 +312,9 @@ fn read_transition<'a>(
                                 *slot = true;
                             }
                         }
-                        None => {
-                            reader.report(
-                                item.span(),
-                                Code::Reference,
-                                format!("no terrain \"{name}\""),
-                            );
-                            ok = false;
-                        }
+                        // The terrains the check resolves against are
+                        // these.
+                        None => ok = false,
                     }
                 }
                 ok.then_some(blends)
@@ -418,7 +438,7 @@ pub(crate) fn read_transitions(
     tree: &mut Tree<'_>,
     path: &str,
     profile: &Profile,
-    references: &References,
+    references: &mut References,
     diagnostics: &mut Diagnostics,
 ) -> Option<Transitions> {
     let source = tree.document(path)?;
@@ -427,7 +447,7 @@ pub(crate) fn read_transitions(
     let mut ok = reader.format(root, TRANSITIONS_FORMAT);
     let terrain_layer = reader
         .required(root, "layer")
-        .and_then(|value| ground_layer(&reader, profile, value));
+        .and_then(|value| ground_layer(&reader, (profile, references), Role::TerrainLayer, value));
     ok &= terrain_layer.is_some();
     let terrains_value = reader.required(root, "terrains")?;
     let items = reader.array(terrains_value)?;
@@ -450,6 +470,8 @@ pub(crate) fn read_transitions(
         .enumerate()
         .filter_map(|(index, id)| Some((id.clone()?, index)))
         .collect();
+    references.terrains_declared(by_id.keys());
+    let references = &*references;
     let lookup = Terrains {
         ids: &by_id,
         count: items.len(),
@@ -491,7 +513,7 @@ pub(crate) fn read_transitions(
                 };
                 // A prototype is claimed whether or not it resolves, so a
                 // repeat is reported in the same load as a missing one.
-                if proto(&reader, references, item).is_none() {
+                if proto(&reader, references, Role::TerrainProto, item).is_none() {
                     ok = false;
                 }
                 if let Some(&other) = by_proto.get(&name) {

@@ -1,0 +1,58 @@
+basic planes/overworld/layers/0/0_0.jsonc "proto": "nope"
+  planes/overworld/layers/0/0_0.jsonc 7389..7395 159:29 ref.unresolved no proto definition "nope"
+basic planes/overworld/layers/0/0_0.jsonc "layer": "roof", "fields"
+  planes/overworld/layers/0/0_0.jsonc 7230..7236 157:73 ref.unresolved "roof" is not a render layer of the profile
+basic planes/overworld/layers/0/0_0.jsonc "loot": "nope"
+  planes/overworld/layers/0/0_0.jsonc 7679..7685 162:97 ref.unresolved no loot definition "nope"
+basic planes/overworld/layers/0/0_0.jsonc "anchor": "nope"
+  planes/overworld/layers/0/0_0.jsonc 7425..7431 159:65 ref.unresolved no anchor "nope" in plane "overworld"
+basic planes/overworld/layers/0/0_0.jsonc "plane": "nope"
+  planes/overworld/layers/0/0_0.jsonc 8009..8015 169:64 ref.unresolved no plane "nope"
+basic planes/overworld/layers/0/0_0.jsonc "v": "nope"
+  planes/overworld/layers/0/0_0.jsonc 5612..7097 117:13 ref.unresolved zone "nope" is not in this plane's zones.jsonc
+basic planes/overworld/layers/0/0_0.jsonc "g": "nope"
+  planes/overworld/layers/0/0_0.jsonc 121..1604 7:14 ref.unresolved no proto definition "nope"
+basic planes/overworld/plane.jsonc "nope"
+  planes/overworld/plane.jsonc 0..0 0:0 ref.unresolved default zone "nope" is not in zones.jsonc
+basic planes/overworld/zones.jsonc "parent": "nope"
+  planes/overworld/zones.jsonc 232..238 6:33 ref.unresolved zone "village" has unknown parent "nope"
+basic planes/overworld/zones.jsonc "parent": "village"
+  planes/overworld/zones.jsonc 232..241 6:33 ref.cycle zone "village" is its own ancestor
+basic planes/overworld/stairwells.jsonc "nope"
+  planes/overworld/stairwells.jsonc 205..211 8:48 ref.unresolved no proto definition "nope"
+basic profile/profile.jsonc "ground_layers": ["nope"
+  profile/profile.jsonc 249..255 7:21 ref.unresolved ground layer "nope" must be a render layer other than height or zone
+basic profile/profile.jsonc "ground_layers": ["zone"
+  profile/profile.jsonc 249..255 7:21 ref.unresolved ground layer "zone" must be a render layer other than height or zone
+basic profile/profile.jsonc "schema/nope.jsonc"
+  profile/schema/nope.jsonc 0..0 0:0 source.missing_file file is missing
+basic profile/schema/loot.jsonc "target": "nope"
+  profile/schema/loot.jsonc 0..0 0:0 ref.unresolved field "entries[].item" references unknown definition type "nope"
+basic world.jsonc "nope"
+  planes/nope/plane.jsonc 0..0 0:0 source.missing_file plane "nope" is listed in world.jsonc but has no plane.jsonc
+  planes/overworld/layers/0/0_0.jsonc 8009..8016 169:64 ref.unresolved no plane "vault"
+  planes/vault 0..0 0:0 source.unexpected_file not a plane listed in world.jsonc
+basic defs/loot/chest_common.jsonc "nope"
+  defs/loot/chest_common.jsonc 190..196 8:16 ref.unresolved no proto definition "nope"
+terrain profile/transitions.jsonc "layer": "nope"
+  profile/transitions.jsonc 330..336 7:12 ref.unresolved "nope" is not a ground layer of the profile
+terrain profile/transitions.jsonc "layer": "nope"
+  profile/transitions.jsonc 698..704 19:20 ref.unresolved "nope" is not a ground layer of the profile
+terrain profile/transitions.jsonc "protos": ["nope"]
+  profile/transitions.jsonc 1020..1026 33:18 ref.unresolved no proto definition "nope"
+terrain profile/transitions.jsonc "with": ["nope"]
+  profile/transitions.jsonc 1233..1239 40:20 ref.unresolved no terrain "nope"
+terrain profile/transitions.jsonc "0": "nope"
+  profile/transitions.jsonc 814..820 22:18 ref.unresolved no proto definition "nope"
+basic profile/profile.jsonc a render layer named zone as a ground layer
+  profile/profile.jsonc 266..272 7:30 ref.unresolved ground layer "zone" must be a render layer other than height or zone
+basic every proto
+  planes/overworld/layers/0/0_0.jsonc 7149..7156 156:29 ref.unresolved no proto definition "xtree"
+  planes/overworld/layers/0/0_0.jsonc 7214..7221 157:56 ref.unresolved no proto definition "xwall"
+  planes/overworld/layers/0/0_0.jsonc 7330..7337 158:31 ref.unresolved no proto definition "xtree"
+  planes/overworld/layers/0/0_0.jsonc 7392..7406 159:29 ref.unresolved no proto definition "xstairs_down"
+  planes/overworld/layers/0/0_0.jsonc 7639..7647 162:53 ref.unresolved no proto definition "xchest"
+  planes/overworld/layers/0/0_0.jsonc 7738..7745 164:18 ref.unresolved no proto definition "xcoin"
+  planes/overworld/layers/0/0_0.jsonc 7819..7827 165:48 ref.unresolved no proto definition "xchest"
+  planes/overworld/layers/0/0_0.jsonc 7902..7909 166:59 ref.unresolved no proto definition "xcoin"
+  planes/overworld/layers/0/0_0.jsonc 7982..7996 169:29 ref.unresolved no proto definition "xstairs_down"

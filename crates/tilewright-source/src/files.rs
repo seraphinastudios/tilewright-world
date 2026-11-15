@@ -95,6 +95,28 @@ pub(crate) struct Entry {
     pub kind: EntryKind,
 }
 
+/// A file a load read: its length and SHA-256, as read.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct SourceFile {
+    length: u64,
+    sha256: [u8; 32],
+}
+
+impl SourceFile {
+    /// Its length in bytes.
+    #[must_use]
+    pub const fn length(&self) -> u64 {
+        self.length
+    }
+
+    /// The SHA-256 of its bytes.
+    #[must_use]
+    pub const fn sha256(&self) -> [u8; 32] {
+        self.sha256
+    }
+}
+
 pub(crate) struct Tree<'o> {
     root: platform::Root,
     options: &'o LoadOptions,
@@ -102,7 +124,7 @@ pub(crate) struct Tree<'o> {
     files: usize,
     entries: usize,
     bytes: u64,
-    digests: BTreeMap<String, (u64, [u8; 32])>,
+    digests: BTreeMap<String, SourceFile>,
     diagnostics: Diagnostics,
     exhausted: bool,
 }
@@ -654,8 +676,13 @@ impl<'o> Tree<'o> {
         let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         self.files += 1;
         self.bytes = self.bytes.saturating_add(length);
-        self.digests
-            .insert(path.to_owned(), (length, Sha256::digest(&bytes).into()));
+        self.digests.insert(
+            path.to_owned(),
+            SourceFile {
+                length,
+                sha256: Sha256::digest(&bytes).into(),
+            },
+        );
         let text = match String::from_utf8(bytes) {
             Ok(text) => text,
             Err(error) => {
@@ -691,13 +718,18 @@ impl<'o> Tree<'o> {
     /// of the file's bytes.
     pub fn digest(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
-        for (path, (length, digest)) in &self.digests {
+        for (path, file) in &self.digests {
             hasher.update(path.as_bytes());
             hasher.update([0]);
-            hasher.update(length.to_le_bytes());
-            hasher.update(digest);
+            hasher.update(file.length.to_le_bytes());
+            hasher.update(file.sha256);
         }
         hasher.finalize().into()
+    }
+
+    /// The files read, which [`Tree::digest`] covers.
+    pub fn take_files(&mut self) -> BTreeMap<String, SourceFile> {
+        std::mem::take(&mut self.digests)
     }
 }
 

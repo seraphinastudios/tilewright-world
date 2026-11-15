@@ -966,7 +966,14 @@ fn deleting_a_large_file_and_making_it_again_copies_it_no_more() {
     // deletion dropped the steps before it, down to one creation of it.
     let source = SourceRoot::new(root);
     let on_disk = Overlay::new();
-    let workspace = carry_out(&source, &on_disk, Names::OWN, &tx, &Options::default()).unwrap();
+    let workspace = carry_out(
+        (&source, &on_disk),
+        Names::OWN,
+        &tx,
+        &Options::default(),
+        Budgets::default(),
+    )
+    .unwrap();
     let steps = &workspace.entries[PAD].inverse;
     assert!(matches!(steps[0], Primitive::CreateBase), "{steps:?}");
     assert!(
@@ -1480,7 +1487,7 @@ fn reading_goes_past_the_budget_only_for_a_base_that_can_resume() {
     let source = SourceRoot::new(root);
     let on_disk = Overlay::new();
     let checked = |transaction: &Transaction| {
-        let mut workspace = Workspace::new(&source, &on_disk, Names::OWN);
+        let mut workspace = Workspace::new(&source, &on_disk, Names::OWN, Budgets::default());
         let mut problems = Problems::new(transaction);
         check_base(&mut workspace, transaction, &mut problems);
         assert!(!problems.is_empty());
@@ -1595,4 +1602,129 @@ fn a_plane_or_type_named_like_a_staging_file_is_undone_and_removed() {
         ),
     );
     assert!(tilewright_source::load(root).is_ok());
+}
+
+/// Plans `transaction` within `budgets`, as a caller that tightens them
+/// does.
+fn plan_within(
+    root: &Path,
+    transaction: &Transaction,
+    budgets: Budgets,
+) -> Result<Plan, Vec<Diagnostic>> {
+    crate::plan_in_within(
+        &SourceRoot::new(root),
+        transaction,
+        &Options::default(),
+        budgets,
+    )
+}
+
+/// Budgets of at most `read_bytes` read and `work` work, as a caller
+/// that tightens both makes them.
+fn budgets(read_bytes: u64, work: u64) -> Budgets {
+    Budgets::default()
+        .with_read_bytes(read_bytes)
+        .with_work(work)
+}
+
+#[test]
+fn budgets_only_tighten_the_limits() {
+    let default = Budgets::default();
+    assert_eq!(
+        (default.read_bytes(), default.work()),
+        (limits::READ_BYTES, limits::WORK)
+    );
+    assert_eq!(budgets(u64::MAX, u64::MAX), default);
+    let tight = budgets(limits::READ_BYTES - 1, 7);
+    assert_eq!(
+        (tight.read_bytes(), tight.work()),
+        (limits::READ_BYTES - 1, 7)
+    );
+    let mixed = budgets(3, limits::WORK + 1);
+    assert_eq!((mixed.read_bytes(), mixed.work()), (3, limits::WORK));
+    // Each sets its own budget and keeps the other.
+    let read = default.with_read_bytes(5);
+    assert_eq!((read.read_bytes(), read.work()), (5, limits::WORK));
+    let work = default.with_work(6);
+    assert_eq!((work.read_bytes(), work.work()), (limits::READ_BYTES, 6));
+    // A later call sets the budget again, still at most its limit.
+    assert_eq!(read.with_read_bytes(u64::MAX), default);
+    assert_eq!(work.with_work(limits::WORK + 1), default);
+}
+
+#[test]
+fn tight_budgets_refuse_what_the_default_ones_plan() {
+    let tree = copy();
+    let root = tree.path();
+    let tx = transaction(
+        r#"{"op": "object.insert", "plane": "overworld", "layer": 0, "at": [1, 1], "object": {"proto": "tree"}}"#,
+    );
+    let planned = planned(root, &tx);
+    assert_eq!(planned.budgets(), Budgets::default());
+    let read = plan_within(root, &tx, budgets(64, limits::WORK)).unwrap_err();
+    assert!(has(&read, "tx.limit", "64 bytes"), "{read:#?}");
+    let work = plan_within(root, &tx, budgets(limits::READ_BYTES, 64)).unwrap_err();
+    assert!(has(&work, "tx.limit", "64 bytes of work"), "{work:#?}");
+    // At what it needs, it plans, with the same result.
+    let within = plan_within(root, &tx, budgets(1 << 20, 1 << 20)).unwrap();
+    assert_eq!(within.budgets(), budgets(1 << 20, 1 << 20));
+    assert_eq!(within.sealed(), planned.sealed());
+}
+
+#[test]
+fn the_undo_check_keeps_the_budgets_of_its_plan() {
+    // The undo of this step needs more work than the step: under a work
+    // budget just below the undo's, the step plans and its check refuses
+    // it, and the default budgets would accept both.
+    let tx = transaction(&format!(
+        r#"{},
+    {{"op": "object.remove", "plane": "overworld", "layer": 3, "at": [0, 31], "index": 0, "expect": {{"proto": "tree"}}}}"#,
+        column()
+    ));
+    let (least, _) = boundary(|| heavy(16), &tx, Budget::Work);
+    let tree = heavy(16);
+    let root = tree.path();
+    let below = plan_within(root, &tx, budgets(limits::READ_BYTES, least - 1)).unwrap();
+    let found = below.check_undo().unwrap_err();
+    assert!(
+        has(
+            &found,
+            "tx.limit",
+            "could not be undone: its inverse would be refused"
+        ) && has(&found, "tx.limit", &format!("{} bytes of work", least - 1)),
+        "{found:#?}"
+    );
+    plan_within(root, &tx, budgets(limits::READ_BYTES, least))
+        .unwrap()
+        .check_undo()
+        .unwrap();
+    planned(root, &tx).check_undo().unwrap();
+}
+
+#[test]
+fn what_plans_within_tighter_budgets_plans_the_same_within_the_default_ones() {
+    let mut random = Random(0x7e57_ab1e_5eed_0003);
+    // Cases refused under the tighter budgets, and accepted.
+    let mut outcomes = [0_u32; 2];
+    for case in 0..60 {
+        let tree = copy();
+        let root = tree.path();
+        let text = revisiting_transaction(&mut random);
+        let tx = transaction(&text);
+        let budgets = budgets(random.below(24 << 10), random.below(160 << 10));
+        let Ok(tight) = plan_within(root, &tx, budgets) else {
+            outcomes[0] += 1;
+            continue;
+        };
+        outcomes[1] += 1;
+        let default = planned(root, &tx);
+        assert_eq!(tight.sealed(), default.sealed(), "case {case}:\n{text}");
+        assert_eq!(tight.inverse(), default.inverse(), "case {case}");
+        assert_eq!(tight.files(), default.files(), "case {case}");
+        assert_eq!(tight.world(), default.world(), "case {case}");
+        if tight.check_undo().is_ok() {
+            default.check_undo().unwrap();
+        }
+    }
+    assert!(outcomes.iter().all(|count| *count > 5), "{outcomes:?}");
 }
