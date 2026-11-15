@@ -91,8 +91,10 @@ A tool that is called correctly but cannot answer returns a result with
 | `cursor.invalid` | A cursor not issued for this tool and these arguments, or past the end |
 | `cursor.stale` | A cursor issued for another revision of the tree |
 | `ids.unavailable` | The world holds more than 1,000,000 IDs |
+| `index.unavailable` | `references` or `impact` on a tree whose references are too many for the reference index to number (see "Snapshots and cursors") |
+| `impact.not_covered` | `impact` of a render layer that is also a ground layer (see "References and impact") |
 | `revision.changed` | The `revision` argument is not the snapshot's revision: the tree was loaded again since, or the revision was never this snapshot's; the text ends with the current revision, or says the tree does not load, so the snapshot has none. From `inspect`, also: the item's file no longer holds the snapshot's item, so the tree changed on disk; call `refresh`. From `preview_transaction`, also: the tree on disk is no longer at the snapshot's revision, so the plan would not be the snapshot's; call `refresh` |
-| `item.not_found` | `inspect` of an ID the snapshot does not hold |
+| `item.not_found` | `inspect` of an ID the snapshot does not hold (`references` and `impact` answer with `exists: false` instead) |
 
 ## Tools
 
@@ -114,6 +116,8 @@ which is the item's JSON.
 | `search_definitions` | `type`, `field`, `equals`, `contains`, `limit`, `scan_limit`, `cursor`, `revision` | A page of `definitions`, each with `type`, `id`, `path` and the matched `field`, `value_kind` and `value`; see "Searching definitions and objects" |
 | `search_objects` | `plane`, `layer`, `bbox`, `proto`, `uid_prefix`, `carried`, `field`, `equals`, `contains`, `limit`, `scan_limit`, `cursor`, `revision` | A page of `objects`, each with `uid`, `plane`, `layer`, `tile`, `proto`, `carried`, `carried_by`, `path`, `position` and the matched field; see "Searching definitions and objects" |
 | `inspect` | `kind` and `id` (both required), `revision` | One item: its `path`, its `span` in that file, and its `value`; see "Inspecting an item" |
+| `references` | `kind` and `id` (both required), `direction`, `roles`, `limit`, `scan_limit`, `cursor`, `revision` | Whether the item `exists`, the `total` of its references, and a page of them: the references of the world format that name it (`direction` `to`) or that it holds (`from`); see "References and impact" |
+| `impact` | `kind`, `id` and `action` (all required), `to` (for a rename), `limit`, `cursor`, `revision` | What removing or renaming the item breaks: `breaking_total` and a page of the `breaking` references, a plane's `cascade` and `surviving_implicit`, the item's `own_files`, the `diff_allowance` and `not_covered`; see "References and impact" |
 | `preview_transaction` | `transaction` (required), `excerpts`, `revision` | Whether the transaction `would_apply`, the files it would change with their sizes, digests and changed spans, the `resulting_revision`, the undo check and the refusals; see "Previewing a transaction" |
 | `refresh` | none | Reloads the tree: its `revision`, `valid`, the diagnostic count, the `previous_revision`, and whether it `changed` |
 
@@ -130,7 +134,9 @@ revision, so any `revision` given fails then, `validate`'s included,
 with text that says so; `validate` without one still answers. Arguments
 are checked first (for `inspect`, the shape of its `id` too; for
 `preview_transaction`, that `transaction` is an object of at most 256
-operations), then `revision`, then whether the tree loads. The
+operations; for `references` and `impact`, the kind for the direction or
+tool, the shape of `id` and `to`), then `revision`, then whether the tree
+loads. The
 `revision` is not part of a cursor's arguments: a cursor is bound to its
 snapshot already. The
 server starts on such a tree, and on a root that does not exist, so that a
@@ -158,6 +164,33 @@ server holds at most one world, plus what a load holds while it runs
 load is bounded by `tilewright_source::LoadOptions::default`: 500,000
 files, 1,000,000 directory entries, 8 GiB read, 10,000 diagnostics. Those
 bounds, not the server, cap its memory.
+
+The server loads with the library's indexed load
+(`tilewright_source::load_indexed_in`), which gives the same world and the
+same diagnostics as a plain load and also the index of the world's
+references that `references` and `impact` read. The snapshot keeps the
+index beside the world, about 36 bytes a reference plus each distinct
+string once, and the world's list of the files it read, about 100 bytes a
+file. Measured on a release build (AMD Ryzen 9 9950X3D), against the
+plain load of the release before:
+
+| Tree | References | Start, plain load | Start, indexed load | Each `refresh` |
+| --- | --- | --- | --- | --- |
+| 200 chunks, 100,000 objects (10 MB) | 300,000 | 0.09 s, 47 MB | 0.13 s, 61 MB | 0.09 s → 0.13 s |
+| 1,000 chunks, 1,000,000 objects (91 MB) | 3,000,000 | 0.93 s, 415 MB | 1.45 s, 557 MB | 0.88 s → 1.34 s |
+| `fixtures/basic` and a 59 MB `zones.jsonc` of 220,000 zones | 220,000 | 0.75 s, 519 MB | 0.89 s, 574 MB | |
+
+Memory is the process's peak, which includes what recording holds while
+the index is sorted. A tree with more references, distinct strings or
+holders than the index's 32-bit numbering holds (about four billion, far
+past what the load's bounds let a tree reach) is refused by the indexed
+load with one `source.budget` diagnostic. The server then loads the tree
+again without an index and serves it: `references` and `impact` fail with
+`index.unavailable`, every other tool answers, and the revision is the
+same. Any other failure of the indexed load is the tree's own, the plain
+load's diagnostics, and is not loaded again. The library's refusal cannot
+be reached by a tree a test can build, so the tests give the server that
+refusal through a hook in the snapshot's load and check the fallback.
 
 A paged result has `next_cursor`, a string when more items remain and
 `null` otherwise; pass it back as `cursor`, with the same other arguments,
@@ -227,6 +260,171 @@ other items; and for an anchor or object, in how the same values are
 spelled (`1.0` for `1`, or `"z": 0` written out). The check does not
 prove the rest of the file or of the tree unchanged: only `refresh` does.
 
+## References and impact
+
+A reference is a value of the world format that names another item: an
+object's prototype or render layer, a portal's plane and anchor, a value
+of a schema `reference` field, a zone's parent, a plane's default zone, a
+palette entry, a stairwell step's prototype, what a transitions document
+names, a schema field's definition type, a profile ground layer's render
+layer, a definition's `type`, a chunk's `plane`, and the paths by which
+the manifest and the profile name their documents. The loader checks
+every one; the server keeps them all in the snapshot's reference index.
+An item's own identity is the item, not a reference to it: a plane's
+`id`, a definition's `id` and file name, a zone's `id`. Names written
+inside `json` field values and `custom` objects, string field values
+that happen to spell a name (such as a prototype's `layer` string), and
+anything game code, saves or scripts keep are not references here.
+
+### IDs
+
+`kind` and `id` name the item, written as `search_ids`, `inspect` and
+`tilewright diff` write IDs where they have one:
+
+| `kind` | `id` | `direction` `to` | `direction` `from` | `impact` |
+| --- | --- | --- | --- | --- |
+| `definition` | `type/id` | yes | yes | yes |
+| `definition_type` | the type | yes | | |
+| `plane` | its ID | yes | yes (its `plane.jsonc`) | yes |
+| `zone` | `plane/id` | yes | yes | yes |
+| `anchor` | `plane/id` | yes | | yes |
+| `stairwell` | `plane/id` | yes, never named | yes | yes |
+| `render_layer` | its name | yes | | yes, unless also a ground layer |
+| `ground_layer` | its name | yes | | |
+| `terrain` | its ID | yes | | yes |
+| `object` | its uid, or `<chunk path>#<ordinal>` | yes, never named | yes | yes, by uid |
+| `chunk` | its root-relative path | | yes (its palettes) | |
+| `file` | a root-relative path | yes | | |
+| `manifest` | `world.jsonc` | | yes | |
+| `profile` | the profile's path | | yes | |
+| `schema` | a schema's path | | yes | |
+| `transitions` | the transitions document's path | | yes | |
+
+Every part of an ID is an identifier (FORMAT.md section 2), and a path is
+one a file of a tree can have; an ID not written so is `arguments.invalid`.
+An object's ordinal is its index in its chunk, depth first
+(`Chunk::depth_first`, FORMAT.md section 7): an object, then its
+inventory entries, then the next object. A well-formed ID of an item the
+snapshot does not hold is not an error: the result has `exists: false`,
+and, in a valid world, no references. The format references no stairwell
+and no object uid, so `to` either always has none; they are taken so that
+`exists` answers for them too. A file a `file` reference names is a
+document the manifest or the profile names by path: the profile, a
+schema, the transitions document.
+
+### `references`
+
+- **Direction.** `to` (the default) lists the references that name the
+  item, `from` those the item holds: an object's are its own, not its
+  inventory's; a chunk's are its palettes', not its objects'; a plane's
+  are its `plane.jsonc`'s (its default zone), not its chunks'.
+- **Order.** The index's: the references to an item in source order, by
+  file path, then byte span; the references an item holds in source order
+  too. Both are binary searches in the index, so a call costs what it
+  returns, whatever the world's size. `total` counts every reference to
+  or from the item; `offset` is the position the page starts at.
+- **Items.** Each item has `role` (one of `manifest_profile`,
+  `manifest_plane`, `profile_ground_layer`, `profile_schema`,
+  `profile_transitions`, `schema_target`, `definition_type`, `field`,
+  `zone_parent`, `default_zone`, `ground_palette`, `zone_palette`,
+  `chunk_plane`, `proto`, `layer`, `portal_plane`, `portal_anchor`,
+  `stairwell_step`, `terrain_layer`, `terrain_proto`, `transition_layer`,
+  `transition_blend`, `transition_tile`, or `other` for a role a later
+  library adds); `field`, the schema field's path for `schema_target` and
+  `field` (names joined by `.`, `[]` for a list's items, as in
+  `entries[].item`), else null; `layer`, the ground layer of a
+  `ground_palette` entry, else null; `implicit_plane`, for a
+  `portal_anchor`, whether the portal omits its plane, so that the anchor
+  is its own plane's, else null; `from`, what holds it (`kind`, `id`, and
+  `plane` and `chunk` where it has them; for an object `id` is its uid or
+  null, with its `ordinal`, its `position` as `search_objects` gives it,
+  and `carried_by`, the uid of the object that carries it, or null);
+  `to`, what it names (`kind` and `id` as in the table); `path`, the
+  root-relative path of the file it is written in; and `start` and `end`,
+  its byte span in that file as the snapshot loaded it, end exclusive:
+  the value that names the target, quotes included (for a portal whose
+  plane is implicit, the anchor's value). There are no lines and columns:
+  the index keeps bytes, and finding lines would mean reading the files
+  again; `inspect` gives the lines of an item, and a reference's span is
+  inside its holder's.
+- **Roles.** `roles`, 1 to 24 role names, keeps references of those
+  roles. The references are then examined one by one, at most
+  `scan_limit` a call (default and at most 10,000): `scanned` says how many
+  this call examined and `scan_budget_reached` whether it stopped there,
+  and `next_cursor` resumes at the first not examined, so a page can be
+  empty and still have a next one. `total` stays the count of every
+  reference, whatever their roles. `scan_limit` needs `roles`.
+- **Cursors and budget.** As every paged tool's: a cursor is bound to the
+  snapshot, the tool and the arguments (`kind`, `id`, `direction`,
+  `roles`); a page stops before the item that would take the result past
+  the byte budget (`byte_budget_reached`); strings are cut to 4 KiB.
+
+### `impact`
+
+`impact` says what removing (`action` `remove`) or renaming (`rename`,
+with `to`, the new ID) one item would break, without changing anything.
+`to` is an ID of the same kind, in the same plane for a zone, anchor or
+stairwell and of the same type for a definition, and not `id`; `to_free`
+says whether the snapshot holds no item at `to` (a rename into an existing
+ID would leave two items with one ID, which does not load). `exists` says
+whether the snapshot holds the item; one it does not hold breaks nothing.
+
+**What it guarantees.** A world that loads has every reference resolved,
+and each reference names exactly one item. So taking an item away breaks
+exactly the references that name it, and nothing else of the format's
+references: those are the `breaking` references. For a removal, the
+references the item holds itself go with it and are not listed (a plane's
+chunks naming the plane, a definition naming itself). For a plane they
+include the references from outside it to its anchors (portals that name
+the plane). Its zones are named only from its own files, which go with it.
+For a rename, every reference that names the item must be written anew:
+for a plane, the manifest's entry, each of its chunks' `plane`, and every
+portal that names the plane, its own included; the references to its
+zones and to its anchors from its own portals that omit their plane name
+the plane only implicitly, so they survive (`surviving_implicit` counts
+those portals). It is a statement about the format's references only:
+`not_covered` says, in fixed text, what is not seen. The tests carry out
+every removal and rename of every item of each kind on both fixtures and
+a generated tree (218 cases), by rewriting copies of the files: the
+loader's `ref.unresolved` diagnostics, and for a plane removed the
+manifest entry's missing `plane.jsonc`, are the predicted references one
+to one (at a reference's span, at its palette's grid, or on its file),
+with no diagnostic of any other code; and a rename with exactly the
+predicted references rewritten loads cleanly.
+
+**Result.**
+
+- `breaking_total` and a page of `breaking` references, in the shape of
+  `references` items, in the index's order: the item's references, then,
+  for a plane removed, its anchors' by anchor ID. Paged by `limit` and
+  `cursor`, bound to `kind`, `id`, `action` and `to`.
+- `cascade`, for a plane, else null: the counts of its `zones`,
+  `anchors`, `stairwells`, `chunks` and `objects` (inventory entries
+  included), and `incoming`, the references from outside the plane to its
+  anchors and zones. `surviving_implicit`, for a plane renamed, else
+  null. `search_ids` with `scope` lists the zones, anchors and stairwells.
+- `own_files`: the snapshot's files that hold the item itself, which the
+  change deletes, moves or edits: a definition's file, a plane's directory
+  (its every file), the file of a zone's, anchor's or stairwell's entry,
+  an object's chunk, the profile for a render layer, the transitions
+  document for a terrain. At most 100 (`own_files_total`,
+  `own_files_truncated`), sharing the byte budget: they take at most a
+  quarter of it, before the breaking references.
+- `diff_allowance`: the allowlist entry `tilewright diff` needs to accept
+  the change (DIFF.md section 4), as `{"list": "remove", "entry": {"kind",
+  "id"}}` or `{"list": "rename", "entry": {"kind", "from", "to"}}`, for
+  the kinds it compares (anchor, definition, object, plane, render layer,
+  stairwell, zone), else null. One entry for a plane covers its zones,
+  anchors, stairwells and, when removed, its objects' uids.
+- `not_covered`: fixed text saying that names inside `json` and `custom`
+  values and in game code, saves or scripts are not seen, and that the
+  format names no stairwell and no object uid.
+
+A render layer that is also a ground layer is refused with
+`impact.not_covered`: removing or renaming it changes the ground layer
+too, whose name chunks use as keys of their terrain grids, which are not
+references. `references` lists what the index records for both.
+
 ## Previewing a transaction
 
 `preview_transaction` carries a transaction out in memory, as
@@ -251,9 +449,10 @@ editor action.
   a transaction: a document that is not one (`jsonc.*`, `tx.shape`) is
   refused there, with `refused_at: "transaction"`, without reading the
   tree. Otherwise it is planned on the tree with the library's
-  `plan_in`: every precondition (the `base` digests, `expect` and `test`
-  values, cell expectations, what each operation needs), the library's
-  limits, and validation of the tree it would leave. A failure is
+  `plan_in_within`, within the server's budgets (see "Budgets" below):
+  every precondition (the `base` digests, `expect` and `test` values, cell
+  expectations, what each operation needs), the library's limits, and
+  validation of the tree it would leave. A failure is
   `refused_at: "plan"`. A plan is then given the library's undo check
   (`Plan::check_undo`, section 8.1), as `tilewright tx preview` does; a
   refusal there is `refused_at: "undo"`, and the plan's files and resulting
@@ -265,13 +464,16 @@ editor action.
   snapshot's. Otherwise the call fails with `revision.changed`, and
   `refresh` loads the tree as it now is. So a result is a plan of the
   snapshot's files, with one exception: the revision covers only the
-  files the loader reads. A transaction may name other files under the
-  root, such as a file under `profile/` that is neither the profile nor a
-  schema it names (`profile/extra.jsonc`). For those, the preview reads
-  the disk as it is at the call, the same revision can give another
-  answer once such a file changes, and a transaction that changes only
-  such files has a `resulting_revision` equal to `revision`; `refresh`
-  does not see a change to them either. A change made and undone while
+  files the loader reads (`World::files`). A transaction may name other
+  files under the root, such as a file under `profile/` that is neither
+  the profile nor a schema it names (`profile/extra.jsonc`). For those,
+  the preview reads the disk as it is at the call, the same revision can
+  give another answer once such a file changes, and a transaction that
+  changes only such files has a `resulting_revision` equal to `revision`;
+  `refresh` does not see a change to them either. The result says when
+  that is so: each listed file has `in_revision`, and `outside_revision`
+  is true when any file the plan read, checked or changed is outside the
+  revision (see "Files"). A change made and undone while
   the call runs is not seen. The tool error `revision.changed` and the planner's `tx.conflict`
   differ: the first says the tree moved from under the snapshot, the
   second that the transaction's own preconditions (its `base` digests, an
@@ -283,7 +485,13 @@ editor action.
   systems whose access it cannot check, a staging name in the way;
   TRANSACTIONS.md section 9), none of which a preview checks.
 - **Result.** `would_apply` is true when nothing refused it. `refused_at`
-  is `null`, `"transaction"`, `"plan"` or `"undo"`. `operations` is the
+  is `null`, `"transaction"`, `"plan"` or `"undo"`. `server_budgets` gives
+  the server's `read_bytes` and `work` budgets, and
+  `server_budget_reached` is true when a refusal is at one of them (see
+  "Budgets"). `outside_revision` is true when a file the plan read,
+  checked or changed is not covered by the revision, false when every one
+  is, and null when there is no plan: a refused plan does not say which
+  files it read. `operations` is the
   transaction's operation count (`null` when it is not a transaction).
   `resulting_revision` is the source digest the tree would have, from the
   validating load that planning makes anyway, so it costs nothing more
@@ -293,7 +501,339 @@ editor action.
   they are.
 - **Files.** `files` lists the changed files in path order, at most 200
   (`files_truncated`), each with its root-relative `path`; `change`
-  (`created`, `modified` or `deleted`); `before_bytes` and `after_bytes`;
+  (`created`, `modified` or `deleted`); `in_revision`, whether a revision
+  covers it: for a file the tree has, whether the snapshot's load read it;
+  for a file the transaction creates, whether the load of the tree it
+  would leave reads it, so a new definition is in and a new file under
+  `profile/` that the profile does not name is not; `before_bytes` and
+  `after_bytes`;
+  `before_sha256` and `after_sha256`, the lowercase hex SHA-256 of the
+  bytes, as `base` and `result` record them (each `null` where the file is
+  absent); and `changed`, the smallest byte range of the new text that
+  holds every change: `start` and `end` (end exclusive) and `start_line`,
+  `start_column`, `end_line` and `end_column`, counted as `inspect`
+  counts them, and `removed_bytes`, the length of the old text it
+  replaces. A created file's range is the whole file; a deleted file has
+  `changed: null`. The range is one range: edits far apart in a file give
+  a range that covers what lies between them.
+- **Excerpts.** By default no file text is returned, only sizes, digests
+  and ranges. With `excerpts: true`, `excerpt` is the new text of the
+  changed range as a JSON string, cut to 4 KiB (`excerpt_truncated`), and
+  counted in the byte budget like any value.
+- **Refusals.** `refusals` lists at most 500 (`refusals_total` counts them
+  all; the library reports at most 1,000, the last a note that there may
+  be more; `refusals_truncated`), in the shape of a `validate` diagnostic
+  with `on_transaction`: a problem of the transaction has the path
+  `transaction` and its span in the argument as
+  sent, or no position (`0`) when it concerns the whole transaction, such
+  as the undo check (no diagnostic of the edited tree has the path
+  `transaction`: an entry of that name in the root makes the tree fail to
+  load, and one made after the snapshot is a change to the tree, so the
+  call fails with `revision.changed` before any result); a problem of the edited tree has the loader's code
+  and the root-relative path, with its span in the file as the transaction
+  would leave it. Codes are the library's: `tx.shape`, `tx.conflict`,
+  `tx.result`, `tx.path`, `tx.limit`, `tx.io`, `jsonc.*` and the loader's.
+  There is no cursor: a preview is not paged, since paging would plan the
+  transaction again.
+- **Budget.** The files come first and the refusals share what they leave
+  of the byte budget; `byte_budget_reached` says either list stopped
+  there. `truncated_strings` counts every string cut.
+- **Budgets.** The server plans within tighter budgets than the library's
+  (`tilewright_edit::Budgets`, which can only tighten): at most 64 MiB
+  read from the files the transaction touches (the library allows
+  256 MiB) and 512 MiB of work (the library allows 4 GiB; work counts
+  each operation's size, the size of each document it reads, once per
+  operation, and the size of each edit). The plan keeps them, so the undo
+  check carries out each round within them too. A transaction that needs
+  more is refused with the library's `tx.limit`, as a normal refusal
+  (`would_apply: false`), whose message names the budget, and
+  `server_budget_reached` is true. **`tilewright tx apply` and `tx
+  preview` plan within the library's budgets, so they may still accept a
+  transaction the server refuses for cost**; the tests check both sides of
+  each budget, and that the library accepts what the server refuses. A
+  `tx.limit` at another limit (operations, files, a pointer's steps, the
+  format's 64 MiB a file) is not the server's: `server_budget_reached` is
+  false.
+- **Cost.** A call reads the files the transaction touches, within those
+  budgets and the library's other bounds (1,000 diagnostics), loads the
+  whole tree to validate the result, loads it once more when the
+  transaction addresses an object by uid, and once more for the snapshot
+  check; the undo check reads nothing from disk but does about the work of
+  planning again in each of its rounds, at most four. The budgets bound
+  the transaction's own reading and work, not those loads, which cost
+  what a `refresh` of the tree costs. Requests are handled one at a time
+  and a preview cannot be cancelled. Measured on a release build (AMD
+  Ryzen 9 9950X3D), times for the whole process, start included:
+  - typical: on a tree of 200 chunks and 100,000 objects (10 MB) that the
+    server starts on in 0.13 s, placing an object took 0.33 s and 144 MB,
+    and editing an object's field 0.35 s and 143 MB (0.29 s and 0.31 s
+    with the plain load and the library's budgets before);
+  - the worst measured at the library's budgets, `fixtures/basic` with a
+    59 MB `zones.jsonc` of 220,000 zones, which the server starts on in
+    0.89 s and 574 MB: 36 `set` operations on that file (a request of
+    about 3.7 KB) took 13.1 s and 1.49 GB, and 40 were refused at the
+    library's work budget after 5.0 s. Within the server's budgets, 5 or
+    more such operations are refused at the work budget in 2.1 s and
+    829 MB, 36 and 40 included, and so are 34 on two such files (3.3 s,
+    1.34 GB, against 15.7 s and 2.56 GB). The most that is accepted, 4
+    operations on that file, takes 4.2 s and 1.52 GB (one takes 3.1 s and
+    1.52 GB); a one-line edit of a small definition on that tree takes
+    2.1 s and 1.04 GB.
+
+  On a tree that large, most of a call is the loads of the whole tree and
+  the worlds they hold: while a preview runs the server holds the
+  snapshot's world, the plan's world and the touched files before and
+  after, and, during the snapshot check, a third world. Memory grows with
+  how the touched files parse, about 25 times their size for files dense
+  with values, and with the tree's size, which the load's bounds cap.
+
+## References and impact
+
+A reference is a value of the world format that names another item: an
+object's prototype or render layer, a portal's plane and anchor, a value
+of a schema `reference` field, a zone's parent, a plane's default zone, a
+palette entry, a stairwell step's prototype, what a transitions document
+names, a schema field's definition type, a profile ground layer's render
+layer, a definition's `type`, a chunk's `plane`, and the paths by which
+the manifest and the profile name their documents. The loader checks
+every one; the server keeps them all in the snapshot's reference index.
+An item's own identity is the item, not a reference to it: a plane's
+`id`, a definition's `id` and file name, a zone's `id`. Names written
+inside `json` field values and `custom` objects, string field values
+that happen to spell a name (such as a prototype's `layer` string), and
+anything game code, saves or scripts keep are not references here.
+
+### IDs
+
+`kind` and `id` name the item, written as `search_ids`, `inspect` and
+`tilewright diff` write IDs where they have one:
+
+| `kind` | `id` | `direction` `to` | `direction` `from` | `impact` |
+| --- | --- | --- | --- | --- |
+| `definition` | `type/id` | yes | yes | yes |
+| `definition_type` | the type | yes | | |
+| `plane` | its ID | yes | yes (its `plane.jsonc`) | yes |
+| `zone` | `plane/id` | yes | yes | yes |
+| `anchor` | `plane/id` | yes | | yes |
+| `stairwell` | `plane/id` | yes, never named | yes | yes |
+| `render_layer` | its name | yes | | yes, unless also a ground layer |
+| `ground_layer` | its name | yes | | |
+| `terrain` | its ID | yes | | yes |
+| `object` | its uid, or `<chunk path>#<ordinal>` | yes, never named | yes | yes, by uid |
+| `chunk` | its root-relative path | | yes (its palettes) | |
+| `file` | a root-relative path | yes | | |
+| `manifest` | `world.jsonc` | | yes | |
+| `profile` | the profile's path | | yes | |
+| `schema` | a schema's path | | yes | |
+| `transitions` | the transitions document's path | | yes | |
+
+Every part of an ID is an identifier (FORMAT.md section 2), and a path is
+one a file of a tree can have; an ID not written so is `arguments.invalid`.
+An object's ordinal is its index in its chunk, depth first
+(`Chunk::depth_first`, FORMAT.md section 7): an object, then its
+inventory entries, then the next object. A well-formed ID of an item the
+snapshot does not hold is not an error: the result has `exists: false`,
+and, in a valid world, no references. The format references no stairwell
+and no object uid, so `to` either always has none; they are taken so that
+`exists` answers for them too. A file a `file` reference names is a
+document the manifest or the profile names by path: the profile, a
+schema, the transitions document.
+
+### `references`
+
+- **Direction.** `to` (the default) lists the references that name the
+  item, `from` those the item holds: an object's are its own, not its
+  inventory's; a chunk's are its palettes', not its objects'; a plane's
+  are its `plane.jsonc`'s (its default zone), not its chunks'.
+- **Order.** The index's: the references to an item in source order, by
+  file path, then byte span; the references an item holds in source order
+  too. Both are binary searches in the index, so a call costs what it
+  returns, whatever the world's size. `total` counts every reference to
+  or from the item; `offset` is the position the page starts at.
+- **Items.** Each item has `role` (one of `manifest_profile`,
+  `manifest_plane`, `profile_ground_layer`, `profile_schema`,
+  `profile_transitions`, `schema_target`, `definition_type`, `field`,
+  `zone_parent`, `default_zone`, `ground_palette`, `zone_palette`,
+  `chunk_plane`, `proto`, `layer`, `portal_plane`, `portal_anchor`,
+  `stairwell_step`, `terrain_layer`, `terrain_proto`, `transition_layer`,
+  `transition_blend`, `transition_tile`, or `other` for a role a later
+  library adds); `field`, the schema field's path for `schema_target` and
+  `field` (names joined by `.`, `[]` for a list's items, as in
+  `entries[].item`), else null; `layer`, the ground layer of a
+  `ground_palette` entry, else null; `implicit_plane`, for a
+  `portal_anchor`, whether the portal omits its plane, so that the anchor
+  is its own plane's, else null; `from`, what holds it (`kind`, `id`, and
+  `plane` and `chunk` where it has them; for an object `id` is its uid or
+  null, with its `ordinal`, its `position` as `search_objects` gives it,
+  and `carried_by`, the uid of the object that carries it, or null);
+  `to`, what it names (`kind` and `id` as in the table); `path`, the
+  root-relative path of the file it is written in; and `start` and `end`,
+  its byte span in that file as the snapshot loaded it, end exclusive:
+  the value that names the target, quotes included (for a portal whose
+  plane is implicit, the anchor's value). There are no lines and columns:
+  the index keeps bytes, and finding lines would mean reading the files
+  again; `inspect` gives the lines of an item, and a reference's span is
+  inside its holder's.
+- **Roles.** `roles`, 1 to 24 role names, keeps references of those
+  roles. The references are then examined one by one, at most
+  `scan_limit` a call (default and at most 10,000): `scanned` says how many
+  this call examined and `scan_budget_reached` whether it stopped there,
+  and `next_cursor` resumes at the first not examined, so a page can be
+  empty and still have a next one. `total` stays the count of every
+  reference, whatever their roles. `scan_limit` needs `roles`.
+- **Cursors and budget.** As every paged tool's: a cursor is bound to the
+  snapshot, the tool and the arguments (`kind`, `id`, `direction`,
+  `roles`); a page stops before the item that would take the result past
+  the byte budget (`byte_budget_reached`); strings are cut to 4 KiB.
+
+### `impact`
+
+`impact` says what removing (`action` `remove`) or renaming (`rename`,
+with `to`, the new ID) one item would break, without changing anything.
+`to` is an ID of the same kind, in the same plane for a zone, anchor or
+stairwell and of the same type for a definition, and not `id`; `to_free`
+says whether the snapshot holds no item at `to` (a rename into an existing
+ID would leave two items with one ID, which does not load). `exists` says
+whether the snapshot holds the item; one it does not hold breaks nothing.
+
+**What it guarantees.** A world that loads has every reference resolved,
+and each reference names exactly one item. So taking an item away breaks
+exactly the references that name it, and nothing else of the format's
+references: those are the `breaking` references. For a removal, the
+references the item holds itself go with it and are not listed (a plane's
+chunks naming the plane, a definition naming itself). For a plane they
+include the references from outside it to its anchors (portals that name
+the plane). Its zones are named only from its own files, which go with it.
+For a rename, every reference that names the item must be written anew:
+for a plane, the manifest's entry, each of its chunks' `plane`, and every
+portal that names the plane, its own included; the references to its
+zones and to its anchors from its own portals that omit their plane name
+the plane only implicitly, so they survive (`surviving_implicit` counts
+those portals). It is a statement about the format's references only:
+`not_covered` says, in fixed text, what is not seen. The tests carry out
+every removal and rename of every item of each kind on both fixtures and
+a generated tree (218 cases), by rewriting copies of the files: the
+loader's `ref.unresolved` diagnostics, and for a plane removed the
+manifest entry's missing `plane.jsonc`, are the predicted references one
+to one (at a reference's span, at its palette's grid, or on its file),
+with no diagnostic of any other code; and a rename with exactly the
+predicted references rewritten loads cleanly.
+
+**Result.**
+
+- `breaking_total` and a page of `breaking` references, in the shape of
+  `references` items, in the index's order: the item's references, then,
+  for a plane removed, its anchors' by anchor ID. Paged by `limit` and
+  `cursor`, bound to `kind`, `id`, `action` and `to`.
+- `cascade`, for a plane, else null: the counts of its `zones`,
+  `anchors`, `stairwells`, `chunks` and `objects` (inventory entries
+  included), and `incoming`, the references from outside the plane to its
+  anchors and zones. `surviving_implicit`, for a plane renamed, else
+  null. `search_ids` with `scope` lists the zones, anchors and stairwells.
+- `own_files`: the snapshot's files that hold the item itself, which the
+  change deletes, moves or edits: a definition's file, a plane's directory
+  (its every file), the file of a zone's, anchor's or stairwell's entry,
+  an object's chunk, the profile for a render layer, the transitions
+  document for a terrain. At most 100 (`own_files_total`,
+  `own_files_truncated`), sharing the byte budget: they take at most a
+  quarter of it, before the breaking references.
+- `diff_allowance`: the allowlist entry `tilewright diff` needs to accept
+  the change (DIFF.md section 4), as `{"list": "remove", "entry": {"kind",
+  "id"}}` or `{"list": "rename", "entry": {"kind", "from", "to"}}`, for
+  the kinds it compares (anchor, definition, object, plane, render layer,
+  stairwell, zone), else null. One entry for a plane covers its zones,
+  anchors, stairwells and, when removed, its objects' uids.
+- `not_covered`: fixed text saying that names inside `json` and `custom`
+  values and in game code, saves or scripts are not seen, and that the
+  format names no stairwell and no object uid.
+
+A render layer that is also a ground layer is refused with
+`impact.not_covered`: removing or renaming it changes the ground layer
+too, whose name chunks use as keys of their terrain grids, which are not
+references. `references` lists what the index records for both.
+
+## Previewing a transaction
+
+`preview_transaction` carries a transaction out in memory, as
+`tilewright tx preview` does (docs/spec/TRANSACTIONS.md), and reports it.
+Nothing is written, locked or published: the plan is dropped when the call
+returns. Applying a transaction stays a reviewed `tilewright tx apply` or
+editor action.
+
+- **Argument.** `transaction` is the transaction document as a JSON object
+  (`format`, `operations`, and optionally `title`, `actor`, `base`,
+  `result` and `custom`), not a path and not a string. It is part of the
+  request, so it is within the message limits (64 KiB, depth 32 for the
+  whole message, 1,000 items an array, 10,000 values). The depth leaves
+  26 nested arrays or objects inside an operation's `value` (tested; 27
+  are refused). A deeper or larger one, a duplicate key,
+  or an integer past 2^53 − 1 is refused as JSON before the tool runs. It
+  may have at most 256 operations; more is `arguments.invalid`. Its bytes,
+  as the request holds them, are what is planned, so spans in refusals
+  index them. `excerpts` (default `false`) adds each file's changed text.
+- **Order.** The arguments are checked, then `revision`, then whether the
+  snapshot loads (`tree.invalid` otherwise). Then the document is read as
+  a transaction: a document that is not one (`jsonc.*`, `tx.shape`) is
+  refused there, with `refused_at: "transaction"`, without reading the
+  tree. Otherwise it is planned on the tree with the library's
+  `plan_in_within`, within the server's budgets (see "Budgets" below):
+  every precondition (the `base` digests, `expect` and `test` values, cell
+  expectations, what each operation needs), the library's limits, and
+  validation of the tree it would leave. A failure is
+  `refused_at: "plan"`. A plan is then given the library's undo check
+  (`Plan::check_undo`, section 8.1), as `tilewright tx preview` does; a
+  refusal there is `refused_at: "undo"`, and the plan's files and resulting
+  revision are still reported.
+- **The snapshot.** The library plans on the tree on disk; the snapshot
+  keeps no file text. So after planning, the server loads the tree again,
+  with the files the plan read laid over it as it read them (the tree as
+  it is now, after a refusal), and requires its revision to be the
+  snapshot's. Otherwise the call fails with `revision.changed`, and
+  `refresh` loads the tree as it now is. So a result is a plan of the
+  snapshot's files, with one exception: the revision covers only the
+  files the loader reads (`World::files`). A transaction may name other
+  files under the root, such as a file under `profile/` that is neither
+  the profile nor a schema it names (`profile/extra.jsonc`). For those,
+  the preview reads the disk as it is at the call, the same revision can
+  give another answer once such a file changes, and a transaction that
+  changes only such files has a `resulting_revision` equal to `revision`;
+  `refresh` does not see a change to them either. The result says when
+  that is so: each listed file has `in_revision`, and `outside_revision`
+  is true when any file the plan read, checked or changed is outside the
+  revision (see "Files"). A change made and undone while
+  the call runs is not seen. The tool error `revision.changed` and the planner's `tx.conflict`
+  differ: the first says the tree moved from under the snapshot, the
+  second that the transaction's own preconditions (its `base` digests, an
+  `expect` or a `test`) do not hold on the snapshot.
+- **What it guarantees.** A preview is a plan against the snapshot, not a
+  promise that applying the transaction later succeeds: the tree can
+  change before then, applying checks every precondition again, and
+  publishing can be refused for reasons of its own (permissions, file
+  systems whose access it cannot check, a staging name in the way;
+  TRANSACTIONS.md section 9), none of which a preview checks.
+- **Result.** `would_apply` is true when nothing refused it. `refused_at`
+  is `null`, `"transaction"`, `"plan"` or `"undo"`. `server_budgets` gives
+  the server's `read_bytes` and `work` budgets, and
+  `server_budget_reached` is true when a refusal is at one of them (see
+  "Budgets"). `outside_revision` is true when a file the plan read,
+  checked or changed is not covered by the revision, false when every one
+  is, and null when there is no plan: a refused plan does not say which
+  files it read. `operations` is the
+  transaction's operation count (`null` when it is not a transaction).
+  `resulting_revision` is the source digest the tree would have, from the
+  validating load that planning makes anyway, so it costs nothing more
+  (`null` when planning failed). `undo_check` is `passed`, `refused` or
+  `not_run`. `files_changed` counts the files it would create, modify or
+  delete, and `files_consulted` those it read or checked but leaves as
+  they are.
+- **Files.** `files` lists the changed files in path order, at most 200
+  (`files_truncated`), each with its root-relative `path`; `change`
+  (`created`, `modified` or `deleted`); `in_revision`, whether a revision
+  covers it: for a file the tree has, whether the snapshot's load read it;
+  for a file the transaction creates, whether the load of the tree it
+  would leave reads it, so a new definition is in and a new file under
+  `profile/` that the profile does not name is not; `before_bytes` and
+  `after_bytes`;
   `before_sha256` and `after_sha256`, the lowercase hex SHA-256 of the
   bytes, as `base` and `result` record them (each `null` where the file is
   absent); and `changed`, the smallest byte range of the new text that
@@ -430,9 +970,12 @@ resolved, so a field only its prototype sets is not found.
 | One string value | 4 KiB before escaping, cut at a character boundary; `truncated_strings` counts the strings cut, and each diagnostic says whether it was cut |
 | `prefix`, `contains`, `scope`, `type`, `field`, `equals` (a string), `plane`, `proto`, `uid_prefix` | 256 bytes |
 | `id` of `inspect` | 512 bytes |
+| `id` and `to` of `references` and `impact` | 2 KiB |
+| `roles` of `references` | 1 to 24 role names; the references examined in one call with `roles` (`scan_limit`): default and at most 10,000 |
+| An `impact` result's own files | 100, taking at most a quarter of the byte budget, before the breaking references |
 | Candidates a search examines in one call (`scan_limit`) | Default and at most 10,000, and 8 MiB of field values parsed again, plus the one value that reaches it (a value can be as large as its file) |
 | `inspect`'s re-read | One file of at most 64 MiB, the format's limit, parsed under the format's limits |
-| A previewed transaction | The message limits, and at most 256 operations; planned within the library's limits (TRANSACTIONS.md section 11), which the server cannot tighten: up to 256 MiB read and 4 GiB of work for the plan and for each undo round |
+| A previewed transaction | The message limits, and at most 256 operations; planned within the library's limits (TRANSACTIONS.md section 11) and the server's tighter budgets: 64 MiB read and 512 MiB of work for the plan and for each undo round |
 | Files and refusals of a preview | 200 files and 500 refusals, sharing the byte budget in that order; `excerpts` cut to 4 KiB |
 | A cursor sent back | 256 bytes |
 | Lists in `world_summary` | 500 planes, 500 layers per plane, 500 definition types, 500 render layers and 500 ground layers, sharing the byte budget in that order; a `*_truncated` flag says when a list was cut |
@@ -496,10 +1039,15 @@ Clients should still treat tool results as data.
 
 ## Not yet
 
-A preview cannot yet tell which of the files it reads or changes the
-revision covers (see "Previewing a transaction"): that needs the loader's
-list of the files it read, planned with the reference index.
-References and the impact of removing or renaming an ID, inspecting an object without a uid, and searching fields
-an object inherits from its prototype are planned or open (issue #30).
+`impact` of a definition type, a ground layer, a render layer that is
+also a ground layer, or a file: removing or renaming one changes what the
+layout ties to its name (the `defs/` directory of a type, the keys of
+chunks' terrain grids, a document's path), which are not all references
+of the index. `references` lists what the index records for each.
+`inspect` could check its re-read file against the snapshot's per-file
+digest (`World::files`), which is stronger than comparing the item; it
+still compares the item. Inspecting an object without a uid, and
+searching fields an object inherits from its prototype, are open
+(issue #30).
 Resources, prompts, an HTTP transport and pack files are out of scope for
 now.
