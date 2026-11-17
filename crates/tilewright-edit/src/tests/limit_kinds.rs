@@ -144,6 +144,20 @@ fn a_file_past_the_file_limit_read_after_another_is_the_file_limit() {
 #[test]
 fn a_file_within_the_file_limit_read_past_the_budget_is_the_budget() {
     let tree = copy();
+    // Exactly the format's limit: within it.
+    fs::write(
+        tree.path().join("defs/proto/huge.jsonc"),
+        vec![b' '; 64 << 20],
+    )
+    .unwrap();
+    let found = refused_within(tree.path(), &transaction(TWO_TESTS), read_budget(64 << 20));
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_limit(
+        "hold more than",
+        LimitKind::ReadBytes,
+        Some(64 << 20),
+        LimitOrigin::Budgets,
+    );
     fs::write(
         tree.path().join("defs/proto/huge.jsonc"),
         vec![b' '; 2 << 20],
