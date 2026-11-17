@@ -121,7 +121,7 @@ which is the item's JSON.
 | `search_objects` | `plane`, `layer`, `bbox`, `proto`, `uid_prefix`, `carried`, `field`, `equals`, `contains`, `limit`, `scan_limit`, `cursor`, `revision` | A page of `objects`, each with `uid`, `plane`, `layer`, `tile`, `proto`, `carried`, `carried_by`, `path`, `position` and the matched field; see "Searching definitions and objects" |
 | `inspect` | `kind` and `id` (both required), `revision` | One item: its `path`, its `span` in that file, and its `value`; see "Inspecting an item" |
 | `references` | `kind` and `id` (both required), `direction`, `roles`, `limit`, `scan_limit`, `cursor`, `revision` | Whether the item `exists`, the `total` of its references, and a page of them: the references of the world format that name it (`direction` `to`) or that it holds (`from`); see "References and impact" |
-| `impact` | `kind`, `id` and `action` (all required), `to` (for a rename), `limit`, `cursor`, `revision` | What removing or renaming the item breaks: `breaking_total` and a page of the `breaking` references, a plane's `cascade` and `surviving_implicit`, the item's `own_files`, the `diff_allowance` and `not_covered`; see "References and impact" |
+| `impact` | `kind`, `id` and `action` (all required), `to` (for a rename), `limit`, `cursor`, `carried_cursor`, `entries_cursor`, `revision` | What removing or renaming the item breaks: `breaking_total` and a page of the `breaking` references, a plane's `cascade` and `surviving_implicit`, the item's `own_files`, for an object removed its `carried` objects, the `diff_allowance` and `not_covered`; see "References and impact" |
 | `preview_transaction` | `transaction` (required), `excerpts`, `revision` | Whether the transaction `would_apply`, the files it would change with their sizes, digests and changed spans, the `resulting_revision`, the undo check and the refusals; see "Previewing a transaction" |
 | `refresh` | none | Reloads the tree: its `revision`, `valid`, the diagnostic count, the `previous_revision`, and whether it `changed` |
 
@@ -441,27 +441,38 @@ without any one of them refuses it (149 cases).
   quarter of it, before the breaking references.
 - `carried`, for an object removed, else null: the objects it carries, at
   any depth, depth first, each with its `uid` (or null), `proto` and
-  `depth` (1 for one it carries itself); at most 100 (`carried_total`,
-  `carried_truncated`). They go with it; nothing names them.
+  `depth` (1 for one it carries itself); at most 100 a call
+  (`carried_total`, `carried_truncated`). They go with it; nothing names
+  them. `carried_offset` is the index of the first one listed (null with
+  `carried`), and `carried_next_cursor`, while more remain, gives the
+  rest: call again with the same `kind`, `id`, `action` and `to` and
+  `carried_cursor` set to it.
 - `diff_allowance`: the allowlist entries `tilewright diff` needs to
   accept the change (DIFF.md section 4), as `{"list": "remove" or
-  "rename", "entries": [...], "entries_total", "entries_truncated"}`,
+  "rename", "entries": [...], "entries_total", "entries_truncated",
+  "entries_offset", "entries_next_cursor"}`,
   each entry `{"kind", "id"}` or `{"kind", "from", "to"}`, for the kinds
   it compares (anchor, definition, object, plane, render layer,
   stairwell, zone), else null. An object removed needs one entry for its
-  uid and one for each uid it carries; at most 100 are listed. When
-  `entries_truncated` or `carried_truncated` is true, the allowance is
-  incomplete: find the rest with `search_objects` with the object's
-  `plane`, its `layer` and a `bbox` of its tile (carried objects are at
-  their carrier's tile; `carried` true, the default), and keep the items
-  whose `position` starts with the object's own position, which
-  `search_objects` gives for it too; `carried_by` names only a carrier
-  that has a uid, so it does not find everything under carriers without
-  one. One entry
+  uid and one for each uid it carries, in that order; at most 100 are
+  listed a call. When `entries_truncated` is true, the entries listed are
+  not the whole allowance: `entries_next_cursor` gives the rest, from
+  `entries_offset` on. Call again with the same `kind`, `id`, `action`
+  and `to` and `entries_cursor` set to it, until it is null; the pages
+  together are every entry once, in order, and exactly the allowance
+  (tested with `tilewright diff --allow` on an object that carries 120
+  objects with uids: 121 entries over two pages, accepted, and refused
+  with the first page alone or any entry left out). One entry
   for a plane covers its zones, anchors and stairwells, and, when it is
   removed, its objects' uids, by DIFF.md's rules for a plane's entry.
   `carried` and the entries each take at most an eighth of the byte
   budget, before the breaking references.
+- **Cursors.** `cursor`, `carried_cursor` and `entries_cursor` each page
+  one list, and are bound, as every cursor is, to the snapshot, to their
+  list and to `kind`, `id`, `action` and `to`: a cursor of one list is
+  refused for another (`cursor.invalid`). Each list a call has no cursor
+  for is its first page, so a call that pages one list repeats the
+  first page of the others; a call may give several cursors.
 - `not_covered`: fixed text saying that names inside `json` and `custom`
   values and in game code, saves or scripts are not seen, that the format
   names no stairwell and no object uid, and that rules of the format that
@@ -811,7 +822,6 @@ also a ground layer, or a file: removing or renaming one changes what the
 layout ties to its name (the `defs/` directory of a type, the keys of
 chunks' terrain grids, a document's path), which are not all references
 of the index. `references` lists what the index records for each.
-A cursor on `impact`'s `carried` and allowance entries, past their 100.
 `inspect` could check its re-read file against the snapshot's per-file
 digest (`World::files`), which is stronger than comparing the item; it
 still compares the item. Inspecting an object without a uid, and

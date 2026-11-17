@@ -590,7 +590,7 @@ fn unlist(root: &Path, plane: &str) {
 /// Whether `tilewright diff` of `old` and `new` reports a removal or
 /// rename it does not allow, with `entries` of `list` as the allowlist.
 /// This is the comparison `tilewright diff --allow` makes.
-fn breaking_with(old: &Path, new: &Path, list: &str, entries: &[String]) -> bool {
+pub(super) fn breaking_with(old: &Path, new: &Path, list: &str, entries: &[String]) -> bool {
     let limits = tilewright_diff::Limits::default();
     let old = tilewright_diff::load(old, &limits).unwrap();
     let new = tilewright_diff::load(new, &limits).unwrap();
