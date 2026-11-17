@@ -62,6 +62,7 @@
 
 mod diagnostic;
 mod engine;
+mod limit;
 mod operations;
 mod publish;
 mod render;
@@ -70,12 +71,14 @@ mod terrain;
 mod transaction;
 mod uids;
 
+pub use limit::{Limit, LimitKind, LimitOrigin, Refusal};
 pub use publish::{
     PUBLISH_CONFINED, PUBLISH_SUPPORTED, PublishError, PublishOptions, Published, UNCHECKED_ACCESS,
 };
 pub use transaction::{Digests, FORMAT, Transaction};
 
 use engine::{Failure, Names, Primitive, Workspace};
+use limit::Limit as FoundLimit;
 use render::json_string;
 use sha2::{Digest as _, Sha256};
 use splice::Step;
@@ -394,7 +397,7 @@ pub(crate) fn staging_path(path: &str) -> String {
 struct Problems<'a> {
     name: &'a str,
     lines: diagnostic::Lines<'a>,
-    found: Vec<Diagnostic>,
+    found: Vec<(Diagnostic, Option<FoundLimit>)>,
     /// Whether a problem was dropped, or checking stopped, at the limit.
     more: bool,
 }
@@ -413,13 +416,16 @@ impl<'a> Problems<'a> {
         if self.full() {
             return;
         }
-        self.found.push(diagnostic::at(
-            self.name,
-            &self.lines,
-            span.start,
-            span.end,
-            failure.code.as_str(),
-            failure.message,
+        self.found.push((
+            diagnostic::at(
+                self.name,
+                &self.lines,
+                span.start,
+                span.end,
+                failure.code.as_str(),
+                failure.message,
+            ),
+            failure.limit,
         ));
     }
 
@@ -436,15 +442,19 @@ impl<'a> Problems<'a> {
     }
 
     /// The problems in order, with the note if there may be more.
-    fn finish(self) -> Vec<Diagnostic> {
+    fn finish(self) -> Refusal {
         let mut found = self.found;
-        found.sort();
-        found.dedup();
+        limit::sort(&mut found);
         if self.more {
-            found.push(more_note(self.name));
+            found.push((more_note(self.name), Some(diagnostics_limit())));
         }
-        found
+        Refusal::new(found)
     }
+}
+
+/// The limit on the diagnostics of one transaction.
+fn diagnostics_limit() -> FoundLimit {
+    FoundLimit::count(LimitKind::Diagnostics, limits::DIAGNOSTICS)
 }
 
 /// The note, in the last place of a transaction's problems, that there may
@@ -571,6 +581,7 @@ fn check_recorded(
                         "replaying the transaction gives other bytes than its result records for {}",
                         diagnostic::listed(differing.iter().map(|path| path.as_str()))
                     ),
+                    limit: None,
                 },
             );
         }
@@ -582,7 +593,7 @@ fn check_recorded(
 fn check_terrain_addresses(
     transaction: &Transaction,
     problem: impl Fn(&str, &str) -> Option<String>,
-) -> Vec<Diagnostic> {
+) -> Option<Refusal> {
     let mut problems = Problems::new(transaction);
     for operation in &transaction.operations {
         if problems.full() {
@@ -595,9 +606,9 @@ fn check_terrain_addresses(
         }
     }
     if problems.is_empty() {
-        Vec::new()
+        None
     } else {
-        problems.finish()
+        Some(problems.finish())
     }
 }
 
@@ -630,15 +641,14 @@ fn load_result(
     load: &LoadOptions,
     transaction: &Transaction,
     files: &[FileChange],
-) -> Result<World, Vec<Diagnostic>> {
-    let world = tilewright_source::load_edited_in(source, load, &overlay(files))?;
-    let problems = check_terrain_addresses(transaction, |plane, grid| {
+) -> Result<World, Refusal> {
+    let world =
+        tilewright_source::load_edited_in(source, load, &overlay(files)).map_err(Refusal::plain)?;
+    match check_terrain_addresses(transaction, |plane, grid| {
         terrain_problem(&world, plane, grid)
-    });
-    if problems.is_empty() {
-        Ok(world)
-    } else {
-        Err(problems)
+    }) {
+        None => Ok(world),
+        Some(problems) => Err(problems),
     }
 }
 
@@ -712,7 +722,7 @@ fn carry_out<'r>(
     transaction: &Transaction,
     options: &Options,
     budgets: Budgets,
-) -> Result<Workspace<'r>, Vec<Diagnostic>> {
+) -> Result<Workspace<'r>, Refusal> {
     let mut workspace = Workspace::new(source, under, names, budgets);
     let mut problems = Problems::new(transaction);
     let done = if options.rebase {
@@ -778,28 +788,35 @@ fn records(
     workspace: &Workspace<'_>,
     files: &[FileChange],
     names: Names,
-) -> Result<Records, Vec<Diagnostic>> {
+) -> Result<Records, Refusal> {
     let sealed = seal(transaction, files);
-    let too_large = |what: &str, detail: &str| {
-        vec![diagnostic::file(
-            &transaction.name,
-            Code::Limit.as_str(),
-            format!(
-                "{what} would exceed the limits of a transaction{detail}; split the transaction"
+    // Past the size of a transaction, that size is the bound; a form that
+    // does not parse for another reason has no one bound.
+    let too_large = |what: &str, detail: &str, bound: Option<u64>| {
+        Refusal::new(vec![(
+            diagnostic::file(
+                &transaction.name,
+                Code::Limit.as_str(),
+                format!(
+                    "{what} would exceed the limits of a transaction{detail}; split the transaction"
+                ),
             ),
-        )]
+            Some(FoundLimit::library(LimitKind::Records, bound)),
+        )])
     };
-    let inverse = inverse(workspace).map_err(|TooLarge| too_large(names.inverse, ""))?;
+    let size = u64::try_from(Limits::default().max_input_bytes).unwrap_or(u64::MAX);
+    let inverse =
+        inverse(workspace).map_err(|TooLarge| too_large(names.inverse, "", Some(size)))?;
     let detail = |found: &[Diagnostic]| {
         found.first().map_or_else(String::new, |problem| {
             format!(": {} ({})", problem.message, problem.code)
         })
     };
     if let Err(found) = Transaction::parse(&transaction.name, sealed.as_str()) {
-        return Err(too_large(names.sealed, &detail(&found)));
+        return Err(too_large(names.sealed, &detail(&found), None));
     }
     let parsed_inverse = Transaction::parse(&transaction.name, inverse.as_str())
-        .map_err(|found| too_large(names.inverse, &detail(&found)))?;
+        .map_err(|found| too_large(names.inverse, &detail(&found), None))?;
     Ok(Records {
         sealed,
         inverse,
@@ -861,6 +878,24 @@ pub fn plan_in_within(
     options: &Options,
     budgets: Budgets,
 ) -> Result<Plan, Vec<Diagnostic>> {
+    plan_in_within_detailed(root, transaction, options, budgets).map_err(Refusal::into_diagnostics)
+}
+
+/// Plans `transaction` as [`plan_in_within`] does, and when it is refused
+/// says, beside the same diagnostics, which limit each `tx.limit` among
+/// them reports ([`Refusal::limit`]): so a caller can tell a refusal at
+/// its own [`Budgets`] from one at a limit no budget widens, without
+/// reading messages.
+///
+/// # Errors
+/// The diagnostics [`plan_in_within`] returns, in the same order, with
+/// their limits.
+pub fn plan_in_within_detailed(
+    root: &SourceRoot,
+    transaction: &Transaction,
+    options: &Options,
+    budgets: Budgets,
+) -> Result<Plan, Refusal> {
     let source = root.try_clone();
     // The edited world's diagnostics are a transaction's too, and the
     // loader's note of those it dropped takes the last place.
@@ -913,7 +948,7 @@ fn carry_out_round(
     transaction: &Transaction,
     options: &Options,
     budgets: Budgets,
-) -> Result<(Vec<FileChange>, Transaction), Vec<Diagnostic>> {
+) -> Result<(Vec<FileChange>, Transaction), Refusal> {
     let workspace = carry_out(
         (source, under),
         Names::NESTED,
@@ -992,6 +1027,19 @@ impl Plan {
     /// would refuse the round that fails, with that problem's code:
     /// `tx.limit` for a budget or a limit.
     pub fn check_undo(&self) -> Result<(), Vec<Diagnostic>> {
+        self.check_undo_detailed()
+            .map_err(Refusal::into_diagnostics)
+    }
+
+    /// Checks that this plan can be undone and redone, as
+    /// [`Plan::check_undo`] does, and when a round is refused says, beside
+    /// the same diagnostics, which limit each `tx.limit` among them
+    /// reports: the limit that refused the round ([`Refusal::limit`]).
+    ///
+    /// # Errors
+    /// The diagnostics [`Plan::check_undo`] returns, in the same order,
+    /// with their limits.
+    pub fn check_undo_detailed(&self) -> Result<(), Refusal> {
         let options = Options {
             load: self.load,
             rebase: false,
@@ -1004,7 +1052,7 @@ impl Plan {
             .filter(|file| file.is_changed())
             .map(|file| (file.path.clone(), file.after.clone()))
             .collect();
-        let mut current = Transaction::parse(&self.name, self.inverse.as_str())
+        let mut current = Transaction::parse_detailed(&self.name, self.inverse.as_str())
             .map_err(|problems| self.refused("its inverse is not a transaction", problems))?;
         let mut previous: Option<Transaction> = None;
         for what in ROUNDS {
@@ -1026,25 +1074,26 @@ impl Plan {
             }
             previous = Some(std::mem::replace(&mut current, next));
         }
-        Err(vec![diagnostic::file(
+        Err(Refusal::plain(vec![diagnostic::file(
             &self.name,
             Code::Result.as_str(),
             "the transaction could not be checked for undo: its undo and redo do not settle into a cycle by the fourth round; this is an internal error",
-        )])
+        )]))
     }
 
     /// The problems of a round of the undo check, on the transaction's
     /// name, each after `what` failed; the note that there may be more
     /// stays last.
-    fn refused(&self, what: &str, mut problems: Vec<Diagnostic>) -> Vec<Diagnostic> {
+    fn refused(&self, what: &str, problems: Refusal) -> Refusal {
+        let mut problems = problems.into_pairs();
         let note = problems
             .last()
-            .is_some_and(|last| *last == more_note(&self.name))
+            .is_some_and(|last| last.0 == more_note(&self.name))
             .then(|| problems.pop())
             .flatten();
-        let mut found: Vec<Diagnostic> = problems
+        let mut found: Vec<(Diagnostic, Option<FoundLimit>)> = problems
             .into_iter()
-            .map(|problem| {
+            .map(|(problem, limit)| {
                 let split = if problem.code == Code::Limit.as_str()
                     && !problem.message.ends_with("; split the transaction")
                 {
@@ -1052,17 +1101,19 @@ impl Plan {
                 } else {
                     ""
                 };
-                diagnostic::file(
-                    &self.name,
-                    problem.code,
-                    format!("{what}: {}{split}", problem.message),
+                (
+                    diagnostic::file(
+                        &self.name,
+                        problem.code,
+                        format!("{what}: {}{split}", problem.message),
+                    ),
+                    limit,
                 )
             })
             .collect();
-        found.sort();
-        found.dedup();
+        limit::sort(&mut found);
         found.extend(note);
-        found
+        Refusal::new(found)
     }
 }
 

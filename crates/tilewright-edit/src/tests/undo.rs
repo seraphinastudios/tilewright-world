@@ -38,9 +38,10 @@ fn published(plan: &Plan) {
 /// The check's problems, which must refuse `plan` at the transaction's
 /// name.
 fn refused(plan: &Plan) -> Vec<Diagnostic> {
-    let found = plan
-        .check_undo()
-        .expect_err("the undo check should refuse the plan");
+    let found = limit_kinds::kept(
+        plan.check_undo_detailed()
+            .expect_err("the undo check should refuse the plan"),
+    );
     assert!(
         found
             .iter()
@@ -96,7 +97,7 @@ fn operations(text: &str) -> usize {
 
 /// A tree with `chunks` chunks of grass on layer 2 of the overworld, and
 /// `values` more floor protos, `p00` on.
-fn painted(chunks: i64, values: usize) -> tempfile::TempDir {
+pub(super) fn painted(chunks: i64, values: usize) -> tempfile::TempDir {
     let tree = copy();
     let root = tree.path();
     for value in 0..values {
@@ -125,7 +126,7 @@ fn painted(chunks: i64, values: usize) -> tempfile::TempDir {
 
 /// A thin stroke along row 0 of every chunk of [`painted`]: its first
 /// `values` cells, each a value the palette lacks.
-fn stroke(chunks: i64, values: usize) -> Transaction {
+pub(super) fn stroke(chunks: i64, values: usize) -> Transaction {
     let lines: Vec<String> = (0..chunks)
         .map(|cx| {
             (0..values)
@@ -167,6 +168,13 @@ fn a_stroke_whose_undo_could_not_hold_its_redo_is_refused() {
         ),
         "{found:#?}"
     );
+    // Not a transaction for a reason other than one bound of its own.
+    limit_kinds::assert_limit(
+        "exceed the limits",
+        LimitKind::Records,
+        None,
+        LimitOrigin::Library,
+    );
     // Applied anyway, its undo is refused for that reason.
     published(&plan);
     let undo = problems(root, &reparsed("undo.jsonc", plan.inverse()));
@@ -177,6 +185,12 @@ fn a_stroke_whose_undo_could_not_hold_its_redo_is_refused() {
             "the inverse would exceed the limits of a transaction: invalid JSONC (jsonc.too_many_lines)"
         ),
         "{undo:#?}"
+    );
+    limit_kinds::assert_limit(
+        "exceed the limits",
+        LimitKind::Records,
+        None,
+        LimitOrigin::Library,
     );
 }
 
@@ -300,6 +314,17 @@ fn an_undo_that_would_read_past_the_budget_is_refused() {
         ),
         "{found:#?}"
     );
+    // The undo round's refusal names the read budget it was carried out
+    // within, which the test lowered.
+    let below = copy();
+    let _lowered = Lowered::to(least - 1, limits::WORK);
+    refused(&planned(below.path(), &tx));
+    limit_kinds::assert_limit(
+        "hold more than",
+        LimitKind::ReadBytes,
+        Some(least - 1),
+        LimitOrigin::Budgets,
+    );
 }
 
 /// The fixture with a chunk on layer 3 of the overworld that holds 32 rows
@@ -363,6 +388,17 @@ fn an_undo_that_would_need_more_work_than_the_budget_is_refused() {
         ) && has(&found, "tx.limit", "bytes of work"),
         "{found:#?}"
     );
+    {
+        let below = heavy(16);
+        let _lowered = Lowered::to(limits::READ_BYTES, least - 1);
+        refused(&planned(below.path(), &tx));
+        limit_kinds::assert_limit(
+            "could not be undone",
+            LimitKind::Work,
+            Some(least - 1),
+            LimitOrigin::Budgets,
+        );
+    }
     // The step itself needs a small part of that.
     let tree = heavy(16);
     let _lowered = Lowered::to(limits::READ_BYTES, least / 4);
@@ -380,7 +416,7 @@ fn a_redo_that_would_need_more_work_than_the_budget_is_refused() {
         column(),
         "y".repeat(8 << 10)
     ));
-    let (_, found) = boundary(|| heavy(16), &tx, Budget::Work);
+    let (least, found) = boundary(|| heavy(16), &tx, Budget::Work);
     assert!(
         has(
             &found,
@@ -389,6 +425,15 @@ fn a_redo_that_would_need_more_work_than_the_budget_is_refused() {
         ) && has(&found, "tx.limit", "bytes of work")
             && !has(&found, "tx.limit", "could not be undone"),
         "{found:#?}"
+    );
+    let below = heavy(16);
+    let _lowered = Lowered::to(limits::READ_BYTES, least - 1);
+    refused(&planned(below.path(), &tx));
+    limit_kinds::assert_limit(
+        "could not be redone",
+        LimitKind::Work,
+        Some(least - 1),
+        LimitOrigin::Budgets,
     );
 }
 
@@ -717,14 +762,28 @@ fn the_note_that_there_may_be_more_stays_last_and_as_it_is() {
         ),
     );
     let note = more_note("tx.jsonc");
-    let found = plan.refused(
+    let work = crate::Limit::work(crate::Budgets::default().with_work(5));
+    let diagnostics = crate::Limit::count(crate::LimitKind::Diagnostics, 1000);
+    let refusal = plan.refused(
         "the transaction could not be undone",
-        vec![
-            diagnostic::file("tx.jsonc", "tx.limit", "a limit"),
-            diagnostic::file("tx.jsonc", "tx.conflict", "a conflict"),
-            note.clone(),
-        ],
+        crate::Refusal::new(vec![
+            (
+                diagnostic::file("tx.jsonc", "tx.limit", "a limit"),
+                Some(work),
+            ),
+            (
+                diagnostic::file("tx.jsonc", "tx.conflict", "a conflict"),
+                None,
+            ),
+            (note.clone(), Some(diagnostics)),
+        ]),
     );
+    // Each limit stays with its diagnostic, which sorting moved.
+    assert_eq!(
+        (0..4).map(|index| refusal.limit(index)).collect::<Vec<_>>(),
+        [None, Some(work), Some(diagnostics), None]
+    );
+    let found = refusal.diagnostics();
     assert_eq!(found.last(), Some(&note));
     assert_eq!(
         found[..2]
@@ -1117,6 +1176,13 @@ fn files_at_their_result_have_an_allowance_of_the_budget_and_no_more() {
     let found = problems(root, &all_done(root, &ids));
     assert_eq!(found.len(), 1, "{found:#?}");
     assert!(has(&found, "tx.limit", "hold more than"), "{found:#?}");
+    // Settled as done, the third file passed the allowance of such files.
+    limit_kinds::assert_limit(
+        "hold more than",
+        LimitKind::ReadBytes,
+        Some(2 * size),
+        LimitOrigin::Budgets,
+    );
 }
 
 #[test]
@@ -1611,12 +1677,13 @@ fn plan_within(
     transaction: &Transaction,
     budgets: Budgets,
 ) -> Result<Plan, Vec<Diagnostic>> {
-    crate::plan_in_within(
+    crate::plan_in_within_detailed(
         &SourceRoot::new(root),
         transaction,
         &Options::default(),
         budgets,
     )
+    .map_err(limit_kinds::kept)
 }
 
 /// Budgets of at most `read_bytes` read and `work` work, as a caller
@@ -1663,8 +1730,20 @@ fn tight_budgets_refuse_what_the_default_ones_plan() {
     assert_eq!(planned.budgets(), Budgets::default());
     let read = plan_within(root, &tx, budgets(64, limits::WORK)).unwrap_err();
     assert!(has(&read, "tx.limit", "64 bytes"), "{read:#?}");
+    limit_kinds::assert_limit(
+        "64 bytes",
+        LimitKind::ReadBytes,
+        Some(64),
+        LimitOrigin::Budgets,
+    );
     let work = plan_within(root, &tx, budgets(limits::READ_BYTES, 64)).unwrap_err();
     assert!(has(&work, "tx.limit", "64 bytes of work"), "{work:#?}");
+    limit_kinds::assert_limit(
+        "64 bytes of work",
+        LimitKind::Work,
+        Some(64),
+        LimitOrigin::Budgets,
+    );
     // At what it needs, it plans, with the same result.
     let within = plan_within(root, &tx, budgets(1 << 20, 1 << 20)).unwrap();
     assert_eq!(within.budgets(), budgets(1 << 20, 1 << 20));
@@ -1693,6 +1772,17 @@ fn the_undo_check_keeps_the_budgets_of_its_plan() {
             "could not be undone: its inverse would be refused"
         ) && has(&found, "tx.limit", &format!("{} bytes of work", least - 1)),
         "{found:#?}"
+    );
+    // The budget the caller gave the plan, not one a test lowered.
+    assert_eq!(
+        limit_kinds::kept(below.check_undo_detailed().unwrap_err()),
+        found
+    );
+    limit_kinds::assert_limit(
+        "bytes of work",
+        LimitKind::Work,
+        Some(least - 1),
+        LimitOrigin::Budgets,
     );
     plan_within(root, &tx, budgets(limits::READ_BYTES, least))
         .unwrap()

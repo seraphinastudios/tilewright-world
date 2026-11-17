@@ -4,6 +4,7 @@
 use super::*;
 use std::{collections::BTreeMap, fmt::Write as _, fs};
 
+mod limit_kinds;
 mod undo;
 
 const CHUNK: &str = "planes/overworld/layers/0/0_0.jsonc";
@@ -102,9 +103,15 @@ fn apply(root: &Path, transaction: &Transaction) -> Plan {
 }
 
 fn problems(root: &Path, transaction: &Transaction) -> Vec<Diagnostic> {
-    match plan(root, transaction, &Options::default()) {
+    // As `plan` plans, with the limits beside its diagnostics.
+    match plan_in_within_detailed(
+        &SourceRoot::new(root),
+        transaction,
+        &Options::default(),
+        Budgets::default(),
+    ) {
         Ok(_) => panic!("the transaction should fail"),
-        Err(problems) => problems,
+        Err(refusal) => limit_kinds::kept(refusal),
     }
 }
 
@@ -1035,7 +1042,8 @@ fn wrap(operations: &str) -> String {
 
 fn rejected(cases: &[(String, &str, &str)]) {
     for (text, code, message) in cases {
-        let found = Transaction::parse("t.jsonc", text.as_str()).unwrap_err();
+        let found =
+            limit_kinds::kept(Transaction::parse_detailed("t.jsonc", text.as_str()).unwrap_err());
         let shown: String = text.chars().take(300).collect();
         assert!(has(&found, code, message), "{shown}: {found:#?}");
     }
@@ -1142,6 +1150,43 @@ fn transactions_are_bounded() {
             "more than 100000 operations",
         ),
     ]);
+    limit_kinds::assert_limit(
+        "more than 100000 operations",
+        LimitKind::Operations,
+        Some(100_000),
+        LimitOrigin::Library,
+    );
+    let long = wrap(&format!(
+        r#"{{"op": "test", "path": "world.jsonc", "pointer": [{}], "absent": true}}"#,
+        long.join(", ")
+    ));
+    rejected(&[(long, "tx.limit", "at most 64 steps")]);
+    limit_kinds::assert_limit(
+        "at most 64 steps",
+        LimitKind::PointerSteps,
+        Some(64),
+        LimitOrigin::Library,
+    );
+    // The cell limit, LimitKind::Cells, is checked too, but a document
+    // within the parser's bound on values holds at most about 200,000
+    // cells, so no transaction reaches it.
+    let entries: Vec<String> = (0..=limits::FILES)
+        .map(|index| format!(r#"{{"path": "defs/n{index}.jsonc", "sha256": null}}"#))
+        .collect();
+    rejected(&[(
+        format!(
+            "{{\"format\": \"tilewright.transaction/1\", \"base\": [{}], \"operations\": []}}",
+            entries.join(",")
+        ),
+        "tx.limit",
+        "more than 10000 files",
+    )]);
+    limit_kinds::assert_limit(
+        "more than 10000 files",
+        LimitKind::Files,
+        Some(10_000),
+        LimitOrigin::Library,
+    );
 }
 
 #[test]
@@ -1271,6 +1316,12 @@ fn work_is_metered_and_planning_stops_at_the_budget() {
         has(&found, "tx.limit", "bytes of work"),
         "{:#?}",
         &found[..3]
+    );
+    limit_kinds::assert_limit(
+        "bytes of work",
+        LimitKind::Work,
+        Some(limits::WORK),
+        LimitOrigin::Library,
     );
     assert!(found.len() <= limits::DIAGNOSTICS + 1);
     assert!(
@@ -1448,6 +1499,13 @@ fn reading_stops_at_the_read_budget() {
     );
     // Seven files fit the 256 MiB budget; nothing past the eighth is read.
     assert!(found.len() <= 8, "{found:#?}");
+    // Each file is within the format's 64 MiB: the budget refused it.
+    limit_kinds::assert_limit(
+        "hold more than",
+        LimitKind::ReadBytes,
+        Some(limits::READ_BYTES),
+        LimitOrigin::Library,
+    );
 }
 
 #[test]
@@ -1535,6 +1593,12 @@ fn one_operation_touches_a_bounded_number_of_chunks() {
         has(&found, "tx.limit", "more than 10000 chunks"),
         "{found:#?}"
     );
+    limit_kinds::assert_limit(
+        "more than 10000 chunks",
+        LimitKind::TerrainChunks,
+        Some(10_000),
+        LimitOrigin::Library,
+    );
 }
 
 #[test]
@@ -1564,6 +1628,12 @@ fn the_inverse_log_is_bounded_while_carrying_out() {
         "{found:#?}"
     );
     assert_eq!(found.len(), 1);
+    limit_kinds::assert_limit(
+        "the inverse would hold more than",
+        LimitKind::InverseBytes,
+        Some(64 << 20),
+        LimitOrigin::Library,
+    );
 }
 
 #[cfg(unix)]
@@ -2268,6 +2338,12 @@ fn the_file_limit_stops_carrying_out() {
     let found = problems(tree.path(), &transaction(&operations.join(",\n    ")));
     assert_eq!(found.len(), 1, "{:#?}", &found[..found.len().min(5)]);
     assert!(has(&found, "tx.limit", "more than"), "{found:#?}");
+    limit_kinds::assert_limit(
+        "touches more than 10000 files",
+        LimitKind::Files,
+        Some(10_000),
+        LimitOrigin::Library,
+    );
 }
 
 #[test]
@@ -2461,6 +2537,13 @@ fn an_edit_past_a_parser_bound_is_a_limit() {
         ),
     );
     assert!(has(&found, "tx.limit", "invalid"), "{found:#?}");
+    // The parser's bound on an object's keys.
+    limit_kinds::assert_limit(
+        "invalid",
+        LimitKind::Document,
+        Some(256),
+        LimitOrigin::Library,
+    );
 }
 
 #[test]
@@ -2480,6 +2563,13 @@ fn an_oversized_file_stops_carrying_out() {
     );
     assert_eq!(found.len(), 1, "{found:#?}");
     assert_eq!(found[0].code, "tx.limit", "{found:#?}");
+    // The first file read, past the format's limit on a file.
+    limit_kinds::assert_limit(
+        "file is too large",
+        LimitKind::FileSize,
+        Some(64 << 20),
+        LimitOrigin::Library,
+    );
 }
 
 #[test]
@@ -2542,6 +2632,12 @@ fn an_edit_past_a_parser_bound_stops_carrying_out() {
     );
     assert_eq!(found.len(), 1, "{found:#?}");
     assert_eq!(found[0].code, "tx.limit", "{found:#?}");
+    limit_kinds::assert_limit(
+        "invalid",
+        LimitKind::Document,
+        Some(256),
+        LimitOrigin::Library,
+    );
 }
 
 #[test]
@@ -2563,6 +2659,12 @@ fn unreadable_files_count_toward_the_file_limit() {
     }));
     let found = problems(tree.path(), &transaction(&operations.join(",\n    ")));
     assert!(has(&found, "tx.limit", "more than"), "{found:#?}");
+    limit_kinds::assert_limit(
+        "touches more than 10000 files",
+        LimitKind::Files,
+        Some(10_000),
+        LimitOrigin::Library,
+    );
 }
 
 #[test]
@@ -3188,12 +3290,19 @@ fn moves_that_cancel_out_keep_no_inverse_steps() {
 #[test]
 fn a_transaction_with_more_problems_than_reported_says_so() {
     let operations = vec![r#"{"op": "frob"}"#; limits::DIAGNOSTICS + 100].join(", ");
-    let found = Transaction::parse("t.jsonc", wrap(&operations)).unwrap_err();
+    let found =
+        limit_kinds::kept(Transaction::parse_detailed("t.jsonc", wrap(&operations)).unwrap_err());
     assert_eq!(found.len(), limits::DIAGNOSTICS);
     assert!(
         has(&found, "tx.limit", "the rest are not reported"),
         "{:#?}",
         &found[..3]
+    );
+    limit_kinds::assert_limit(
+        "the rest are not reported",
+        LimitKind::Diagnostics,
+        Some(1_000),
+        LimitOrigin::Library,
     );
 }
 
@@ -3217,6 +3326,12 @@ fn a_terrain_operation_past_the_chunk_limit_stops_carrying_out() {
     let found = problems(tree.path(), &transaction(&operations));
     assert_eq!(found.len(), 1, "{:#?}", &found[..found.len().min(3)]);
     assert!(has(&found, "tx.limit", "chunks"), "{found:#?}");
+    limit_kinds::assert_limit(
+        "chunks",
+        LimitKind::TerrainChunks,
+        Some(10_000),
+        LimitOrigin::Library,
+    );
 }
 
 #[test]
@@ -3255,6 +3370,12 @@ fn a_plan_with_more_problems_than_reported_says_so() {
         has(&found, "tx.limit", "there may be more"),
         "{:#?}",
         &found[..3]
+    );
+    limit_kinds::assert_limit(
+        "there may be more",
+        LimitKind::Diagnostics,
+        Some(1_000),
+        LimitOrigin::Library,
     );
 }
 
