@@ -2464,6 +2464,26 @@ fn a_root_and_what_is_in_it_exist() {
     assert!(!missing.exists("").unwrap());
 }
 
+/// Links in `directory` to its `file.jsonc` and `sub`, and what `length`
+/// and `read` say of paths through them; on Unix only, where a test can
+/// make links without privileges.
+fn links(directory: &Path) -> Vec<(&'static str, &'static str)> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("file.jsonc", directory.join("link.jsonc")).unwrap();
+        std::os::unix::fs::symlink("sub", directory.join("linked")).unwrap();
+        vec![
+            ("link.jsonc", "link link.jsonc"),
+            ("linked/deep.jsonc", "link linked"),
+        ]
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = directory;
+        Vec::new()
+    }
+}
+
 /// The class of an access result, to compare `length` with `read`.
 fn access_class<T>(result: &Result<Option<T>, crate::AccessError>) -> String {
     match result {
@@ -2491,7 +2511,7 @@ fn a_length_is_checked_as_a_read_is_and_reads_nothing() {
     assert_eq!(root.length("sub/deep.jsonc").unwrap(), Some(300));
     assert_eq!(root.length("nope.jsonc").unwrap(), None);
     assert_eq!(root.length("nope/deeper.jsonc").unwrap(), None);
-    let mut cases = vec![
+    let cases = [
         ("file.jsonc", "found"),
         ("sub/deep.jsonc", "found"),
         ("nope.jsonc", "missing"),
@@ -2500,17 +2520,9 @@ fn a_length_is_checked_as_a_read_is_and_reads_nothing() {
         ("../file.jsonc", "path ../file.jsonc"),
         ("sub/../file.jsonc", "path sub/../file.jsonc"),
         ("/file.jsonc", "path /file.jsonc"),
+        ("sub\\deep.jsonc", "path sub\\deep.jsonc"),
     ];
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink("file.jsonc", directory.path().join("link.jsonc")).unwrap();
-        std::os::unix::fs::symlink("sub", directory.path().join("linked")).unwrap();
-        cases.extend([
-            ("link.jsonc", "link link.jsonc"),
-            ("linked/deep.jsonc", "link linked"),
-        ]);
-    }
-    for (path, expected) in cases {
+    for (path, expected) in cases.into_iter().chain(links(directory.path())) {
         let length = root.length(path);
         // Whatever reading says of the path, its length says too.
         let read = root.read(path, u64::MAX);
