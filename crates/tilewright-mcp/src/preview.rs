@@ -17,7 +17,9 @@ use crate::{
     snapshot::Valid,
 };
 use std::{fmt::Write as _, path::Path};
-use tilewright_edit::{Budgets, FileChange, Options, Plan, Transaction, digest};
+use tilewright_edit::{
+    Budgets, FileChange, Limit, LimitOrigin, Options, Plan, Refusal, Transaction, digest,
+};
 use tilewright_source::{Diagnostic, LoadOptions, Overlay, SourceRoot, World};
 
 /// The name a transaction's own diagnostics carry as their `path`. No
@@ -51,31 +53,41 @@ pub fn budgets() -> Budgets {
         .with_work(WORK)
 }
 
-/// Whether `diagnostic` is a refusal at the server's read or work budget.
-///
-/// The library gives no structured kind of limit, so this reads its
-/// message text: a `tx.limit` whose message holds the library's whole
-/// phrase for a refusal at the read budget ("the touched files hold more
-/// than N bytes") or the work budget ("needs more than N bytes of work"),
-/// with the server's N, as `tilewright-edit` 0.2.1 words them; an undo
-/// round quotes the same phrase after its own words. A bare number is not
-/// enough: the read budget is the format's 64 MiB, which the library's
-/// fixed limit on an inverse's size also names. The library's own budgets
-/// are larger, so its refusals at them never match. One refusal this
-/// cannot tell apart: a file past the format's 64 MiB read after another
-/// file, which the library reports in the read budget's words because the
-/// allowance left is then below the per-file limit; `tilewright tx apply`
-/// refuses it too (docs/MCP.md, "Budgets"). Tests pin the wording
-/// on both sides of each budget and for the inverse limit, so a change in
-/// the library's text fails them rather than silently turning this off.
-fn at_server_budget(diagnostic: &Diagnostic, budgets: Budgets) -> bool {
-    let read = format!(
-        "the touched files hold more than {} bytes",
-        budgets.read_bytes()
-    );
-    let work = format!("needs more than {} bytes of work", budgets.work());
-    diagnostic.code == tilewright_edit::Code::Limit.as_str()
-        && (diagnostic.message.contains(&read) || diagnostic.message.contains(&work))
+/// Refusals, and for each the limit the library says refused it, if any
+/// (`tilewright_edit::Refusal::limit`).
+pub(crate) struct Refused {
+    diagnostics: Vec<Diagnostic>,
+    limits: Vec<Option<Limit>>,
+}
+
+impl From<Refusal> for Refused {
+    fn from(refusal: Refusal) -> Self {
+        let limits = (0..refusal.diagnostics().len())
+            .map(|index| refusal.limit(index))
+            .collect();
+        Self {
+            diagnostics: refusal.into_diagnostics(),
+            limits,
+        }
+    }
+}
+
+/// Diagnostics that name no limit, as a test gives them.
+impl From<Vec<Diagnostic>> for Refused {
+    fn from(diagnostics: Vec<Diagnostic>) -> Self {
+        let limits = vec![None; diagnostics.len()];
+        Self {
+            diagnostics,
+            limits,
+        }
+    }
+}
+
+/// Whether `limit` is one of the server's budgets: a budget the server
+/// gave the library, tighter than the library's own, as the library says
+/// in its structured limit, never read from a message.
+pub(crate) fn at_server_budget(limit: Option<Limit>) -> bool {
+    limit.is_some_and(|limit| matches!(limit.origin(), LimitOrigin::Budgets))
 }
 
 /// The tree on disk is not at the snapshot's revision, with the files the
@@ -111,6 +123,8 @@ struct Report<'p> {
     plan: Option<&'p Plan>,
     undo: &'static str,
     refusals: &'p [Diagnostic],
+    /// One for each refusal.
+    limits: &'p [Option<Limit>],
     budgets: Budgets,
 }
 
@@ -120,7 +134,9 @@ struct Report<'p> {
 /// # Errors
 /// [`Drift`] when the tree on disk is not the snapshot's.
 pub fn preview(valid: &Valid, root: &Path, text: &str, excerpts: bool) -> Result<String, Drift> {
-    preview_with(valid, root, text, excerpts, budgets(), Plan::check_undo)
+    preview_with(valid, root, text, excerpts, budgets(), |plan| {
+        plan.check_undo_detailed().map_err(Refused::from)
+    })
 }
 
 /// [`preview`] within `budgets`, with `undo` as the undo check, so that a
@@ -133,12 +149,13 @@ pub(crate) fn preview_with(
     text: &str,
     excerpts: bool,
     budgets: Budgets,
-    undo: impl FnOnce(&Plan) -> Result<(), Vec<Diagnostic>>,
+    undo: impl FnOnce(&Plan) -> Result<(), Refused>,
 ) -> Result<String, Drift> {
-    let transaction = match Transaction::parse(NAME, text) {
+    let transaction = match Transaction::parse_detailed(NAME, text) {
         Ok(transaction) => transaction,
         // The document alone is wrong: the tree was not read.
         Err(problems) => {
+            let problems = Refused::from(problems);
             return Ok(write(
                 valid,
                 &Report {
@@ -146,7 +163,8 @@ pub(crate) fn preview_with(
                     operations: None,
                     plan: None,
                     undo: "not_run",
-                    refusals: &problems,
+                    refusals: &problems.diagnostics,
+                    limits: &problems.limits,
                     budgets,
                 },
                 excerpts,
@@ -156,8 +174,13 @@ pub(crate) fn preview_with(
     // One handle for planning and the check after it, opened afresh as
     // every load of the snapshot is.
     let source = SourceRoot::new(root);
-    let planned =
-        tilewright_edit::plan_in_within(&source, &transaction, &Options::default(), budgets);
+    let planned = tilewright_edit::plan_in_within_detailed(
+        &source,
+        &transaction,
+        &Options::default(),
+        budgets,
+    )
+    .map_err(Refused::from);
     let overlay: Overlay = match &planned {
         Ok(plan) => plan
             .files()
@@ -182,16 +205,22 @@ pub(crate) fn preview_with(
                 operations,
                 plan: None,
                 undo: "not_run",
-                refusals: problems,
+                refusals: &problems.diagnostics,
+                limits: &problems.limits,
                 budgets,
             },
             excerpts,
         ),
         Ok(plan) => {
             let undone = undo(plan);
-            let (refused_at, undo, refusals) = match &undone {
-                Ok(()) => (None, "passed", &[][..]),
-                Err(problems) => (Some(Stage::Undo), "refused", problems.as_slice()),
+            let (refused_at, undo, refusals, limits) = match &undone {
+                Ok(()) => (None, "passed", &[][..], &[][..]),
+                Err(problems) => (
+                    Some(Stage::Undo),
+                    "refused",
+                    problems.diagnostics.as_slice(),
+                    problems.limits.as_slice(),
+                ),
             };
             write(
                 valid,
@@ -201,6 +230,7 @@ pub(crate) fn preview_with(
                     plan: Some(plan),
                     undo,
                     refusals,
+                    limits,
                     budgets,
                 },
                 excerpts,
@@ -295,8 +325,9 @@ fn file_item(output: &mut Output, file: &FileChange, in_revision: bool, excerpts
     let _ = write!(output.text, ",\"excerpt_truncated\":{cut}}}");
 }
 
-/// One refusal, in the shape of a `validate` diagnostic.
-fn refusal_item(output: &mut Output, diagnostic: &Diagnostic) {
+/// One refusal, in the shape of a `validate` diagnostic, and for a refusal
+/// at a limit, which limit.
+fn refusal_item(output: &mut Output, (diagnostic, limit): (&Diagnostic, &Option<Limit>)) {
     output.raw("{\"path\":");
     let path = output.string(&diagnostic.path);
     let _ = write!(
@@ -311,6 +342,19 @@ fn refusal_item(output: &mut Output, diagnostic: &Diagnostic) {
     output.string(diagnostic.code);
     output.raw(",\"message\":");
     let message = output.string(&diagnostic.message);
+    // Only a refusal at a limit has the member, so that every other
+    // refusal costs what it did.
+    if let Some(limit) = limit {
+        let _ = write!(
+            output.text,
+            ",\"limit\":{{\"kind\":\"{}\",\"bound\":{},\"server_budget\":{}}}",
+            limit.kind().as_str(),
+            limit
+                .bound()
+                .map_or_else(|| "null".to_owned(), |bound| bound.to_string()),
+            at_server_budget(Some(*limit))
+        );
+    }
     let _ = write!(output.text, ",\"truncated\":{}}}", path || message);
 }
 
@@ -341,10 +385,7 @@ fn write(valid: &Valid, report: &Report<'_>, excerpts: bool) -> String {
             "true"
         }
     });
-    let at_budget = report
-        .refusals
-        .iter()
-        .any(|refusal| at_server_budget(refusal, report.budgets));
+    let at_budget = report.limits.iter().copied().any(at_server_budget);
     let mut output = Output::default();
     output.raw("{\"revision\":");
     output.string(&valid.revision);
@@ -387,7 +428,7 @@ fn write(valid: &Valid, report: &Report<'_>, excerpts: bool) -> String {
         file_item(output, file, covered(file), excerpts);
     });
     let refusals = budget::page_within(
-        report.refusals.iter(),
+        report.refusals.iter().zip(report.limits),
         0,
         MAXIMUM_REFUSALS,
         budget.saturating_sub(files.cost),
@@ -410,62 +451,50 @@ fn write(valid: &Valid, report: &Report<'_>, excerpts: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::{at_server_budget, budgets, changed_range};
-    use tilewright_source::Diagnostic;
+    use tilewright_source::SourceRoot;
 
     #[test]
+    #[allow(clippy::disallowed_methods)]
     fn only_the_servers_budgets_are_the_servers() {
-        let refusal = |code: &'static str, message: &str| Diagnostic {
-            path: "transaction".to_owned(),
-            start: 0,
-            end: 0,
-            line: 0,
-            column: 0,
-            code,
-            message: message.to_owned(),
-        };
-        let undo = "the transaction could not be undone: its inverse would be refused: ";
-        for (message, expected) in [
-            ("the touched files hold more than 67108864 bytes", true),
-            (
-                "the transaction needs more than 536870912 bytes of work: its operations, the documents each reads, and its edits",
-                true,
-            ),
-            // The library's fixed limit on an inverse's size names the
-            // same number as the server's read budget.
-            (
-                "the inverse would hold more than 67108864 bytes; split the transaction",
-                false,
-            ),
-            // The library's own budgets.
-            ("the touched files hold more than 268435456 bytes", false),
-            (
-                "the transaction needs more than 4294967296 bytes of work: its operations",
-                false,
-            ),
-            ("67108864 bytes", false),
+        use tilewright_edit::{LimitKind, Options, Transaction, limits};
+        assert!(!at_server_budget(None));
+        // A budget the server gave the library is the server's.
+        let tree = tempfile::tempdir().unwrap();
+        std::fs::write(tree.path().join("world.jsonc"), "{}").unwrap();
+        let test = Transaction::parse(
+            "transaction",
+            r#"{"format": "tilewright.transaction/1", "operations": [{"op": "test", "path": "world.jsonc", "pointer": [], "value": {}}]}"#,
+        )
+        .unwrap();
+        let source = SourceRoot::new(tree.path());
+        for (budgets, kind) in [
+            (budgets().with_read_bytes(1), LimitKind::ReadBytes),
+            (budgets().with_work(1), LimitKind::Work),
         ] {
-            assert_eq!(
-                at_server_budget(&refusal("tx.limit", message), budgets()),
-                expected,
-                "{message}"
-            );
-            // An undo round quotes the round's refusal after its own words.
-            assert_eq!(
-                at_server_budget(
-                    &refusal(
-                        "tx.limit",
-                        &format!("{undo}{message}; split the transaction")
-                    ),
-                    budgets()
-                ),
-                expected,
-                "undo: {message}"
-            );
-            assert!(!at_server_budget(
-                &refusal("tx.conflict", message),
-                budgets()
-            ));
+            let refusal = tilewright_edit::plan_in_within_detailed(
+                &source,
+                &test,
+                &Options::default(),
+                budgets,
+            )
+            .unwrap_err();
+            let limit = refusal.limit(0).unwrap();
+            assert_eq!(limit.kind(), kind);
+            assert!(at_server_budget(Some(limit)));
         }
+        // A limit no budget widens is not, whatever its number.
+        let steps = vec!["\"x\""; limits::POINTER + 1].join(",");
+        let refusal = Transaction::parse_detailed(
+            "transaction",
+            format!(
+                r#"{{"format": "tilewright.transaction/1", "operations": [{{"op": "set", "path": "world.jsonc", "pointer": [{steps}], "value": 1}}]}}"#
+            ),
+        )
+        .err()
+        .unwrap();
+        let limit = refusal.limit(0).unwrap();
+        assert_eq!(limit.kind(), LimitKind::PointerSteps);
+        assert!(!at_server_budget(Some(limit)));
     }
 
     #[test]

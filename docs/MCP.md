@@ -497,12 +497,12 @@ editor action.
   a transaction: a document that is not one (`jsonc.*`, `tx.shape`) is
   refused there, with `refused_at: "transaction"`, without reading the
   tree. Otherwise it is planned on the tree with the library's
-  `plan_in_within`, within the server's budgets (see "Budgets" below):
+  `plan_in_within_detailed`, within the server's budgets (see "Budgets" below):
   every precondition (the `base` digests, `expect` and `test` values, cell
   expectations, what each operation needs), the library's limits, and
   validation of the tree it would leave. A failure is
   `refused_at: "plan"`. A plan is then given the library's undo check
-  (`Plan::check_undo`, section 8.1), as `tilewright tx preview` does; a
+  (`Plan::check_undo_detailed`, section 8.1), as `tilewright tx preview` does; a
   refusal there is `refused_at: "undo"`, and the plan's files and resulting
   revision are still reported.
 - **The snapshot.** The library plans on the tree on disk; the snapshot
@@ -581,6 +581,23 @@ editor action.
   and the root-relative path, with its span in the file as the transaction
   would leave it. Codes are the library's: `tx.shape`, `tx.conflict`,
   `tx.result`, `tx.path`, `tx.limit`, `tx.io`, `jsonc.*` and the loader's.
+  Each `tx.limit` refusal also has `limit`, the limit the library says
+  refused it (`tilewright_edit::Refusal::limit`), and no other refusal
+  has that member: `kind`, one of `files` (the files a transaction
+  touches, or the entries of its `base` or `result`), `terrain_chunks`
+  (the chunks one terrain operation touches), `read_bytes` (the read
+  budget), `file_size` (the format's 64 MiB a file), `work` (the work
+  budget), `inverse_operations`, `inverse_bytes` (the 64 MiB an inverse
+  may hold), `document` (a bound of the JSONC parser met by a document
+  read or edited), `records` (the sealed transaction or its inverse would
+  not be a transaction within the limits), `diagnostics` (the note that
+  there may be more), `operations`, `pointer_steps` or `cells`, a
+  vocabulary later versions may add to; `bound`, the bound in force in
+  the kind's unit (files, bytes, operations, steps, cells, diagnostics),
+  or `null` where no one number is the bound (a JSONC comment bound, or
+  a sealed form or inverse that is not a transaction for another reason
+  than one limit); and `server_budget`, whether it is one of the server's
+  budgets (see "Budgets").
   There is no cursor: a preview is not paged, since paging would plan the
   transaction again.
 - **Budget.** The files come first and the refusals share what they leave
@@ -598,24 +615,20 @@ editor action.
   `server_budget_reached` is true. **`tilewright tx apply` and `tx
   preview` plan within the library's budgets, so they may still accept a
   transaction the server refuses for cost**; the tests check both sides of
-  each budget, and that the library accepts what the server refuses. A
-  `tx.limit` at another limit (operations, files, a pointer's steps, the
-  format's 64 MiB a file, the 64 MiB an inverse may hold) is not the
-  server's: `server_budget_reached` is false, with one exception. A file
-  past the format's 64 MiB that is read after another file is refused by
-  the library in its read budget's words (the server's read budget and
-  the per-file limit are the same 64 MiB, so once any file is read the
-  allowance left is the smaller), and then `server_budget_reached` is
-  true, though `tilewright tx apply` refuses that transaction too. Only a
-  file the loader does not read can be that large in a tree that loads. A
-  test pins this (ignored by default, as it writes a 70 MiB file). The library gives no
-  structured kind of limit, so the server tells its budgets' refusals
-  apart by the library's message text: the whole phrase it writes for
-  each budget ("the touched files hold more than N bytes", "needs more
-  than N bytes of work") with the server's N, never a number alone, as
-  the read budget's 64 MiB is also the inverse limit's. The tests pin that
-  wording on both sides of each budget, for the inverse limit, and for the
-  undo rounds' messages, so a change in the library's text fails them.
+  each budget, and that the library accepts what the server refuses.
+  `server_budget_reached` is true exactly when the library says, in the
+  structured limit beside a refusal of the plan or of an undo round, that
+  a budget the server gave it was the limit (`LimitOrigin::Budgets`);
+  the server never reads messages for it. A `tx.limit` at another limit
+  (operations, files, a pointer's steps, the format's 64 MiB a file, the
+  64 MiB an inverse may hold) is not the server's, whatever number it
+  names: `server_budget_reached` is false, and `tilewright tx apply`
+  refuses it too. That includes a file past the format's 64 MiB read
+  after another file, whose message names the read budget (once a file is
+  read, the server's allowance left is below the per-file limit, so the
+  file is read only that far) but whose limit is `file_size`: the library
+  asks its length to tell the two apart, without reading more. A test
+  pins it (ignored by default, as it writes a 70 MiB file).
 - **Cost.** A call reads the files the transaction touches, within those
   budgets and the library's other bounds (1,000 diagnostics), loads the
   whole tree to validate the result, loads it once more when the
@@ -799,9 +812,6 @@ layout ties to its name (the `defs/` directory of a type, the keys of
 chunks' terrain grids, a document's path), which are not all references
 of the index. `references` lists what the index records for each.
 A cursor on `impact`'s `carried` and allowance entries, past their 100.
-`server_budget_reached` reads the library's message text; a structured
-kind of limit on the library's refusals would make it exact, and needs a
-library addition (a candidate for the next library release).
 `inspect` could check its re-read file against the snapshot's per-file
 digest (`World::files`), which is stronger than comparing the item; it
 still compares the item. Inspecting an object without a uid, and

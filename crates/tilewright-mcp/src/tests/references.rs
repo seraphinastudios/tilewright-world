@@ -1493,14 +1493,15 @@ fn the_input_schemas_state_the_rules_the_server_checks() {
 }
 
 /// A file past the format's 64 MiB, read after another file, is refused by
-/// the library in its read budget's words, so `server_budget_reached` is
-/// true for it too, though `tilewright tx apply` refuses it as well
-/// (docs/MCP.md, "Budgets"). Ignored by default: it writes a 70 MiB file.
-/// Run with `cargo test -p tilewright-mcp -- --ignored`.
+/// the library in its read budget's words, but its limit is the format's
+/// per-file limit, which `tilewright tx apply` refuses too: so
+/// `server_budget_reached` is false for it (docs/MCP.md, "Budgets").
+/// Ignored by default: it writes a 70 MiB file. Run with
+/// `cargo test -p tilewright-mcp -- --ignored`.
 #[test]
 #[ignore = "writes a 70 MiB file"]
 #[allow(clippy::disallowed_methods)]
-fn a_file_past_the_format_limit_read_second_reads_as_the_read_budget() {
+fn a_file_past_the_format_limit_read_second_is_not_the_read_budget() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("tree");
     copy_tree(&fixture("basic"), &root);
@@ -1522,16 +1523,24 @@ fn a_file_past_the_format_limit_read_second_reads_as_the_read_budget() {
         let (_, document) = result(server, "preview_transaction", &arguments);
         let page = structured(&document);
         assert_eq!(at(page, &["would_apply"]).as_bool(), Some(false));
+        assert_eq!(
+            at(page, &["refusals", "0", "limit", "kind"]).as_str(),
+            Some("file_size")
+        );
+        assert_eq!(
+            at(page, &["refusals", "0", "limit", "server_budget"]).as_bool(),
+            Some(false)
+        );
         at(page, &["server_budget_reached"]).as_bool().unwrap()
     };
     // Alone, the library says the file is too large: not the server's.
     assert!(!reached(&mut server, &test("profile/huge.jsonc")));
     // After another file, it says the touched files hold more than the
-    // read budget.
+    // read budget, and is still not the server's.
     let both = format!(
         "{},{}",
         test("profile/small.jsonc"),
         test("profile/huge.jsonc")
     );
-    assert!(reached(&mut server, &both));
+    assert!(!reached(&mut server, &both));
 }

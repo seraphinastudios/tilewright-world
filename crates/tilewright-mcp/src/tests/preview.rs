@@ -431,6 +431,23 @@ fn previews_match_a_plan_with_either_line_ending() {
     }
 }
 
+/// The limit of the refusal at `index` of `page`: its kind, bound and
+/// whether it is a server budget, or `None` when it has none.
+fn limit_of(page: &Value, index: usize) -> Option<(String, Option<i64>, bool)> {
+    let refusal = at(page, &["refusals", &index.to_string()]);
+    let limit = refusal.get("limit")?;
+    assert_eq!(
+        limit.as_object().map(<[_]>::len),
+        Some(3),
+        "kind, bound and server_budget only"
+    );
+    Some((
+        at(limit, &["kind"]).as_str().unwrap().to_owned(),
+        at(limit, &["bound"]).as_i64(),
+        at(limit, &["server_budget"]).as_bool().unwrap(),
+    ))
+}
+
 /// Parses a structured result `preview_with` gave and checks it against
 /// the tool's output schema.
 fn checked_result(text: &str) -> Document {
@@ -889,7 +906,7 @@ fn a_preview_stays_within_the_byte_budget_as_sent() {
         .collect();
     let structured_text =
         crate::preview::preview_with(valid, &root, &text, true, crate::preview::budgets(), |_| {
-            Err(long.clone())
+            Err(long.clone().into())
         })
         .unwrap();
     assert!(cost(&structured_text) + 1024 <= MAXIMUM_RESULT_BYTES);
@@ -921,7 +938,7 @@ fn a_preview_stays_within_the_byte_budget_as_sent() {
         &orchard(),
         false,
         crate::preview::budgets(),
-        |_| Err(long.clone()),
+        |_| Err(long.clone().into()),
     )
     .unwrap();
     let document = checked_result(&structured_text);
@@ -983,7 +1000,7 @@ fn transaction_and_world_text_stays_in_typed_strings() {
         &orchard(),
         false,
         crate::preview::budgets(),
-        |_| Err(problems.clone()),
+        |_| Err(problems.clone().into()),
     )
     .unwrap();
     assert!(!structured_text.chars().any(char::is_control));
@@ -1511,6 +1528,10 @@ fn previews_plan_within_the_servers_budgets() {
             .3
             .contains("67108864 bytes")
     );
+    assert_eq!(
+        limit_of(structured(&outside), 0),
+        Some(("read_bytes".to_owned(), Some(64 << 20), true))
+    );
     // `tilewright tx apply` plans within the library's budgets, which
     // accept it.
     let transaction = Transaction::parse(NAME, &outside_text).unwrap();
@@ -1526,19 +1547,12 @@ fn previews_plan_within_the_servers_budgets() {
             .3
             .contains("536870912 bytes of work")
     );
+    assert_eq!(
+        limit_of(structured(&outside), 0),
+        Some(("work".to_owned(), Some(512 << 20), true))
+    );
     let transaction = Transaction::parse(NAME, &outside_text).unwrap();
     assert!(tilewright_edit::plan(&root, &transaction, &Options::default()).is_ok());
-    // A refusal at a limit that is not a budget is not the server's.
-    let steps = vec!["\"x\""; tilewright_edit::limits::POINTER + 1].join(",");
-    let (document, _) = refused(
-        &mut server,
-        &self::transaction(&format!(
-            r#"{{"op": "set", "path": "world.jsonc", "pointer": [{steps}], "value": 1}}"#
-        )),
-    );
-    let page = structured(&document);
-    assert_eq!(refusals(page)[0].2, "tx.limit");
-    assert_eq!(at(page, &["server_budget_reached"]).as_bool(), Some(false));
 }
 
 #[test]
@@ -1643,8 +1657,108 @@ fn a_library_limit_at_the_same_number_is_not_the_servers_budget() {
         "{refusals:?}"
     );
     assert_eq!(at(page, &["server_budget_reached"]).as_bool(), Some(false));
+    assert_eq!(
+        limit_of(page, 0),
+        Some(("inverse_bytes".to_owned(), Some(64 << 20), false))
+    );
     // tx apply's own plan refuses it the same way.
     let transaction = Transaction::parse(NAME, &text).unwrap();
     let library = tilewright_edit::plan(&root, &transaction, &Options::default()).unwrap_err();
     assert!(library[0].message.contains("inverse would hold more than"));
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn an_undo_round_at_the_servers_work_budget_is_the_servers() {
+    // A chunk of about 9 MiB, and a stroke down a column of it in one
+    // operation, which reads and edits the chunk once: well inside the
+    // server's 512 MiB of work. Its undo sets each of the 32 rows in an
+    // operation of its own, each reading and editing the whole chunk:
+    // past 512 MiB, and well inside the library's 4 GiB.
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("tree");
+    copy_tree(&fixture("basic"), &root);
+    let layer = root.join("planes/overworld/layers/3");
+    std::fs::create_dir_all(&layer).unwrap();
+    let rows = vec![format!("        \"{}\"", "g".repeat(32)); 32].join(",\n");
+    let objects: Vec<String> = (0..9)
+        .map(|index| {
+            format!(
+                "    {{\"at\": [{index}, 31], \"proto\": \"tree\", \"custom\": {{\"example.org/pad\": \"{}\"}}}}",
+                "x".repeat(1_040_000)
+            )
+        })
+        .collect();
+    std::fs::write(
+        layer.join("0_0.jsonc"),
+        format!(
+            "{{\n  \"format\": \"tilewright.chunk/1\",\n  \"plane\": \"overworld\",\n  \"layer\": 3,\n  \"chunk\": [0, 0],\n  \"terrain\": {{\n    \"floor\": {{\n      \"palette\": {{\"g\": \"grass\"}},\n      \"rows\": [\n{rows}\n      ]\n    }}\n  }},\n  \"objects\": [\n{}\n  ]\n}}\n",
+            objects.join(",\n")
+        ),
+    )
+    .unwrap();
+    let cells: Vec<String> = (0..32)
+        .map(|y| format!(r#"{{"at": [0, {y}], "value": "sand"}}"#))
+        .collect();
+    let text = transaction(&format!(
+        r#"{{"op": "terrain.set", "plane": "overworld", "layer": 3, "grid": "floor", "cells": [{}]}}"#,
+        cells.join(", ")
+    ));
+    let mut server = ready(&root);
+    let (document, stage) = refused(&mut server, &text);
+    assert_eq!(stage, "undo");
+    let page = structured(&document);
+    assert_eq!(at(page, &["undo_check"]).as_str(), Some("refused"));
+    let found = refusals(page);
+    assert!(
+        found[0].3.contains("could not be undone")
+            && found[0].3.contains("536870912 bytes of work"),
+        "{found:?}"
+    );
+    assert_eq!(
+        limit_of(page, 0),
+        Some(("work".to_owned(), Some(512 << 20), true))
+    );
+    assert_eq!(at(page, &["server_budget_reached"]).as_bool(), Some(true));
+    // tilewright tx apply plans it and passes its undo check.
+    let transaction = Transaction::parse(NAME, &text).unwrap();
+    tilewright_edit::plan(&root, &transaction, &Options::default())
+        .unwrap()
+        .check_undo()
+        .unwrap();
+}
+
+#[test]
+fn refusals_that_are_not_at_a_limit_have_no_limit() {
+    let mut server = ready(&fixture("basic"));
+    let (document, _) = refused(
+        &mut server,
+        &transaction(
+            r#"{"op": "test", "path": "world.jsonc", "pointer": ["format"], "value": "x"}"#,
+        ),
+    );
+    let page = structured(&document);
+    assert_eq!(refusals(page)[0].2, "tx.conflict");
+    assert_eq!(limit_of(page, 0), None);
+    assert_eq!(at(page, &["server_budget_reached"]).as_bool(), Some(false));
+}
+
+#[test]
+fn a_limit_that_is_not_a_budget_is_not_the_servers() {
+    // A refusal at a limit that is not a budget is not the server's.
+    let steps = vec!["\"x\""; tilewright_edit::limits::POINTER + 1].join(",");
+    let (document, _) = refused(
+        &mut ready(&fixture("basic")),
+        &self::transaction(&format!(
+            r#"{{"op": "set", "path": "world.jsonc", "pointer": [{steps}], "value": 1}}"#
+        )),
+    );
+    let page = structured(&document);
+    assert_eq!(refusals(page)[0].2, "tx.limit");
+    assert_eq!(at(page, &["refused_at"]).as_str(), Some("transaction"));
+    assert_eq!(
+        limit_of(page, 0),
+        Some(("pointer_steps".to_owned(), Some(64), false))
+    );
+    assert_eq!(at(page, &["server_budget_reached"]).as_bool(), Some(false));
 }
