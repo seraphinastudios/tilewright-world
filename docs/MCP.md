@@ -462,7 +462,8 @@ without any one of them refuses it (149 cases).
   together are every entry once, in order, and exactly the allowance
   (tested with `tilewright diff --allow` on an object that carries 120
   objects with uids: 121 entries over two pages, accepted, and refused
-  with the first page alone or any entry left out). One entry
+  with the first page alone or with the item's entry, or the first,
+  100th or last carried object's entry, left out). One entry
   for a plane covers its zones, anchors and stairwells, and, when it is
   removed, its objects' uids, by DIFF.md's rules for a plane's entry.
   `carried` and the entries each take at most an eighth of the byte

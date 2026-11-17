@@ -12,7 +12,7 @@ use tilewright_source::Diagnostic;
 /// gives it. More kinds may be added; each has a stable name,
 /// [`LimitKind::as_str`].
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum LimitKind {
     /// The files one transaction touches, or the entries of its `base` or
     /// `result`: [`limits::FILES`].
@@ -35,7 +35,8 @@ pub enum LimitKind {
     /// A bound of the JSONC parser, met by a document read or edited.
     Document,
     /// The sealed transaction or its inverse would not be a transaction
-    /// within the limits.
+    /// within the limits: past the size of one (the bound), or not parsing
+    /// as one for another reason (no bound).
     Records,
     /// The diagnostics reported for one transaction: [`limits::DIAGNOSTICS`].
     Diagnostics,
@@ -74,7 +75,7 @@ impl LimitKind {
 
 /// Where the bound of a [`Limit`] comes from.
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum LimitOrigin {
     /// A budget of the caller's [`Budgets`] tighter than the library's
     /// limit: under the default budgets the same transaction may plan.
@@ -87,7 +88,7 @@ pub enum LimitOrigin {
 /// A limit that refused a transaction: its kind, the bound in force, and
 /// where that bound comes from.
 #[non_exhaustive]
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Limit {
     kind: LimitKind,
     bound: Option<u64>,
@@ -106,12 +107,19 @@ impl Limit {
         self.kind
     }
 
-    /// The bound in force, in the limit's unit (files, bytes, operations,
-    /// steps, cells, diagnostics), the number its diagnostic names when it
-    /// names one. `None` when no one number is the bound: a JSONC comment
-    /// bound, which is a count and a size together, or a sealed form or
-    /// inverse that would not be a transaction for a reason other than one
-    /// limit.
+    /// The bound in force for this limit, in its unit (files, bytes,
+    /// operations, steps, cells, diagnostics). It is not always the number
+    /// the diagnostic's message names: a file past the format's limit on a
+    /// file that was read only as far as a smaller read allowance left is
+    /// reported in the read budget's words, with that budget's number, yet
+    /// its limit is [`LimitKind::FileSize`] with the format's limit; and the
+    /// notes that there may be more diagnostics name the 999 problems kept
+    /// beside them, while the bound is [`limits::DIAGNOSTICS`], 1,000.
+    ///
+    /// `None` when no one number is the bound: a JSONC comment bound, which
+    /// is a count and a size together, or [`LimitKind::Records`] for a
+    /// sealed form or inverse that does not parse as a transaction for a
+    /// reason other than being past the size of one.
     #[must_use]
     pub const fn bound(&self) -> Option<u64> {
         self.bound

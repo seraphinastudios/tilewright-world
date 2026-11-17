@@ -783,9 +783,8 @@ fn the_note_that_there_may_be_more_stays_last_and_as_it_is() {
             (note.clone(), Some(diagnostics)),
         ]),
     );
-    // Each limit stays with its diagnostic, which sorting moved, though
-    // the limits alone sort in another order.
-    assert!(read < work);
+    // Each limit stays with its diagnostic, which sorting moved: the
+    // limits do not keep the order they came in.
     assert_eq!(
         (0..5).map(|index| refusal.limit(index)).collect::<Vec<_>>(),
         [None, Some(work), Some(read), Some(diagnostics), None]

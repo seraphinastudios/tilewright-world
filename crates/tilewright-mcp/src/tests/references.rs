@@ -1536,23 +1536,23 @@ fn the_input_schemas_state_the_rules_the_server_checks() {
 /// the library in its read budget's words, but its limit is the format's
 /// per-file limit, which `tilewright tx apply` refuses too: so
 /// `server_budget_reached` is false for it (docs/MCP.md, "Budgets").
-/// Ignored by default: it writes a 70 MiB file. Run with
-/// `cargo test -p tilewright-mcp -- --ignored`.
+///
+/// The file is sparse: the library refuses it from its length and never
+/// reads it, and the loader does not read it, so it costs no disk and no
+/// time. On Unix only, where extending a file with `set_len` leaves it
+/// sparse (Linux file systems and APFS); NTFS would allocate it.
+#[cfg(unix)]
 #[test]
-#[ignore = "writes a 70 MiB file"]
 #[allow(clippy::disallowed_methods)]
 fn a_file_past_the_format_limit_read_second_is_not_the_read_budget() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("tree");
     copy_tree(&fixture("basic"), &root);
     std::fs::write(root.join("profile/small.jsonc"), "{\"a\": 1}\n").unwrap();
-    let mut huge = String::from("{\"a\": 1");
-    while huge.len() < 70 << 20 {
-        huge.push('\n');
-        huge.push_str(&" ".repeat((1 << 20) - 1));
-    }
-    huge.push_str("\n}");
-    std::fs::write(root.join("profile/huge.jsonc"), huge).unwrap();
+    std::fs::File::create(root.join("profile/huge.jsonc"))
+        .unwrap()
+        .set_len(70 << 20)
+        .unwrap();
     let mut server = ready(&root);
     let test =
         |path: &str| format!(r#"{{"op": "test", "path": "{path}", "pointer": ["a"], "value": 1}}"#);
