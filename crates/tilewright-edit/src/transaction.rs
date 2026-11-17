@@ -5,7 +5,11 @@
 //! checks. Every problem is reported; a transaction is returned only when
 //! there are none.
 
-use crate::{Code, diagnostic, limits};
+use crate::{
+    Code, diagnostic,
+    limit::{Limit, LimitKind, Refusal},
+    limits,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use tilewright_jsonc::{Document, Limits, MAX_SAFE_INTEGER, Span, Value};
 use tilewright_source::{CHUNK_SIZE, Diagnostic, is_identifier, is_namespace};
@@ -202,9 +206,21 @@ impl Transaction {
     /// # Errors
     /// Returns every problem with the document, each at its byte span.
     pub fn parse(name: &str, text: impl Into<String>) -> Result<Self, Vec<Diagnostic>> {
+        Self::parse_detailed(name, text).map_err(Refusal::into_diagnostics)
+    }
+
+    /// Parses and checks a transaction document as [`Transaction::parse`]
+    /// does, and when it is refused says, beside the same diagnostics,
+    /// which limit each `tx.limit` among them reports
+    /// ([`Refusal::limit`]).
+    ///
+    /// # Errors
+    /// The diagnostics [`Transaction::parse`] returns, in the same order,
+    /// with their limits.
+    pub fn parse_detailed(name: &str, text: impl Into<String>) -> Result<Self, Refusal> {
         let text = text.into();
         let document = Document::parse(text, &Limits::default()).map_err(|error| {
-            vec![Diagnostic {
+            Refusal::plain(vec![Diagnostic {
                 path: name.to_owned(),
                 start: error.offset,
                 end: error.offset,
@@ -212,13 +228,13 @@ impl Transaction {
                 column: error.column,
                 code: error.code.as_str(),
                 message: "invalid JSONC".to_owned(),
-            }]
+            }])
         })?;
         let mut shape = Shape::new(name, &document);
         let parsed = shape.transaction();
         let problems = shape.finish();
         match parsed {
-            Some((base, result, operations)) if problems.is_empty() => Ok(Self {
+            Some((base, result, operations)) if problems.diagnostics().is_empty() => Ok(Self {
                 name: name.to_owned(),
                 base,
                 result,
@@ -383,7 +399,7 @@ struct Shape<'a> {
     name: &'a str,
     document: &'a Document,
     lines: diagnostic::Lines<'a>,
-    problems: Vec<Diagnostic>,
+    problems: Vec<(Diagnostic, Option<Limit>)>,
     /// Whether a problem was dropped at the limit, whose last place is
     /// kept for a note that there were more.
     dropped: bool,
@@ -404,33 +420,53 @@ impl<'a> Shape<'a> {
         }
     }
 
-    fn finish(mut self) -> Vec<Diagnostic> {
-        self.problems.sort();
-        self.problems.dedup();
+    fn finish(mut self) -> Refusal {
+        crate::limit::sort(&mut self.problems);
         if self.dropped {
-            self.problems.push(diagnostic::file(
-                self.name,
-                Code::Limit.as_str(),
-                format!(
-                    "more than {} problems; the rest are not reported",
-                    limits::DIAGNOSTICS - 1
+            self.problems.push((
+                diagnostic::file(
+                    self.name,
+                    Code::Limit.as_str(),
+                    format!(
+                        "more than {} problems; the rest are not reported",
+                        limits::DIAGNOSTICS - 1
+                    ),
                 ),
+                Some(Limit::count(LimitKind::Diagnostics, limits::DIAGNOSTICS)),
             ));
         }
-        self.problems
+        Refusal::new(self.problems)
     }
 
     fn report(&mut self, span: Span, code: Code, message: impl Into<String>) {
+        self.report_at(span, code, None, message);
+    }
+
+    /// Reports that `limit` refused the document at `span`.
+    fn report_limit(&mut self, span: Span, limit: Limit, message: impl Into<String>) {
+        self.report_at(span, Code::Limit, Some(limit), message);
+    }
+
+    fn report_at(
+        &mut self,
+        span: Span,
+        code: Code,
+        limit: Option<Limit>,
+        message: impl Into<String>,
+    ) {
         if self.problems.len() >= limits::DIAGNOSTICS - 1 {
             self.dropped = true;
         } else {
-            self.problems.push(diagnostic::at(
-                self.name,
-                &self.lines,
-                span.start,
-                span.end,
-                code.as_str(),
-                message,
+            self.problems.push((
+                diagnostic::at(
+                    self.name,
+                    &self.lines,
+                    span.start,
+                    span.end,
+                    code.as_str(),
+                    message,
+                ),
+                limit,
             ));
         }
     }
@@ -605,9 +641,9 @@ impl<'a> Shape<'a> {
             return None;
         };
         if items.len() > limits::FILES {
-            self.report(
+            self.report_limit(
                 value.span(),
-                Code::Limit,
+                Limit::count(LimitKind::Files, limits::FILES),
                 format!("more than {} files", limits::FILES),
             );
             return None;
@@ -703,9 +739,9 @@ impl<'a> Shape<'a> {
             return None;
         };
         if items.len() > limits::OPERATIONS {
-            self.report(
+            self.report_limit(
                 root.span(),
-                Code::Limit,
+                Limit::count(LimitKind::Operations, limits::OPERATIONS),
                 format!("more than {} operations", limits::OPERATIONS),
             );
             return None;
@@ -957,9 +993,9 @@ impl<'a> Shape<'a> {
             return None;
         };
         if items.len() > limits::POINTER {
-            self.report(
+            self.report_limit(
                 value.span(),
-                Code::Limit,
+                Limit::count(LimitKind::PointerSteps, limits::POINTER),
                 format!("a pointer has at most {} steps", limits::POINTER),
             );
             return None;
@@ -1192,9 +1228,9 @@ impl<'a> Shape<'a> {
         };
         self.cells += items.len();
         if self.cells > limits::CELLS {
-            self.report(
+            self.report_limit(
                 cells_value.span(),
-                Code::Limit,
+                Limit::count(LimitKind::Cells, limits::CELLS),
                 format!("more than {} cells in one transaction", limits::CELLS),
             );
             return None;

@@ -121,7 +121,7 @@ which is the item's JSON.
 | `search_objects` | `plane`, `layer`, `bbox`, `proto`, `uid_prefix`, `carried`, `field`, `equals`, `contains`, `limit`, `scan_limit`, `cursor`, `revision` | A page of `objects`, each with `uid`, `plane`, `layer`, `tile`, `proto`, `carried`, `carried_by`, `path`, `position` and the matched field; see "Searching definitions and objects" |
 | `inspect` | `kind` and `id` (both required), `revision` | One item: its `path`, its `span` in that file, and its `value`; see "Inspecting an item" |
 | `references` | `kind` and `id` (both required), `direction`, `roles`, `limit`, `scan_limit`, `cursor`, `revision` | Whether the item `exists`, the `total` of its references, and a page of them: the references of the world format that name it (`direction` `to`) or that it holds (`from`); see "References and impact" |
-| `impact` | `kind`, `id` and `action` (all required), `to` (for a rename), `limit`, `cursor`, `revision` | What removing or renaming the item breaks: `breaking_total` and a page of the `breaking` references, a plane's `cascade` and `surviving_implicit`, the item's `own_files`, the `diff_allowance` and `not_covered`; see "References and impact" |
+| `impact` | `kind`, `id` and `action` (all required), `to` (for a rename), `limit`, `cursor`, `carried_cursor`, `entries_cursor`, `revision` | What removing or renaming the item breaks: `breaking_total` and a page of the `breaking` references, a plane's `cascade` and `surviving_implicit`, the item's `own_files`, for an object removed its `carried` objects, the `diff_allowance` and `not_covered`; see "References and impact" |
 | `preview_transaction` | `transaction` (required), `excerpts`, `revision` | Whether the transaction `would_apply`, the files it would change with their sizes, digests and changed spans, the `resulting_revision`, the undo check and the refusals; see "Previewing a transaction" |
 | `refresh` | none | Reloads the tree: its `revision`, `valid`, the diagnostic count, the `previous_revision`, and whether it `changed` |
 
@@ -441,27 +441,39 @@ without any one of them refuses it (149 cases).
   quarter of it, before the breaking references.
 - `carried`, for an object removed, else null: the objects it carries, at
   any depth, depth first, each with its `uid` (or null), `proto` and
-  `depth` (1 for one it carries itself); at most 100 (`carried_total`,
-  `carried_truncated`). They go with it; nothing names them.
+  `depth` (1 for one it carries itself); at most 100 a call
+  (`carried_total`, `carried_truncated`). They go with it; nothing names
+  them. `carried_offset` is the index of the first one listed (null with
+  `carried`), and `carried_next_cursor`, while more remain, gives the
+  rest: call again with the same `kind`, `id`, `action` and `to` and
+  `carried_cursor` set to it.
 - `diff_allowance`: the allowlist entries `tilewright diff` needs to
   accept the change (DIFF.md section 4), as `{"list": "remove" or
-  "rename", "entries": [...], "entries_total", "entries_truncated"}`,
+  "rename", "entries": [...], "entries_total", "entries_truncated",
+  "entries_offset", "entries_next_cursor"}`,
   each entry `{"kind", "id"}` or `{"kind", "from", "to"}`, for the kinds
   it compares (anchor, definition, object, plane, render layer,
   stairwell, zone), else null. An object removed needs one entry for its
-  uid and one for each uid it carries; at most 100 are listed. When
-  `entries_truncated` or `carried_truncated` is true, the allowance is
-  incomplete: find the rest with `search_objects` with the object's
-  `plane`, its `layer` and a `bbox` of its tile (carried objects are at
-  their carrier's tile; `carried` true, the default), and keep the items
-  whose `position` starts with the object's own position, which
-  `search_objects` gives for it too; `carried_by` names only a carrier
-  that has a uid, so it does not find everything under carriers without
-  one. One entry
+  uid and one for each uid it carries, in that order; at most 100 are
+  listed a call. When `entries_truncated` is true, the entries listed are
+  not the whole allowance: `entries_next_cursor` gives the rest, from
+  `entries_offset` on. Call again with the same `kind`, `id`, `action`
+  and `to` and `entries_cursor` set to it, until it is null; the pages
+  together are every entry once, in order, and exactly the allowance
+  (tested with `tilewright diff --allow` on an object that carries 120
+  objects with uids: 121 entries over two pages, accepted, and refused
+  with the first page alone or with the item's entry, or the first,
+  100th or last carried object's entry, left out). One entry
   for a plane covers its zones, anchors and stairwells, and, when it is
   removed, its objects' uids, by DIFF.md's rules for a plane's entry.
   `carried` and the entries each take at most an eighth of the byte
   budget, before the breaking references.
+- **Cursors.** `cursor`, `carried_cursor` and `entries_cursor` each page
+  one list, and are bound, as every cursor is, to the snapshot, to their
+  list and to `kind`, `id`, `action` and `to`: a cursor of one list is
+  refused for another (`cursor.invalid`). Each list a call has no cursor
+  for is its first page, so a call that pages one list repeats the
+  first page of the others; a call may give several cursors.
 - `not_covered`: fixed text saying that names inside `json` and `custom`
   values and in game code, saves or scripts are not seen, that the format
   names no stairwell and no object uid, and that rules of the format that
@@ -497,12 +509,12 @@ editor action.
   a transaction: a document that is not one (`jsonc.*`, `tx.shape`) is
   refused there, with `refused_at: "transaction"`, without reading the
   tree. Otherwise it is planned on the tree with the library's
-  `plan_in_within`, within the server's budgets (see "Budgets" below):
+  `plan_in_within_detailed`, within the server's budgets (see "Budgets" below):
   every precondition (the `base` digests, `expect` and `test` values, cell
   expectations, what each operation needs), the library's limits, and
   validation of the tree it would leave. A failure is
   `refused_at: "plan"`. A plan is then given the library's undo check
-  (`Plan::check_undo`, section 8.1), as `tilewright tx preview` does; a
+  (`Plan::check_undo_detailed`, section 8.1), as `tilewright tx preview` does; a
   refusal there is `refused_at: "undo"`, and the plan's files and resulting
   revision are still reported.
 - **The snapshot.** The library plans on the tree on disk; the snapshot
@@ -581,6 +593,23 @@ editor action.
   and the root-relative path, with its span in the file as the transaction
   would leave it. Codes are the library's: `tx.shape`, `tx.conflict`,
   `tx.result`, `tx.path`, `tx.limit`, `tx.io`, `jsonc.*` and the loader's.
+  Each `tx.limit` refusal also has `limit`, the limit the library says
+  refused it (`tilewright_edit::Refusal::limit`), and no other refusal
+  has that member: `kind`, one of `files` (the files a transaction
+  touches, or the entries of its `base` or `result`), `terrain_chunks`
+  (the chunks one terrain operation touches), `read_bytes` (the read
+  budget), `file_size` (the format's 64 MiB a file), `work` (the work
+  budget), `inverse_operations`, `inverse_bytes` (the 64 MiB an inverse
+  may hold), `document` (a bound of the JSONC parser met by a document
+  read or edited), `records` (the sealed transaction or its inverse would
+  not be a transaction within the limits), `diagnostics` (the note that
+  there may be more), `operations`, `pointer_steps` or `cells`, a
+  vocabulary later versions may add to; `bound`, the bound in force in
+  the kind's unit (files, bytes, operations, steps, cells, diagnostics),
+  or `null` where no one number is the bound (a JSONC comment bound, or
+  a sealed form or inverse that is not a transaction for another reason
+  than one limit); and `server_budget`, whether it is one of the server's
+  budgets (see "Budgets").
   There is no cursor: a preview is not paged, since paging would plan the
   transaction again.
 - **Budget.** The files come first and the refusals share what they leave
@@ -598,24 +627,20 @@ editor action.
   `server_budget_reached` is true. **`tilewright tx apply` and `tx
   preview` plan within the library's budgets, so they may still accept a
   transaction the server refuses for cost**; the tests check both sides of
-  each budget, and that the library accepts what the server refuses. A
-  `tx.limit` at another limit (operations, files, a pointer's steps, the
-  format's 64 MiB a file, the 64 MiB an inverse may hold) is not the
-  server's: `server_budget_reached` is false, with one exception. A file
-  past the format's 64 MiB that is read after another file is refused by
-  the library in its read budget's words (the server's read budget and
-  the per-file limit are the same 64 MiB, so once any file is read the
-  allowance left is the smaller), and then `server_budget_reached` is
-  true, though `tilewright tx apply` refuses that transaction too. Only a
-  file the loader does not read can be that large in a tree that loads. A
-  test pins this (ignored by default, as it writes a 70 MiB file). The library gives no
-  structured kind of limit, so the server tells its budgets' refusals
-  apart by the library's message text: the whole phrase it writes for
-  each budget ("the touched files hold more than N bytes", "needs more
-  than N bytes of work") with the server's N, never a number alone, as
-  the read budget's 64 MiB is also the inverse limit's. The tests pin that
-  wording on both sides of each budget, for the inverse limit, and for the
-  undo rounds' messages, so a change in the library's text fails them.
+  each budget, and that the library accepts what the server refuses.
+  `server_budget_reached` is true exactly when the library says, in the
+  structured limit beside a refusal of the plan or of an undo round, that
+  a budget the server gave it was the limit (`LimitOrigin::Budgets`);
+  the server never reads messages for it. A `tx.limit` at another limit
+  (operations, files, a pointer's steps, the format's 64 MiB a file, the
+  64 MiB an inverse may hold) is not the server's, whatever number it
+  names: `server_budget_reached` is false, and `tilewright tx apply`
+  refuses it too. That includes a file past the format's 64 MiB read
+  after another file, whose message names the read budget (once a file is
+  read, the server's allowance left is below the per-file limit, so the
+  file is read only that far) but whose limit is `file_size`: the library
+  asks its length to tell the two apart, without reading more. A test
+  pins it (ignored by default, as it writes a 70 MiB file).
 - **Cost.** A call reads the files the transaction touches, within those
   budgets and the library's other bounds (1,000 diagnostics), loads the
   whole tree to validate the result, loads it once more when the
@@ -798,10 +823,6 @@ also a ground layer, or a file: removing or renaming one changes what the
 layout ties to its name (the `defs/` directory of a type, the keys of
 chunks' terrain grids, a document's path), which are not all references
 of the index. `references` lists what the index records for each.
-A cursor on `impact`'s `carried` and allowance entries, past their 100.
-`server_budget_reached` reads the library's message text; a structured
-kind of limit on the library's refusals would make it exact, and needs a
-library addition (a candidate for the next library release).
 `inspect` could check its re-read file against the snapshot's per-file
 digest (`World::files`), which is stronger than comparing the item; it
 still compares the item. Inspecting an object without a uid, and

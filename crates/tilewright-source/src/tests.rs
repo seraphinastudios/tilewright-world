@@ -2464,6 +2464,84 @@ fn a_root_and_what_is_in_it_exist() {
     assert!(!missing.exists("").unwrap());
 }
 
+/// Links in `directory` to its `file.jsonc` and `sub`, and what `length`
+/// and `read` say of paths through them; on Unix only, where a test can
+/// make links without privileges.
+fn links(directory: &Path) -> Vec<(&'static str, &'static str)> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("file.jsonc", directory.join("link.jsonc")).unwrap();
+        std::os::unix::fs::symlink("sub", directory.join("linked")).unwrap();
+        vec![
+            ("link.jsonc", "link link.jsonc"),
+            ("linked/deep.jsonc", "link linked"),
+        ]
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = directory;
+        Vec::new()
+    }
+}
+
+/// The class of an access result, to compare `length` with `read`.
+fn access_class<T>(result: &Result<Option<T>, crate::AccessError>) -> String {
+    match result {
+        Ok(Some(_)) => "found".to_owned(),
+        Ok(None) => "missing".to_owned(),
+        Err(crate::AccessError::Path(path)) => format!("path {path}"),
+        Err(crate::AccessError::Link(path)) => format!("link {path}"),
+        Err(crate::AccessError::Unexpected(path)) => format!("unexpected {path}"),
+        Err(crate::AccessError::TooLarge(path)) => format!("too large {path}"),
+        Err(crate::AccessError::Locked) => "locked".to_owned(),
+        Err(crate::AccessError::Io(path, _)) => format!("io {path}"),
+    }
+}
+
+#[test]
+fn a_length_is_checked_as_a_read_is_and_reads_nothing() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("file.jsonc"), "{\"a\": 1}").unwrap();
+    std::fs::write(directory.path().join("empty.jsonc"), "").unwrap();
+    std::fs::create_dir(directory.path().join("sub")).unwrap();
+    std::fs::write(directory.path().join("sub/deep.jsonc"), [b'x'; 300]).unwrap();
+    let root = crate::SourceRoot::new(directory.path());
+    assert_eq!(root.length("file.jsonc").unwrap(), Some(8));
+    assert_eq!(root.length("empty.jsonc").unwrap(), Some(0));
+    assert_eq!(root.length("sub/deep.jsonc").unwrap(), Some(300));
+    assert_eq!(root.length("nope.jsonc").unwrap(), None);
+    assert_eq!(root.length("nope/deeper.jsonc").unwrap(), None);
+    let cases = [
+        ("file.jsonc", "found"),
+        ("sub/deep.jsonc", "found"),
+        ("nope.jsonc", "missing"),
+        ("sub", "unexpected sub"),
+        ("", "unexpected "),
+        ("../file.jsonc", "path ../file.jsonc"),
+        ("sub/../file.jsonc", "path sub/../file.jsonc"),
+        ("/file.jsonc", "path /file.jsonc"),
+        ("sub\\deep.jsonc", "path sub\\deep.jsonc"),
+    ];
+    for (path, expected) in cases.into_iter().chain(links(directory.path())) {
+        let length = root.length(path);
+        // Whatever reading says of the path, its length says too.
+        let read = root.read(path, u64::MAX);
+        assert_eq!(access_class(&length), expected, "{path}");
+        assert_eq!(access_class(&length), access_class(&read), "{path}");
+    }
+    // A length larger than any read limit is still given: nothing is read.
+    assert!(matches!(
+        root.read("sub/deep.jsonc", 10),
+        Err(crate::AccessError::TooLarge(_))
+    ));
+    assert_eq!(root.length("sub/deep.jsonc").unwrap(), Some(300));
+    let missing = crate::SourceRoot::new(&directory.path().join("missing"));
+    assert_eq!(
+        access_class(&missing.length("file.jsonc")),
+        access_class(&missing.read("file.jsonc", 10))
+    );
+}
+
 #[test]
 fn only_a_removal_left_pending_says_so() {
     let pending = crate::AccessError::Io(

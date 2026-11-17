@@ -666,11 +666,11 @@ fn impact_gives_the_cascade_the_allowance_and_whether_a_name_is_free() {
     );
     assert_eq!(
         impact_member(&mut server, remove, "diff_allowance"),
-        r#"{"list":"remove","entries":[{"kind":"plane","id":"vault"}],"entries_total":1,"entries_truncated":false}"#
+        r#"{"list":"remove","entries":[{"kind":"plane","id":"vault"}],"entries_total":1,"entries_truncated":false,"entries_offset":0,"entries_next_cursor":null}"#
     );
     assert_eq!(
         impact_member(&mut server, rename, "diff_allowance"),
-        r#"{"list":"rename","entries":[{"kind":"plane","from":"vault","to":"crypt"}],"entries_total":1,"entries_truncated":false}"#
+        r#"{"list":"rename","entries":[{"kind":"plane","from":"vault","to":"crypt"}],"entries_total":1,"entries_truncated":false,"entries_offset":0,"entries_next_cursor":null}"#
     );
     assert_eq!(impact_member(&mut server, rename, "to_free"), "true");
     assert_eq!(impact_member(&mut server, remove, "to_free"), "null");
@@ -693,32 +693,32 @@ fn impact_gives_the_cascade_the_allowance_and_whether_a_name_is_free() {
         (
             r#"{"kind":"definition","id":"proto/chest","action":"remove"}"#,
             r#"["defs/proto/chest.jsonc"]"#,
-            r#"{"list":"remove","entries":[{"kind":"definition","id":"proto/chest"}],"entries_total":1,"entries_truncated":false}"#,
+            r#"{"list":"remove","entries":[{"kind":"definition","id":"proto/chest"}],"entries_total":1,"entries_truncated":false,"entries_offset":0,"entries_next_cursor":null}"#,
         ),
         (
             r#"{"kind":"zone","id":"vault/hall","action":"rename","to":"vault/corridor"}"#,
             r#"["planes/vault/zones.jsonc"]"#,
-            r#"{"list":"rename","entries":[{"kind":"zone","from":"vault/hall","to":"vault/corridor"}],"entries_total":1,"entries_truncated":false}"#,
+            r#"{"list":"rename","entries":[{"kind":"zone","from":"vault/hall","to":"vault/corridor"}],"entries_total":1,"entries_truncated":false,"entries_offset":0,"entries_next_cursor":null}"#,
         ),
         (
             r#"{"kind":"anchor","id":"vault/door","action":"remove"}"#,
             r#"["planes/vault/anchors.jsonc"]"#,
-            r#"{"list":"remove","entries":[{"kind":"anchor","id":"vault/door"}],"entries_total":1,"entries_truncated":false}"#,
+            r#"{"list":"remove","entries":[{"kind":"anchor","id":"vault/door"}],"entries_total":1,"entries_truncated":false,"entries_offset":0,"entries_next_cursor":null}"#,
         ),
         (
             r#"{"kind":"stairwell","id":"overworld/cave.chute","action":"remove"}"#,
             r#"["planes/overworld/stairwells.jsonc"]"#,
-            r#"{"list":"remove","entries":[{"kind":"stairwell","id":"overworld/cave.chute"}],"entries_total":1,"entries_truncated":false}"#,
+            r#"{"list":"remove","entries":[{"kind":"stairwell","id":"overworld/cave.chute"}],"entries_total":1,"entries_truncated":false,"entries_offset":0,"entries_next_cursor":null}"#,
         ),
         (
             r#"{"kind":"object","id":"vault.key","action":"rename","to":"vault.key2"}"#,
             r#"["planes/vault/layers/0/0_0.jsonc"]"#,
-            r#"{"list":"rename","entries":[{"kind":"object","from":"vault.key","to":"vault.key2"}],"entries_total":1,"entries_truncated":false}"#,
+            r#"{"list":"rename","entries":[{"kind":"object","from":"vault.key","to":"vault.key2"}],"entries_total":1,"entries_truncated":false,"entries_offset":0,"entries_next_cursor":null}"#,
         ),
         (
             r#"{"kind":"render_layer","id":"item","action":"remove"}"#,
             r#"["profile/profile.jsonc"]"#,
-            r#"{"list":"remove","entries":[{"kind":"render_layer","id":"item"}],"entries_total":1,"entries_truncated":false}"#,
+            r#"{"list":"remove","entries":[{"kind":"render_layer","id":"item"}],"entries_total":1,"entries_truncated":false,"entries_offset":0,"entries_next_cursor":null}"#,
         ),
     ] {
         assert_eq!(
@@ -743,7 +743,7 @@ fn impact_gives_the_cascade_the_allowance_and_whether_a_name_is_free() {
     assert_eq!(impact_member(&mut server, lamp, "carried_total"), "3");
     assert_eq!(
         impact_member(&mut server, lamp, "diff_allowance"),
-        r#"{"list":"remove","entries":[{"kind":"object","id":"vault.lamp"},{"kind":"object","id":"vault.key"},{"kind":"object","id":"vault.gem"}],"entries_total":3,"entries_truncated":false}"#
+        r#"{"list":"remove","entries":[{"kind":"object","id":"vault.lamp"},{"kind":"object","id":"vault.key"},{"kind":"object","id":"vault.gem"}],"entries_total":3,"entries_truncated":false,"entries_offset":0,"entries_next_cursor":null}"#
     );
     assert_eq!(impact_member(&mut server, lamp, "breaking_total"), "0");
     let renamed = r#"{"kind":"object","id":"vault.lamp","action":"rename","to":"vault.torch"}"#;
@@ -1269,7 +1269,7 @@ pub(super) fn every_reference_tool(server: &mut Server) {
 }
 
 #[test]
-#[allow(clippy::disallowed_methods)]
+#[allow(clippy::disallowed_methods, clippy::too_many_lines)]
 fn an_object_carrying_many_is_listed_within_its_caps() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("tree");
@@ -1313,30 +1313,70 @@ fn an_object_carrying_many_is_listed_within_its_caps() {
         Some(i64::try_from(carried + 1).unwrap())
     );
     assert_eq!(at(allowance, &["entries_truncated"]).as_bool(), Some(true));
-    // The rest are found as docs/MCP.md says: search_objects at the
-    // carrier's plane, layer and tile, keeping the items whose position
-    // starts with the carrier's.
-    let (_, document) = result(
+    // The rest come with the cursors: each list paged to its end gives
+    // every item once, in order.
+    let (carried_items, carried_pages) = paged(
         &mut server,
-        "search_objects",
-        r#"{"plane":"overworld","layer":0,"bbox":[32,0,32,0],"carried":true,"limit":500}"#,
+        arguments,
+        "carried_cursor",
+        &["carried_next_cursor"],
+        &["carried"],
     );
-    let page = structured(&document);
-    let inside: Vec<&Value> = at(page, &["objects"])
-        .as_array()
-        .unwrap()
+    assert_eq!(carried_pages, 2);
+    assert_eq!(carried_items.len(), carried);
+    let uids: Vec<String> = carried_items
         .iter()
-        .filter(|item| {
-            let position = at(item, &["position"]).as_array().unwrap();
-            position.len() > 1 && position[0].as_i64() == Some(0)
+        .map(|item| {
+            let document = Document::parse(item.as_str(), &Limits::default()).unwrap();
+            at(document.root(), &["uid"]).as_str().unwrap().to_owned()
         })
         .collect();
-    assert_eq!(inside.len(), carried);
-    assert!(
-        inside
-            .iter()
-            .all(|item| at(item, &["carried_by"]).as_str() == Some("bag"))
+    let expected: Vec<String> = (0..carried)
+        .map(|index| format!("bag.item{index}"))
+        .collect();
+    assert_eq!(uids, expected);
+    let (entries, entries_pages) = paged(
+        &mut server,
+        arguments,
+        "entries_cursor",
+        &["diff_allowance", "entries_next_cursor"],
+        &["diff_allowance", "entries"],
     );
+    assert_eq!(entries_pages, 2);
+    assert_eq!(entries.len(), carried + 1);
+    let mut wanted = vec![r#"{"kind":"object","id":"bag"}"#.to_owned()];
+    wanted.extend(
+        expected
+            .iter()
+            .map(|uid| format!(r#"{{"kind":"object","id":"{uid}"}}"#)),
+    );
+    assert_eq!(entries, wanted);
+    // tilewright diff accepts the removal with exactly those entries, and
+    // not with the first page alone or with any one left out.
+    let removed = directory.path().join("removed");
+    copy_tree(&root, &removed);
+    std::fs::write(
+        removed.join("planes/overworld/layers/0/1_0.jsonc"),
+        r#"{"format": "tilewright.chunk/1", "plane": "overworld", "layer": 0, "chunk": [1, 0], "objects": []}"#,
+    )
+    .unwrap();
+    assert!(!super::impact::breaking_with(
+        &root, &removed, "remove", &entries
+    ));
+    assert!(super::impact::breaking_with(
+        &root,
+        &removed,
+        "remove",
+        &entries[..crate::references::MAXIMUM_CARRIED]
+    ));
+    for left_out in [0, 1, crate::references::MAXIMUM_CARRIED, carried] {
+        let mut fewer = entries.clone();
+        fewer.remove(left_out);
+        assert!(
+            super::impact::breaking_with(&root, &removed, "remove", &fewer),
+            "{left_out}"
+        );
+    }
 }
 
 #[test]
@@ -1493,25 +1533,26 @@ fn the_input_schemas_state_the_rules_the_server_checks() {
 }
 
 /// A file past the format's 64 MiB, read after another file, is refused by
-/// the library in its read budget's words, so `server_budget_reached` is
-/// true for it too, though `tilewright tx apply` refuses it as well
-/// (docs/MCP.md, "Budgets"). Ignored by default: it writes a 70 MiB file.
-/// Run with `cargo test -p tilewright-mcp -- --ignored`.
+/// the library in its read budget's words, but its limit is the format's
+/// per-file limit, which `tilewright tx apply` refuses too: so
+/// `server_budget_reached` is false for it (docs/MCP.md, "Budgets").
+///
+/// The file is sparse: the library refuses it from its length and never
+/// reads it, and the loader does not read it, so it costs no disk and no
+/// time. On Unix only, where extending a file with `set_len` leaves it
+/// sparse (Linux file systems and APFS); NTFS would allocate it.
+#[cfg(unix)]
 #[test]
-#[ignore = "writes a 70 MiB file"]
 #[allow(clippy::disallowed_methods)]
-fn a_file_past_the_format_limit_read_second_reads_as_the_read_budget() {
+fn a_file_past_the_format_limit_read_second_is_not_the_read_budget() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("tree");
     copy_tree(&fixture("basic"), &root);
     std::fs::write(root.join("profile/small.jsonc"), "{\"a\": 1}\n").unwrap();
-    let mut huge = String::from("{\"a\": 1");
-    while huge.len() < 70 << 20 {
-        huge.push('\n');
-        huge.push_str(&" ".repeat((1 << 20) - 1));
-    }
-    huge.push_str("\n}");
-    std::fs::write(root.join("profile/huge.jsonc"), huge).unwrap();
+    std::fs::File::create(root.join("profile/huge.jsonc"))
+        .unwrap()
+        .set_len(70 << 20)
+        .unwrap();
     let mut server = ready(&root);
     let test =
         |path: &str| format!(r#"{{"op": "test", "path": "{path}", "pointer": ["a"], "value": 1}}"#);
@@ -1522,16 +1563,140 @@ fn a_file_past_the_format_limit_read_second_reads_as_the_read_budget() {
         let (_, document) = result(server, "preview_transaction", &arguments);
         let page = structured(&document);
         assert_eq!(at(page, &["would_apply"]).as_bool(), Some(false));
+        assert_eq!(
+            at(page, &["refusals", "0", "limit", "kind"]).as_str(),
+            Some("file_size")
+        );
+        assert_eq!(
+            at(page, &["refusals", "0", "limit", "server_budget"]).as_bool(),
+            Some(false)
+        );
         at(page, &["server_budget_reached"]).as_bool().unwrap()
     };
     // Alone, the library says the file is too large: not the server's.
     assert!(!reached(&mut server, &test("profile/huge.jsonc")));
     // After another file, it says the touched files hold more than the
-    // read budget.
+    // read budget, and is still not the server's.
     let both = format!(
         "{},{}",
         test("profile/small.jsonc"),
         test("profile/huge.jsonc")
     );
-    assert!(reached(&mut server, &both));
+    assert!(!reached(&mut server, &both));
+}
+
+/// Every item of the list at `items` of `impact`'s result for `arguments`,
+/// each as its JSON text, following the cursor at `next` with the argument
+/// `cursor` until it is null; and the number of pages. Each page starts
+/// at the offset its cursor named, and the other lists stay at their
+/// first page.
+fn paged(
+    server: &mut Server,
+    arguments: &str,
+    cursor: &str,
+    next: &[&str],
+    items: &[&str],
+) -> (Vec<String>, usize) {
+    let mut found = Vec::new();
+    let mut pages = 0;
+    let mut call = arguments.to_owned();
+    loop {
+        let (reply, document) = result(server, "impact", &call);
+        assert!(reply.contains("\"isError\":false"), "{call}: {reply}");
+        let page = structured(&document);
+        // The breaking references are always their first page here.
+        assert_eq!(at(page, &["offset"]).as_i64(), Some(0));
+        let offset_key = if cursor == "carried_cursor" {
+            vec!["carried_offset"]
+        } else {
+            vec!["diff_allowance", "entries_offset"]
+        };
+        assert_eq!(
+            at(page, &offset_key).as_i64(),
+            Some(i64::try_from(found.len()).unwrap())
+        );
+        let list = at(page, items).as_array().unwrap();
+        assert!(!list.is_empty());
+        found.extend(list.iter().map(|item| document.canonical(item)));
+        pages += 1;
+        match at(page, next).as_str() {
+            Some(token) => {
+                call = format!(
+                    r#"{},"{cursor}":"{token}"}}"#,
+                    &arguments[..arguments.len() - 1]
+                );
+            }
+            None => return (found, pages),
+        }
+    }
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)]
+fn impacts_list_cursors_are_their_own() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("tree");
+    copy_tree(&fixture("basic"), &root);
+    let items: Vec<String> = (0..crate::references::MAXIMUM_CARRIED + 5)
+        .map(|index| format!(r#"{{"uid": "bag.item{index}", "proto": "coin"}}"#))
+        .collect();
+    std::fs::write(
+        root.join("planes/overworld/layers/0/1_0.jsonc"),
+        format!(
+            r#"{{"format": "tilewright.chunk/1", "plane": "overworld", "layer": 0, "chunk": [1, 0], "objects": [{{"uid": "bag", "at": [0, 0], "proto": "chest", "inventory": [{}]}}]}}"#,
+            items.join(",")
+        ),
+    )
+    .unwrap();
+    let mut server = ready(&root);
+    let arguments = r#"{"kind":"object","id":"bag","action":"remove"}"#;
+    let (_, document) = result(&mut server, "impact", arguments);
+    let page = structured(&document);
+    let carried = at(page, &["carried_next_cursor"])
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let entries = at(page, &["diff_allowance", "entries_next_cursor"])
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(carried, entries);
+    let with = |name: &str, token: &str, arguments: &str| {
+        format!(
+            r#"{},"{name}":"{token}"}}"#,
+            &arguments[..arguments.len() - 1]
+        )
+    };
+    let refused = |server: &mut Server, call: &str| {
+        let (_, document) = result(server, "impact", call);
+        assert_eq!(tool_error(&document), "cursor.invalid", "{call}");
+    };
+    // A cursor of one list is not a cursor of another.
+    refused(&mut server, &with("entries_cursor", &carried, arguments));
+    refused(&mut server, &with("carried_cursor", &entries, arguments));
+    refused(&mut server, &with("cursor", &carried, arguments));
+    // Nor of other arguments: the object renamed, or another object.
+    let rename = r#"{"kind":"object","id":"bag","action":"rename","to":"sack"}"#;
+    refused(&mut server, &with("entries_cursor", &entries, rename));
+    refused(&mut server, &with("carried_cursor", &carried, rename));
+    // Both cursors in one call page both lists.
+    let both = with(
+        "entries_cursor",
+        &entries,
+        &with("carried_cursor", &carried, arguments),
+    );
+    let (_, document) = result(&mut server, "impact", &both);
+    let page = structured(&document);
+    assert_eq!(at(page, &["carried"]).as_array().unwrap().len(), 5);
+    assert_eq!(
+        at(page, &["diff_allowance", "entries"])
+            .as_array()
+            .unwrap()
+            .len(),
+        6
+    );
+    assert_eq!(at(page, &["carried_truncated"]).as_bool(), Some(false));
+    assert!(at(page, &["carried_next_cursor"]).as_str().is_none());
+    // A string that is not a cursor.
+    refused(&mut server, &with("carried_cursor", "nope", arguments));
 }

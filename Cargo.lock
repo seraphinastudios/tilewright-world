@@ -369,7 +369,7 @@ dependencies = [
 
 [[package]]
 name = "tilewright-cli"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "tempfile",
  "tilewright-diff",
@@ -382,7 +382,7 @@ dependencies = [
 
 [[package]]
 name = "tilewright-diff"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "sha2",
  "tempfile",
@@ -393,7 +393,7 @@ dependencies = [
 
 [[package]]
 name = "tilewright-edit"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "rustix",
  "sha2",
@@ -404,11 +404,11 @@ dependencies = [
 
 [[package]]
 name = "tilewright-jsonc"
-version = "0.2.2"
+version = "0.2.3"
 
 [[package]]
 name = "tilewright-mcp"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "tempfile",
  "tilewright-diff",
@@ -419,7 +419,7 @@ dependencies = [
 
 [[package]]
 name = "tilewright-pack"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "rusqlite",
  "sha2",
@@ -432,7 +432,7 @@ dependencies = [
 
 [[package]]
 name = "tilewright-pack-wasm"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "js-sys",
  "tilewright-pack",
@@ -442,7 +442,7 @@ dependencies = [
 
 [[package]]
 name = "tilewright-source"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "rustix",
  "sha2",
