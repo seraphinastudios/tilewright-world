@@ -389,6 +389,23 @@ impl SourceRoot {
         Ok(Some(bytes))
     }
 
+    /// The length in bytes of the regular file `path`, checked as
+    /// [`Self::read`] checks a file before reading it, without reading any
+    /// of it: a link is not followed, and anything but a regular file is
+    /// refused. `Ok(None)` means the file, or a directory on its way, is
+    /// missing.
+    pub fn length(&self, path: &str) -> Result<Option<u64>, AccessError> {
+        let parts = checked(path)?;
+        if parts.is_empty() {
+            return Err(AccessError::Unexpected(path.to_owned()));
+        }
+        match self.root.file(&parts) {
+            Ok((_, length)) => Ok(Some(length)),
+            Err(Refused::Missing) => Ok(None),
+            Err(other) => Err(refused(path, other)),
+        }
+    }
+
     /// Opens the directory `path` (the empty path is the root), creating it
     /// and its missing parents when `create`. `Ok(None)` means it is missing
     /// and was not created.
