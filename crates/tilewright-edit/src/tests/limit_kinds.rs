@@ -286,3 +286,32 @@ fn each_parser_bound_is_named() {
     }
     assert_eq!(Limit::parser(E::UnexpectedEnd), None);
 }
+
+#[test]
+fn an_inverse_too_large_to_write_is_the_size_of_a_transaction() {
+    // Deleting a file makes an inverse that holds its text, escaped: a
+    // file of backslashes doubles, past the size of a transaction.
+    let tree = copy();
+    let line = format!("\"{}\"", "\\\\".repeat(500_000));
+    let text = format!("{{\"a\": [\n{}\n]}}\n", vec![line.as_str(); 40].join(",\n"));
+    assert!(text.len() < 64 << 20 && 2 * text.len() > 64 << 20);
+    fs::write(tree.path().join("profile/big.jsonc"), text).unwrap();
+    let found = problems(
+        tree.path(),
+        &transaction(r#"{"op": "document.delete", "path": "profile/big.jsonc"}"#),
+    );
+    assert!(
+        has(
+            &found,
+            "tx.limit",
+            "the inverse would exceed the limits of a transaction; split"
+        ),
+        "{found:#?}"
+    );
+    assert_limit(
+        "exceed the limits",
+        LimitKind::Records,
+        Some(64 << 20),
+        LimitOrigin::Library,
+    );
+}
