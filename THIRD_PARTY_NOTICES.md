@@ -43,7 +43,7 @@ target `rusqlite` takes SQLite from `sqlite-wasm-rs` instead of
 
 | Component | Pulled in by | License |
 | --- | --- | --- |
-| [SQLite](https://sqlite.org/) 3.53.4 | [`sqlite-wasm-rs`](https://github.com/Spxg/sqlite-wasm-rs) 0.6.2 (MIT), through `rusqlite`'s `ffi-sqlite-wasm-rs` feature | Public domain |
+| [SQLite](https://sqlite.org/) 3.54.1 | [`sqlite-wasm-rs`](https://github.com/Spxg/sqlite-wasm-rs) 0.6.3 (MIT), through `rusqlite`'s `ffi-sqlite-wasm-rs` feature | Public domain |
 | Parts of [musl](https://musl.libc.org/) libc (string, stdlib, math and stdio functions) | `sqlite-wasm-rs` | MIT |
 | [printf](https://github.com/eyalroz/printf) | `sqlite-wasm-rs` | MIT |
 | `rsqlite-vfs` 0.2.0, SQLite's in-memory file system | `sqlite-wasm-rs` | MIT |
