@@ -76,6 +76,79 @@ impl AccessError {
         type Inner = dyn std::error::Error + Send + Sync;
         matches!(self, Self::Io(_, error) if error.get_ref().is_some_and(Inner::is::<RemovalPending>))
     }
+
+    /// Whether this is [`SourceDirectory::create`] refusing because
+    /// something is already at the name: a file, a directory, a link
+    /// (dangling or not, on Windows any reparse point), or any other entry,
+    /// which it left as it was. It is an [`AccessError::Io`] whose error is
+    /// of kind [`std::io::ErrorKind::AlreadyExists`].
+    #[must_use]
+    pub fn already_exists(&self) -> bool {
+        type Inner = dyn std::error::Error + Send + Sync;
+        matches!(self, Self::Io(_, error) if error.kind() == std::io::ErrorKind::AlreadyExists
+            && error.get_ref().is_some_and(Inner::is::<AlreadyThere>))
+    }
+
+    /// Whether this is [`SourceDirectory::create`] failing after it made
+    /// its file and not removing it, so that the file, partly written, may
+    /// be left at the name: always on Windows, and on Unix where the entry
+    /// at the name could not be told to be still that file. It is an
+    /// [`AccessError::Io`] of the failure's own kind. When `create` fails
+    /// otherwise, nothing it made is left.
+    #[must_use]
+    pub fn may_be_left(&self) -> bool {
+        type Inner = dyn std::error::Error + Send + Sync;
+        matches!(self, Self::Io(_, error) if error.get_ref().is_some_and(Inner::is::<LeftBehind>))
+    }
+}
+
+/// Something already at the name a file is created as; see
+/// [`AccessError::already_exists`].
+#[derive(Debug)]
+pub(crate) struct AlreadyThere;
+
+impl fmt::Display for AlreadyThere {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("something is already there, and it is left as it was")
+    }
+}
+
+impl std::error::Error for AlreadyThere {}
+
+/// The error for something already at the name a file is created as.
+pub(crate) fn already_there() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::AlreadyExists, AlreadyThere)
+}
+
+/// A failed creation whose file, partly written, was not removed, since it
+/// could not be told to be still the one created at the name; see
+/// [`AccessError::may_be_left`].
+#[derive(Debug)]
+pub(crate) struct LeftBehind(std::io::Error);
+
+impl fmt::Display for LeftBehind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{}; the file it made may be left at the name, partly written, since only a file known to be the one it made is removed",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for LeftBehind {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
+/// `error`, of a creation whose file was not removed, saying so; of the
+/// same kind.
+pub(crate) fn left_behind(error: Refused) -> Refused {
+    match error {
+        Refused::Io(error) => Refused::Io(std::io::Error::new(error.kind(), LeftBehind(error))),
+        other => other,
+    }
 }
 
 /// A removal that took effect but stays until another program closes the
@@ -316,6 +389,23 @@ impl SourceRoot {
         Ok(Some(bytes))
     }
 
+    /// The length in bytes of the regular file `path`, checked as
+    /// [`Self::read`] checks a file before reading it, without reading any
+    /// of it: a link is not followed, and anything but a regular file is
+    /// refused. `Ok(None)` means the file, or a directory on its way, is
+    /// missing.
+    pub fn length(&self, path: &str) -> Result<Option<u64>, AccessError> {
+        let parts = checked(path)?;
+        if parts.is_empty() {
+            return Err(AccessError::Unexpected(path.to_owned()));
+        }
+        match self.root.file(&parts) {
+            Ok((_, length)) => Ok(Some(length)),
+            Err(Refused::Missing) => Ok(None),
+            Err(other) => Err(refused(path, other)),
+        }
+    }
+
     /// Opens the directory `path` (the empty path is the root), creating it
     /// and its missing parents when `create`. `Ok(None)` means it is missing
     /// and was not created.
@@ -431,6 +521,65 @@ impl SourceDirectory {
     ) -> Result<(), AccessError> {
         self.directory
             .write(checked_name(name)?, access, bytes)
+            .map_err(|error| refused(&self.entry(name), error))
+    }
+
+    /// Creates a new file `name` holding `bytes` and syncs it, only if
+    /// nothing is at `name`: for callers that must never replace or remove
+    /// a file that is not theirs, such as one writing output a user named.
+    /// `name` is checked as for [`write`](Self::write), and `access` means
+    /// what it does there.
+    ///
+    /// What it promises on every platform:
+    ///
+    /// - The file is made by an exclusive create (`O_CREAT | O_EXCL` on
+    ///   Unix, `CREATE_NEW` on Windows), which fails if anything is at the
+    ///   name, a link or a dangling link included, and follows none. Then
+    ///   the error is [`AccessError::Io`] of kind
+    ///   [`AlreadyExists`](std::io::ErrorKind::AlreadyExists), and
+    ///   [`AccessError::already_exists`] says so.
+    /// - Nothing that was at the name before the call is removed, replaced
+    ///   or written through, on success or on any error. Something another
+    ///   process puts at the name while a create is failing is removed
+    ///   only in the Unix window below; on Windows nothing is removed.
+    /// - All of `bytes` is written and the file is synced (`fsync`; on
+    ///   macOS `F_FULLFSYNC`, as std syncs) before it succeeds. As with
+    ///   [`write`](Self::write), the directory is not synced: call
+    ///   [`sync`](Self::sync) to make the new name durable.
+    ///
+    /// When it fails after making the file, as when the disk is full or
+    /// `access` cannot be given:
+    ///
+    /// - On Unix the file is removed only if the entry at `name` is still
+    ///   the file it made: same device and inode as the open file, read
+    ///   without following a link. However many links the file has, the
+    ///   name is still that file's, so removing it removes no one else's
+    ///   data. Between that check and the removal (`unlinkat`), a window
+    ///   of the order of a microsecond, another process that renames a
+    ///   file over the name, over the new file, has its file removed; that
+    ///   is the only file at risk. POSIX has no call that removes a name
+    ///   only if it is a given file, so this window cannot be closed. Where
+    ///   the file is not removed, [`AccessError::may_be_left`] says so.
+    /// - On Windows the file is never removed: std gives no way to tell the
+    ///   entry at a path is the file it made, so a partly written file may
+    ///   be left at the name, and [`AccessError::may_be_left`] says so.
+    ///   Removing it is the caller's choice.
+    ///
+    /// What it cannot promise: on Unix the directory is the one this
+    /// handle opened, but a process that can change an ancestor can move
+    /// or replace it, and the file is then made where the handle is. On
+    /// Windows every step is by path, after the directory's components were
+    /// checked for reparse points when it was opened, so a local process
+    /// changing the tree at the same time can redirect where the file is
+    /// made (but the create still never replaces an entry).
+    pub fn create(
+        &self,
+        name: &str,
+        access: Option<&Access>,
+        bytes: &[u8],
+    ) -> Result<(), AccessError> {
+        self.directory
+            .create(checked_name(name)?, access, bytes)
             .map_err(|error| refused(&self.entry(name), error))
     }
 

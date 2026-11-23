@@ -376,6 +376,70 @@ impl Directory {
         written
     }
 
+    /// Creates a new file `name` holding `bytes` and syncs it, failing if
+    /// anything is at `name`, which is never removed: the exclusive create
+    /// neither replaces nor follows an entry there. Access is given as by
+    /// [`write`](Self::write). If it fails after making the file, the file
+    /// is removed only while the entry at `name` is still that file, by
+    /// device and inode; see `SourceDirectory::create` for the window that
+    /// leaves.
+    pub(crate) fn create(
+        &self,
+        name: &str,
+        access: Option<&Access>,
+        bytes: &[u8],
+    ) -> Result<(), Refused> {
+        let flags = OFlags::WRONLY
+            | OFlags::CREATE
+            | OFlags::EXCL
+            | OFlags::NOFOLLOW
+            | OFlags::CLOEXEC
+            | OFlags::NOCTTY;
+        // Only its owner's until it has its permissions, as in `write`.
+        let mode = if access.is_some() { 0o600 } else { 0o666 };
+        let fd = match openat(&self.0, name, flags, Mode::from_raw_mode(mode)) {
+            Ok(fd) => fd,
+            // Anything at the name, a link to anywhere or nowhere included.
+            Err(Errno::EXIST) => return Err(Refused::Io(crate::access::already_there())),
+            Err(errno) => return Err(classify(self.0.as_fd(), name, errno, &[name])),
+        };
+        let mut file = std::fs::File::from(fd);
+        let written = (|| {
+            #[cfg(test)]
+            super::after_create().map_err(Refused::Io)?;
+            if let Some(access) = access {
+                #[cfg(target_os = "linux")]
+                strip_access_control_list(&file)?;
+                check_labels(&file, access)?;
+            }
+            file.write_all(bytes).map_err(Refused::Io)?;
+            if let Some(access) = access {
+                set_access(&file, access)?;
+            }
+            file.sync_all().map_err(Refused::Io)
+        })();
+        match written {
+            Ok(()) => Ok(()),
+            Err(error) if self.remove_created(name, &file) => Err(error),
+            Err(error) => Err(crate::access::left_behind(error)),
+        }
+    }
+
+    /// Removes `name` if it is still the open file `created`: the same
+    /// device and inode, not following a link. Whether it was removed.
+    fn remove_created(&self, name: &str, created: &std::fs::File) -> bool {
+        let (Ok(ours), Ok(there)) = (
+            fstat(created),
+            statat(&self.0, name, AtFlags::SYMLINK_NOFOLLOW),
+        ) else {
+            return false;
+        };
+        if (ours.st_dev, ours.st_ino) != (there.st_dev, there.st_ino) {
+            return false;
+        }
+        unlinkat(&self.0, name, AtFlags::empty()).is_ok()
+    }
+
     /// Renames `from` to `to` in this directory, replacing `to`.
     pub(crate) fn rename(&self, from: &str, to: &str) -> Result<(), Refused> {
         renameat(&self.0, from, &self.0, to).map_err(|errno| Refused::Io(errno.into()))

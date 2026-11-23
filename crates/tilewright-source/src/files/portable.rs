@@ -374,6 +374,67 @@ impl Directory {
         written
     }
 
+    /// Creates a new file `name` holding `bytes` and syncs it, failing if
+    /// anything is at `name`, which is never removed: the exclusive create
+    /// (`create_new`, on Windows not following a reparse point) neither
+    /// replaces nor follows an entry there. With `access`, it gets that
+    /// mode after writing, as with [`write`](Self::write). A file it made
+    /// is never removed, even if writing it fails: by path alone it cannot
+    /// be told to be still the one made, so the error says it may be left.
+    pub(crate) fn create(
+        &self,
+        name: &str,
+        access: Option<&Access>,
+        bytes: &[u8],
+    ) -> Result<(), Refused> {
+        use std::io::Write as _;
+        let path = self.0.join(name);
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        if access.is_some() {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+            options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        }
+        #[cfg(test)]
+        let opened =
+            super::open_fails().map_or_else(|| options.open(&path), |kind| Err(kind.into()));
+        #[cfg(not(test))]
+        let opened = options.open(&path);
+        let mut file = match opened {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                return Err(Refused::Io(crate::access::already_there()));
+            }
+            // Windows may refuse a name a directory has with another error;
+            // whatever is there, the name is taken.
+            Err(error) => {
+                return Err(match self.entry(name) {
+                    Ok(Some(_)) => Refused::Io(crate::access::already_there()),
+                    _ => Refused::Io(error),
+                });
+            }
+        };
+        let written = (|| {
+            #[cfg(test)]
+            super::after_create().map_err(Refused::Io)?;
+            file.write_all(bytes).map_err(Refused::Io)?;
+            if let Some(access) = access {
+                let current = file.metadata().map_err(Refused::Io)?.permissions();
+                file.set_permissions(permissions_of(access, &current))
+                    .map_err(Refused::Io)?;
+            }
+            file.sync_all().map_err(Refused::Io)
+        })();
+        written.map_err(crate::access::left_behind)
+    }
+
     /// There are no labels a file's name decides here.
     #[allow(clippy::unnecessary_wraps, clippy::unused_self, dead_code)]
     pub(crate) fn check_final_name(&self, _: &str, _: &str) -> Result<(), Refused> {

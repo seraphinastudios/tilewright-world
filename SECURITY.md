@@ -15,8 +15,8 @@ terminal or add lines to the output.
 `tilewright mcp` (docs/MCP.md) reads one source tree for an MCP client: it
 takes no path from the client, and nothing it does writes. It previews a
 transaction the client sends by planning it in memory with
-`tilewright-edit`, as `tilewright tx preview` does, and never publishes
-it; the transaction's paths are confined as when it is applied. That is
+`tilewright-edit`, as `tilewright tx preview` does but within tighter read
+and work budgets, and never publishes it; the transaction's paths are confined as when it is applied. That is
 enforced by a list and by tests, not proven: a lint in its crate refuses
 the std and toolkit functions it lists that write, lock, publish, change
 permissions, owners or times, start a process or open a connection, and
@@ -116,6 +116,20 @@ platform the access checks are made before anything is written and again
 just before the first rename, but as with verifying packs, applying
 transactions in a tree that others can write to is not supported: such a
 writer could swap a file between a check and its use.
+
+For tools that write a file a user named and must never replace one,
+`SourceDirectory::create` in `tilewright-source` makes a new file through
+the same confinement with an exclusive create, which fails if anything is
+at the name (a link, dangling or not, included) and follows nothing. It
+never removes or replaces an entry that was there before the call, on
+success or on error, unlike `SourceDirectory::write`, which removes whatever
+is at the name first. If writing fails after the file was made, on Unix it
+is removed only while the entry at the name is still that file (same device
+and inode). That leaves a window of the order of a microsecond, between that
+check and the removal, which POSIX cannot close: the only file at risk is
+one another process renames over the new file in it. On Windows, where std
+cannot tell that by path, the file is never removed. Either way, where the
+file may be left, partly written, `AccessError::may_be_left` says so.
 
 A pack's file name digest is checked against the file at its path, so the
 check binds to the path. Packs are content-addressed files opened from

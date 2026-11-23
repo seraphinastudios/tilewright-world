@@ -62,6 +62,7 @@
 
 mod diagnostic;
 mod engine;
+mod limit;
 mod operations;
 mod publish;
 mod render;
@@ -70,12 +71,14 @@ mod terrain;
 mod transaction;
 mod uids;
 
+pub use limit::{Limit, LimitKind, LimitOrigin, Refusal};
 pub use publish::{
     PUBLISH_CONFINED, PUBLISH_SUPPORTED, PublishError, PublishOptions, Published, UNCHECKED_ACCESS,
 };
 pub use transaction::{Digests, FORMAT, Transaction};
 
 use engine::{Failure, Names, Primitive, Workspace};
+use limit::Limit as FoundLimit;
 use render::json_string;
 use sha2::{Digest as _, Sha256};
 use splice::Step;
@@ -112,6 +115,85 @@ pub mod limits {
     pub const WORK: u64 = 4 << 30;
     /// Most diagnostics reported for one transaction.
     pub const DIAGNOSTICS: usize = 1_000;
+}
+
+/// The read and work budgets of planning a transaction, which can only be
+/// tighter than [`limits::READ_BYTES`] and [`limits::WORK`]: the
+/// [`Default`] is those limits, and each `with_` method sets one budget,
+/// lowering a value above its limit to the limit.
+///
+/// [`plan_in_within`] plans within them, and the [`Plan`] keeps them, so
+/// [`Plan::check_undo`] carries out each round within the same budgets. A
+/// transaction refused under tighter budgets may still plan under the
+/// default ones, as [`plan`] and the CLI use: tighter budgets bound what a
+/// caller spends, not what the format allows. Whatever plans under tighter
+/// budgets plans under the default ones, with the same result.
+///
+/// ```
+/// use tilewright_edit::{Budgets, limits};
+///
+/// let budgets = Budgets::default().with_read_bytes(64 << 20).with_work(1 << 40);
+/// assert_eq!(budgets.read_bytes(), 64 << 20);
+/// assert_eq!(budgets.work(), limits::WORK); // lowered to the limit
+/// assert_eq!(Budgets::default().read_bytes(), limits::READ_BYTES);
+/// ```
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Budgets {
+    read_bytes: u64,
+    work: u64,
+}
+
+impl Budgets {
+    /// These budgets with at most `read_bytes` read from the files a
+    /// transaction touches ([`limits::READ_BYTES`] at most).
+    #[must_use]
+    pub const fn with_read_bytes(self, read_bytes: u64) -> Self {
+        Self {
+            read_bytes: if read_bytes < limits::READ_BYTES {
+                read_bytes
+            } else {
+                limits::READ_BYTES
+            },
+            ..self
+        }
+    }
+
+    /// These budgets with at most `work` bytes of work ([`limits::WORK`]
+    /// at most).
+    #[must_use]
+    pub const fn with_work(self, work: u64) -> Self {
+        Self {
+            work: if work < limits::WORK {
+                work
+            } else {
+                limits::WORK
+            },
+            ..self
+        }
+    }
+
+    /// Most bytes read from the files a transaction touches; see
+    /// [`limits::READ_BYTES`].
+    #[must_use]
+    pub const fn read_bytes(&self) -> u64 {
+        self.read_bytes
+    }
+
+    /// Most work, in bytes; see [`limits::WORK`].
+    #[must_use]
+    pub const fn work(&self) -> u64 {
+        self.work
+    }
+}
+
+impl Default for Budgets {
+    fn default() -> Self {
+        Self {
+            read_bytes: limits::READ_BYTES,
+            work: limits::WORK,
+        }
+    }
 }
 
 /// Stable diagnostic codes of transactions. Problems with the edited world
@@ -195,6 +277,8 @@ pub struct Plan {
     /// use it, not the path.
     source: SourceRoot,
     load: LoadOptions,
+    /// The budgets it was planned within, which the undo check keeps.
+    budgets: Budgets,
     files: Vec<FileChange>,
     world: World,
     sealed: String,
@@ -212,6 +296,13 @@ impl Plan {
     #[must_use]
     pub const fn world(&self) -> &World {
         &self.world
+    }
+
+    /// The budgets it was planned within, which [`Plan::check_undo`]
+    /// carries out each round within too.
+    #[must_use]
+    pub const fn budgets(&self) -> Budgets {
+        self.budgets
     }
 
     /// The transaction with `base` and `result` recording the digests of
@@ -306,7 +397,7 @@ pub(crate) fn staging_path(path: &str) -> String {
 struct Problems<'a> {
     name: &'a str,
     lines: diagnostic::Lines<'a>,
-    found: Vec<Diagnostic>,
+    found: Vec<(Diagnostic, Option<FoundLimit>)>,
     /// Whether a problem was dropped, or checking stopped, at the limit.
     more: bool,
 }
@@ -325,13 +416,16 @@ impl<'a> Problems<'a> {
         if self.full() {
             return;
         }
-        self.found.push(diagnostic::at(
-            self.name,
-            &self.lines,
-            span.start,
-            span.end,
-            failure.code.as_str(),
-            failure.message,
+        self.found.push((
+            diagnostic::at(
+                self.name,
+                &self.lines,
+                span.start,
+                span.end,
+                failure.code.as_str(),
+                failure.message,
+            ),
+            failure.limit,
         ));
     }
 
@@ -348,15 +442,19 @@ impl<'a> Problems<'a> {
     }
 
     /// The problems in order, with the note if there may be more.
-    fn finish(self) -> Vec<Diagnostic> {
+    fn finish(self) -> Refusal {
         let mut found = self.found;
-        found.sort();
-        found.dedup();
+        limit::sort(&mut found);
         if self.more {
-            found.push(more_note(self.name));
+            found.push((more_note(self.name), Some(diagnostics_limit())));
         }
-        found
+        Refusal::new(found)
     }
+}
+
+/// The limit on the diagnostics of one transaction.
+fn diagnostics_limit() -> FoundLimit {
+    FoundLimit::count(LimitKind::Diagnostics, limits::DIAGNOSTICS)
 }
 
 /// The note, in the last place of a transaction's problems, that there may
@@ -483,6 +581,7 @@ fn check_recorded(
                         "replaying the transaction gives other bytes than its result records for {}",
                         diagnostic::listed(differing.iter().map(|path| path.as_str()))
                     ),
+                    limit: None,
                 },
             );
         }
@@ -494,7 +593,7 @@ fn check_recorded(
 fn check_terrain_addresses(
     transaction: &Transaction,
     problem: impl Fn(&str, &str) -> Option<String>,
-) -> Vec<Diagnostic> {
+) -> Option<Refusal> {
     let mut problems = Problems::new(transaction);
     for operation in &transaction.operations {
         if problems.full() {
@@ -507,9 +606,9 @@ fn check_terrain_addresses(
         }
     }
     if problems.is_empty() {
-        Vec::new()
+        None
     } else {
-        problems.finish()
+        Some(problems.finish())
     }
 }
 
@@ -542,15 +641,14 @@ fn load_result(
     load: &LoadOptions,
     transaction: &Transaction,
     files: &[FileChange],
-) -> Result<World, Vec<Diagnostic>> {
-    let world = tilewright_source::load_edited_in(source, load, &overlay(files))?;
-    let problems = check_terrain_addresses(transaction, |plane, grid| {
+) -> Result<World, Refusal> {
+    let world =
+        tilewright_source::load_edited_in(source, load, &overlay(files)).map_err(Refusal::plain)?;
+    match check_terrain_addresses(transaction, |plane, grid| {
         terrain_problem(&world, plane, grid)
-    });
-    if problems.is_empty() {
-        Ok(world)
-    } else {
-        Err(problems)
+    }) {
+        None => Ok(world),
+        Some(problems) => Err(problems),
     }
 }
 
@@ -616,16 +714,16 @@ fn terrain_addresses(transaction: &Transaction) -> Vec<(String, String, Diagnost
 }
 
 /// Carries out `transaction` in memory on the tree at `source`, with the
-/// files of `under` laid over it, and checks what it recorded. Messages
-/// use `names`.
+/// files of `under` laid over it, and checks what it recorded, within
+/// `budgets`. Messages use `names`.
 fn carry_out<'r>(
-    source: &'r SourceRoot,
-    under: &'r Overlay,
+    (source, under): (&'r SourceRoot, &'r Overlay),
     names: Names,
     transaction: &Transaction,
     options: &Options,
-) -> Result<Workspace<'r>, Vec<Diagnostic>> {
-    let mut workspace = Workspace::new(source, under, names);
+    budgets: Budgets,
+) -> Result<Workspace<'r>, Refusal> {
+    let mut workspace = Workspace::new(source, under, names, budgets);
     let mut problems = Problems::new(transaction);
     let done = if options.rebase {
         BTreeSet::new()
@@ -690,28 +788,35 @@ fn records(
     workspace: &Workspace<'_>,
     files: &[FileChange],
     names: Names,
-) -> Result<Records, Vec<Diagnostic>> {
+) -> Result<Records, Refusal> {
     let sealed = seal(transaction, files);
-    let too_large = |what: &str, detail: &str| {
-        vec![diagnostic::file(
-            &transaction.name,
-            Code::Limit.as_str(),
-            format!(
-                "{what} would exceed the limits of a transaction{detail}; split the transaction"
+    // Past the size of a transaction, that size is the bound; a form that
+    // does not parse for another reason has no one bound.
+    let too_large = |what: &str, detail: &str, bound: Option<u64>| {
+        Refusal::new(vec![(
+            diagnostic::file(
+                &transaction.name,
+                Code::Limit.as_str(),
+                format!(
+                    "{what} would exceed the limits of a transaction{detail}; split the transaction"
+                ),
             ),
-        )]
+            Some(FoundLimit::library(LimitKind::Records, bound)),
+        )])
     };
-    let inverse = inverse(workspace).map_err(|TooLarge| too_large(names.inverse, ""))?;
+    let size = u64::try_from(Limits::default().max_input_bytes).unwrap_or(u64::MAX);
+    let inverse =
+        inverse(workspace).map_err(|TooLarge| too_large(names.inverse, "", Some(size)))?;
     let detail = |found: &[Diagnostic]| {
         found.first().map_or_else(String::new, |problem| {
             format!(": {} ({})", problem.message, problem.code)
         })
     };
     if let Err(found) = Transaction::parse(&transaction.name, sealed.as_str()) {
-        return Err(too_large(names.sealed, &detail(&found)));
+        return Err(too_large(names.sealed, &detail(&found), None));
     }
     let parsed_inverse = Transaction::parse(&transaction.name, inverse.as_str())
-        .map_err(|found| too_large(names.inverse, &detail(&found)))?;
+        .map_err(|found| too_large(names.inverse, &detail(&found), None))?;
     Ok(Records {
         sealed,
         inverse,
@@ -757,6 +862,40 @@ pub fn plan_in(
     transaction: &Transaction,
     options: &Options,
 ) -> Result<Plan, Vec<Diagnostic>> {
+    plan_in_within(root, transaction, options, Budgets::default())
+}
+
+/// Plans `transaction` as [`plan_in`] does, within `budgets`, which can
+/// only be tighter than the default ones. The plan keeps them, so its
+/// [`Plan::check_undo`] uses them too. A budget it would exceed refuses
+/// it with the `tx.limit` diagnostic that [`plan_in`] gives at the limit.
+///
+/// # Errors
+/// As [`plan_in`].
+pub fn plan_in_within(
+    root: &SourceRoot,
+    transaction: &Transaction,
+    options: &Options,
+    budgets: Budgets,
+) -> Result<Plan, Vec<Diagnostic>> {
+    plan_in_within_detailed(root, transaction, options, budgets).map_err(Refusal::into_diagnostics)
+}
+
+/// Plans `transaction` as [`plan_in_within`] does, and when it is refused
+/// says, beside the same diagnostics, which limit each `tx.limit` among
+/// them reports ([`Refusal::limit`]): so a caller can tell a refusal at
+/// its own [`Budgets`] from one at a limit no budget widens, without
+/// reading messages.
+///
+/// # Errors
+/// The diagnostics [`plan_in_within`] returns, in the same order, with
+/// their limits.
+pub fn plan_in_within_detailed(
+    root: &SourceRoot,
+    transaction: &Transaction,
+    options: &Options,
+    budgets: Budgets,
+) -> Result<Plan, Refusal> {
     let source = root.try_clone();
     // The edited world's diagnostics are a transaction's too, and the
     // loader's note of those it dropped takes the last place.
@@ -771,7 +910,13 @@ pub fn plan_in(
         ..*options
     };
     let on_disk = Overlay::new();
-    let workspace = carry_out(&source, &on_disk, Names::OWN, transaction, options)?;
+    let workspace = carry_out(
+        (&source, &on_disk),
+        Names::OWN,
+        transaction,
+        options,
+        budgets,
+    )?;
     let files = file_changes(&workspace);
     let world = load_result(&source, &options.load, transaction, &files)?;
     let Records {
@@ -786,6 +931,7 @@ pub fn plan_in(
         terrain,
         source,
         load: options.load,
+        budgets,
         files,
         world,
         sealed,
@@ -798,12 +944,18 @@ pub fn plan_in(
 /// a round of the undo check. Returns the files it touched or consulted,
 /// and its inverse.
 fn carry_out_round(
-    source: &SourceRoot,
-    under: &Overlay,
+    (source, under): (&SourceRoot, &Overlay),
     transaction: &Transaction,
     options: &Options,
-) -> Result<(Vec<FileChange>, Transaction), Vec<Diagnostic>> {
-    let workspace = carry_out(source, under, Names::NESTED, transaction, options)?;
+    budgets: Budgets,
+) -> Result<(Vec<FileChange>, Transaction), Refusal> {
+    let workspace = carry_out(
+        (source, under),
+        Names::NESTED,
+        transaction,
+        options,
+        budgets,
+    )?;
     let files = file_changes(&workspace);
     let records = records(transaction, &workspace, &files, Names::NESTED)?;
     Ok((files, records.parsed_inverse))
@@ -838,11 +990,13 @@ impl Plan {
     /// it again, without the file being as it began after that, which
     /// leaves the rounds only deleting and creating the file.)
     ///
-    /// Each round is carried out as [`plan`] would carry it out then, with
-    /// every check it makes except validating its result: the `base`
-    /// digests, every operation, every budget of [`limits`] (the files it
-    /// reads count against [`limits::READ_BYTES`] as the round before left
-    /// them, and their documents against [`limits::WORK`]), the counts of
+    /// Each round is carried out as [`plan_in_within`] would carry it out
+    /// then, within the budgets this plan was planned within
+    /// ([`Plan::budgets`]), with every check it makes except validating its
+    /// result: the `base` digests, every operation, every budget (the files
+    /// it reads count against the read budget, [`limits::READ_BYTES`] by
+    /// default, as the round before left them, and their documents against
+    /// the work budget, [`limits::WORK`] by default), the counts of
     /// files and operations, the recorded `result`, and that its own
     /// sealed form and inverse are transactions within the limits. Nothing
     /// is read from disk: an inverse names only files this plan changed,
@@ -873,6 +1027,19 @@ impl Plan {
     /// would refuse the round that fails, with that problem's code:
     /// `tx.limit` for a budget or a limit.
     pub fn check_undo(&self) -> Result<(), Vec<Diagnostic>> {
+        self.check_undo_detailed()
+            .map_err(Refusal::into_diagnostics)
+    }
+
+    /// Checks that this plan can be undone and redone, as
+    /// [`Plan::check_undo`] does, and when a round is refused says, beside
+    /// the same diagnostics, which limit each `tx.limit` among them
+    /// reports: the limit that refused the round ([`Refusal::limit`]).
+    ///
+    /// # Errors
+    /// The diagnostics [`Plan::check_undo`] returns, in the same order,
+    /// with their limits.
+    pub fn check_undo_detailed(&self) -> Result<(), Refusal> {
         let options = Options {
             load: self.load,
             rebase: false,
@@ -885,12 +1052,13 @@ impl Plan {
             .filter(|file| file.is_changed())
             .map(|file| (file.path.clone(), file.after.clone()))
             .collect();
-        let mut current = Transaction::parse(&self.name, self.inverse.as_str())
+        let mut current = Transaction::parse_detailed(&self.name, self.inverse.as_str())
             .map_err(|problems| self.refused("its inverse is not a transaction", problems))?;
         let mut previous: Option<Transaction> = None;
         for what in ROUNDS {
-            let (files, next) = carry_out_round(&self.source, &tree, &current, &options)
-                .map_err(|problems| self.refused(what, problems))?;
+            let (files, next) =
+                carry_out_round((&self.source, &tree), &current, &options, self.budgets)
+                    .map_err(|problems| self.refused(what, problems))?;
             // Carrying out is deterministic, and every other round meets
             // the same tree, as each round's recorded `result` makes sure:
             // a round whose inverse is the transaction of the round before
@@ -906,25 +1074,26 @@ impl Plan {
             }
             previous = Some(std::mem::replace(&mut current, next));
         }
-        Err(vec![diagnostic::file(
+        Err(Refusal::plain(vec![diagnostic::file(
             &self.name,
             Code::Result.as_str(),
             "the transaction could not be checked for undo: its undo and redo do not settle into a cycle by the fourth round; this is an internal error",
-        )])
+        )]))
     }
 
     /// The problems of a round of the undo check, on the transaction's
     /// name, each after `what` failed; the note that there may be more
     /// stays last.
-    fn refused(&self, what: &str, mut problems: Vec<Diagnostic>) -> Vec<Diagnostic> {
+    fn refused(&self, what: &str, problems: Refusal) -> Refusal {
+        let mut problems = problems.into_pairs();
         let note = problems
             .last()
-            .is_some_and(|last| *last == more_note(&self.name))
+            .is_some_and(|last| last.0 == more_note(&self.name))
             .then(|| problems.pop())
             .flatten();
-        let mut found: Vec<Diagnostic> = problems
+        let mut found: Vec<(Diagnostic, Option<FoundLimit>)> = problems
             .into_iter()
-            .map(|problem| {
+            .map(|(problem, limit)| {
                 let split = if problem.code == Code::Limit.as_str()
                     && !problem.message.ends_with("; split the transaction")
                 {
@@ -932,17 +1101,19 @@ impl Plan {
                 } else {
                     ""
                 };
-                diagnostic::file(
-                    &self.name,
-                    problem.code,
-                    format!("{what}: {}{split}", problem.message),
+                (
+                    diagnostic::file(
+                        &self.name,
+                        problem.code,
+                        format!("{what}: {}{split}", problem.message),
+                    ),
+                    limit,
                 )
             })
             .collect();
-        found.sort();
-        found.dedup();
+        limit::sort(&mut found);
         found.extend(note);
-        found
+        Refusal::new(found)
     }
 }
 

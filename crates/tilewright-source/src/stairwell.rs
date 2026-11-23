@@ -7,17 +7,18 @@ use crate::diagnostic::Diagnostics;
 use crate::{
     Code, Stairwell, StairwellDirection, StairwellStep, adjacent,
     files::Tree,
+    index::{Holder, Role, Target},
     read::Reader,
-    schema::{References, Target},
+    schema::References,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use tilewright_jsonc::Value;
 
-/// Reads a plane's stairwells. Steps resolve their prototypes as they are
-/// read, so definitions must already be listed.
+/// Reads the stairwells of the plane `plane` at `path`. Steps resolve their
+/// prototypes as they are read, so definitions must already be listed.
 pub(crate) fn read_stairwells(
     tree: &mut Tree<'_>,
-    path: &str,
+    (plane, path): (&str, &str),
     references: &References,
     diagnostics: &mut Diagnostics,
 ) -> BTreeMap<String, Stairwell> {
@@ -45,7 +46,7 @@ pub(crate) fn read_stairwells(
     let mut names: Vec<Option<String>> = Vec::new();
     let mut tiles: BTreeMap<(i32, i64, i64), usize> = BTreeMap::new();
     for item in items {
-        let Some(entry) = read_entry(&reader, item, references) else {
+        let Some(entry) = read_entry(&reader, item, (plane, references)) else {
             continue;
         };
         let position = names.len();
@@ -126,7 +127,7 @@ struct Steps<'a> {
 fn read_entry<'a>(
     reader: &Reader<'a>,
     item: &'a Value,
-    references: &References,
+    (plane, references): (&str, &References),
 ) -> Option<Entry<'a>> {
     let entry = reader.object(
         item,
@@ -159,9 +160,14 @@ fn read_entry<'a>(
         None => Some(true),
         Some(value) => reader.boolean(value),
     };
+    // A stairwell without a valid ID fails; its steps are still checked.
+    let holder = Holder::Stairwell {
+        plane,
+        stairwell: id.as_deref().unwrap_or_default(),
+    };
     let steps = reader
         .required(entry, "steps")
-        .map(|value| read_steps(reader, value, references))
+        .map(|value| read_steps(reader, value, (holder, references)))
         .unwrap_or_default();
     // `custom` reports its own problems, which reject the tree.
     let custom = reader.custom(entry);
@@ -175,7 +181,11 @@ fn read_entry<'a>(
 /// against the position before it whenever both parse, and its prototype on
 /// its own. The steps are complete when there are at least two, every one
 /// parses, and each follows the one before it.
-fn read_steps<'a>(reader: &Reader<'a>, value: &'a Value, references: &References) -> Steps<'a> {
+fn read_steps<'a>(
+    reader: &Reader<'a>,
+    value: &'a Value,
+    (holder, references): (Holder<'_>, &References),
+) -> Steps<'a> {
     let Some(items) = reader.array(value) else {
         return Steps::default();
     };
@@ -194,7 +204,7 @@ fn read_steps<'a>(reader: &Reader<'a>, value: &'a Value, references: &References
     // The position of the item just before this one, if it parsed.
     let mut previous: Option<Position> = None;
     for item in items {
-        let (position, proto) = read_step(reader, item, references);
+        let (position, proto) = read_step(reader, item, (holder, references));
         let Some(position) = position else {
             complete = false;
             previous = None;
@@ -235,7 +245,7 @@ fn read_steps<'a>(reader: &Reader<'a>, value: &'a Value, references: &References
 fn read_step<'a>(
     reader: &Reader<'a>,
     item: &'a Value,
-    references: &References,
+    (holder, references): (Holder<'_>, &References),
 ) -> (Option<Position>, Option<String>) {
     let Some(step) = reader.object(item, &["layer", "at", "proto"]) else {
         return (None, None);
@@ -250,10 +260,11 @@ fn read_step<'a>(
         let proto = reader.identifier(value)?;
         reader.reference(
             references,
-            &Target::Definition {
-                kind: "proto".to_owned(),
-                id: proto.clone(),
+            Target::Definition {
+                kind: "proto",
+                id: &proto,
             },
+            (Role::StairwellStep, holder),
             value.span(),
         );
         Some(proto)

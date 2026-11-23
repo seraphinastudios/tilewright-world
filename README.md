@@ -33,10 +33,10 @@ All are drafts until format 1.0 is frozen.
 | Crate | Purpose |
 | --- | --- |
 | `tilewright-jsonc` | Strict, lossless, bounded JSONC parser with byte spans, span edits and canonical JSON output |
-| `tilewright-source` | Loads and validates a source tree into a typed world model, reporting every problem with file, span and a stable code, and resolves terrain transitions |
+| `tilewright-source` | Loads and validates a source tree into a typed world model, reporting every problem with file, span and a stable code; resolves terrain transitions, and on request indexes every reference with its file and span |
 | `tilewright-pack` | Deterministic pack compiler, the `twc1+zstd` chunk codec, and a verifying pack reader |
 | `tilewright-diff` | Compares the IDs of two worlds, source trees or packs, and reports removals, additions and renames |
-| `tilewright-edit` | Transactions: lossless structural edits, preview, rebase, staged apply with rollback, and inverses |
+| `tilewright-edit` | Transactions: lossless structural edits, preview within budgets a caller can tighten, rebase, staged apply with rollback, and inverses |
 | `tilewright-cli` | The `tilewright` command |
 | `tilewright-pack-wasm` | The pack reader for WebAssembly, behind the browser package |
 

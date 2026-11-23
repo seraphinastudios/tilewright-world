@@ -358,6 +358,35 @@ impl<'w> Iterator for Walk<'w> {
     }
 }
 
+/// One object of a chunk, as [`chunk_objects`] gives it.
+pub struct ChunkObject<'w> {
+    pub uid: Option<&'w str>,
+    /// The uid of the object that carries it, if one does and has one.
+    pub carried_by: Option<&'w str>,
+    /// Its index in the chunk's objects, then in each inventory down to it.
+    pub position: Vec<usize>,
+}
+
+/// Every object of `chunk`, inventory entries included, depth first: the
+/// order of [`Chunk::depth_first`], so the `n`th is the object at ordinal
+/// `n`.
+pub fn chunk_objects(chunk: &Chunk) -> impl Iterator<Item = ChunkObject<'_>> + '_ {
+    Walk {
+        plane: "",
+        chunk,
+        layer: 0,
+        origin: [0, 0],
+        carried: true,
+        levels: vec![(chunk.objects.iter(), None, 0)],
+        tile: [0, 0],
+    }
+    .map(|placed| ChunkObject {
+        uid: placed.object.uid.as_deref(),
+        carried_by: placed.carried_by,
+        position: placed.position.steps().to_vec(),
+    })
+}
+
 /// Whether the tiles of the chunk at `origin` of `size` meet `bbox`.
 fn chunk_meets(origin: [i128; 2], size: u16, bbox: [i64; 4]) -> bool {
     let size = i128::from(size);

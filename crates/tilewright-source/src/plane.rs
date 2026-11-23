@@ -8,6 +8,8 @@ use crate::{
     Anchor, CHUNK_SIZE, Code, Diagnostic, Plane, PlaneKind, Profile, Zone,
     chunk::{ChunkAddress, read_chunk},
     files::{EntryKind, Tree, ignored, join},
+    index::Site,
+    index::{Holder, Role, Target},
     read::Reader,
     schema::{References, read_fields},
     stairwell::read_stairwells,
@@ -124,10 +126,10 @@ fn read_plane(
             }
         }
     }
-    let mut plane = read_plane_document(tree, id, directory, diagnostics)?;
+    let (mut plane, default_zone_span) = read_plane_document(tree, id, directory, diagnostics)?;
     let zones_path = join(directory, "zones.jsonc");
     if tree.kind(&zones_path).is_some() {
-        plane.zones = read_zones(tree, profile, &zones_path, references, diagnostics);
+        plane.zones = read_zones(tree, profile, (id, &zones_path), references, diagnostics);
     }
     let anchors_path = join(directory, "anchors.jsonc");
     if tree.kind(&anchors_path).is_some() {
@@ -135,26 +137,37 @@ fn read_plane(
     }
     let stairwells_path = join(directory, "stairwells.jsonc");
     if tree.kind(&stairwells_path).is_some() {
-        plane.stairwells = read_stairwells(tree, &stairwells_path, references, diagnostics);
+        plane.stairwells = read_stairwells(tree, (id, &stairwells_path), references, diagnostics);
     }
-    if let Some(zone) = &plane.default_zone
-        && !plane.zones.contains_key(zone)
-    {
-        diagnostics.push(Diagnostic::file(
-            &join(directory, "plane.jsonc"),
-            Code::Reference,
-            format!("default zone \"{zone}\" is not in zones.jsonc"),
-        ));
+    // Reported on the plane document as a whole; recorded at the value.
+    if let Some(zone) = &plane.default_zone {
+        let file = join(directory, "plane.jsonc");
+        references.check_file(
+            &Site {
+                target: Target::Zone {
+                    plane: id,
+                    id: zone,
+                },
+                role: Role::DefaultZone,
+                holder: Holder::Plane { plane: id },
+                file: &file,
+                start: default_zone_span.start,
+                end: default_zone_span.end,
+            },
+            diagnostics,
+        );
     }
     Some((plane, has_layers))
 }
 
+/// Reads `plane.jsonc`; also returns the span of its `default_zone`, or
+/// an empty one.
 fn read_plane_document(
     tree: &mut Tree<'_>,
     id: &str,
     directory: &str,
     diagnostics: &mut Diagnostics,
-) -> Option<Plane> {
+) -> Option<(Plane, Span)> {
     let source = tree.document(&join(directory, "plane.jsonc"))?;
     let reader = Reader::new(&source, diagnostics);
     let root = reader.object(
@@ -208,30 +221,37 @@ fn read_plane_document(
         );
         return None;
     }
+    let default_zone_span = root
+        .get("default_zone")
+        .map_or(Span { start: 0, end: 0 }, tilewright_jsonc::Value::span);
     let default_zone = match root.get("default_zone") {
         Some(value) => Some(reader.identifier(value)?),
         None => None,
     };
     reader.custom(root);
     let canonical = reader.canonical(root);
-    format_ok.then_some(Plane {
-        id: plane_id,
-        title,
-        kind,
-        chunk_size,
-        default_zone,
-        canonical,
-        zones: BTreeMap::new(),
-        anchors: BTreeMap::new(),
-        stairwells: BTreeMap::new(),
-        chunks: BTreeMap::new(),
-    })
+    format_ok.then_some((
+        Plane {
+            id: plane_id,
+            title,
+            kind,
+            chunk_size,
+            default_zone,
+            canonical,
+            zones: BTreeMap::new(),
+            anchors: BTreeMap::new(),
+            stairwells: BTreeMap::new(),
+            chunks: BTreeMap::new(),
+        },
+        default_zone_span,
+    ))
 }
 
+/// Reads the zones document at `path` of the plane `plane`.
 fn read_zones(
     tree: &mut Tree<'_>,
     profile: &Profile,
-    path: &str,
+    (plane, path): (&str, &str),
     references: &mut References,
     diagnostics: &mut Diagnostics,
 ) -> BTreeMap<String, Zone> {
@@ -289,7 +309,7 @@ fn read_zones(
         };
         if read_fields(
             &reader,
-            entry,
+            (entry, Holder::Zone { plane, zone: &id }),
             entry.get("properties"),
             &profile.zone_properties,
             references,
@@ -309,14 +329,16 @@ fn read_zones(
             },
         );
     }
+    // Parents are checked once every zone is read, so a zone may name
+    // one listed after it.
+    references.zones_read(plane, zones.keys());
     for (id, parent, span) in &parents {
-        if !zones.contains_key(parent) {
-            reader.report(
-                *span,
-                Code::Reference,
-                format!("zone \"{id}\" has unknown parent \"{parent}\""),
-            );
-        }
+        reader.reference(
+            references,
+            Target::Zone { plane, id: parent },
+            (Role::ZoneParent, Holder::Zone { plane, zone: id }),
+            *span,
+        );
     }
     report_cycles(&reader, &zones, &parents);
     zones
@@ -465,15 +487,8 @@ fn read_layers(
                 cy,
                 size: plane.chunk_size,
             };
-            if let Some(chunk) = read_chunk(
-                tree,
-                profile,
-                &plane.zones,
-                &address,
-                &path,
-                references,
-                diagnostics,
-            ) {
+            if let Some(chunk) = read_chunk(tree, profile, &address, &path, references, diagnostics)
+            {
                 plane.chunks.insert((layer, cx, cy), chunk);
             }
         }

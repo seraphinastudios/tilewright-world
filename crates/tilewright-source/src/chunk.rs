@@ -5,16 +5,17 @@
 
 use crate::diagnostic::Diagnostics;
 use crate::{
-    Chunk, Code, Grid, Object, Portal, Profile, Zone,
+    Chunk, Code, Grid, Object, Portal, Profile,
     files::Tree,
+    index::{Holder, Role, Target},
     read::Reader,
-    schema::{References, Target, read_fields},
+    schema::{References, read_fields},
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
-use tilewright_jsonc::Value;
+use tilewright_jsonc::{Span, Value};
 
 /// Deepest inventory nesting accepted.
 const MAXIMUM_INVENTORY_DEPTH: usize = 16;
@@ -38,7 +39,6 @@ enum GridKind {
 pub(crate) fn read_chunk(
     tree: &mut Tree<'_>,
     profile: &Profile,
-    zones: &BTreeMap<String, Zone>,
     address: &ChunkAddress<'_>,
     path: &str,
     references: &mut References,
@@ -51,8 +51,21 @@ pub(crate) fn read_chunk(
         &["format", "plane", "layer", "chunk", "terrain", "objects"],
     )?;
     let mut ok = reader.format(root, "tilewright.chunk/1");
+    let key = (address.layer, address.cx, address.cy);
+    let holder = Holder::Chunk {
+        plane: address.plane,
+        chunk: key,
+    };
     let plane_value = reader.required(root, "plane")?;
-    if reader.string(plane_value)? != address.plane {
+    // The chunk's `plane` names the plane it belongs to, which its path
+    // must agree with.
+    if reader.string(plane_value)? == address.plane {
+        references.follow(&reader.site(
+            Target::Plane(address.plane),
+            (Role::ChunkPlane, holder),
+            plane_value.span(),
+        ));
+    } else {
         reader.report(
             plane_value.span(),
             Code::NameMismatch,
@@ -107,14 +120,18 @@ pub(crate) fn read_chunk(
         for (index, layer) in profile.ground_layers.iter().enumerate() {
             if let Some(value) = terrain.get(layer) {
                 match read_grid(&reader, value, address.size, GridKind::Ground) {
-                    Some(grid) => {
-                        for value_name in &grid.palette {
-                            reader.reference(
+                    Some((grid, entries)) => {
+                        // Each entry is recorded where it is written, and
+                        // reported at its grid.
+                        for (value_name, entry) in grid.palette.iter().zip(entries) {
+                            reader.reference_reported_at(
                                 references,
-                                &Target::Definition {
-                                    kind: "proto".to_owned(),
-                                    id: value_name.clone(),
+                                Target::Definition {
+                                    kind: "proto",
+                                    id: value_name,
                                 },
+                                (Role::GroundPalette { layer }, holder),
+                                entry,
                                 value.span(),
                             );
                         }
@@ -132,16 +149,18 @@ pub(crate) fn read_chunk(
         }
         if let Some(value) = terrain.get("zone") {
             match read_grid(&reader, value, address.size, GridKind::Zone) {
-                Some(grid) => {
-                    for zone in &grid.palette {
-                        if !zones.contains_key(zone) {
-                            reader.report(
-                                value.span(),
-                                Code::Reference,
-                                format!("zone \"{zone}\" is not in this plane's zones.jsonc"),
-                            );
-                            ok = false;
-                        }
+                Some((grid, entries)) => {
+                    for (zone, entry) in grid.palette.iter().zip(entries) {
+                        ok &= reader.reference_reported_at(
+                            references,
+                            Target::Zone {
+                                plane: address.plane,
+                                id: zone,
+                            },
+                            (Role::ZonePalette, holder),
+                            entry,
+                            value.span(),
+                        );
                     }
                     chunk.zones = grid;
                 }
@@ -154,6 +173,8 @@ pub(crate) fn read_chunk(
         let mut context = ObjectContext {
             profile,
             plane: address.plane,
+            chunk: key,
+            ordinal: 0,
             path: Arc::from(path),
             size: address.size,
             references,
@@ -170,18 +191,20 @@ pub(crate) fn read_chunk(
 
 /// A character grid: `{"palette": {...}, "rows": [...]}` or
 /// `{"palette": {...}, "fill": "k"}`, with optional `"cell_width": 2`.
+/// Also returns the span of each palette entry's value, in palette order.
 fn read_grid<'a>(
     reader: &Reader<'a>,
     value: &'a Value,
     chunk_size: u16,
     kind: GridKind,
-) -> Option<Grid> {
+) -> Option<(Grid, Vec<Span>)> {
     let grid = reader.object(value, &["palette", "rows", "fill", "cell_width"])?;
     let width = match grid.get("cell_width") {
         Some(width) => usize::try_from(reader.integer(width, 1, 2)?).ok()?,
         None => 1,
     };
-    let (keys, palette) = read_palette(reader, reader.required(grid, "palette")?, width, kind)?;
+    let (keys, palette, entries) =
+        read_palette(reader, reader.required(grid, "palette")?, width, kind)?;
     // Keys are indexed once, so decoding a cell is a lookup, not a scan.
     let indexes: BTreeMap<&str, u16> = keys
         .iter()
@@ -250,17 +273,18 @@ fn read_grid<'a>(
             return None;
         }
     };
-    Some(Grid { palette, cells })
+    Some((Grid { palette, cells }, entries))
 }
 
 /// A grid palette: keys of `width` printable ASCII characters, not all `.`,
-/// mapping to identifiers. Returns the keys and values in source order.
+/// mapping to identifiers. Returns the keys, the values and the values'
+/// spans, in source order.
 fn read_palette<'a>(
     reader: &Reader<'a>,
     value: &'a Value,
     width: usize,
     kind: GridKind,
-) -> Option<(Vec<&'a str>, Vec<String>)> {
+) -> Option<(Vec<&'a str>, Vec<String>, Vec<Span>)> {
     let members = reader.members(value)?;
     if members.len() > usize::from(u16::MAX - 1) {
         reader.report(value.span(), Code::Grid, "palette has too many entries");
@@ -268,6 +292,7 @@ fn read_palette<'a>(
     }
     let mut keys: Vec<&str> = Vec::with_capacity(members.len());
     let mut palette = Vec::with_capacity(members.len());
+    let mut entries = Vec::with_capacity(members.len());
     let mut seen = BTreeSet::new();
     for member in members {
         let key_ok = member.key.len() == width
@@ -292,8 +317,9 @@ fn read_palette<'a>(
         }
         keys.push(member.key.as_str());
         palette.push(entry);
+        entries.push(member.value.span());
     }
-    Some((keys, palette))
+    Some((keys, palette, entries))
 }
 
 /// `{"fill": h}` or `{"rows": [[h, ...], ...]}`.
@@ -339,6 +365,9 @@ fn read_heights<'a>(reader: &Reader<'a>, value: &'a Value, chunk_size: u16) -> O
 struct ObjectContext<'p, 'r> {
     profile: &'p Profile,
     plane: &'p str,
+    chunk: (i32, i64, i64),
+    /// The depth-first index of the next object read.
+    ordinal: usize,
     /// The chunk's path, kept with each uid its objects claim.
     path: Arc<str>,
     size: u16,
@@ -369,6 +398,14 @@ fn read_object<'a>(
     value: &'a Value,
     depth: usize,
 ) -> Option<Object> {
+    // Objects are numbered as they are met, each before its inventory, so
+    // an object's number is its index in `Chunk::depth_first`.
+    let holder = Holder::Object {
+        plane: context.plane,
+        chunk: context.chunk,
+        ordinal: context.ordinal,
+    };
+    context.ordinal += 1;
     let entry = reader.object(value, OBJECT_KEYS)?;
     // The uid is claimed before the inventory is read, so of two objects
     // that share one, the first in document order keeps it.
@@ -378,10 +415,11 @@ fn read_object<'a>(
         let proto = reader.identifier(value)?;
         reader.reference(
             context.references,
-            &Target::Definition {
-                kind: "proto".to_owned(),
-                id: proto.clone(),
+            Target::Definition {
+                kind: "proto",
+                id: &proto,
             },
+            (Role::Proto, holder),
             value.span(),
         );
         Some(proto)
@@ -390,7 +428,8 @@ fn read_object<'a>(
         let layer = reader.identifier(value)?;
         reader.reference(
             context.references,
-            &Target::RenderLayer(layer.clone()),
+            Target::RenderLayer(&layer),
+            (Role::Layer, holder),
             value.span(),
         );
         Some(layer)
@@ -401,13 +440,13 @@ fn read_object<'a>(
     let z = optional(entry.get("z"), |value| reader.i32(value));
     let fields = read_fields(
         reader,
-        entry,
+        (entry, holder),
         entry.get("fields"),
         &context.profile.object_fields,
         context.references,
     );
     let portal = optional(entry.get("portal"), |value| {
-        read_portal(reader, context, value)
+        read_portal(reader, context, holder, value)
     });
     let inventory = read_inventory(reader, context, entry, depth);
     let custom = reader.custom(entry);
@@ -530,6 +569,7 @@ fn read_inventory<'a>(
 fn read_portal<'a>(
     reader: &Reader<'a>,
     context: &mut ObjectContext<'_, '_>,
+    holder: Holder<'_>,
     value: &'a Value,
 ) -> Option<Portal> {
     let anchor = value.get("anchor").is_some();
@@ -544,23 +584,31 @@ fn read_portal<'a>(
             let plane = reader.identifier(plane_value)?;
             reader.reference(
                 context.references,
-                &Target::Plane(plane.clone()),
+                Target::Plane(&plane),
+                (Role::PortalPlane, holder),
                 plane_value.span(),
             );
             Some(plane)
         }
         None => None,
     };
-    let target_plane = plane.clone().unwrap_or_else(|| context.plane.to_owned());
+    // A portal without a plane leads within its own.
+    let target_plane = plane.as_deref().unwrap_or(context.plane);
     if anchor {
         let anchor_value = reader.required(portal, "anchor")?;
         let anchor = reader.identifier(anchor_value)?;
         reader.reference(
             context.references,
-            &Target::Anchor {
-                plane: target_plane.clone(),
-                id: anchor.clone(),
+            Target::Anchor {
+                plane: target_plane,
+                id: &anchor,
             },
+            (
+                Role::PortalAnchor {
+                    implicit_plane: plane.is_none(),
+                },
+                holder,
+            ),
             anchor_value.span(),
         );
         Some(Portal::Anchor { plane, anchor })

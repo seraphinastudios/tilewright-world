@@ -39,6 +39,7 @@ mod budget;
 mod inspect;
 mod json;
 mod preview;
+mod references;
 mod search;
 mod snapshot;
 mod tools;

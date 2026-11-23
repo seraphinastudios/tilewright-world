@@ -5,7 +5,9 @@
 //! change them. Each primitive records its exact inverse.
 
 use crate::{
-    Code, limits,
+    Code,
+    limit::{Limit, LimitKind},
+    limits,
     splice::{self, Insertion, Layout, Step},
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -17,6 +19,8 @@ use tilewright_source::{AccessError, Overlay, SourceRoot};
 pub(crate) struct Failure {
     pub code: Code,
     pub message: String,
+    /// Which limit, for a `tx.limit`.
+    pub limit: Option<Limit>,
 }
 
 impl Failure {
@@ -24,47 +28,45 @@ impl Failure {
         Self {
             code: Code::Conflict,
             message: message.into(),
+            limit: None,
         }
     }
 
-    pub fn limit(message: impl Into<String>) -> Self {
+    pub fn limit(limit: Limit, message: impl Into<String>) -> Self {
         Self {
             code: Code::Limit,
             message: message.into(),
+            limit: Some(limit),
         }
     }
 
     /// A document that does not parse: past a parser bound it is a limit,
     /// otherwise a conflict.
     fn unparsed(error: &tilewright_jsonc::Error, message: String) -> Self {
-        use tilewright_jsonc::ErrorCode as E;
-        let limit = matches!(
-            error.code,
-            E::InputTooLarge
-                | E::TooManyLines
-                | E::LineTooLong
-                | E::NumberTooLong
-                | E::StringTooLong
-                | E::TooManyComments
-                | E::DepthLimit
-                | E::ValueLimit
-                | E::ArrayLimit
-                | E::ObjectLimit
-        );
+        let limit = Limit::parser(error.code);
         Self {
-            code: if limit { Code::Limit } else { Code::Conflict },
+            code: if limit.is_some() {
+                Code::Limit
+            } else {
+                Code::Conflict
+            },
             message,
+            limit,
         }
     }
 
     fn access(error: &AccessError) -> Self {
+        let (code, limit) = match error {
+            AccessError::Io(..) => (Code::Io, None),
+            AccessError::TooLarge(_) => {
+                (Code::Limit, Some(Limit::document_size(LimitKind::FileSize)))
+            }
+            _ => (Code::Path, None),
+        };
         Self {
-            code: match error {
-                AccessError::Io(..) => Code::Io,
-                AccessError::TooLarge(_) => Code::Limit,
-                _ => Code::Path,
-            },
+            code,
             message: error.to_string(),
+            limit,
         }
     }
 }
@@ -253,13 +255,7 @@ impl Names {
     };
 }
 
-/// The read and work budgets of carrying a transaction out:
-/// [`limits::READ_BYTES`] and [`limits::WORK`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct Budgets {
-    pub read_bytes: u64,
-    pub work: u64,
-}
+pub(crate) use crate::Budgets;
 
 #[cfg(test)]
 thread_local! {
@@ -270,15 +266,15 @@ thread_local! {
 }
 
 impl Budgets {
-    fn current() -> Self {
+    /// These budgets, lowered on a test's thread where it lowers them.
+    fn current(self) -> Self {
         #[cfg(test)]
-        if let Some(budgets) = TEST_BUDGETS.get() {
-            return budgets;
+        if let Some(lowered) = TEST_BUDGETS.get() {
+            return self
+                .with_read_bytes(self.read_bytes.min(lowered.read_bytes))
+                .with_work(self.work.min(lowered.work));
         }
-        Self {
-            read_bytes: limits::READ_BYTES,
-            work: limits::WORK,
-        }
+        self
     }
 }
 
@@ -353,12 +349,12 @@ fn read(
 
 impl<'r> Workspace<'r> {
     /// A workspace over the tree at `root` with the files of `under` laid
-    /// over it, whose messages use `names`.
-    pub fn new(root: &'r SourceRoot, under: &'r Overlay, names: Names) -> Self {
+    /// over it, whose messages use `names`, within `budgets`.
+    pub fn new(root: &'r SourceRoot, under: &'r Overlay, names: Names, budgets: Budgets) -> Self {
         Self {
             root,
             under,
-            budgets: Budgets::current(),
+            budgets: budgets.current(),
             names,
             entries: BTreeMap::new(),
             read_bytes: 0,
@@ -432,17 +428,25 @@ impl<'r> Workspace<'r> {
                 if count + self.unreadable.len() >= limits::FILES {
                     // The transaction is rejected; carrying on is useless.
                     self.spent = true;
-                    return Err(Failure::limit(format!(
-                        "{} touches more than {} files",
-                        self.names.transaction,
-                        limits::FILES
-                    )));
+                    return Err(Failure::limit(
+                        Limit::count(LimitKind::Files, limits::FILES),
+                        format!(
+                            "{} touches more than {} files",
+                            self.names.transaction,
+                            limits::FILES
+                        ),
+                    ));
                 }
                 // A file is read only as far as the allowance left, and
                 // once that is spent nothing more is read.
                 let budget = self.budgets.read_bytes;
-                let spent =
-                    || Failure::limit(format!("the touched files hold more than {budget} bytes"));
+                let read_budget = Limit::read_bytes(self.budgets);
+                let spent = |limit| {
+                    Failure::limit(
+                        limit,
+                        format!("the touched files hold more than {budget} bytes"),
+                    )
+                };
                 let file_limit = u64::try_from(limits().max_input_bytes).unwrap_or(u64::MAX);
                 let left = if self.resuming {
                     budget
@@ -458,7 +462,25 @@ impl<'r> Workspace<'r> {
                     Err(error @ AccessError::TooLarge(_)) => {
                         self.spent = true;
                         return Err(if left < file_limit {
-                            spent()
+                            // Read only as far as the allowance left, the
+                            // file may also be past the format's limit on
+                            // a file, which then refused it whatever the
+                            // budget: its length says which. Only the
+                            // length is asked, nothing more is read, so a
+                            // file that changes in between can change
+                            // only which limit is named.
+                            let past_file_limit = match self.under.get(path) {
+                                Some(text) => text
+                                    .as_ref()
+                                    .map(|text| u64::try_from(text.len()).unwrap_or(u64::MAX)),
+                                None => root.length(path).ok().flatten(),
+                            }
+                            .is_some_and(|length| length > file_limit);
+                            spent(if past_file_limit {
+                                Limit::document_size(LimitKind::FileSize)
+                            } else {
+                                read_budget
+                            })
                         } else {
                             Failure::access(&error)
                         });
@@ -532,9 +554,10 @@ impl<'r> Workspace<'r> {
         let budget = self.budgets.read_bytes;
         if self.read_bytes.max(self.done_bytes) > budget {
             self.spent = true;
-            return Err(Failure::limit(format!(
-                "the touched files hold more than {budget} bytes"
-            )));
+            return Err(Failure::limit(
+                Limit::read_bytes(self.budgets),
+                format!("the touched files hold more than {budget} bytes"),
+            ));
         }
         Ok(())
     }
@@ -557,10 +580,13 @@ impl<'r> Workspace<'r> {
             .saturating_add(u64::try_from(units.max(1)).unwrap_or(u64::MAX));
         if self.work > self.budgets.work {
             self.spent = true;
-            return Err(Failure::limit(format!(
-                "{} needs more than {} bytes of work: its operations, the documents each reads, and its edits",
-                self.names.transaction, self.budgets.work
-            )));
+            return Err(Failure::limit(
+                Limit::work(self.budgets),
+                format!(
+                    "{} needs more than {} bytes of work: its operations, the documents each reads, and its edits",
+                    self.names.transaction, self.budgets.work
+                ),
+            ));
         }
         Ok(())
     }
@@ -578,19 +604,25 @@ impl<'r> Workspace<'r> {
             .saturating_add(after.1);
         if self.inverse_operations > limits::OPERATIONS {
             self.spent = true;
-            return Err(Failure::limit(format!(
-                "{} would hold more than {} operations; split the transaction",
-                self.names.inverse,
-                limits::OPERATIONS
-            )));
+            return Err(Failure::limit(
+                Limit::count(LimitKind::InverseOperations, limits::OPERATIONS),
+                format!(
+                    "{} would hold more than {} operations; split the transaction",
+                    self.names.inverse,
+                    limits::OPERATIONS
+                ),
+            ));
         }
         let limit = u64::try_from(limits().max_input_bytes).unwrap_or(u64::MAX);
         if self.inverse_bytes > limit {
             self.spent = true;
-            return Err(Failure::limit(format!(
-                "{} would hold more than {limit} bytes; split the transaction",
-                self.names.inverse
-            )));
+            return Err(Failure::limit(
+                Limit::document_size(LimitKind::InverseBytes),
+                format!(
+                    "{} would hold more than {limit} bytes; split the transaction",
+                    self.names.inverse
+                ),
+            ));
         }
         Ok(())
     }

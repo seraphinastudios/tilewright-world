@@ -638,10 +638,10 @@ pub(crate) fn set_cells(
         let site = site(plane, layer, cell.at);
         let index = usize::from(site.local[1]) * SIDE + usize::from(site.local[0]);
         if by_chunk.len() == limits::FILES && !by_chunk.contains_key(&site.path) {
-            let failure = Failure::limit(format!(
-                "the operation touches more than {} chunks",
-                limits::FILES
-            ));
+            let failure = Failure::limit(
+                crate::limit::Limit::count(crate::limit::LimitKind::TerrainChunks, limits::FILES),
+                format!("the operation touches more than {} chunks", limits::FILES),
+            );
             return Err(vec![(None, workspace.failed(failure))]);
         }
         by_chunk
