@@ -8,7 +8,7 @@ crates `Cargo.lock` resolves; do not edit it.
 Where a component is offered under a choice of licenses, it is used under
 MIT, or for Zstandard under BSD-3-Clause.
 
-## SQLite 3.53.4
+## SQLite 3.54.1
 
 Compiled in through the `sqlite-wasm-rs` crate. SQLite is in the public
 domain:
@@ -998,9 +998,9 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
-### sqlite-wasm-rs 0.6.2
+### sqlite-wasm-rs 0.6.3
 
-License: MIT. Source: https://crates.io/crates/sqlite-wasm-rs/0.6.2
+License: MIT. Source: https://crates.io/crates/sqlite-wasm-rs/0.6.3
 
 LICENSE:
 
