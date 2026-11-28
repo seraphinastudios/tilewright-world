@@ -169,12 +169,83 @@ transactions ([TRANSACTIONS.md](TRANSACTIONS.md)).
   is at elevation `L × layer_height + h`, and an object on it adds its `z`.
   The bound keeps every such elevation within the integer range of
   section 3. Without `layer_height`, layers are not stacked.
-- `movement` (optional) holds the editor's analysis rules, `max_step` (0 to
-  4,294,967,295) and `fall_unit` (1 to 4,294,967,295); the format itself does
-  not interpret them.
+- `movement` (optional) holds the movement limits for analysis, `max_step`
+  (0 to 4,294,967,295) and `fall_unit` (1 to 4,294,967,295), which the
+  reference rule of section 5.1 interprets.
 - `transitions` (optional) names the terrain transitions document (section
   13), a path relative to the profile's directory, like a schema path.
 - `custom` (optional) holds namespaced extension data, as in section 7.
+
+### 5.1 Movement limits
+
+The format defines one reference rule for the profile's `movement`, so that
+analysis tools (an editor's slope and fall marks, a linter, a keep-walkable
+brush) judge the same edges alike. It marks steps and falls, not where
+anything can stand or go: whether a tile can be stood on, what blocks it
+and what a fall costs are the game's, and a game may move differently.
+Without `movement`, the rule does not apply: no edge is judged.
+
+- **Edges.** A tile at `(plane, layer, x, y)` has an edge to each of its
+  four side neighbours, `(x + 1, y)`, `(x - 1, y)`, `(x, y + 1)` and
+  `(x, y - 1)`, on the same plane and layer. Diagonals are not edges, and
+  layers are never compared: stairwells and portals connect them.
+- **Heights.** The rule compares the two tiles' stored heights, the value of
+  their chunk's `height` grid (section 7) at each tile, which is 0 for every
+  tile of a chunk without one. Both heights are relative to the same layer,
+  so `layer_height` does not enter; object `z` is ignored.
+- **Missing and empty chunks.** Only tiles of chunks with content are
+  judged. A chunk is missing when the plane does not have it (no chunk
+  document at that layer and chunk coordinates in a source tree, no chunk
+  row in a pack). A chunk is empty when it holds no content: no objects,
+  and every terrain grid empty, with no cell set and every height 0. This
+  is what [TRANSACTIONS.md](TRANSACTIONS.md) section 4 calls a chunk with
+  no content, which a transaction that touches it deletes. An empty chunk
+  counts as missing, whether it is a file in a source tree, a row in a
+  pack or a chunk an edit holds in memory. An edge with either tile in a
+  missing or empty chunk is not judged in either direction: it is neither
+  a step, nor blocked, nor a fall. Every tile of a chunk with content is
+  judged by its height, whatever its ground grids hold, even nothing, and
+  whatever objects stand on it.
+- **Direction.** Each direction of an edge is judged on its own, from tile
+  `a` to tile `b`, with `d = height(b) - height(a)`:
+  - a climb (`d > 0`) of at most `max_step` is a step; a larger one is
+    blocked;
+  - a drop (`d < 0`) whose size `|d|` is at most `max_step` is a step; a
+    larger one is a fall, one way only, that counts `ceil(|d| / fall_unit)`
+    falls;
+  - level (`d = 0`) is always a step.
+
+  So an edge is either a step both ways, or a fall one way and blocked
+  the other.
+- **Arithmetic.** It is exact integer arithmetic, with no floating point
+  and no overflow: `|d|` of two 32-bit signed heights is at most
+  4,294,967,295, so it fits an unsigned 32-bit integer, as `max_step` and
+  `fall_unit` do, and so does the count of falls. Compute the difference
+  in 64 bits (or as an unsigned magnitude), and the ceiling as
+  `|d| / fall_unit`, plus one when the remainder is not 0; the form
+  `(|d| + fall_unit - 1) / fall_unit` overflows in 32 bits. `max_step` 0
+  allows only level steps, so every climb is blocked and every drop is a
+  fall; `max_step` 4,294,967,295 is no limit, so every edge is a step
+  both ways.
+
+With the example profile's `{"max_step": 12, "fall_unit": 50}` and
+`layer_height` 50, between neighbours of one layer:
+
+| Heights `a`, `b` | `a` to `b` | `b` to `a` |
+| --- | --- | --- |
+| 0, 4 | climb of 4: step | drop of 4: step |
+| 0, 12 | climb of 12: step | drop of 12: step |
+| 0, 13 | climb of 13: blocked | drop of 13: fall, `ceil(13 / 50)` = 1 |
+| 0, 50 | climb of 50: blocked | drop of 50: fall, 1 (one layer's height) |
+| 0, 120 | climb of 120: blocked | drop of 120: fall, `ceil(120 / 50)` = 3 |
+| −2,147,483,648, 2,147,483,647 | climb of 4,294,967,295: blocked | drop of 4,294,967,295: fall, 85,899,346 |
+
+A tile of height 4 on layer 0 and the tile of height 4 above it on layer 1
+are not compared, though their elevations are 50 apart. A tile on the edge
+of a chunk whose neighbouring chunk is missing or empty keeps its other
+edges; only the edges across into that chunk are not judged. Raising one
+tile of an empty chunk gives it content, and from then on all its tiles
+are judged, the others at height 0.
 
 ## 6. Plane: `planes/<plane>/plane.jsonc`
 
