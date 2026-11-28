@@ -198,11 +198,12 @@ Without `movement`, the rule does not apply: no edge is judged.
   document at that layer and chunk coordinates in a source tree, no chunk
   row in a pack). A chunk is empty when it holds no content: no objects,
   and every terrain grid empty, with no cell set and every height 0. This
-  is the chunk that a transaction deletes ([TRANSACTIONS.md](TRANSACTIONS.md)
-  section 4), so an empty chunk counts as missing, whether it is a file in
-  a source tree, a row in a pack or a chunk an edit holds in memory. An
-  edge with either tile in a missing or empty chunk is not judged in
-  either direction: it is neither a step, nor blocked, nor a fall. Every tile of a chunk with content is
+  is what [TRANSACTIONS.md](TRANSACTIONS.md) section 4 calls a chunk with
+  no content, which a transaction that touches it deletes. An empty chunk
+  counts as missing, whether it is a file in a source tree, a row in a
+  pack or a chunk an edit holds in memory. An edge with either tile in a
+  missing or empty chunk is not judged in either direction: it is neither
+  a step, nor blocked, nor a fall. Every tile of a chunk with content is
   judged by its height, whatever its ground grids hold, even nothing, and
   whatever objects stand on it.
 - **Direction.** Each direction of an edge is judged on its own, from tile
@@ -217,14 +218,15 @@ Without `movement`, the rule does not apply: no edge is judged.
   So an edge is either a step both ways, or a fall one way and blocked
   the other.
 - **Arithmetic.** It is exact integer arithmetic, with no floating point
-  and no overflow: `|d|` of two 32-bit signed heights is at most 4,294,967,295, so
-  it fits an unsigned 32-bit integer, as `max_step` and `fall_unit` do, and
-  so does the count of falls. Compute the difference in 64 bits (or as an
-  unsigned magnitude), and the ceiling as `|d| / fall_unit`, plus one when
-  the remainder is not 0; the form `(|d| + fall_unit - 1) / fall_unit`
-  overflows in 32 bits. `max_step` 0 allows only level steps, so every climb is
-  blocked and every drop is a fall; `max_step` 4,294,967,295 is no limit,
-  so every edge is a step both ways.
+  and no overflow: `|d|` of two 32-bit signed heights is at most
+  4,294,967,295, so it fits an unsigned 32-bit integer, as `max_step` and
+  `fall_unit` do, and so does the count of falls. Compute the difference
+  in 64 bits (or as an unsigned magnitude), and the ceiling as
+  `|d| / fall_unit`, plus one when the remainder is not 0; the form
+  `(|d| + fall_unit - 1) / fall_unit` overflows in 32 bits. `max_step` 0
+  allows only level steps, so every climb is blocked and every drop is a
+  fall; `max_step` 4,294,967,295 is no limit, so every edge is a step
+  both ways.
 
 With the example profile's `{"max_step": 12, "fall_unit": 50}` and
 `layer_height` 50, between neighbours of one layer:
